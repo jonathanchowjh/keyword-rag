@@ -1,0 +1,87 @@
+#!/bin/sh
+# Refuse a push whose commits have not passed `./scripts/gate.sh`.
+#
+# THIS HOOK MUST STAY FAST, and that is a correctness rule rather than a
+# comfort one. `git push` opens the connection to the remote BEFORE running
+# this hook — it must, because git feeds us each ref's remote SHA on stdin,
+# which it can only learn by asking. Everything done here therefore happens
+# while an idle `git-receive-pack` session is held open.
+#
+# In pg-ops, where this hook comes from, it once ran the integration suite
+# and a Docker image build inline, about fifteen minutes, and every push failed: the remote dropped
+# the idle session, and git died writing the pack to a closed pipe with exit
+# 141 and no output whatsoever — not even `Enumerating objects`. It looked
+# like a broken pipe bug anywhere but here. `--no-verify` was the only way to
+# push at all, which made the gate worse than no gate: it trained the one
+# reflex that skips it.
+#
+# So the work moved to scripts/gate.sh and this reads its receipt instead.
+# tests/test_boundaries.py pins both halves — that the slow steps are not
+# here, and that they are there.
+#
+# `git push --no-verify` skips this hook.
+set -e
+
+# git passes the remote's name and its URL as the two arguments.
+remote=${1:-origin}
+
+receipt="$(git rev-parse --git-dir)/ragqa-gate-receipt"
+zero=0000000000000000000000000000000000000000
+missing=''
+
+# git writes one line per ref: <local ref> <local sha> <remote ref> <remote
+# sha>. Reading it is not optional bookkeeping — an unread stdin is its own
+# class of hook bug — and it is what lets the gate bind to the exact commits
+# this push would publish rather than to whatever HEAD happens to be now.
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  # A deletion publishes no code, so there is nothing for a gate to have
+  # checked. Refusing these would make `git push origin --delete` impossible
+  # without --no-verify, for no gain.
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  # AN ANNOTATED TAG'S SHA IS NOT A COMMIT. For refs/tags/* git hands us the
+  # TAG OBJECT's sha, and scripts/gate.sh records `git rev-parse HEAD`, a
+  # commit — so a literal comparison could never match one, and every
+  # `git push origin vX.Y.Z` was refused no matter how thoroughly the commit
+  # underneath it had been gated. That made step 4 of CONTRIBUTING's own
+  # release procedure impossible without the --no-verify this hook exists to
+  # make unnecessary, which is the failure mode that produced this hook in the
+  # first place. Dereferencing is a no-op on a commit and on a lightweight tag.
+  commit=$(git rev-parse --verify --quiet "$local_sha^{commit}" || true)
+  if [ -z "$commit" ]; then
+    missing="$missing  $local_sha  $local_ref  (does not name a commit)
+"
+    continue
+  fi
+
+  # -x so a SHA must match a whole line, -F so it is never read as a
+  # pattern. A missing receipt file is simply no match, which is the right
+  # answer for a clone that has never gated.
+  if grep -qxF "$commit" "$receipt" 2>/dev/null; then
+    continue
+  fi
+
+  # NOTHING NEW TO PUBLISH IS NOTHING TO GATE — the same reasoning as the
+  # deletion case above. If every commit reachable from this ref is already on
+  # the remote, the push sends no code: only a tag object pointing into history
+  # the remote already serves. This is what lets a release tag be pushed for a
+  # version whose commits predate the receipt file, and it weakens nothing,
+  # because an unpushed commit still counts. Commit after gating and this is
+  # still non-zero, so the hook still refuses and you still re-gate.
+  if [ "$(git rev-list --count "$commit" --not --remotes="$remote" 2>/dev/null || echo 1)" = 0 ]; then
+    continue
+  fi
+
+  missing="$missing  $local_sha  $local_ref
+"
+done
+
+if [ -n "$missing" ]; then
+  echo "pre-push: refusing — no green gate for:" >&2
+  printf '%s' "$missing" >&2
+  echo "Run ./scripts/gate.sh (needs Docker; the integration suite and the image smoke test), then push." >&2
+  exit 1
+fi
+
+echo "pre-push: every pushed commit has a green gate."

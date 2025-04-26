@@ -1,0 +1,18 @@
+#!/bin/sh
+# The fast checks, run before each commit: lint, format, types and the unit
+# suite. Nothing here needs Docker or downloads a model, so it belongs on the
+# commit rather than the push — the slow half is scripts/gate.sh.
+#
+# Order is cheapest-first so a lint slip fails in a second, not after the
+# suite has run.
+#
+# `git commit --no-verify` skips this hook when you need a checkpoint commit
+# on a branch that does not pass yet.
+set -e
+
+echo "pre-commit: lint, format, types and unit tests"
+
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest -m "not integration" -q
