@@ -42,3 +42,6 @@ pythonVersion = "3.12"
 include = ["packages/core/src", "apps/api/src"]
 venvPath = "."
 venv = ".venv"
+
+[tool.ruff.lint.isort]
+known-first-party = ["ragqa_core", "ragqa_api"]
