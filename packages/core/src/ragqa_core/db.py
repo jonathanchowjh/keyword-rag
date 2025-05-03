@@ -179,6 +179,15 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
     return job
 
 
+def active_jobs(conn: sqlite3.Connection, kind: str, collection: str) -> int:
+    row = conn.execute(
+        "select count(*) from jobs where kind = ? and collection = ?"
+        " and status in ('queued', 'running')",
+        (kind, collection),
+    ).fetchone()
+    return row[0]
+
+
 def mark_interrupted(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         "update jobs set status = 'interrupted', updated_at = ?"
