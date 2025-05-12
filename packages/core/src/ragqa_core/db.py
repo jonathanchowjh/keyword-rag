@@ -206,6 +206,15 @@ def add_run_item(
     )
 
 
+def update_run_item(
+    conn: sqlite3.Connection, job_id: str, method: str, question_id: str, row: dict
+) -> None:
+    conn.execute(
+        "update run_items set row_json = ? where job_id = ? and method = ? and question_id = ?",
+        (json.dumps(row), job_id, method, question_id),
+    )
+
+
 def run_items(conn: sqlite3.Connection, job_id: str, method: str | None = None) -> list[dict]:
     if method is None:
         rows = conn.execute("select * from run_items where job_id = ? order by rowid", (job_id,))
