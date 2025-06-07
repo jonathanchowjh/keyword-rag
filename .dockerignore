@@ -1,2 +1,12 @@
 .git
+.githooks
 .venv
+**/__pycache__
+**/.pytest_cache
+.ruff_cache
+docs
+.superpowers
+.remember
+.playwright-mcp
+.env
+.env.*

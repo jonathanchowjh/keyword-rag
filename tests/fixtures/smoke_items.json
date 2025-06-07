@@ -1,0 +1,182 @@
+[
+ {
+  "id": "smoke-00",
+  "text": "Which gas do plants take in for photosynthesis? Choices: A. oxygen; B. carbon dioxide (variant 0)",
+  "answer": "B",
+  "explanation": "Plants take in carbon dioxide and release oxygen.",
+  "meta": {
+   "skill": "photosynthesis"
+  }
+ },
+ {
+  "id": "smoke-01",
+  "text": "What pulls a dropped ball toward the ground? Choices: A. gravity; B. magnetism (variant 1)",
+  "answer": "A",
+  "explanation": "Gravity pulls objects toward Earth.",
+  "meta": {
+   "skill": "gravity"
+  }
+ },
+ {
+  "id": "smoke-02",
+  "text": "Which metal is attracted to a magnet? Choices: A. iron; B. copper (variant 2)",
+  "answer": "A",
+  "explanation": "Iron is magnetic; copper is not.",
+  "meta": {
+   "skill": "magnetism"
+  }
+ },
+ {
+  "id": "smoke-03",
+  "text": "What happens to water left in the sun? Choices: A. it evaporates; B. it freezes (variant 3)",
+  "answer": "A",
+  "explanation": "Heat turns liquid water into vapour.",
+  "meta": {
+   "skill": "evaporation"
+  }
+ },
+ {
+  "id": "smoke-04",
+  "text": "What travels faster, light or sound? Choices: A. light; B. sound (variant 4)",
+  "answer": "A",
+  "explanation": "Light is far faster than sound.",
+  "meta": {
+   "skill": "light"
+  }
+ },
+ {
+  "id": "smoke-05",
+  "text": "Which gas do plants take in for photosynthesis? Choices: A. oxygen; B. carbon dioxide (variant 5)",
+  "answer": "B",
+  "explanation": "Plants take in carbon dioxide and release oxygen.",
+  "meta": {
+   "skill": "photosynthesis"
+  }
+ },
+ {
+  "id": "smoke-06",
+  "text": "What pulls a dropped ball toward the ground? Choices: A. gravity; B. magnetism (variant 6)",
+  "answer": "A",
+  "explanation": "Gravity pulls objects toward Earth.",
+  "meta": {
+   "skill": "gravity"
+  }
+ },
+ {
+  "id": "smoke-07",
+  "text": "Which metal is attracted to a magnet? Choices: A. iron; B. copper (variant 7)",
+  "answer": "A",
+  "explanation": "Iron is magnetic; copper is not.",
+  "meta": {
+   "skill": "magnetism"
+  }
+ },
+ {
+  "id": "smoke-08",
+  "text": "What happens to water left in the sun? Choices: A. it evaporates; B. it freezes (variant 8)",
+  "answer": "A",
+  "explanation": "Heat turns liquid water into vapour.",
+  "meta": {
+   "skill": "evaporation"
+  }
+ },
+ {
+  "id": "smoke-09",
+  "text": "What travels faster, light or sound? Choices: A. light; B. sound (variant 9)",
+  "answer": "A",
+  "explanation": "Light is far faster than sound.",
+  "meta": {
+   "skill": "light"
+  }
+ },
+ {
+  "id": "smoke-10",
+  "text": "Which gas do plants take in for photosynthesis? Choices: A. oxygen; B. carbon dioxide (variant 10)",
+  "answer": "B",
+  "explanation": "Plants take in carbon dioxide and release oxygen.",
+  "meta": {
+   "skill": "photosynthesis"
+  }
+ },
+ {
+  "id": "smoke-11",
+  "text": "What pulls a dropped ball toward the ground? Choices: A. gravity; B. magnetism (variant 11)",
+  "answer": "A",
+  "explanation": "Gravity pulls objects toward Earth.",
+  "meta": {
+   "skill": "gravity"
+  }
+ },
+ {
+  "id": "smoke-12",
+  "text": "Which metal is attracted to a magnet? Choices: A. iron; B. copper (variant 12)",
+  "answer": "A",
+  "explanation": "Iron is magnetic; copper is not.",
+  "meta": {
+   "skill": "magnetism"
+  }
+ },
+ {
+  "id": "smoke-13",
+  "text": "What happens to water left in the sun? Choices: A. it evaporates; B. it freezes (variant 13)",
+  "answer": "A",
+  "explanation": "Heat turns liquid water into vapour.",
+  "meta": {
+   "skill": "evaporation"
+  }
+ },
+ {
+  "id": "smoke-14",
+  "text": "What travels faster, light or sound? Choices: A. light; B. sound (variant 14)",
+  "answer": "A",
+  "explanation": "Light is far faster than sound.",
+  "meta": {
+   "skill": "light"
+  }
+ },
+ {
+  "id": "smoke-15",
+  "text": "Which gas do plants take in for photosynthesis? Choices: A. oxygen; B. carbon dioxide (variant 15)",
+  "answer": "B",
+  "explanation": "Plants take in carbon dioxide and release oxygen.",
+  "meta": {
+   "skill": "photosynthesis"
+  }
+ },
+ {
+  "id": "smoke-16",
+  "text": "What pulls a dropped ball toward the ground? Choices: A. gravity; B. magnetism (variant 16)",
+  "answer": "A",
+  "explanation": "Gravity pulls objects toward Earth.",
+  "meta": {
+   "skill": "gravity"
+  }
+ },
+ {
+  "id": "smoke-17",
+  "text": "Which metal is attracted to a magnet? Choices: A. iron; B. copper (variant 17)",
+  "answer": "A",
+  "explanation": "Iron is magnetic; copper is not.",
+  "meta": {
+   "skill": "magnetism"
+  }
+ },
+ {
+  "id": "smoke-18",
+  "text": "What happens to water left in the sun? Choices: A. it evaporates; B. it freezes (variant 18)",
+  "answer": "A",
+  "explanation": "Heat turns liquid water into vapour.",
+  "meta": {
+   "skill": "evaporation"
+  }
+ },
+ {
+  "id": "smoke-19",
+  "text": "What travels faster, light or sound? Choices: A. light; B. sound (variant 19)",
+  "answer": "A",
+  "explanation": "Light is far faster than sound.",
+  "meta": {
+   "skill": "light"
+  }
+ }
+]

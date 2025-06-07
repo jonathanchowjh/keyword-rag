@@ -1,0 +1,31 @@
+# The service and its vector store. `docker compose up` is the whole start.
+#
+# The API is published on 127.0.0.1 only: it has endpoints that spend Claude
+# credit, so a port open to the network would let anyone spend up to the
+# monthly cap. Qdrant is not published at all; the API reaches it on the
+# compose network.
+services:
+  api:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RAGQA_QDRANT_URL: http://qdrant:6333
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ragqa:/home/app/.ragqa
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    volumes:
+      - qdrant:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  ragqa:
+  qdrant:

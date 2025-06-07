@@ -1,0 +1,22 @@
+# Overrides for scripts/image-smoke.sh: the built image, no API key, small
+# models, its own port, and a persistent volume for the model cache only, so
+# reruns do not download again but every other byte of state starts fresh.
+services:
+  api:
+    image: ragqa:smoke
+    build: !reset null
+    env_file: !reset []
+    environment:
+      ANTHROPIC_API_KEY: ""
+      RAGQA_DENSE_MODEL: BAAI/bge-small-en-v1.5
+      RAGQA_JUDGE_MODEL: BAAI/bge-small-en-v1.5
+      RAGQA_RERANK_MODEL: Xenova/ms-marco-MiniLM-L-6-v2
+    ports: !override
+      - "127.0.0.1:58080:8080"
+    volumes: !override
+      - ragqa-smoke-models:/home/app/.ragqa/models
+    restart: !reset no
+
+volumes:
+  ragqa-smoke-models:
+    external: true
