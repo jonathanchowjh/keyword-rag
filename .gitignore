@@ -13,3 +13,6 @@ __pycache__/
 .remember/
 # Design documents, plans and the paper are kept locally and not published.
 docs/
+# The 2024 CS472 paper, slides and course files: never published, named on
+# their own so they stay out even if the docs/ rule above changes.
+docs/CS472/
