@@ -281,3 +281,23 @@ def test_basic_auth(tmp_path):
 def test_half_set_auth_is_503(tmp_path):
     r = TestClient(create_app(settings(tmp_path, username="u"))).get("/health")
     assert r.status_code == 503 and "RAGQA_PASSWORD" in r.json()["detail"]
+
+
+STATIC = Path(__file__).resolve().parents[1] / "src/ragqa_api/static"
+PUBLIC = {"/collections", "/query", "/eval", "/jobs", "/budget", "/health"}
+
+
+def test_pages_are_served(client):
+    for path in ("/lab", "/board"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+
+
+def test_pages_only_call_public_endpoints():
+    import re
+
+    for page in ("lab.html", "board.html"):
+        text = (STATIC / page).read_text()
+        paths = {"/" + p.split("/")[1] for p in re.findall(r"""fetch\(\s*[`'"](/[a-z/]+)""", text)}
+        assert paths and paths <= PUBLIC, (page, paths)
+        assert "http://" not in text and "https://" not in text  # no external requests

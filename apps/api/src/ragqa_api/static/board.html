@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-qa · Eval Board</title>
+<style>
+  :root { --bg:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#dedee3; --card:#f6f6f8; --warn:#8a5a00; --bad:#b3261e; --ok:#1e7a3c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141416; --fg:#ececf0; --muted:#9a9aa3; --line:#2c2c31; --card:#1c1c20; --warn:#e6b450; --bad:#ff8a80; --ok:#7fd69a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; justify-content:space-between; }
+  h1 { font-size:18px; margin:0; }
+  h2 { font-size:15px; margin:20px 0 8px; }
+  nav a, .muted { color:var(--muted); }
+  form { display:grid; gap:10px; margin:16px 0; max-width:900px; }
+  label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
+  select, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+  .methods { display:flex; flex-wrap:wrap; gap:6px 14px; }
+  .methods label { display:flex; gap:4px; align-items:center; color:var(--fg); font-size:13px; }
+  button { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--fg); color:var(--bg); cursor:pointer; }
+  button.secondary { background:transparent; color:var(--fg); }
+  button:disabled { opacity:.5; cursor:default; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { border-bottom:1px solid var(--line); padding:6px 10px; text-align:right; white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:var(--card); }
+  .ci { color:var(--muted); font-size:12px; }
+  .banner { padding:8px 10px; border-radius:6px; background:var(--card); margin:8px 0; }
+  .warn { color:var(--warn); } .err { color:var(--bad); } .ok { color:var(--ok); }
+  .item { background:var(--card); border-radius:6px; padding:8px; margin:6px 0; overflow-wrap:anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Eval Board</h1>
+  <nav><a href="/lab">Retrieval Lab</a> · <a href="/docs">API docs</a> · <span id="spend" class="muted"></span></nav>
+</header>
+<p class="muted">Estimate first, then start. Cells are mean [95% interval] over questions.</p>
+
+<form id="form">
+  <div class="row">
+    <label>Collection <select id="collection"></select></label>
+    <label>Split <select id="split"><option value="dev">dev (200)</option><option value="full">full</option></select></label>
+    <label>Model <select id="model"><option value="claude-haiku-5-5">Haiku 5.5</option><option value="claude-sonnet-5-5">Sonnet 5.5 (≈20×)</option></select></label>
+    <label>k <input id="k" type="number" value="5" min="1" max="20" style="width:70px"></label>
+    <label>rrf_k <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
+  </div>
+  <div class="methods" id="methods"></div>
+  <div class="row">
+    <label style="flex-direction:row;display:flex;gap:6px;color:var(--fg)"><input id="answer" type="checkbox"> answer (uses credit)</label>
+    <button id="estimate" type="button" class="secondary">Estimate</button>
+    <button id="start" type="button" disabled>Start</button>
+    <span id="status" class="muted"></span>
+  </div>
+</form>
+
+<div id="run"></div>
+<div id="drill"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = (x) => (x === null || x === undefined ? "–" : x.toFixed(3));
+let current = null, lastProgress = null, lastChange = 0, timer = null;
+
+async function json(response) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || response.statusText);
+  return body;
+}
+
+function request() {
+  return {
+    collection: $("collection").value, split: $("split").value, model: $("model").value,
+    methods: [...document.querySelectorAll("#methods input:checked")].map((i) => i.value),
+    answer: $("answer").checked, k: +$("k").value, rrf_k: +$("rrfk").value,
+  };
+}
+
+async function postEval(confirm) {
+  return json(await fetch("/eval", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...request(), confirm }) }));
+}
+
+async function loadCollections() {
+  const list = await json(await fetch("/collections"));
+  $("collection").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
+  if (list.length) await loadMethods();
+  else $("status").textContent = "No collections yet — create one at /docs.";
+}
+
+async function loadMethods() {
+  const detail = await json(await fetch(`/collections/${encodeURIComponent($("collection").value)}`));
+  const preset = new Set(["question_only", "vector", "hybrid", "kw_individual", "kw_rrf"]);
+  $("methods").innerHTML = detail.methods_available
+    .map((m) => `<label><input type="checkbox" value="${m}" ${preset.has(m) ? "checked" : ""}> ${m}</label>`)
+    .join("");
+  $("start").disabled = true;
+}
+
+async function loadSpend() {
+  const b = await json(await fetch("/budget"));
+  $("spend").textContent = `spent $${b.spent_usd.toFixed(4)} of $${b.cap_usd.toFixed(2)} this month`;
+}
+
+for (const id of ["collection", "split", "model", "answer", "methods", "k", "rrfk"]) {
+  $(id).addEventListener("change", () => { $("start").disabled = true; if (id === "collection") loadMethods(); });
+}
+
+$("estimate").addEventListener("click", async () => {
+  try {
+    const { estimate } = await postEval(false);
+    $("status").textContent = `${estimate.questions} questions · ${estimate.calls} Claude calls · ≈ $${estimate.est_usd.toFixed(4)}`;
+    $("start").disabled = false;
+  } catch (e) { $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+});
+
+$("start").addEventListener("click", async () => {
+  try {
+    const { job_id } = await postEval(true);
+    $("start").disabled = true;
+    current = job_id; lastProgress = null; lastChange = Date.now();
+    poll();
+  } catch (e) { $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+});
+
+async function poll() {
+  clearTimeout(timer);
+  const job = await json(await fetch(`/jobs/${current}`));
+  if (job.progress !== lastProgress) { lastProgress = job.progress; lastChange = Date.now(); }
+  const waiting = Date.now() - lastChange > 30000 ? " · waiting on batch" : "";
+  $("status").textContent = `${job.status} · ${Math.round(job.progress * 100)}%${waiting}`;
+  await render();
+  if (job.status === "queued" || job.status === "running") timer = setTimeout(poll, 3000);
+  else loadSpend();
+}
+
+async function render() {
+  const t = await json(await fetch(`/eval/${current}`));
+  const metrics = [...new Set(Object.values(t.methods).flatMap((m) => Object.keys(m).filter((k) => k !== "usd" && k !== "n")))];
+  const rows = Object.entries(t.methods).map(([name, m]) => `<tr data-method="${esc(name)}"><td>${esc(name)}</td>
+    ${metrics.map((k) => m[k] ? `<td>${fmt(m[k].mean)} <span class="ci">[${fmt(m[k].lo)}, ${fmt(m[k].hi)}]</span></td>` : "<td>–</td>").join("")}
+    <td>$${m.usd.toFixed(4)}</td><td>${m.n}</td></tr>`).join("");
+  const loose = t.pairs.filter((p) => !p.separated);
+  const proxy = t.proxy
+    ? `<div class="banner ${t.proxy.trusted ? "ok" : "warn"}">Proxy check: solution similarity ${t.proxy.trusted ? "tracks" : "does not track"} accuracy across methods (Spearman ${fmt(t.proxy.spearman)}).</div>`
+    : "";
+  $("run").innerHTML = `<h2>Run ${esc(current.slice(0, 8))} · ${esc(t.setup.collection)} · ${esc(t.status)}</h2>
+    ${t.error ? `<div class="banner err">${esc(t.error)}</div>` : ""}
+    ${proxy}
+    <div class="scroll"><table><thead><tr><th>method</th>${metrics.map((k) => `<th>${esc(k)}</th>`).join("")}<th>$</th><th>n</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <h2>Not separated</h2>
+    <div class="muted">${loose.length ? loose.map((p) => `${esc(p.a)} vs ${esc(p.b)} on ${esc(p.metric)} (diff ${fmt(p.diff)} [${fmt(p.lo)}, ${fmt(p.hi)}])`).join("<br>") : "Every compared pair is separated."}</div>
+    <p class="muted">keyword lists ${esc(t.setup.keyword_version || "none")} · ${esc(t.setup.dense_model)} · rrf_k ${t.setup.rrf_k} · k ${t.setup.k} · seed ${t.setup.seed}<br>${esc(t.setup.dataset_filter)}</p>`;
+  for (const tr of document.querySelectorAll("tbody tr")) tr.addEventListener("click", () => drill(tr.dataset.method));
+}
+
+async function drill(method) {
+  const items = await json(await fetch(`/eval/${current}/items?method=${encodeURIComponent(method)}&wrong=true`));
+  $("drill").innerHTML = `<h2>${esc(method)}: ${items.length} wrong</h2>` + items.map((i) => `<div class="item">
+    <div><strong>${esc(i.question_id)}</strong> ${esc(i.question)}</div>
+    <div class="muted">gold ${esc((i.gold_answers || []).join(" | "))}${i.pred !== undefined ? ` · predicted ${esc(i.pred)}` : ""}</div>
+    <div class="muted">retrieved ${esc((i.hit_ids || []).join(", "))}</div></div>`).join("");
+}
+
+loadCollections().catch((e) => ($("status").textContent = e.message));
+loadSpend().catch(() => {});
+</script>
+</body>
+</html>
