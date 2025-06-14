@@ -167,3 +167,24 @@ def test_items_wrong_only(env):
     ev.run(right)
     assert ev.items(right, "hybrid", wrong_only=True) == []
     assert len(ev.items(right, "hybrid", wrong_only=False)) == 5
+
+
+def test_items_wrong_only_without_answers_uses_skill_miss(env):
+    conn, ev = env
+    save_questions(
+        conn,
+        "c",
+        [
+            Question(
+                "q-odd",
+                "enzyme question",
+                None,
+                ["A"],
+                [],
+                {"skill": "odd", "solution": "enzyme explanation"},
+            )
+        ],
+    )
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
+    ev.run(job)
+    assert [row["question_id"] for row in ev.items(job, "hybrid", wrong_only=True)] == ["q-odd"]

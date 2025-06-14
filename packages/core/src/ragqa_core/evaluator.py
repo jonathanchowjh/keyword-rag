@@ -41,6 +41,13 @@ ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
     "multihop": ("em", "f1"),
     "table": ("em", "f1"),
 }
+# What counts as a retrieval miss when a run has no answers: a binary metric,
+# because the continuous solution similarity is practically never exactly 0.
+MISS_METRIC: dict[QaType, str] = {
+    "mcq": "same_skill@1",
+    "multihop": "recall@2",
+    "table": "recall@1",
+}
 PAIR_ANSWER_METRIC: dict[QaType, str] = {"mcq": "accuracy", "multihop": "f1", "table": "f1"}
 ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "multihop": 100, "table": 100}
 HOP_TOKENS = 200
@@ -301,7 +308,7 @@ class Evaluator:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
-        primary = RETRIEVAL_METRICS[spec.qa_type][0]
+        primary = MISS_METRIC[spec.qa_type]
         out = []
         for row in db.run_items(self.conn, job_id, method):
             if wrong_only and not is_wrong(row, primary):
