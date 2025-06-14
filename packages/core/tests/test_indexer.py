@@ -142,3 +142,17 @@ def test_propose_lists_uses_claude_json_and_tfidf(tmp_path):
     lists = ix.propose_lists(spec, ITEMS + [Item("4", "enzyme rate genetics")])
     assert lists.topic == ["genetics"] and lists.method == ["titration"]
     assert "rate" in lists.common
+
+
+def test_keyword_list_embeddings_are_reused_across_calls(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.set_lists(spec, LISTS)
+    embedded: list[str] = []
+    real = models.embed
+    models.embed = lambda texts: embedded.extend(texts) or real(texts)
+    ix.keywords_for(spec, LISTS, ["first query"], [None])
+    first = len(embedded)
+    ix.keywords_for(spec, LISTS, ["second query"], [None])
+    assert len(embedded) - first < first  # the lists are not embedded again
+    assert "enzyme kinetics" not in embedded[first:]

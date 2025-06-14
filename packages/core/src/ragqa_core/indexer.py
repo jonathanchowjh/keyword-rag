@@ -45,6 +45,9 @@ class Indexer:
         self.store = store
         self.models = models
         self.claude = claude
+        # Keyword-list embeddings by list version: they change only when the
+        # lists do, and re-embedding ~565 keywords per query dominated eval time.
+        self._list_vectors: dict[str, tuple[dict[str, np.ndarray], list[str], np.ndarray]] = {}
 
     def create(self, name: str, qa_type: QaType, summarize: bool) -> CollectionSpec:
         if not NAME.match(name):
@@ -136,10 +139,9 @@ class Indexer:
     ) -> tuple[list[dict], dict[str, np.ndarray]]:
         """Keywords and keyword vectors for items or queries — both sides alike."""
         item_vecs = self.models.embed(texts)
-        facet_vecs = {f: self.models.embed(getattr(lists, f)) for f in FACETS}
-        pooled = list(dict.fromkeys(lists.topic + lists.method + lists.common))
+        facet_vecs, pooled, pooled_vecs = self._lists_embedded(lists)
         per_facet = assign(item_vecs, facet_vecs, lists)
-        pooled_picks = pick_all(item_vecs, self.models.embed(pooled), pooled)
+        pooled_picks = pick_all(item_vecs, pooled_vecs, pooled)
         keywords = [{**kw, "all": picks} for kw, picks in zip(per_facet, pooled_picks, strict=True)]
         use_summary = [s if spec.summarize else None for s in summaries]
         vectors = {
@@ -160,6 +162,19 @@ class Indexer:
         if spec.summarize:
             vectors["kw_summary"] = self.models.embed([s or "" for s in summaries])
         return keywords, vectors
+
+    def _lists_embedded(
+        self, lists: KeywordLists
+    ) -> tuple[dict[str, np.ndarray], list[str], np.ndarray]:
+        version = list_version(lists)
+        if version not in self._list_vectors:
+            pooled = list(dict.fromkeys(lists.topic + lists.method + lists.common))
+            self._list_vectors[version] = (
+                {f: self.models.embed(getattr(lists, f)) for f in FACETS},
+                pooled,
+                self.models.embed(pooled),
+            )
+        return self._list_vectors[version]
 
     def _check_model(self, spec: CollectionSpec) -> None:
         if spec.dense_model != self.models.dense_model:
