@@ -8,6 +8,11 @@ from ragqa_core.types import Hit, QaType
 
 LETTERS = "ABCDEFGH"
 ANSWER_LINE = re.compile(r"^\s*Answer:\s*(.+?)\s*$", re.M)
+LEADING_UPPER = re.compile(r"^\(?([A-H])\)?(?=[.:),;\s]|$)")
+LEADING_MARKED = re.compile(r"^(?:\(([a-h])\)|([a-h])(?=[.)]))")
+NAMED_CHOICE = re.compile(
+    r"\b(?:answer|option|choice)\s+(?:is\s+)?\(?([A-Ha-h])\)?(?![A-Za-z])", re.I
+)
 SUMMARY_TOKENS = 120
 
 METHOD_HINT = {
@@ -70,15 +75,23 @@ def hop_prompt(question: str, passages: list[str]) -> str:
     )
 
 
-def parse_answer(qa_type: QaType, text: str) -> str:
+def answer_line(text: str) -> str:
+    """The content of the last `Answer:` line, or "" if there is none."""
     found = ANSWER_LINE.findall(text)
-    if not found:
-        return ""
-    answer = found[-1].strip()
-    if qa_type == "mcq":
-        letter = next((ch for ch in answer.upper() if ch in LETTERS), "")
-        return letter
-    return answer
+    return found[-1].strip() if found else ""
+
+
+def parse_answer(qa_type: QaType, text: str) -> str:
+    answer = answer_line(text)
+    if qa_type != "mcq" or not answer:
+        return answer
+    # A bare letter: "B", "B.", "(c)", "c) sulfate". Lower case only when it is
+    # marked as a choice, so the article in "a dog" is not read as A.
+    for pattern in (LEADING_UPPER, LEADING_MARKED, NAMED_CHOICE):
+        match = pattern.search(answer)
+        if match:
+            return next(g for g in match.groups() if g).upper()
+    return ""
 
 
 def parse_json(text: str) -> dict:

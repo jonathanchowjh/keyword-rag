@@ -9,7 +9,7 @@ from typing import Literal
 
 from ragqa_core import db
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
-from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey
+from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Claude, NoApiKey
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
@@ -23,6 +23,7 @@ from ragqa_core.metrics import (
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
     SUMMARY_TOKENS,
+    answer_line,
     answer_prompt,
     hop_prompt,
     parse_answer,
@@ -86,24 +87,32 @@ class Evaluator:
         model: str | None,
     ) -> dict:
         spec = self.retriever.spec(collection)
+        self.retriever.indexer.check_model(spec)
         questions = self._questions(spec, split)
         sample = questions[:ESTIMATE_SAMPLE]
         n = len(questions)
-        parts: list[tuple[int, float, int]] = []  # (calls, avg prompt chars, output tokens)
+        # (calls, avg prompt chars, output tokens, batched?) — each part priced the
+        # way it is sent: one complete_many per part, batched only above 50 calls;
+        # iterative hops are single real-time calls.
+        parts: list[tuple[int, float, int, bool]] = []
         if spec.summarize and any(m in KEYWORD_METHODS for m in methods):
-            parts.append((n, avg(len(summary_prompt(q.text)) for q in sample), SUMMARY_TOKENS))
+            chars = avg(len(summary_prompt(q.text)) for q in sample)
+            parts.append((n, chars, SUMMARY_TOKENS, n > BATCH_THRESHOLD))
         hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
-        parts.extend((n * MAX_HOPS, hop_chars, HOP_TOKENS) for m in methods if m == "iterative")
+        parts.extend(
+            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False) for m in methods if m == "iterative"
+        )
         if answer:
             chars = self._answer_chars(spec, sample)
-            parts.extend((n, chars, ANSWER_TOKENS[spec.qa_type]) for _ in methods)
-        calls = sum(c for c, _, _ in parts)
+            parts.extend(
+                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD) for _ in methods
+            )
+        calls = sum(part[0] for part in parts)
         if calls == 0:
             return {"questions": n, "calls": 0, "est_usd": 0.0}
-        batch = calls > 50
         usd = sum(
             c * self.claude.estimate_usd(int(chars), out, model=model, batch=batch)
-            for c, chars, out in parts
+            for c, chars, out, batch in parts
         )
         return {"questions": n, "calls": calls, "est_usd": usd}
 
@@ -197,7 +206,14 @@ class Evaluator:
         )
         for q, row, completion in zip(questions, rows, done, strict=True):
             pred = parse_answer(spec.qa_type, completion.text)
-            row.update({"pred": pred, "usd": completion.usd, "answer": score(spec, q, pred)})
+            row.update(
+                {
+                    "pred": pred,
+                    "raw": answer_line(completion.text),
+                    "usd": completion.usd,
+                    "answer": score(spec, q, pred),
+                }
+            )
             db.update_run_item(self.conn, job_id, method, q.id, row)
 
     def _retrieval_rows(

@@ -96,6 +96,9 @@ class Retriever:
         if method not in self._methods:
             raise ValueError(f"unknown method {method!r}; known: {', '.join(METHOD_NAMES)}")
         spec = self.spec(collection)
+        # A query embedded by another model is either a dimension crash or,
+        # worse, silently meaningless; refuse it by name instead.
+        self.indexer.check_model(spec)
         return self._methods[method](spec, question, k, rrf_k)
 
     def is_paid(self, spec: CollectionSpec, method: str) -> bool:

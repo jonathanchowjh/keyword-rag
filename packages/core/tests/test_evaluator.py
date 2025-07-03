@@ -188,3 +188,43 @@ def test_items_wrong_only_without_answers_uses_skill_miss(env):
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
     ev.run(job)
     assert [row["question_id"] for row in ev.items(job, "hybrid", wrong_only=True)] == ["q-odd"]
+
+
+def test_estimate_matches_how_calls_are_sent(env):
+    conn, ev = env
+    many = [
+        Question(f"m{i}", f"enzyme question {i}", ["yes", "no"], ["A"], [], {"skill": "enzyme"})
+        for i in range(60)
+    ]
+    save_questions(conn, "c", many)
+    methods = ["hybrid", "vector", "kw_all", "kw_individual", "kw_rrf", "keyword"]
+    small = ev.estimate("c", "full", methods[:6], answer=True, model=None)
+    # 65 questions per method: each method's answers exceed 50, so each is a batch.
+    job = create_job(conn, "eval", "c", setup_for(methods, answer=True, split="full"))
+    ev.run(job)
+    modes = {r["batch"] for r in conn.execute("select batch from ledger where purpose='answer'")}
+    assert modes == {1} and small["calls"] == 65 * 6
+
+
+def test_estimate_does_not_halve_for_runs_whose_methods_stay_under_50(env):
+    conn, ev = env
+    extra = [
+        Question(f"x{i}", f"market question {i}", ["yes", "no"], ["A"], [], {"skill": "market"})
+        for i in range(5)
+    ]
+    save_questions(conn, "c", extra)  # 10 questions
+    methods = ["hybrid", "vector", "kw_all", "kw_individual", "kw_rrf", "keyword"]
+    est = ev.estimate("c", "full", methods, answer=True, model=None)  # 60 calls in all
+    single = ev.estimate("c", "full", ["hybrid"], answer=True, model=None)  # 10 calls
+    assert est["est_usd"] == pytest.approx(6 * single["est_usd"], rel=0.2)
+
+
+def test_rows_keep_the_raw_answer_line(env):
+    conn, ev = env
+    ev.claude = fake_claude(conn, lambda p: "thinking\nAnswer: The answer is A")
+    job = create_job(
+        conn, "eval", "c", setup_for(["hybrid"], answer=True, model="claude-sonnet-5-5")
+    )
+    ev.run(job)
+    row = run_items(conn, job)[0]
+    assert row["pred"] == "A" and row["raw"] == "The answer is A"

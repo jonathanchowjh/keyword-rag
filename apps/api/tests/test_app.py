@@ -301,3 +301,12 @@ def test_pages_only_call_public_endpoints():
         paths = {"/" + p.split("/")[1] for p in re.findall(r"""fetch\(\s*[`'"](/[a-z/]+)""", text)}
         assert paths and paths <= PUBLIC, (page, paths)
         assert "http://" not in text and "https://" not in text  # no external requests
+
+
+def test_model_mismatch_on_query_and_eval(client):
+    add_collection(client)
+    client.app.state.models.dense_model = "other/model"
+    r = client.post("/query", json={"collection": "c", "question": "x", "methods": ["hybrid"]})
+    assert "built with fake/dense" in r.json()["results"]["hybrid"]["error"]
+    r = client.post("/eval", json={"collection": "c", "methods": ["hybrid"]})
+    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]

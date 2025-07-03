@@ -77,7 +77,7 @@ class Indexer:
         items: list[Item],
         progress: Callable[[float], None] = lambda p: None,
     ) -> None:
-        self._check_model(spec)
+        self.check_model(spec)
         summaries: list[str | None] = [None] * len(items)
         if spec.summarize and items:
             done = self.claude.complete_many(
@@ -176,7 +176,7 @@ class Indexer:
             )
         return self._list_vectors[version]
 
-    def _check_model(self, spec: CollectionSpec) -> None:
+    def check_model(self, spec: CollectionSpec) -> None:
         if spec.dense_model != self.models.dense_model:
             raise ModelMismatch(
                 f"collection '{spec.name}' was built with {spec.dense_model};"

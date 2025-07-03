@@ -166,7 +166,7 @@ async function drill(method) {
   const items = await json(await fetch(`/eval/${current}/items?method=${encodeURIComponent(method)}&wrong=true`));
   $("drill").innerHTML = `<h2>${esc(method)}: ${items.length} wrong</h2>` + items.map((i) => `<div class="item">
     <div><strong>${esc(i.question_id)}</strong> ${esc(i.question)}</div>
-    <div class="muted">gold ${esc((i.gold_answers || []).join(" | "))}${i.pred !== undefined ? ` · predicted ${esc(i.pred)}` : ""}</div>
+    <div class="muted">gold ${esc((i.gold_answers || []).join(" | "))}${i.pred !== undefined ? ` · predicted ${esc(i.pred || "(unparsed)")} from “${esc(i.raw)}”` : ""}</div>
     <div class="muted">retrieved ${esc((i.hit_ids || []).join(", "))}</div></div>`).join("");
 }
 

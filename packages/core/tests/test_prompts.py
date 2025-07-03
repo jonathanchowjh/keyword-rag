@@ -61,3 +61,17 @@ def test_parse_json_tolerates_prose():
         "next_query": "",
     }
     assert parse_json("not json") == {}
+
+
+def test_parse_mcq_letter_inside_a_sentence():
+    assert parse_answer("mcq", "Answer: The answer is B") == "B"
+    assert parse_answer("mcq", "Answer: option (d), because") == "D"
+
+
+def test_parse_mcq_without_a_clear_letter_is_empty():
+    assert parse_answer("mcq", "Answer: None of these") == ""
+
+
+def test_parse_mcq_bare_letter_with_punctuation():
+    assert parse_answer("mcq", "Answer: B.") == "B"
+    assert parse_answer("mcq", "Answer: c) sulfate") == "C"

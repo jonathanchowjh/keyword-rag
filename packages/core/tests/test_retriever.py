@@ -174,3 +174,14 @@ def test_is_paid(tmp_path):
     assert r.is_paid(summarizing, "kw_all") and r.is_paid(summarizing, "kw_hybrid")
     assert not r.is_paid(plain, "kw_all")
     assert r.is_paid(plain, "iterative") and not r.is_paid(summarizing, "hybrid")
+
+
+def test_retrieve_refuses_model_mismatch(tmp_path):
+    from ragqa_core.indexer import ModelMismatch
+
+    r, _ = build(tmp_path)
+    r.models.dense_model = "other/model"
+    with pytest.raises(
+        ModelMismatch, match="built with fake/dense; service is running other/model"
+    ):
+        r.retrieve("c", "enzyme", "hybrid")
