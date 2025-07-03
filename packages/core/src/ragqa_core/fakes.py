@@ -19,6 +19,9 @@ from ragqa_core.llm import Claude
 from ragqa_core.models import Models, normalise
 
 WORD = re.compile(r"[a-z0-9]+")
+# The fake Batch API's server side: batches outlive the fake that submitted
+# them, as real ones outlive a restarted process.
+BATCHES: dict[str, dict[str, tuple[str, int, int]]] = {}
 
 
 def fake_models(dim: int = 256) -> Models:
@@ -70,12 +73,19 @@ def fake_claude(
         text = reply(prompt)
         return text, math.ceil(len(prompt) / 4), math.ceil(len(text) / 4)
 
-    def send_batch(requests: list[dict]) -> dict[str, tuple[str, int, int]]:
-        return {
-            r["custom_id"]: send(r["model"], r["system"], r["prompt"], r["max_tokens"])
-            for r in requests
+    def submit_batch(requests: list[dict]) -> str:
+        batch_id = f"fake-batch-{len(BATCHES)}"
+        BATCHES[batch_id] = {
+            r["custom_id"]: send(r["model"], r["system"], r["prompt"], 0) for r in requests
         }
+        return batch_id
+
+    def batch_results(batch_id: str) -> dict[str, tuple[str, int, int] | None]:
+        # A reply of "FAIL" stands for an errored or expired batch entry.
+        return {k: None if v[0] == "FAIL" else v for k, v in BATCHES[batch_id].items()}
 
     claude._send = send  # type: ignore[method-assign]
-    claude._send_batch = send_batch  # type: ignore[method-assign]
+    claude._submit_batch = submit_batch  # type: ignore[method-assign]
+    claude._batch_done = lambda batch_id: True  # type: ignore[method-assign]
+    claude._batch_results = batch_results  # type: ignore[method-assign]
     return claude

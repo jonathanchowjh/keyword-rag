@@ -42,6 +42,9 @@ create table if not exists jobs (
   status text not null, progress real not null default 0, setup_json text not null,
   result_json text, error text, created_at text not null, updated_at text not null
 );
+create table if not exists pending_batches (
+  id text primary key, model text not null, purpose text not null, created_at text not null
+);
 create table if not exists run_items (
   job_id text not null, method text not null, question_id text not null,
   row_json text not null

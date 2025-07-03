@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -52,6 +53,8 @@ class Claude:
         self.cap_usd = cap_usd
         self.default_model = default_model
         self._client: anthropic.Anthropic | None = None
+        self._lock = threading.Lock()
+        self._reserved = 0.0  # estimated spend of calls in flight, counted against the cap
 
     def complete(
         self,
@@ -85,6 +88,16 @@ class Claude:
                     row["text"], 0.0, True, row["input_tokens"], row["output_tokens"]
                 )
         misses = {k: p for k, p in zip(keys, prompts, strict=True) if k not in results}
+        if misses and self.api_key:
+            # A batch submitted before a crash may already hold these answers.
+            self.collect_pending()
+            for key in list(misses):
+                row = self.conn.execute("select * from cache where key = ?", (key,)).fetchone()
+                if row:
+                    results[key] = Completion(
+                        row["text"], 0.0, True, row["input_tokens"], row["output_tokens"]
+                    )
+                    del misses[key]
         if misses:
             if not self.api_key:
                 raise NoApiKey()
@@ -93,39 +106,97 @@ class Claude:
                 self.estimate_usd(len(system) + len(p), max_tokens, model=model, batch=batch)
                 for p in misses.values()
             )
-            spent = self.month_spend()
-            if spent + estimate > self.cap_usd:
-                raise BudgetExceeded(
-                    f"monthly cap reached: ${spent:.4f} spent + ${estimate:.4f} needed"
-                    f" > ${self.cap_usd:.2f} cap"
-                )
-            if batch:
-                requests = [
-                    {
-                        "custom_id": key[:64],
-                        "model": model,
-                        "system": system,
-                        "prompt": p,
-                        "max_tokens": max_tokens,
-                    }
-                    for key, p in misses.items()
-                ]
-                by_id = self._send_batch(requests)
-                sent = {key: by_id[key[:64]] for key in misses}
-            else:
-                sent = {key: self._send(model, system, p, max_tokens) for key, p in misses.items()}
-            for key, (text, tokens_in, tokens_out) in sent.items():
-                usd = self._price(model, tokens_in, tokens_out, batch)
-                self.conn.execute(
-                    "insert or replace into cache values (?, ?, ?, ?)",
-                    (key, text, tokens_in, tokens_out),
-                )
-                self.conn.execute(
-                    "insert into ledger values (?, ?, ?, ?, ?, ?, ?)",
-                    (now(), model, tokens_in, tokens_out, usd, int(batch), purpose),
-                )
-                results[key] = Completion(text, usd, False, tokens_in, tokens_out)
+            with self._lock:
+                committed = self.month_spend() + self._reserved
+                if committed + estimate > self.cap_usd:
+                    raise BudgetExceeded(
+                        f"monthly cap reached: ${committed:.4f} spent or in flight"
+                        f" + ${estimate:.4f} needed > ${self.cap_usd:.2f} cap"
+                    )
+                self._reserved += estimate
+            try:
+                if batch:
+                    results.update(self._run_batch(model, system, max_tokens, purpose, misses))
+                else:
+                    # Recorded one by one, so a failure part-way keeps what was paid for.
+                    for key, p in misses.items():
+                        text, tokens_in, tokens_out = self._send(model, system, p, max_tokens)
+                        results[key] = self._record(
+                            key, model, text, tokens_in, tokens_out, False, purpose
+                        )
+            finally:
+                with self._lock:
+                    self._reserved -= estimate
         return [results[k] for k in keys]
+
+    def _record(
+        self,
+        key: str,
+        model: str,
+        text: str,
+        tokens_in: int,
+        tokens_out: int,
+        batch: bool,
+        purpose: str,
+    ) -> Completion:
+        usd = self._price(model, tokens_in, tokens_out, batch)
+        self.conn.execute(
+            "insert or replace into cache values (?, ?, ?, ?)", (key, text, tokens_in, tokens_out)
+        )
+        self.conn.execute(
+            "insert into ledger values (?, ?, ?, ?, ?, ?, ?)",
+            (now(), model, tokens_in, tokens_out, usd, int(batch), purpose),
+        )
+        return Completion(text, usd, False, tokens_in, tokens_out)
+
+    def _run_batch(
+        self, model: str, system: str, max_tokens: int, purpose: str, misses: dict[str, str]
+    ) -> dict[str, Completion]:
+        requests = [
+            {
+                "custom_id": key,
+                "model": model,
+                "system": system,
+                "prompt": p,
+                "max_tokens": max_tokens,
+            }
+            for key, p in misses.items()
+        ]
+        batch_id = self._submit_batch(requests)
+        # Recorded before waiting: a batch is billed once submitted, so a
+        # restart must be able to find it and collect what it paid for.
+        self.conn.execute(
+            "insert into pending_batches values (?, ?, ?, ?)", (batch_id, model, purpose, now())
+        )
+        while not self._batch_done(batch_id):
+            time.sleep(BATCH_POLL_SECONDS)
+        return self._collect(batch_id, model, purpose, expected=len(misses))
+
+    def _collect(
+        self, batch_id: str, model: str, purpose: str, expected: int | None = None
+    ) -> dict[str, Completion]:
+        out: dict[str, Completion] = {}
+        failed = 0
+        for key, result in self._batch_results(batch_id).items():
+            if result is None:
+                failed += 1
+                continue
+            out[key] = self._record(key, model, *result, True, purpose)
+        self.conn.execute("delete from pending_batches where id = ?", (batch_id,))
+        if failed:
+            total = expected if expected is not None else failed + len(out)
+            raise RuntimeError(f"{failed} of {total} batch requests failed in {batch_id}")
+        return out
+
+    def collect_pending(self) -> None:
+        """Collect batches submitted by an earlier process that stopped waiting."""
+        rows = self.conn.execute("select * from pending_batches").fetchall()
+        for row in rows:
+            if self._batch_done(row["id"]):
+                try:
+                    self._collect(row["id"], row["model"], row["purpose"])
+                except RuntimeError:
+                    pass  # the failed entries are simply not cached; they will be re-sent
 
     def estimate_usd(
         self,
@@ -180,9 +251,8 @@ class Claude:
         text = "".join(block.text for block in message.content if block.type == "text")
         return text, message.usage.input_tokens, message.usage.output_tokens
 
-    def _send_batch(self, requests: list[dict]) -> dict[str, tuple[str, int, int]]:
-        client = self._client_or_create()
-        batch = client.messages.batches.create(
+    def _submit_batch(self, requests: list[dict]) -> str:
+        batch = self._client_or_create().messages.batches.create(
             requests=[
                 {
                     "custom_id": r["custom_id"],
@@ -196,12 +266,19 @@ class Claude:
                 for r in requests
             ]
         )
-        while client.messages.batches.retrieve(batch.id).processing_status != "ended":
-            time.sleep(BATCH_POLL_SECONDS)
-        out: dict[str, tuple[str, int, int]] = {}
-        for entry in client.messages.batches.results(batch.id):
+        return batch.id
+
+    def _batch_done(self, batch_id: str) -> bool:
+        status = self._client_or_create().messages.batches.retrieve(batch_id).processing_status
+        return status == "ended"
+
+    def _batch_results(self, batch_id: str) -> dict[str, tuple[str, int, int] | None]:
+        """custom_id -> (text, input tokens, output tokens), or None if not succeeded."""
+        out: dict[str, tuple[str, int, int] | None] = {}
+        for entry in self._client_or_create().messages.batches.results(batch_id):
             if entry.result.type != "succeeded":
-                raise RuntimeError(f"batch request {entry.custom_id} {entry.result.type}")
+                out[entry.custom_id] = None
+                continue
             message = entry.result.message
             text = "".join(block.text for block in message.content if block.type == "text")
             out[entry.custom_id] = (text, message.usage.input_tokens, message.usage.output_tokens)

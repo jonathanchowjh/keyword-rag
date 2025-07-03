@@ -92,3 +92,72 @@ def test_estimate(tmp_path):
     full = 1300 * 0.10e-6 + 520 * 0.50e-6
     assert c.estimate_usd(4000, 400) == pytest.approx(full)
     assert c.estimate_usd(4000, 400, batch=True) == pytest.approx(full / 2)
+
+
+def ledger_rows(c):
+    return c.conn.execute("select count(*) from ledger").fetchone()[0]
+
+
+def cache_rows(c):
+    return c.conn.execute("select count(*) from cache").fetchone()[0]
+
+
+def test_realtime_failure_keeps_completed_calls(tmp_path):
+    def reply(p):
+        if p == "p2":
+            raise RuntimeError("529 overloaded")
+        return "ok"
+
+    c = fake_claude(connect(tmp_path / "r.db"), reply)
+    with pytest.raises(RuntimeError, match="overloaded"):
+        c.complete_many(["p0", "p1", "p2", "p3"], purpose="t")
+    assert ledger_rows(c) == 2 and cache_rows(c) == 2
+
+
+def test_batch_with_failed_entry_ledgers_the_rest(tmp_path):
+    c = fake_claude(connect(tmp_path / "r.db"), lambda p: "FAIL" if p == "p7" else "ok")
+    with pytest.raises(RuntimeError, match="1 of 51 batch requests failed"):
+        c.complete_many([f"p{i}" for i in range(51)], purpose="t")
+    assert ledger_rows(c) == 50 and cache_rows(c) == 50
+
+
+def test_batch_interrupted_while_waiting_is_collected_after_restart(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    prompts = [f"p{i}" for i in range(51)]
+    first = fake_claude(conn, lambda p: "ok")
+
+    def die(batch_id):
+        raise KeyboardInterrupt  # the process is killed while polling
+
+    first._batch_done = die
+    with pytest.raises(KeyboardInterrupt):
+        first.complete_many(prompts, purpose="t")
+    assert ledger_rows(first) == 0
+
+    submitted: list[list[dict]] = []
+    second = fake_claude(conn, lambda p: "ok")
+    real_submit = second._submit_batch
+    second._submit_batch = lambda reqs: submitted.append(reqs) or real_submit(reqs)
+    out = second.complete_many(prompts, purpose="t")
+    assert all(o.cached for o in out) and submitted == []
+    assert ledger_rows(second) == 51
+
+
+def test_cap_counts_spend_still_in_flight(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    seen: list[Exception] = []
+    holder: dict = {}
+
+    def reply(p):
+        if p == "outer":
+            try:
+                holder["c"].complete("inner", purpose="t")
+            except BudgetExceeded as e:
+                seen.append(e)
+        return "ok"
+
+    probe = fake_claude(conn, lambda p: "")
+    one_call = probe.estimate_usd(len("outer"), 1024)
+    holder["c"] = fake_claude(conn, reply, cap_usd=one_call * 1.5)
+    holder["c"].complete("outer", purpose="t")
+    assert len(seen) == 1
