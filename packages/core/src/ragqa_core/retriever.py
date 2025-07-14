@@ -31,6 +31,7 @@ METHOD_NAMES = (
 KEYWORD_METHODS = ("kw_all", "kw_individual", "kw_rrf", "kw_hybrid")
 POOL = 50
 MAX_HOPS = 3
+HOP_TOKENS = 200
 
 
 class MethodUnavailable(Exception):
@@ -183,7 +184,7 @@ class Retriever:
         for _ in range(MAX_HOPS):
             hop(query)
             found = [h.text for hits in hops for h in hits]
-            reply = self.claude.complete(hop_prompt(q, found), max_tokens=200, purpose="hop")
+            reply = self.claude.complete(hop_prompt(q, found), max_tokens=HOP_TOKENS, purpose="hop")
             step = parse_json(reply.text)
             query = str(step.get("next_query") or "").strip()
             if step.get("done") or not query:

@@ -20,7 +20,7 @@ from ragqa_api.config import Settings, load_settings
 from ragqa_core import db
 from ragqa_core.datasets import DATASETS
 from ragqa_core.datasets import load as load_dataset
-from ragqa_core.evaluator import Evaluator
+from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.keywords import tfidf_terms
 from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
@@ -38,7 +38,6 @@ from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
 
 STATIC = Path(__file__).parent / "static"
 PROPOSE_SAMPLE = 40
-ANSWER_TOKENS = {"mcq": 400, "multihop": 100, "table": 100}
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
 
 
@@ -256,8 +255,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 out["hits"] = [asdict(h) for h in hits]
                 if body.answer:
-                    shown = hits[:1] if spec.qa_type == "mcq" else hits
-                    system, user = answer_prompt(spec.qa_type, body.question, body.choices, shown)
+                    system, user = answer_prompt(
+                        spec.qa_type, body.question, body.choices, answer_hits(spec.qa_type, hits)
+                    )
                     done = state.claude.complete(
                         user,
                         system=system,

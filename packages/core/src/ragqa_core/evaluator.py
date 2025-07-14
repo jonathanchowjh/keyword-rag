@@ -29,7 +29,7 @@ from ragqa_core.prompts import (
     parse_answer,
     summary_prompt,
 )
-from ragqa_core.retriever import KEYWORD_METHODS, MAX_HOPS, Retriever
+from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, Retriever
 from ragqa_core.types import CollectionSpec, Hit, QaType, Question
 
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
@@ -51,7 +51,6 @@ MISS_METRIC: dict[QaType, str] = {
 }
 PAIR_ANSWER_METRIC: dict[QaType, str] = {"mcq": "accuracy", "multihop": "f1", "table": "f1"}
 ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "multihop": 100, "table": 100}
-HOP_TOKENS = 200
 PROXY_TRUST = 0.5
 ESTIMATE_SAMPLE = 5
 
