@@ -147,15 +147,15 @@ def test_propose_lists_uses_claude_json_and_tfidf(tmp_path):
 def test_keyword_list_embeddings_are_reused_across_calls(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    ix.set_lists(spec, LISTS)
     embedded: list[str] = []
     real = models.embed
     models.embed = lambda texts: embedded.extend(texts) or real(texts)
+    ix.set_lists(spec, LISTS)
+    assert "enzyme kinetics" in embedded
+    before = len(embedded)
     ix.keywords_for(spec, LISTS, ["first query"], [None])
-    first = len(embedded)
     ix.keywords_for(spec, LISTS, ["second query"], [None])
-    assert len(embedded) - first < first  # the lists are not embedded again
-    assert "enzyme kinetics" not in embedded[first:]
+    assert "enzyme kinetics" not in embedded[before:]  # the lists are not embedded again
 
 
 def test_keywords_for_embeds_in_two_passes(env):
@@ -176,3 +176,34 @@ def test_keywords_for_embeds_in_two_passes(env):
         "kw_summary",
     }
     assert all(v.shape[0] == 1 for v in vectors.values())
+
+
+def test_set_lists_rejects_an_empty_facet_and_keeps_the_old_lists(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, ITEMS)
+    version = ix.set_lists(spec, LISTS)
+    with pytest.raises(ValueError, match="'topic' is empty"):
+        ix.set_lists(spec, KeywordLists(topic=[], method=LISTS.method, common=LISTS.common))
+    assert get_keyword_lists(conn, "c") == LISTS and ix.spec("c").keyword_version == version
+
+
+def test_set_lists_saves_nothing_if_the_lists_cannot_be_embedded(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+
+    def broken(texts):
+        raise RuntimeError("onnx failed")
+
+    models.embed = broken
+    with pytest.raises(RuntimeError, match="onnx failed"):
+        ix.set_lists(spec, LISTS)
+    assert get_keyword_lists(conn, "c") is None and ix.spec("c").keyword_version is None
+
+
+def test_propose_lists_rejects_a_reply_without_lists(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_claude(conn, lambda p: "Sorry,"))
+    spec = ix.create("c", "mcq", False)
+    with pytest.raises(ValueError, match="no usable topic or method"):
+        ix.propose_lists(spec, ITEMS)

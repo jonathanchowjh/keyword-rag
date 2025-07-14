@@ -112,15 +112,24 @@ class Indexer:
             purpose="propose",
         )
         proposed = parse_json(reply.text)
-        return KeywordLists(
-            topic=dedupe(proposed.get("topic") or []),
-            method=dedupe(proposed.get("method") or []),
-            common=tfidf_terms([i.text for i in sample]),
-        )
+        topic = dedupe(proposed.get("topic") or [])
+        method = dedupe(proposed.get("method") or [])
+        if not topic or not method:
+            raise ValueError(
+                f"Claude's reply had no usable topic or method list: {reply.text[:200]!r}"
+            )
+        # A small sample can have no term in two texts; reuse the proposed phrases.
+        common = tfidf_terms([i.text for i in sample]) or topic + method
+        return KeywordLists(topic=topic, method=method, common=common)
 
     def set_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
         if db.active_jobs(self.conn, "eval", spec.name):
             raise ListsBusy(f"an eval is running on '{spec.name}'; wait for it to finish")
+        for facet in FACETS:
+            if not getattr(lists, facet):
+                raise ValueError(f"keyword list '{facet}' is empty")
+        # Embedded before saving: a collection must never point at lists it cannot use.
+        self._lists_embedded(lists)
         version = list_version(lists)
         db.save_keyword_lists(self.conn, spec.name, lists, version)
         for hits in self.store.scroll(spec.name):

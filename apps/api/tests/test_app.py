@@ -234,6 +234,22 @@ def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
     assert client.get("/collections/m").json()["keyword_lists"]["common"]
 
 
+def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
+    from ragqa_api import app as app_module
+    from ragqa_core.types import Item
+
+    items = [Item(d["id"], d["text"] + " shared words", d["answer"]) for d in ITEMS]
+    monkeypatch.setattr(app_module, "load_dataset", lambda name, cache: (items, []))
+    client = make_client(tmp_path, reply=lambda p: "I cannot help with that.")
+    client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+    job = wait(
+        client, client.post("/collections/m/load", json={"dataset": "musique"}).json()["job_id"]
+    )
+    assert job["status"] == "done", job
+    assert job["result"]["lists_source"] == "tfidf (claude proposal unusable)"
+    assert client.get("/collections/m").json()["keyword_lists"]["topic"]
+
+
 def test_propose_lists(client):
     add_collection(client, lists=False)
     client.app.state.claude = fake_claude(

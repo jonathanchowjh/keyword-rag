@@ -383,10 +383,14 @@ def run_load(state, settings: Settings, job_id: str, spec: CollectionSpec, body:
         source = None
         if db.get_keyword_lists(conn, spec.name) is None:
             sample = random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
+            lists, source = None, "tfidf"
             if state.claude.api_key:
-                lists, source = state.indexer.propose_lists(spec, sample), "claude"
-            else:
-                lists, source = tfidf_lists([i.text for i in items]), "tfidf"
+                try:
+                    lists, source = state.indexer.propose_lists(spec, sample), "claude"
+                except ValueError:
+                    source = "tfidf (claude proposal unusable)"
+            if lists is None:
+                lists = tfidf_lists([i.text for i in items])
             if lists is not None:
                 state.indexer.set_lists(spec, lists)
             else:
