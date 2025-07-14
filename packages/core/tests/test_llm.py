@@ -1,5 +1,6 @@
 import pytest
 
+from ragqa_core import llm
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_claude
 from ragqa_core.llm import BudgetExceeded, NoApiKey, UnknownModel
@@ -161,3 +162,93 @@ def test_cap_counts_spend_still_in_flight(tmp_path):
     holder["c"] = fake_claude(conn, reply, cap_usd=one_call * 1.5)
     holder["c"].complete("outer", purpose="t")
     assert len(seen) == 1
+
+
+def batch_estimate(c, prompts):
+    return sum(c.estimate_usd(len(p), 1024, batch=True) for p in prompts)
+
+
+def test_batch_being_waited_on_is_ledgered_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm, "BATCH_POLL_SECONDS", 0)  # every call checks pending batches
+    c = fake_claude(connect(tmp_path / "r.db"), lambda p: "ok")
+    polls = []
+
+    def done(batch_id):
+        polls.append(batch_id)
+        if len(polls) == 1:
+            c.complete("meanwhile", purpose="t")  # another request misses the cache mid-wait
+        return True
+
+    c._batch_done = done
+    c.complete_many([f"p{i}" for i in range(51)], purpose="t")
+    assert ledger_rows(c) == 52
+
+
+def test_unreadable_pending_batch_does_not_block_calls(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    conn.execute(
+        "insert into pending_batches (id, model, purpose, created_at)"
+        " values ('gone', 'claude-haiku-5-5', 't', '2026-10-01T00:00:00+00:00')"
+    )
+    c = fake_claude(conn, lambda p: "ok")
+
+    def done(batch_id):
+        raise RuntimeError("404 batch not found")
+
+    c._batch_done = done
+    assert c.complete("a", purpose="t").text == "ok"
+
+
+def test_pending_batches_are_checked_at_most_once_per_poll_interval(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    conn.execute(
+        "insert into pending_batches (id, model, purpose, created_at)"
+        " values ('slow', 'claude-haiku-5-5', 't', '2026-10-01T00:00:00+00:00')"
+    )
+    c = fake_claude(conn, lambda p: "ok")
+    checks = []
+    c._batch_done = lambda batch_id: checks.append(batch_id) or False
+    for i in range(3):
+        c.complete(f"q{i}", purpose="t")
+    assert checks == ["slow"]
+
+
+def test_cap_counts_batches_submitted_before_a_restart(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    prompts = [f"p{i}" for i in range(51)]
+    first = fake_claude(conn, lambda p: "ok")
+
+    def die(batch_id):
+        raise KeyboardInterrupt
+
+    first._batch_done = die
+    with pytest.raises(KeyboardInterrupt):
+        first.complete_many(prompts, purpose="t")
+
+    one_call = first.estimate_usd(len("next"), 1024)
+    second = fake_claude(
+        conn, lambda p: "ok", cap_usd=batch_estimate(first, prompts) + one_call / 2
+    )
+    second._batch_done = lambda batch_id: False  # still running at the provider
+    with pytest.raises(BudgetExceeded):
+        second.complete("next", purpose="t")
+
+
+def test_batch_in_flight_counts_once_against_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm, "BATCH_POLL_SECONDS", 0)
+    conn = connect(tmp_path / "r.db")
+    prompts = [f"p{i}" for i in range(51)]
+    probe = fake_claude(conn, lambda p: "")
+    cap = batch_estimate(probe, prompts) + 2 * probe.estimate_usd(len("inner"), 1024)
+    c = fake_claude(conn, lambda p: "ok", cap_usd=cap)
+    polls = []
+
+    def done(batch_id):
+        polls.append(batch_id)
+        if len(polls) == 1:
+            c.complete("inner", purpose="t")  # must fit: the batch is reserved, not doubled
+        return True
+
+    c._batch_done = done
+    c.complete_many(prompts, purpose="t")
+    assert ledger_rows(c) == 52

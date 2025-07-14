@@ -55,6 +55,9 @@ class Claude:
         self._client: anthropic.Anthropic | None = None
         self._lock = threading.Lock()
         self._reserved = 0.0  # estimated spend of calls in flight, counted against the cap
+        self._waiting: set[str] = set()  # batches this process is polling; spend in _reserved
+        self._collecting = threading.Lock()
+        self._next_check = 0.0
 
     def complete(
         self,
@@ -107,7 +110,7 @@ class Claude:
                 for p in misses.values()
             )
             with self._lock:
-                committed = self.month_spend() + self._reserved
+                committed = self.month_spend() + self._reserved + self._pending_usd()
                 if committed + estimate > self.cap_usd:
                     raise BudgetExceeded(
                         f"monthly cap reached: ${committed:.4f} spent or in flight"
@@ -116,7 +119,9 @@ class Claude:
                 self._reserved += estimate
             try:
                 if batch:
-                    results.update(self._run_batch(model, system, max_tokens, purpose, misses))
+                    results.update(
+                        self._run_batch(model, system, max_tokens, purpose, misses, estimate)
+                    )
                 else:
                     # Recorded one by one, so a failure part-way keeps what was paid for.
                     for key, p in misses.items():
@@ -150,7 +155,13 @@ class Claude:
         return Completion(text, usd, False, tokens_in, tokens_out)
 
     def _run_batch(
-        self, model: str, system: str, max_tokens: int, purpose: str, misses: dict[str, str]
+        self,
+        model: str,
+        system: str,
+        max_tokens: int,
+        purpose: str,
+        misses: dict[str, str],
+        usd: float,
     ) -> dict[str, Completion]:
         requests = [
             {
@@ -163,14 +174,21 @@ class Claude:
             for key, p in misses.items()
         ]
         batch_id = self._submit_batch(requests)
+        with self._lock:
+            self._waiting.add(batch_id)
         # Recorded before waiting: a batch is billed once submitted, so a
-        # restart must be able to find it and collect what it paid for.
+        # restart must be able to find it, count it and collect what it paid for.
         self.conn.execute(
-            "insert into pending_batches values (?, ?, ?, ?)", (batch_id, model, purpose, now())
+            "insert into pending_batches values (?, ?, ?, ?, ?)",
+            (batch_id, model, purpose, now(), usd),
         )
-        while not self._batch_done(batch_id):
-            time.sleep(BATCH_POLL_SECONDS)
-        return self._collect(batch_id, model, purpose, expected=len(misses))
+        try:
+            while not self._batch_done(batch_id):
+                time.sleep(BATCH_POLL_SECONDS)
+            return self._collect(batch_id, model, purpose, expected=len(misses))
+        finally:
+            with self._lock:
+                self._waiting.discard(batch_id)
 
     def _collect(
         self, batch_id: str, model: str, purpose: str, expected: int | None = None
@@ -189,14 +207,37 @@ class Claude:
         return out
 
     def collect_pending(self) -> None:
-        """Collect batches submitted by an earlier process that stopped waiting."""
-        rows = self.conn.execute("select * from pending_batches").fetchall()
-        for row in rows:
-            if self._batch_done(row["id"]):
+        """Collect batches submitted by an earlier process that stopped waiting.
+
+        One collector at a time, at most once per poll interval: a second one
+        would ledger the same batch twice, and every check is an API request.
+        Batches this process is polling are left to the call that is waiting.
+        """
+        if not self._collecting.acquire(blocking=False):
+            return
+        try:
+            if time.monotonic() < self._next_check:
+                return
+            self._next_check = time.monotonic() + BATCH_POLL_SECONDS
+            for row in self.conn.execute("select * from pending_batches").fetchall():
+                if row["id"] in self._waiting:
+                    continue
                 try:
-                    self._collect(row["id"], row["model"], row["purpose"])
-                except RuntimeError:
-                    pass  # the failed entries are simply not cached; they will be re-sent
+                    if self._batch_done(row["id"]):
+                        self._collect(row["id"], row["model"], row["purpose"])
+                except Exception:
+                    # Failed entries are simply not cached and will be re-sent; a
+                    # batch that cannot be read is tried again next interval, and
+                    # its estimate keeps counting against the cap until then.
+                    continue
+        finally:
+            self._collecting.release()
+
+    def _pending_usd(self) -> float:
+        """Estimated spend of submitted batches not yet in the ledger, except the
+        ones this process is polling: their spend is already in _reserved."""
+        rows = self.conn.execute("select id, usd from pending_batches").fetchall()
+        return sum(row["usd"] for row in rows if row["id"] not in self._waiting)
 
     def estimate_usd(
         self,

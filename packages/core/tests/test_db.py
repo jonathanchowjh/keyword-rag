@@ -91,3 +91,18 @@ def test_run_items_filter_by_method(tmp_path):
 def test_connect_is_idempotent(tmp_path):
     connect(tmp_path / "r.db")
     connect(tmp_path / "r.db")
+
+
+def test_connect_adds_the_batch_estimate_to_a_0_1_0_database(tmp_path):
+    import sqlite3
+
+    old = sqlite3.connect(tmp_path / "r.db")
+    old.execute(
+        "create table pending_batches (id text primary key, model text not null,"
+        " purpose text not null, created_at text not null)"
+    )
+    old.execute("insert into pending_batches values ('b', 'm', 'p', 'now')")
+    old.commit()
+    old.close()
+    row = connect(tmp_path / "r.db").execute("select usd from pending_batches").fetchone()
+    assert row["usd"] == 0

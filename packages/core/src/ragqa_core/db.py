@@ -43,7 +43,8 @@ create table if not exists jobs (
   result_json text, error text, created_at text not null, updated_at text not null
 );
 create table if not exists pending_batches (
-  id text primary key, model text not null, purpose text not null, created_at text not null
+  id text primary key, model text not null, purpose text not null, created_at text not null,
+  usd real not null default 0
 );
 create table if not exists run_items (
   job_id text not null, method text not null, question_id text not null,
@@ -63,6 +64,9 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("pragma journal_mode=wal")
     conn.executescript(SCHEMA)
+    columns = {row["name"] for row in conn.execute("pragma table_info(pending_batches)")}
+    if "usd" not in columns:  # a 0.1.0 database
+        conn.execute("alter table pending_batches add column usd real not null default 0")
     return conn
 
 
