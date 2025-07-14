@@ -228,3 +228,12 @@ def test_rows_keep_the_raw_answer_line(env):
     ev.run(job)
     row = run_items(conn, job)[0]
     assert row["pred"] == "A" and row["raw"] == "The answer is A"
+
+
+def test_estimate_prices_hops_at_the_model_that_sends_them(env):
+    # Hop and query-summary calls run on the service's default model; only the
+    # answers use the requested one.
+    _, ev = env
+    default = ev.estimate("c", "dev", ["iterative"], answer=False, model=None)["est_usd"]
+    sonnet = ev.estimate("c", "dev", ["iterative"], answer=False, model="claude-sonnet-5-5")
+    assert sonnet["est_usd"] == pytest.approx(default)

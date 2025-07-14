@@ -91,28 +91,29 @@ class Evaluator:
         questions = self._questions(spec, split)
         sample = questions[:ESTIMATE_SAMPLE]
         n = len(questions)
-        # (calls, avg prompt chars, output tokens, batched?) — each part priced the
-        # way it is sent: one complete_many per part, batched only above 50 calls;
-        # iterative hops are single real-time calls.
-        parts: list[tuple[int, float, int, bool]] = []
+        # (calls, avg prompt chars, output tokens, batched?, model) — each part
+        # priced the way it is sent: one complete_many per part, batched only
+        # above 50 calls; iterative hops are single real-time calls. Summaries and
+        # hops run on the default model (None); only answers use the requested one.
+        parts: list[tuple[int, float, int, bool, str | None]] = []
         if spec.summarize and any(m in KEYWORD_METHODS for m in methods):
             chars = avg(len(summary_prompt(q.text)) for q in sample)
-            parts.append((n, chars, SUMMARY_TOKENS, n > BATCH_THRESHOLD))
+            parts.append((n, chars, SUMMARY_TOKENS, n > BATCH_THRESHOLD, None))
         hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
         parts.extend(
-            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False) for m in methods if m == "iterative"
+            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, None) for m in methods if m == "iterative"
         )
         if answer:
             chars = self._answer_chars(spec, sample)
             parts.extend(
-                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD) for _ in methods
+                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, model) for _ in methods
             )
         calls = sum(part[0] for part in parts)
         if calls == 0:
             return {"questions": n, "calls": 0, "est_usd": 0.0}
         usd = sum(
-            c * self.claude.estimate_usd(int(chars), out, model=model, batch=batch)
-            for c, chars, out, batch in parts
+            c * self.claude.estimate_usd(int(chars), out, model=m, batch=batch)
+            for c, chars, out, batch, m in parts
         )
         return {"questions": n, "calls": calls, "est_usd": usd}
 
