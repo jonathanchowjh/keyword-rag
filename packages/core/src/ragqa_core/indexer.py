@@ -144,23 +144,26 @@ class Indexer:
         pooled_picks = pick_all(item_vecs, pooled_vecs, pooled)
         keywords = [{**kw, "all": picks} for kw, picks in zip(per_facet, pooled_picks, strict=True)]
         use_summary = [s if spec.summarize else None for s in summaries]
-        vectors = {
-            "kw_all": self.models.embed(
-                [keyword_string(kw["all"], s) for kw, s in zip(keywords, use_summary, strict=True)]
-            ),
-            "kw_individual": self.models.embed(
-                [
-                    keyword_string(kw["topic"] + kw["method"] + kw["common"], s)
-                    for kw, s in zip(keywords, use_summary, strict=True)
-                ]
-            ),
+        # Every keyword string for every text, embedded in one pass: on a CPU the
+        # per-call overhead of six separate passes dominated query time.
+        groups: dict[str, list[str]] = {
+            "kw_all": [
+                keyword_string(kw["all"], s) for kw, s in zip(keywords, use_summary, strict=True)
+            ],
+            "kw_individual": [
+                keyword_string(kw["topic"] + kw["method"] + kw["common"], s)
+                for kw, s in zip(keywords, use_summary, strict=True)
+            ],
+            **{f"kw_{f}": [keyword_string(kw[f], None) for kw in keywords] for f in FACETS},
         }
-        for facet in FACETS:
-            vectors[f"kw_{facet}"] = self.models.embed(
-                [keyword_string(kw[facet], None) for kw in keywords]
-            )
         if spec.summarize:
-            vectors["kw_summary"] = self.models.embed([s or "" for s in summaries])
+            groups["kw_summary"] = [s or "" for s in summaries]
+        flat = self.models.embed([text for strings in groups.values() for text in strings])
+        vectors: dict[str, np.ndarray] = {}
+        offset = 0
+        for name, strings in groups.items():
+            vectors[name] = flat[offset : offset + len(strings)]
+            offset += len(strings)
         return keywords, vectors
 
     def _lists_embedded(

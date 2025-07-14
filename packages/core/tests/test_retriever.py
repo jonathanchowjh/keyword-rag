@@ -185,3 +185,26 @@ def test_retrieve_refuses_model_mismatch(tmp_path):
         ModelMismatch, match="built with fake/dense; service is running other/model"
     ):
         r.retrieve("c", "enzyme", "hybrid")
+
+
+def test_kw_hybrid_computes_query_keywords_once(tmp_path):
+    r, _ = build(tmp_path)
+    calls: list[str] = []
+    real = r.indexer.keywords_for
+    r.indexer.keywords_for = lambda *a: calls.append("x") or real(*a)
+    hits = r.retrieve("c", "enzyme kinetics rate experiment", "kw_hybrid", k=1)
+    assert hits[0].id == "enzyme-item" and hits[0].matched and len(calls) == 1
+
+
+def test_iterative_keeps_the_best_passage_of_every_hop(tmp_path):
+    replies = iter(
+        [
+            '{"done": false, "next_query": "market price demand"}',
+            '{"done": false, "next_query": "volcano magma lava"}',
+            '{"done": true}',
+        ]
+    )
+    r, conn = build(tmp_path)
+    r.claude = fake_claude(conn, lambda p: next(replies))
+    ids = [h.id for h in r.retrieve("c", "enzyme kinetics rate", "iterative", k=3)]
+    assert ids == ["enzyme-item", "market-item", "volcano-item"]

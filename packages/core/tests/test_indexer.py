@@ -156,3 +156,23 @@ def test_keyword_list_embeddings_are_reused_across_calls(env):
     ix.keywords_for(spec, LISTS, ["second query"], [None])
     assert len(embedded) - first < first  # the lists are not embedded again
     assert "enzyme kinetics" not in embedded[first:]
+
+
+def test_keywords_for_embeds_in_two_passes(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", True)
+    ix.keywords_for(spec, LISTS, ["warm the list cache"], ["s"])
+    calls: list[int] = []
+    real = models.embed
+    models.embed = lambda texts: calls.append(len(texts)) or real(texts)
+    keywords, vectors = ix.keywords_for(spec, LISTS, ["one query"], ["a summary"])
+    assert len(calls) == 2
+    assert set(vectors) == {
+        "kw_all",
+        "kw_individual",
+        "kw_topic",
+        "kw_method",
+        "kw_common",
+        "kw_summary",
+    }
+    assert all(v.shape[0] == 1 for v in vectors.values())

@@ -161,28 +161,39 @@ class Retriever:
         return out
 
     def _kw_hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        keyword_hits = self._kw_search(spec, q, ["kw_individual"], POOL, rrf_k)
-        return self._mark(
-            spec, q, rrf([keyword_hits, self._hybrid(spec, q, POOL, rrf_k)], rrf_k)[:k]
-        )
+        query_kw, vectors = self._query_keywords(spec, q)
+        keyword_hits = self._kw_rank(spec, ["kw_individual"], vectors, POOL, rrf_k)
+        fused = rrf([keyword_hits, self._hybrid(spec, q, POOL, rrf_k)], rrf_k)[:k]
+        return self._mark(query_kw, fused)
 
     def _iterative(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        found: dict[str, Hit] = {}
+        """Retrieve, then let Claude name the next query, up to MAX_HOPS calls.
+
+        Reading of spec §5: rather than decomposing up front, each hop asks
+        for the next missing fact given what has been found (≤3 calls)."""
+        hops: list[list[Hit]] = []
+        seen: set[str] = set()
+
+        def hop(query: str) -> None:
+            fresh = [h for h in self._hybrid_rerank(spec, query, 2, rrf_k) if h.id not in seen]
+            seen.update(h.id for h in fresh)
+            hops.append(fresh)
+
         query = q
         for _ in range(MAX_HOPS):
-            for h in self._hybrid_rerank(spec, query, 2, rrf_k):
-                found.setdefault(h.id, h)
-            reply = self.claude.complete(
-                hop_prompt(q, [h.text for h in found.values()]), max_tokens=200, purpose="hop"
-            )
+            hop(query)
+            found = [h.text for hits in hops for h in hits]
+            reply = self.claude.complete(hop_prompt(q, found), max_tokens=200, purpose="hop")
             step = parse_json(reply.text)
             query = str(step.get("next_query") or "").strip()
             if step.get("done") or not query:
                 break
         else:
-            for h in self._hybrid_rerank(spec, query, 2, rrf_k):
-                found.setdefault(h.id, h)
-        return list(found.values())[:k]
+            hop(query)
+        # Round-robin across hops: the best passage of every hop comes before the
+        # second-best of any, so a later hop's fact is never cut off by k.
+        ordered = [hits[i] for i in range(2) for hits in hops if i < len(hits)]
+        return ordered[:k]
 
     # -- shared ------------------------------------------------------------------
 
@@ -202,15 +213,17 @@ class Retriever:
         self, spec: CollectionSpec, q: str, names: list[str], k: int, rrf_k: int
     ) -> list[Hit]:
         query_kw, vectors = self._query_keywords(spec, q)
+        return self._mark(query_kw, self._kw_rank(spec, names, vectors, k, rrf_k))
+
+    def _kw_rank(
+        self, spec: CollectionSpec, names: list[str], vectors: dict, k: int, rrf_k: int
+    ) -> list[Hit]:
         limit = k if len(names) == 1 else POOL
         rankings = [self.store.search(spec.name, n, vectors[n], limit) for n in names]
-        hits = rankings[0][:k] if len(names) == 1 else rrf(rankings, rrf_k)[:k]
-        for h in hits:
-            h.matched = matched(query_kw, h.keywords)
-        return hits
+        return rankings[0][:k] if len(names) == 1 else rrf(rankings, rrf_k)[:k]
 
-    def _mark(self, spec: CollectionSpec, q: str, hits: list[Hit]) -> list[Hit]:
-        query_kw, _ = self._query_keywords(spec, q)
+    @staticmethod
+    def _mark(query_kw: dict, hits: list[Hit]) -> list[Hit]:
         for h in hits:
             h.matched = matched(query_kw, h.keywords)
         return hits
