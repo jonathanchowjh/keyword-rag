@@ -294,6 +294,19 @@ def test_basic_auth(tmp_path):
     assert c.get("/health", auth=("u", "p")).status_code == 200
 
 
+def test_basic_auth_handles_non_ascii(tmp_path):
+    import base64
+
+    c = TestClient(create_app(settings(tmp_path, username="ü", password="p")))
+
+    def header(user, password):
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+
+    assert c.get("/health", headers=header("é", "x")).status_code == 401
+    assert c.get("/health", headers=header("ü", "p")).status_code == 200
+
+
 def test_half_set_auth_is_503(tmp_path):
     r = TestClient(create_app(settings(tmp_path, username="u"))).get("/health")
     assert r.status_code == 503 and "RAGQA_PASSWORD" in r.json()["detail"]

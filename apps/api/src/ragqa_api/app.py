@@ -340,8 +340,9 @@ def authorised(request: Request, username: str, password: str) -> bool:
         given_user, _, given_pass = base64.b64decode(header[6:]).decode().partition(":")
     except (ValueError, UnicodeDecodeError):
         return False
-    return secrets.compare_digest(given_user, username) & secrets.compare_digest(
-        given_pass, password
+    # Compared as bytes: compare_digest refuses str with non-ASCII characters.
+    return secrets.compare_digest(given_user.encode(), username.encode()) & secrets.compare_digest(
+        given_pass.encode(), password.encode()
     )
 
 
