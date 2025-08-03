@@ -326,3 +326,20 @@ def test_model_mismatch_on_query_and_eval(client):
     assert "built with fake/dense" in r.json()["results"]["hybrid"]["error"]
     r = client.post("/eval", json={"collection": "c", "methods": ["hybrid"]})
     assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
+
+
+def test_load_limit_keeps_gold_passages_and_only_answerable_questions():
+    from ragqa_api.app import limited
+    from ragqa_core.types import Item, Question
+
+    items = [Item(f"i{n}", "t") for n in range(6)]
+    questions = [
+        Question("q1", "x", None, ["a"], ["i4", "i5"]),
+        Question("q2", "x", None, ["a"], ["i0", "i3"]),  # would pass the limit
+        Question("q3", "x", None, ["a"], ["i1"]),
+        Question("mcq", "x", ["a"], ["A"], []),  # retrieves examples, not gold passages
+    ]
+    kept, answerable = limited(items, questions, 3)
+    assert [i.id for i in kept] == ["i1", "i4", "i5"]
+    assert [q.id for q in answerable] == ["q1", "q3", "mcq"]
+    assert limited(items, questions, None) == (items, questions)

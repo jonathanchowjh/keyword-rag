@@ -34,7 +34,7 @@ from ragqa_core.retriever import (
     UnknownCollection,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, Question
 
 STATIC = Path(__file__).parent / "static"
 PROPOSE_SAMPLE = 40
@@ -219,8 +219,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise NoApiKey()
         if spec.summarize and not body.confirm:
             # Summaries cost; the dataset is read (and cached) to price them.
-            items, _ = load_dataset(body.dataset, settings.home)
-            items = limited(items, body.limit)
+            items, questions = load_dataset(body.dataset, settings.home)
+            items, _ = limited(items, questions, body.limit)
             estimate = state.indexer.estimate_add_usd(spec, items)
             return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
         job_id = db.create_job(
@@ -345,9 +345,25 @@ def authorised(request: Request, username: str, password: str) -> bool:
     )
 
 
-def limited(items: list[Item], limit: int | None) -> list[Item]:
-    ordered = sorted(items, key=lambda i: i.id)
-    return ordered[:limit] if limit else ordered
+def limited(
+    items: list[Item], questions: list[Question], limit: int | None
+) -> tuple[list[Item], list[Question]]:
+    """At most `limit` items, chosen so questions stay answerable: each
+    question's gold passages first, in question order, while they fit; then
+    the rest by id. Questions whose gold was left out are dropped."""
+    if not limit:
+        return items, questions
+    chosen: set[str] = set()
+    for q in questions:
+        extra = set(q.gold_ids) - chosen
+        if len(chosen) + len(extra) <= limit:
+            chosen |= extra
+    for item in sorted(items, key=lambda i: i.id):
+        if len(chosen) >= limit:
+            break
+        chosen.add(item.id)
+    kept = sorted((i for i in items if i.id in chosen), key=lambda i: i.id)
+    return kept, [q for q in questions if set(q.gold_ids) <= chosen]
 
 
 def sample_items(store: Store, name: str) -> list[Item]:
@@ -375,7 +391,7 @@ def run_load(state, settings: Settings, job_id: str, spec: CollectionSpec, body:
     db.update_job(conn, job_id, status="running")
     try:
         items, questions = load_dataset(body.dataset, settings.home)
-        items = limited(items, body.limit)
+        items, questions = limited(items, questions, body.limit)
         state.indexer.add(
             spec, items, progress=lambda p: db.update_job(conn, job_id, progress=0.9 * p)
         )
