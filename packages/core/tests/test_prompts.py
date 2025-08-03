@@ -75,3 +75,10 @@ def test_parse_mcq_without_a_clear_letter_is_empty():
 def test_parse_mcq_bare_letter_with_punctuation():
     assert parse_answer("mcq", "Answer: B.") == "B"
     assert parse_answer("mcq", "Answer: c) sulfate") == "C"
+
+
+def test_parse_markdown_wrapped_answers():
+    assert parse_answer("mcq", "so...\nAnswer: **B**") == "B"
+    assert parse_answer("mcq", "so...\n**Answer: B**") == "B"
+    assert parse_answer("mcq", "so...\n`Answer: C`") == "C"
+    assert parse_answer("multihop", "x\n**Answer:** June 1982") == "June 1982"

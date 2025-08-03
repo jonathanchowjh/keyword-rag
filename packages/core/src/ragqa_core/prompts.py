@@ -8,6 +8,7 @@ from ragqa_core.types import Hit, QaType
 
 LETTERS = "ABCDEFGH"
 ANSWER_LINE = re.compile(r"^\s*Answer:\s*(.+?)\s*$", re.M)
+MARKDOWN = re.compile(r"[*`]")
 LEADING_UPPER = re.compile(r"^\(?([A-H])\)?(?=[.:),;\s]|$)")
 LEADING_MARKED = re.compile(r"^(?:\(([a-h])\)|([a-h])(?=[.)]))")
 NAMED_CHOICE = re.compile(
@@ -76,8 +77,9 @@ def hop_prompt(question: str, passages: list[str]) -> str:
 
 
 def answer_line(text: str) -> str:
-    """The content of the last `Answer:` line, or "" if there is none."""
-    found = ANSWER_LINE.findall(text)
+    """The content of the last `Answer:` line, or "" if there is none. Markdown
+    emphasis and code marks are dropped first: "**Answer: B**" is an answer."""
+    found = ANSWER_LINE.findall(MARKDOWN.sub("", text))
     return found[-1].strip() if found else ""
 
 
