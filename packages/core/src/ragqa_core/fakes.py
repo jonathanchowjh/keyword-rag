@@ -25,9 +25,15 @@ BATCHES: dict[str, dict[str, tuple[str, int, int]]] = {}
 
 
 def fake_models(dim: int = 256) -> Models:
+    return fake_embeddings(
+        Models("fake/dense", "fake/judge", "fake/rerank", Path("/nonexistent")), dim
+    )
+
+
+def fake_embeddings(models: Models, dim: int = 256) -> Models:
     """Bag-of-words hashing: texts that share words get similar vectors, so
-    retrieval behaves sensibly in tests without any model download."""
-    models = Models("fake/dense", "fake/judge", "fake/rerank", Path("/nonexistent"))
+    retrieval behaves sensibly in tests without any model download. Patches
+    `models` in place, so everything already holding it sees the fake."""
 
     def bucket(token: str) -> int:
         return int(hashlib.md5(token.encode()).hexdigest(), 16) % dim
@@ -67,7 +73,11 @@ def fake_claude(
     api_key: str | None = "test",
     cap_usd: float = 20.0,
 ) -> Claude:
-    claude = Claude(conn, api_key, cap_usd, "claude-haiku-5-5")
+    return fake_replies(Claude(conn, api_key, cap_usd, "claude-haiku-5-5"), reply)
+
+
+def fake_replies(claude: Claude, reply: Callable[[str], str]) -> Claude:
+    """Patches `claude` in place to answer every prompt with reply(prompt)."""
 
     def send(model: str, system: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
         text = reply(prompt)

@@ -121,17 +121,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.home / "models",
     )
     state.claude = Claude(state.conn, settings.api_key, settings.cap_usd, settings.model)
-
-    def rewire() -> None:
-        """Rebuild the objects that hold store/models/claude, after a swap."""
-        state.indexer = Indexer(state.conn, state.store, state.models, state.claude)
-        state.retriever = Retriever(
-            state.conn, state.store, state.models, state.claude, state.indexer
-        )
-        state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.claude)
-
-    rewire()
-    state.rewire = rewire
+    state.indexer = Indexer(state.conn, state.store, state.models, state.claude)
+    state.retriever = Retriever(state.conn, state.store, state.models, state.claude, state.indexer)
+    state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.claude)
 
     # -- auth ------------------------------------------------------------------
 

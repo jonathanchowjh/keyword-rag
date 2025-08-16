@@ -7,8 +7,7 @@ from fastapi.testclient import TestClient
 
 from ragqa_api.app import create_app
 from ragqa_api.config import load_settings
-from ragqa_core.fakes import fake_claude, fake_models
-from ragqa_core.store import Store
+from ragqa_core.fakes import fake_embeddings, fake_replies
 from ragqa_core.types import KeywordLists
 
 ITEMS = [
@@ -43,16 +42,14 @@ LISTS = KeywordLists(
 
 def settings(tmp_path: Path, **overrides):
     base = load_settings({"ANTHROPIC_API_KEY": "test"})
-    return replace(base, home=tmp_path, **overrides)
+    fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
+    return replace(base, home=tmp_path, **{**fake, **overrides})
 
 
 def make_client(tmp_path, reply=lambda p: "Answer: A", **overrides) -> TestClient:
     app = create_app(settings(tmp_path, **overrides))
-    app.state.store = Store(None, None)
-    app.state.models = fake_models()
-    s = app.state.settings
-    app.state.claude = fake_claude(app.state.conn, reply, api_key=s.api_key, cap_usd=s.cap_usd)
-    app.state.rewire()
+    fake_embeddings(app.state.models)
+    fake_replies(app.state.claude, reply)
     return TestClient(app)
 
 
@@ -252,10 +249,7 @@ def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeyp
 
 def test_propose_lists(client):
     add_collection(client, lists=False)
-    client.app.state.claude = fake_claude(
-        client.app.state.conn, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}'
-    )
-    client.app.state.rewire()
+    fake_replies(client.app.state.claude, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
     lists = client.post("/collections/c/keyword-lists/propose").json()
     assert lists["topic"] == ["enzymes"] and lists["method"] == ["assay"]
 
