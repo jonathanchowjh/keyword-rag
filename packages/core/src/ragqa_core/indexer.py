@@ -123,7 +123,7 @@ class Indexer:
         return KeywordLists(topic=topic, method=method, common=common)
 
     def set_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
-        if db.active_jobs(self.conn, "eval", spec.name):
+        if db.running_eval(self.conn, spec.name):
             raise ListsBusy(f"an eval is running on '{spec.name}'; wait for it to finish")
         for facet in FACETS:
             if not getattr(lists, facet):
@@ -132,6 +132,7 @@ class Indexer:
         self._lists_embedded(lists)
         version = list_version(lists)
         db.save_keyword_lists(self.conn, spec.name, lists, version)
+        db.set_keyword_version(self.conn, spec.name, version)
         for hits in self.store.scroll(spec.name):
             keywords, vectors = self.keywords_for(
                 spec, lists, [h.text for h in hits], [h.summary for h in hits]

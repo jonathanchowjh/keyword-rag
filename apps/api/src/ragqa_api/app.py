@@ -110,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     state = app.state
     state.settings = settings
     state.conn = db.connect(settings.home / "ragqa.db")
-    db.mark_interrupted(state.conn)
+    db.interrupt_running(state.conn)
     state.store = Store(
         settings.qdrant_url, None if settings.qdrant_url else settings.home / "qdrant"
     )
