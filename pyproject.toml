@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 
 [tool.uv.workspace]
-members = ["packages/core", "apps/api"]
+members = ["packages/core", "apps/api", "apps/worker"]
 
 [tool.uv]
 package = false
@@ -19,11 +19,13 @@ dev = [
   "httpx==0.28.*",
   "ragqa-core",
   "ragqa-api",
+  "ragqa-worker",
 ]
 
 [tool.uv.sources]
 ragqa-core = { workspace = true }
 ragqa-api = { workspace = true }
+ragqa-worker = { workspace = true }
 
 [tool.pytest.ini_options]
 markers = ["integration: needs Docker or model downloads"]
@@ -39,9 +41,9 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["packages/core/src", "apps/api/src"]
+include = ["packages/core/src", "apps/api/src", "apps/worker/src"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff.lint.isort]
-known-first-party = ["ragqa_core", "ragqa_api"]
+known-first-party = ["ragqa_core", "ragqa_api", "ragqa_worker"]

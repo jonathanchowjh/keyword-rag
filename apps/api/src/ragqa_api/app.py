@@ -16,7 +16,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from ragqa_api.config import Settings, load_settings
 from ragqa_core import db
 from ragqa_core.datasets import DATASETS
 from ragqa_core.datasets import load as load_dataset
@@ -33,6 +32,7 @@ from ragqa_core.retriever import (
     Retriever,
     UnknownCollection,
 )
+from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, Question
 

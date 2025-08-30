@@ -5,12 +5,14 @@ description = "The rag-qa HTTP API and its helper pages."
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "ragqa-core",
+  "ragqa-worker",
   "fastapi==0.161.*",
   "uvicorn==0.54.*",
 ]
 
 [tool.uv.sources]
 ragqa-core = { workspace = true }
+ragqa-worker = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

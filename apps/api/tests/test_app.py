@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ragqa_api.app import create_app
-from ragqa_api.config import load_settings
 from ragqa_core.fakes import fake_embeddings, fake_replies
+from ragqa_core.settings import load_settings
 from ragqa_core.types import KeywordLists
 
 ITEMS = [

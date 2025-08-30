@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SRC = ROOT / "packages/core/src"
 API_SRC = ROOT / "apps/api/src"
+WORKER_SRC = ROOT / "apps/worker/src"
 WEB_LAYER = {"fastapi", "starlette", "uvicorn", "ragqa_api"}
 
 
@@ -45,8 +46,21 @@ def test_core_never_imports_the_web_layer():
     assert forbidden_imports(CORE_SRC) == []
 
 
+def test_worker_never_imports_the_web_layer():
+    assert forbidden_imports(WORKER_SRC) == []
+
+
+def test_core_never_imports_the_worker():
+    assert modules_importing("ragqa_worker", [CORE_SRC]) == []
+
+
+def test_settings_live_in_core():
+    assert (CORE_SRC / "ragqa_core/settings.py").exists()
+    assert not (API_SRC / "ragqa_api/config.py").exists()
+
+
 def test_only_tests_import_fakes():
-    assert modules_importing("ragqa_core.fakes", [CORE_SRC, API_SRC]) == []
+    assert modules_importing("ragqa_core.fakes", [CORE_SRC, API_SRC, WORKER_SRC]) == []
 
 
 def test_pre_push_stays_fast():

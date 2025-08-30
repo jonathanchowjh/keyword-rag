@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from ragqa_api.config import load_settings
+from ragqa_core.settings import load_settings
 
 
 def test_defaults():

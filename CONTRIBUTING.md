@@ -69,15 +69,17 @@ packages/core/            Everything that knows retrieval. No FastAPI, no HTTP.
     datasets.py           ScienceQA / MuSiQue / TAT-QA loaders, dev slice
     metrics.py            Recall, EM/F1, similarity, bootstrap, Spearman
     evaluator.py          Evaluator: estimates, background runs, tables
+    settings.py           Settings + load_settings(): every environment variable
     fakes.py              Test doubles (tests only)
   tests/                  test_*.py unit; test_*_int.py integration
-apps/api/                 FastAPI layer: config, routes, errors, helper pages
+apps/api/                 FastAPI layer: routes, errors, helper pages
+apps/worker/              ragqa_worker: the job-queue loop the API runs on a thread
 scripts/                  dev-qdrant.sh, gate.sh, image-smoke.sh
 tests/                    Repo-level guards and the smoke fixture
 ```
 
-`ragqa_core` must never import `fastapi`, `starlette`, `uvicorn` or
-`ragqa_api`. `tests/test_boundaries.py` fails if it does.
+`ragqa_core` must never import `fastapi`, `starlette`, `uvicorn`, `ragqa_api`
+or `ragqa_worker`; `ragqa_worker` must never import the web layer. `tests/test_boundaries.py` fails if it does.
 
 ## Code style
 

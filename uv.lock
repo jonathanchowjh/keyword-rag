@@ -7,6 +7,7 @@ members = [
     "ragqa",
     "ragqa-api",
     "ragqa-core",
+    "ragqa-worker",
 ]
 
 [[package]]
@@ -733,6 +734,7 @@ dev = [
     { name = "pytest" },
     { name = "ragqa-api" },
     { name = "ragqa-core" },
+    { name = "ragqa-worker" },
     { name = "ruff" },
 ]
 
@@ -745,6 +747,7 @@ dev = [
     { name = "pytest", specifier = "==9.1.*" },
     { name = "ragqa-api", editable = "apps/api" },
     { name = "ragqa-core", editable = "packages/core" },
+    { name = "ragqa-worker", editable = "apps/worker" },
     { name = "ruff", specifier = "==0.17.*" },
 ]
 
@@ -755,6 +758,7 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "fastapi" },
     { name = "ragqa-core" },
+    { name = "ragqa-worker" },
     { name = "uvicorn" },
 ]
 
@@ -762,6 +766,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = "==0.161.*" },
     { name = "ragqa-core", editable = "packages/core" },
+    { name = "ragqa-worker", editable = "apps/worker" },
     { name = "uvicorn", specifier = "==0.54.*" },
 ]
 
@@ -789,6 +794,17 @@ requires-dist = [
     { name = "pyarrow", specifier = "==26.*" },
     { name = "qdrant-client", specifier = "==1.20.*" },
 ]
+
+[[package]]
+name = "ragqa-worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "ragqa-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ragqa-core", editable = "packages/core" }]
 
 [[package]]
 name = "requests"
