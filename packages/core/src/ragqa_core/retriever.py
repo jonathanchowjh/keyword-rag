@@ -1,18 +1,28 @@
-"""The ten retrieval methods: the 2024 paper's seven and three modern ones.
+"""The retrieval methods: the 2024 paper's seven, three modern ones, and two
+controls that pick examples without looking at the question's content.
 
 Fusion is reciprocal rank fusion computed here, not by Qdrant, so the paper's
 k=1 and today's k=60 behave identically in every storage mode.
 """
 
+import random
 import sqlite3
 from collections.abc import Callable
+
+import numpy as np
 
 from ragqa_core import db
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import matched
 from ragqa_core.llm import Claude
 from ragqa_core.models import Models
-from ragqa_core.prompts import SUMMARY_TOKENS, hop_prompt, parse_json, summary_prompt
+from ragqa_core.prompts import (
+    QUERY_TASK,
+    SUMMARY_TOKENS,
+    hop_prompt,
+    parse_json,
+    summary_prompt,
+)
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Hit
 
@@ -27,7 +37,11 @@ METHOD_NAMES = (
     "hybrid_rerank",
     "kw_hybrid",
     "iterative",
+    "random_example",
+    "fixed_example",
 )
+CONTROL_METHODS = ("random_example", "fixed_example")
+FIXED_SEED = "fixed_example"
 KEYWORD_METHODS = ("kw_all", "kw_individual", "kw_rrf", "kw_hybrid")
 POOL = 50
 MAX_HOPS = 3
@@ -58,6 +72,14 @@ def rrf(rankings: list[list[Hit]], k: int) -> list[Hit]:
     return out
 
 
+def shuffled(ids: list[str], seed: str) -> list[str]:
+    """A seeded shuffle. Callers take a prefix, so the first pick (the one an
+    mcq answer uses) is the same whatever k is."""
+    out = list(ids)
+    random.Random(seed).shuffle(out)
+    return out
+
+
 class Retriever:
     def __init__(
         self,
@@ -72,6 +94,9 @@ class Retriever:
         self.models = models
         self.claude = claude
         self.indexer = indexer
+        # Every item id by collection, with the count it was read at: the
+        # controls need them per query, and an 11,656-item scroll each time is slow.
+        self._ids: dict[str, tuple[int, list[str]]] = {}
         self._methods: dict[str, Callable[[CollectionSpec, str, int, int], list[Hit]]] = {
             "question_only": lambda spec, q, k, rk: [],
             "vector": self._vector,
@@ -83,6 +108,8 @@ class Retriever:
             "hybrid_rerank": self._hybrid_rerank,
             "kw_hybrid": self._kw_hybrid,
             "iterative": self._iterative,
+            "random_example": lambda spec, q, k, rk: self._control(spec, q, k),
+            "fixed_example": lambda spec, q, k, rk: self._control(spec, FIXED_SEED, k),
         }
 
     def spec(self, name: str) -> CollectionSpec:
@@ -117,9 +144,7 @@ class Retriever:
 
     def _vector(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
         parents: dict[str, float] = {}
-        for parent, score in self.store.search_chunks(
-            spec.name, self.models.embed_query([q])[0], POOL
-        ):
+        for parent, score in self.store.search_chunks(spec.name, self._dense_query(spec, q), POOL):
             parents.setdefault(parent, score)
         top = list(parents)[:k]
         hits = self.store.get(spec.name, top)
@@ -131,7 +156,7 @@ class Retriever:
         return self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], k)
 
     def _hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        dense = self.store.search(spec.name, "text_dense", self.models.embed_query([q])[0], POOL)
+        dense = self.store.search(spec.name, "text_dense", self._dense_query(spec, q), POOL)
         sparse = self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], POOL)
         return rrf([dense, sparse], rrf_k)[:k]
 
@@ -196,7 +221,25 @@ class Retriever:
         ordered = [hits[i] for i in range(2) for hits in hops if i < len(hits)]
         return ordered[:k]
 
+    # -- controls ----------------------------------------------------------------
+
+    def _control(self, spec: CollectionSpec, seed: str, k: int) -> list[Hit]:
+        """random_example seeds by the question, so each question always gets the
+        same draw (and the same cached answer); fixed_example uses one seed for all.
+        Against these, a method shows whether choosing the example helped at all."""
+        return self.store.get(spec.name, shuffled(self._all_ids(spec.name), seed)[:k])
+
+    def _all_ids(self, name: str) -> list[str]:
+        count = self.store.count(name)
+        cached = self._ids.get(name)
+        if cached is None or cached[0] != count:
+            self._ids[name] = (count, self.store.ids(name))
+        return self._ids[name][1]
+
     # -- shared ------------------------------------------------------------------
+
+    def _dense_query(self, spec: CollectionSpec, q: str) -> np.ndarray:
+        return self.models.embed_query([q], task=QUERY_TASK[spec.qa_type])[0]
 
     def _query_keywords(self, spec: CollectionSpec, q: str) -> tuple[dict, dict]:
         lists = db.get_keyword_lists(self.conn, spec.name)

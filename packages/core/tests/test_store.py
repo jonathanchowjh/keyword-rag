@@ -93,3 +93,8 @@ def test_drop(setup):
     s.drop("c")
     s.create("c", m.dense_dim())
     assert s.count("c") == 0
+
+
+def test_ids_lists_every_item_sorted(setup):
+    s, _ = setup
+    assert s.ids("c") == ["1", "2"]

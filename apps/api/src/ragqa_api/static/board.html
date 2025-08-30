@@ -97,7 +97,7 @@ async function loadCollections() {
 
 async function loadMethods() {
   const detail = await json(await fetch(`/collections/${encodeURIComponent($("collection").value)}`));
-  const preset = new Set(["question_only", "vector", "hybrid", "kw_individual", "kw_rrf"]);
+  const preset = new Set(["question_only", "random_example", "vector", "hybrid", "kw_individual", "kw_rrf"]);
   $("methods").innerHTML = detail.methods_available
     .map((m) => `<label><input type="checkbox" value="${m}" ${preset.has(m) ? "checked" : ""}> ${m}</label>`)
     .join("");

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Two control methods, `random_example` and `fixed_example`, so a method can
+  be checked against an example chosen without looking at the question.
+- Dense queries on Qwen3-Embedding carry the query-side task instruction the
+  model was trained with; fastembed does not add it. Eval runs record it.
+
 ## 0.1.0 — 2026-10-23
 
 - The service: collections, ingestion, ten retrieval methods (the 2024 paper's

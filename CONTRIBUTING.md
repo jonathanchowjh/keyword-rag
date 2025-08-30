@@ -65,7 +65,7 @@ packages/core/            Everything that knows retrieval. No FastAPI, no HTTP.
     store.py              Store: Qdrant collections, named vectors, searches
     prompts.py            Prompt builders and answer parsing
     indexer.py            Indexer: build and refresh representations
-    retriever.py          Retriever + rrf(): the ten methods
+    retriever.py          Retriever + rrf(): the twelve methods
     datasets.py           ScienceQA / MuSiQue / TAT-QA loaders, dev slice
     metrics.py            Recall, EM/F1, similarity, bootstrap, Spearman
     evaluator.py          Evaluator: estimates, background runs, tables

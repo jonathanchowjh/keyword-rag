@@ -184,6 +184,17 @@ class Store:
         by_id = {to_hit(r).id: to_hit(r) for r in records}
         return [by_id[i] for i in ids if i in by_id]
 
+    def ids(self, name: str, batch: int = 1024) -> list[str]:
+        out: list[str] = []
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                name, limit=batch, offset=offset, with_payload=["item_id"]
+            )
+            out.extend((r.payload or {})["item_id"] for r in records)
+            if offset is None:
+                return sorted(out)
+
     def scroll(self, name: str, batch: int = 256) -> Iterator[list[Hit]]:
         offset = None
         while True:

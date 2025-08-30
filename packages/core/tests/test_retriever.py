@@ -4,7 +4,9 @@ from ragqa_core.db import connect
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import NoApiKey
+from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import (
+    CONTROL_METHODS,
     METHOD_NAMES,
     MethodUnavailable,
     Retriever,
@@ -45,7 +47,7 @@ ITEMS = [
     Item(f"{name}-item", " ".join(t + m + c) + f" notes about {name}", "A", f"{name} expl")
     for name, (t, m, c) in DOMAINS.items()
 ]
-FREE = [m for m in METHOD_NAMES if m not in ("question_only", "iterative")]
+FREE = [m for m in METHOD_NAMES if m not in ("question_only", "iterative", *CONTROL_METHODS)]
 
 
 def hit(i: str) -> Hit:
@@ -93,6 +95,52 @@ def test_each_method_respects_k(tmp_path, method):
 def test_question_only_returns_nothing(tmp_path):
     r, _ = build(tmp_path)
     assert r.retrieve("c", "x", "question_only") == []
+
+
+def test_random_example_is_the_same_for_the_same_question(tmp_path):
+    r, _ = build(tmp_path)
+    first = [h.id for h in r.retrieve("c", "enzyme", "random_example", k=2)]
+    assert first == [h.id for h in r.retrieve("c", "enzyme", "random_example", k=2)]
+    assert len(set(first)) == 2
+
+
+def test_random_example_varies_between_questions(tmp_path):
+    r, _ = build(tmp_path)
+    picks = {r.retrieve("c", f"question {n}", "random_example", k=1)[0].id for n in range(12)}
+    assert len(picks) > 1
+
+
+def test_fixed_example_is_the_same_for_every_question(tmp_path):
+    r, _ = build(tmp_path)
+    a = [h.id for h in r.retrieve("c", "enzyme kinetics", "fixed_example", k=2)]
+    b = [h.id for h in r.retrieve("c", "market price demand", "fixed_example", k=2)]
+    assert a == b
+
+
+@pytest.mark.parametrize("method", CONTROL_METHODS)
+def test_controls_keep_their_first_pick_whatever_k(tmp_path, method):
+    # mcq answers use only the first hit, so it must not depend on k.
+    r, _ = build(tmp_path)
+    one = r.retrieve("c", "enzyme", method, k=1)[0].id
+    assert r.retrieve("c", "enzyme", method, k=4)[0].id == one
+
+
+@pytest.mark.parametrize("method", CONTROL_METHODS)
+def test_controls_see_items_added_later(tmp_path, method):
+    r, _ = build(tmp_path)
+    r.retrieve("c", "enzyme", method, k=1)
+    r.indexer.add(r.spec("c"), [Item("late-item", "added after the first query", "B", "late")])
+    ids = {h.id for h in r.retrieve("c", "enzyme", method, k=10)}
+    assert ids == {i.id for i in ITEMS} | {"late-item"}
+
+
+def test_dense_query_carries_the_collection_task(tmp_path):
+    r, _ = build(tmp_path)
+    tasks: list[str] = []
+    real = r.models.embed_query
+    r.models.embed_query = lambda texts, task="": tasks.append(task) or real(texts)
+    r.retrieve("c", "enzyme", "hybrid", k=1)
+    assert tasks == [QUERY_TASK["mcq"]]
 
 
 def test_kw_hits_carry_matched_keywords(tmp_path):

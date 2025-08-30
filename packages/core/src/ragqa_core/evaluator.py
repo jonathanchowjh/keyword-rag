@@ -22,6 +22,7 @@ from ragqa_core.metrics import (
 )
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
+    QUERY_TASK,
     SUMMARY_TOKENS,
     answer_line,
     answer_prompt,
@@ -144,6 +145,7 @@ class Evaluator:
             "k": k,
             "rrf_k": rrf_k,
             "dense_model": self.models.dense_model,
+            "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
             "seed": DEV_SEED,

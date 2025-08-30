@@ -58,7 +58,7 @@ def fake_embeddings(models: Models, dim: int = 256) -> Models:
         return [float(len(q & set(WORD.findall(t.lower())))) for t in texts]
 
     models.embed = vectors  # type: ignore[method-assign]
-    models.embed_query = vectors  # type: ignore[method-assign]
+    models.embed_query = lambda texts, task="": vectors(texts)  # type: ignore[method-assign]
     models.judge = vectors  # type: ignore[method-assign]
     models.sparse = sparse  # type: ignore[method-assign]
     models.sparse_query = sparse  # type: ignore[method-assign]

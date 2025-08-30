@@ -13,6 +13,9 @@ from fastembed.rerank.cross_encoder import TextCrossEncoder
 from qdrant_client.models import SparseVector
 
 SPARSE_MODEL = "Qdrant/bm25"
+# Qwen3-Embedding was trained with an instruction on queries and none on
+# documents; fastembed's query_embed does not add it, so it is added here.
+INSTRUCTED_PREFIX = "Qwen/Qwen3-Embedding"
 
 
 def normalise(rows: np.ndarray) -> np.ndarray:
@@ -44,9 +47,16 @@ class Models:
     def embed(self, texts: list[str]) -> np.ndarray:
         return normalise(np.array(list(self._load("text", self.dense_model).embed(texts))))
 
-    def embed_query(self, texts: list[str]) -> np.ndarray:
+    def query_instruction(self, task: str) -> str:
+        """The prefix the dense model expects on a query; "" for models trained without one."""
+        if not task or not self.dense_model.startswith(INSTRUCTED_PREFIX):
+            return ""
+        return f"Instruct: {task}\nQuery:"
+
+    def embed_query(self, texts: list[str], task: str = "") -> np.ndarray:
+        prefix = self.query_instruction(task)
         model = self._load("text", self.dense_model)
-        return normalise(np.array(list(model.query_embed(texts))))
+        return normalise(np.array(list(model.query_embed([prefix + t for t in texts]))))
 
     def judge(self, texts: list[str]) -> np.ndarray:
         return normalise(np.array(list(self._load("text", self.judge_model).embed(texts))))

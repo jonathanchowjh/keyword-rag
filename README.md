@@ -146,6 +146,20 @@ lists exist, reports its own `error`, and the other methods still return.
 | `hybrid_rerank` | modern | `hybrid` top-50 reranked by a local cross-encoder |
 | `kw_hybrid` | new | `kw_individual` fused with `hybrid`: a dual index like Doc2Query++ |
 | `iterative` | modern | Up to 3 retrieval hops; Claude decides the next query |
+| `random_example` | control | Random items, seeded by the question: the same draw on every run |
+| `fixed_example` | control | The same random items for every question |
+
+The two controls answer a question the paper could not: in 2024 plain vector
+search (63.1%) scored below no retrieval (69.7%), which is either a badly
+chosen example or any example at all getting in the way. A method that does
+not separate from `random_example` has not shown that choosing the example
+helped. For the exam QA type they also give the chance level of the free
+metrics: the solution similarity and same-skill rate of an unchosen example.
+
+Dense queries carry a task instruction per QA type when the dense model was
+trained with one (Qwen3-Embedding, the default): `Instruct: <task>\nQuery:`
+before the query, nothing before documents. Each eval run records the exact
+prefix in its setup.
 
 The RRF constant is a request parameter `rrf_k`: the paper used 1, today's
 default is 60. Fusion is computed in this service, not by Qdrant, so both
