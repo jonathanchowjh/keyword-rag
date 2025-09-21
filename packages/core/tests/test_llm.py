@@ -292,3 +292,49 @@ def test_job_context_is_per_thread(tmp_path):
         t.start()
         t.join()
     assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+
+
+def test_failed_cancel_still_reports_cancelled(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "r.db")
+    monkeypatch.setattr(llm, "BATCH_POLL_SECONDS", 1)
+    claude = fake_claude(conn, lambda p: "ok")
+    claude._batch_done = lambda batch_id: False  # type: ignore[method-assign]
+
+    def broken(batch_id):
+        raise RuntimeError("boom")
+
+    claude._cancel_batch = broken  # type: ignore[method-assign]
+    logs: list[str] = []
+
+    def check():
+        raise Cancelled()
+
+    with pytest.raises(Cancelled), claude.for_job("j1", check=check, log=logs.append):
+        claude.complete_many([f"p{n}" for n in range(51)], purpose="answer")
+    assert any("could not cancel Claude batch" in m for m in logs)
+    assert claude._reserved == 0
+    assert conn.execute("select count(*) from pending_batches").fetchone()[0] == 1
+
+
+def test_collected_batch_keeps_its_own_job(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    claude = fake_claude(conn, lambda p: "ok")
+    batch_id = claude._submit_batch(
+        [
+            {
+                "custom_id": "k",
+                "model": "claude-haiku-5-5",
+                "system": "",
+                "prompt": "p",
+                "max_tokens": 9,
+            }
+        ]
+    )
+    conn.execute(
+        "insert into pending_batches (id, model, purpose, created_at, usd) values (?, ?, ?, ?, ?)",
+        (batch_id, "claude-haiku-5-5", "answer", "2026-01-01", 0.0),
+    )
+    with claude.for_job("j2", check=lambda: None, log=lambda m: None):
+        claude._collect(batch_id, "claude-haiku-5-5", "answer")
+    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+    assert job_spend(conn, "j2") == 0

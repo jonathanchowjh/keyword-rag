@@ -26,6 +26,7 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 BATCH_THRESHOLD = 50
 BATCH_POLL_SECONDS = 30
+CURRENT_JOB = object()  # _record default: the calling thread's job
 
 
 class BudgetExceeded(Exception):
@@ -161,9 +162,10 @@ class Claude:
         tokens_out: int,
         batch: bool,
         purpose: str,
-        job_id: str | None = None,
+        job_id: str | None | object = CURRENT_JOB,
     ) -> Completion:
-        job_id = job_id or getattr(self._job, "job_id", None)
+        if job_id is CURRENT_JOB:
+            job_id = getattr(self._job, "job_id", None)
         usd = self._price(model, tokens_in, tokens_out, batch)
         self.conn.execute(
             "insert or replace into cache values (?, ?, ?, ?)", (key, text, tokens_in, tokens_out)
@@ -225,7 +227,15 @@ class Claude:
                 try:
                     check()
                 except Cancelled:
-                    self._cancel_batch(batch_id)
+                    try:
+                        self._cancel_batch(batch_id)
+                    except Exception as e:
+                        log = getattr(self._job, "log", None)
+                        if log:
+                            log(
+                                f"could not cancel Claude batch {batch_id}: {e!r};"
+                                " it will be collected later"
+                            )
                     raise
 
     def _collect(
