@@ -149,7 +149,8 @@ class Claude:
             "insert or replace into cache values (?, ?, ?, ?)", (key, text, tokens_in, tokens_out)
         )
         self.conn.execute(
-            "insert into ledger values (?, ?, ?, ?, ?, ?, ?)",
+            "insert into ledger (at, model, input_tokens, output_tokens, usd, batch, purpose)"
+            " values (?, ?, ?, ?, ?, ?, ?)",
             (now(), model, tokens_in, tokens_out, usd, int(batch), purpose),
         )
         return Completion(text, usd, False, tokens_in, tokens_out)
@@ -179,7 +180,8 @@ class Claude:
         # Recorded before waiting: a batch is billed once submitted, so a
         # restart must be able to find it, count it and collect what it paid for.
         self.conn.execute(
-            "insert into pending_batches values (?, ?, ?, ?, ?)",
+            "insert into pending_batches (id, model, purpose, created_at, usd)"
+            " values (?, ?, ?, ?, ?)",
             (batch_id, model, purpose, now(), usd),
         )
         try:

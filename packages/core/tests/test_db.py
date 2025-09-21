@@ -1,9 +1,11 @@
+import json
+
 import pytest
 
 from ragqa_core.db import (
     JOBS_RESUMABLE,
-    add_run_item,
     claim_next_job,
+    complete_question_ids,
     connect,
     create_job,
     delete_collection_rows,
@@ -15,6 +17,7 @@ from ragqa_core.db import (
     interrupt_running,
     is_cancel_requested,
     job_running,
+    job_spend,
     list_collections,
     list_jobs,
     log_job,
@@ -28,6 +31,7 @@ from ragqa_core.db import (
     set_job_setup,
     set_keyword_version,
     update_job,
+    upsert_run_item,
 )
 from ragqa_core.types import CollectionSpec, KeywordLists, Question
 
@@ -86,8 +90,8 @@ def test_job_round_trip(tmp_path):
 def test_run_items_filter_by_method(tmp_path):
     conn = connect(tmp_path / "r.db")
     job = create_job(conn, "eval", "arc", {})
-    add_run_item(conn, job, "hybrid", "q1", {"hit_ids": ["a"]})
-    add_run_item(conn, job, "vector", "q1", {"hit_ids": ["b"]})
+    upsert_run_item(conn, job, "hybrid", "q1", {"hit_ids": ["a"]}, complete=False)
+    upsert_run_item(conn, job, "vector", "q1", {"hit_ids": ["b"]}, complete=False)
     assert [r["hit_ids"] for r in run_items(conn, job, "hybrid")] == [["a"]]
     assert len(run_items(conn, job)) == 2
 
@@ -221,8 +225,8 @@ def test_jobs_resumable_statuses():
 def test_delete_job_removes_its_run_items(conn):
     a = create_job(conn, "eval", "c", {})
     b = create_job(conn, "eval", "c", {})
-    add_run_item(conn, a, "hybrid", "q1", {})
-    add_run_item(conn, b, "hybrid", "q1", {})
+    upsert_run_item(conn, a, "hybrid", "q1", {}, complete=False)
+    upsert_run_item(conn, b, "hybrid", "q1", {}, complete=False)
     delete_job(conn, a)
     assert get_job(conn, a) is None and run_items(conn, a) == []
     assert len(run_items(conn, b)) == 1
@@ -235,8 +239,8 @@ def test_delete_collection_rows_removes_its_jobs_and_rows(conn):
         save_questions(conn, name, [Question("q1", "t", None, ["a"], [])])
     gone = create_job(conn, "eval", "c", {})
     kept = create_job(conn, "eval", "keep", {})
-    add_run_item(conn, gone, "hybrid", "q1", {})
-    add_run_item(conn, kept, "hybrid", "q1", {})
+    upsert_run_item(conn, gone, "hybrid", "q1", {}, complete=False)
+    upsert_run_item(conn, kept, "hybrid", "q1", {}, complete=False)
     delete_collection_rows(conn, "c")
     assert get_collection(conn, "c") is None
     assert get_keyword_lists(conn, "c", "v1") is None
@@ -265,3 +269,79 @@ def test_connect_adds_queue_columns_to_an_older_jobs_table(tmp_path):
     old.close()
     job = get_job(connect(tmp_path / "r.db"), "j")
     assert job["cancel_requested"] is False and job["log"] == []
+
+
+def test_upsert_run_item_never_duplicates(conn):
+    j = create_job(conn, "eval", "c", {"answer": True})
+    upsert_run_item(conn, j, "hybrid", "q1", {"retrieval": {}}, complete=False)
+    assert complete_question_ids(conn, j, "hybrid") == set()
+    upsert_run_item(
+        conn, j, "hybrid", "q1", {"retrieval": {}, "answer": {"accuracy": 1.0}}, complete=True
+    )
+    rows = run_items(conn, j)
+    assert len(rows) == 1 and rows[0]["complete"] is True
+    assert complete_question_ids(conn, j, "hybrid") == {"q1"}
+    assert complete_question_ids(conn, j, "vector") == set()
+
+
+def test_migration_dedupes_and_backfills(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table ledger (at text not null, model text not null,
+          input_tokens integer not null, output_tokens integer not null,
+          usd real not null, batch integer not null, purpose text not null);
+        create table pending_batches (id text primary key, model text not null,
+          purpose text not null, created_at text not null, usd real not null default 0);
+        create table jobs (id text primary key, kind text not null, collection text not null,
+          status text not null, progress real not null default 0, setup_json text not null,
+          result_json text, error text, created_at text not null, updated_at text not null);
+        create table run_items (job_id text not null, method text not null,
+          question_id text not null, row_json text not null);
+        insert into ledger values ('t', 'm', 1, 1, 0.5, 0, 'p');
+        insert into pending_batches values ('b', 'm', 'p', 't', 0.1);
+        insert into jobs values ('j1', 'eval', 'c', 'done', 1, '{"answer": false}',
+          null, null, 't', 't');
+        insert into jobs values ('j2', 'eval', 'c', 'done', 1, '{"answer": true}',
+          null, null, 't', 't');
+        insert into run_items values ('j1', 'hybrid', 'q1', '{"v": 1}');
+        insert into run_items values ('j1', 'hybrid', 'q1', '{"v": 2}');
+        insert into run_items values ('j2', 'hybrid', 'q2', '{"answer": {"accuracy": 1}}');
+        insert into run_items values ('j2', 'hybrid', 'q3', '{"hit_ids": []}');
+        """
+    )
+    old.commit()
+    old.close()
+
+    conn = connect(path)
+    rows = {(r["job_id"], r["question_id"]): r for r in conn.execute("select * from run_items")}
+    assert len(rows) == 3
+    assert json.loads(rows[("j1", "q1")]["row_json"]) == {"v": 2}
+    assert rows[("j1", "q1")]["complete"] == 1
+    assert rows[("j2", "q2")]["complete"] == 1
+    assert rows[("j2", "q3")]["complete"] == 0
+    assert get_job(conn, "j1")["setup"] == {"answer": False, "question_ids": ["q1"]}
+    assert get_job(conn, "j2")["setup"]["question_ids"] == ["q2", "q3"]
+    assert conn.execute("select job_id from ledger").fetchone()["job_id"] is None
+    assert conn.execute("select job_id from pending_batches").fetchone()["job_id"] is None
+
+    before = [tuple(r) for r in conn.execute("select * from run_items order by rowid")]
+    setups = [get_job(conn, j)["setup"] for j in ("j1", "j2")]
+    conn.close()
+    again = connect(path)
+    assert [tuple(r) for r in again.execute("select * from run_items order by rowid")] == before
+    assert [get_job(again, j)["setup"] for j in ("j1", "j2")] == setups
+
+
+def test_job_spend_sums_ledger_rows_for_the_job(conn):
+    for job_id, usd in (("j", 0.25), ("j", 0.5), (None, 4.0), ("other", 8.0)):
+        conn.execute(
+            "insert into ledger (at, model, input_tokens, output_tokens, usd, batch, purpose,"
+            " job_id) values ('t', 'm', 1, 1, ?, 0, 'p', ?)",
+            (usd, job_id),
+        )
+    assert job_spend(conn, "j") == 0.75
+    assert job_spend(conn, "none") == 0.0

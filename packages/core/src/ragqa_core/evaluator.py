@@ -192,7 +192,7 @@ class Evaluator:
         ]
         rows = self._retrieval_rows(spec, questions, all_hits)
         for q, row in zip(questions, rows, strict=True):
-            db.add_run_item(self.conn, job_id, method, q.id, row)
+            db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
             return
         prompts = [
@@ -216,7 +216,7 @@ class Evaluator:
                     "answer": score(spec, q, pred),
                 }
             )
-            db.update_run_item(self.conn, job_id, method, q.id, row)
+            db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)
 
     def _retrieval_rows(
         self, spec: CollectionSpec, questions: list[Question], all_hits: list[list[Hit]]

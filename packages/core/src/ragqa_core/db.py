@@ -5,8 +5,11 @@ oldest queued job by insertion order, and the worker reports through
 update_job and log_job. Cancel is a flag the running job polls.
 
 One connection per process, opened with check_same_thread=False and in
-autocommit mode. Every write is a single statement, which SQLite's serialized
+autocommit mode. Most writes are a single statement, which SQLite's serialized
 threading mode makes safe across the API's threadpool and the job threads.
+log_job, request_cancel, delete_job, delete_collection_rows and the migration in
+connect are several statements and are not atomic; log_job also reads then
+writes, so it assumes a single writer (the worker).
 """
 
 import json
@@ -22,7 +25,7 @@ SCHEMA = """
 create table if not exists ledger (
   at text not null, model text not null, input_tokens integer not null,
   output_tokens integer not null, usd real not null, batch integer not null,
-  purpose text not null
+  purpose text not null, job_id text
 );
 create table if not exists cache (
   key text primary key, text text not null, input_tokens integer not null,
@@ -49,11 +52,11 @@ create table if not exists jobs (
 );
 create table if not exists pending_batches (
   id text primary key, model text not null, purpose text not null, created_at text not null,
-  usd real not null default 0
+  usd real not null default 0, job_id text
 );
 create table if not exists run_items (
   job_id text not null, method text not null, question_id text not null,
-  row_json text not null
+  row_json text not null, complete integer not null default 0
 );
 create index if not exists run_items_job on run_items (job_id, method);
 """
@@ -77,7 +80,40 @@ def connect(path: Path) -> sqlite3.Connection:
         conn.execute("alter table jobs add column cancel_requested integer not null default 0")
     if "log_json" not in columns:
         conn.execute("alter table jobs add column log_json text")
+    _migrate_run_items(conn)
     return conn
+
+
+def _migrate_run_items(conn: sqlite3.Connection) -> None:
+    """Make run_items resumable and let ledger rows name their job. Idempotent."""
+    for table in ("ledger", "pending_batches"):
+        columns = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
+        if "job_id" not in columns:
+            conn.execute(f"alter table {table} add column job_id text")
+    columns = {row["name"] for row in conn.execute("pragma table_info(run_items)")}
+    if "complete" not in columns:
+        conn.execute("alter table run_items add column complete integer not null default 0")
+        for row in conn.execute("select id, setup_json from jobs").fetchall():
+            if json.loads(row["setup_json"]).get("answer") is False:
+                conn.execute("update run_items set complete = 1 where job_id = ?", (row["id"],))
+        conn.execute("update run_items set complete = 1 where row_json like '%\"answer\"%'")
+    conn.execute(
+        "delete from run_items where rowid not in"
+        " (select max(rowid) from run_items group by job_id, method, question_id)"
+    )
+    conn.execute(
+        "create unique index if not exists run_items_key on run_items (job_id, method, question_id)"
+    )
+    for row in conn.execute("select id, setup_json from jobs where kind = 'eval'").fetchall():
+        setup = json.loads(row["setup_json"])
+        if "question_ids" in setup:
+            continue
+        ids = conn.execute(
+            "select distinct question_id from run_items where job_id = ? order by question_id",
+            (row["id"],),
+        ).fetchall()
+        if ids:
+            set_job_setup(conn, row["id"], {**setup, "question_ids": [r[0] for r in ids]})
 
 
 def save_collection(conn: sqlite3.Connection, spec: CollectionSpec) -> None:
@@ -313,22 +349,34 @@ def delete_collection_rows(conn: sqlite3.Connection, name: str) -> None:
     conn.execute("delete from collections where name = ?", (name,))
 
 
-def add_run_item(
-    conn: sqlite3.Connection, job_id: str, method: str, question_id: str, row: dict
+def upsert_run_item(
+    conn: sqlite3.Connection,
+    job_id: str,
+    method: str,
+    question_id: str,
+    row: dict,
+    complete: bool,
 ) -> None:
     conn.execute(
-        "insert into run_items values (?, ?, ?, ?)",
-        (job_id, method, question_id, json.dumps(row)),
+        "insert into run_items (job_id, method, question_id, row_json, complete)"
+        " values (?, ?, ?, ?, ?)"
+        " on conflict (job_id, method, question_id)"
+        " do update set row_json = excluded.row_json, complete = excluded.complete",
+        (job_id, method, question_id, json.dumps(row), int(complete)),
     )
 
 
-def update_run_item(
-    conn: sqlite3.Connection, job_id: str, method: str, question_id: str, row: dict
-) -> None:
-    conn.execute(
-        "update run_items set row_json = ? where job_id = ? and method = ? and question_id = ?",
-        (json.dumps(row), job_id, method, question_id),
+def complete_question_ids(conn: sqlite3.Connection, job_id: str, method: str) -> set[str]:
+    rows = conn.execute(
+        "select question_id from run_items where job_id = ? and method = ? and complete = 1",
+        (job_id, method),
     )
+    return {r["question_id"] for r in rows}
+
+
+def job_spend(conn: sqlite3.Connection, job_id: str) -> float:
+    row = conn.execute("select sum(usd) as usd from ledger where job_id = ?", (job_id,)).fetchone()
+    return row["usd"] or 0.0
 
 
 def run_items(conn: sqlite3.Connection, job_id: str, method: str | None = None) -> list[dict]:
@@ -340,6 +388,11 @@ def run_items(conn: sqlite3.Connection, job_id: str, method: str | None = None) 
             (job_id, method),
         )
     return [
-        {"method": r["method"], "question_id": r["question_id"], **json.loads(r["row_json"])}
+        {
+            "method": r["method"],
+            "question_id": r["question_id"],
+            "complete": bool(r["complete"]),
+            **json.loads(r["row_json"]),
+        }
         for r in rows
     ]
