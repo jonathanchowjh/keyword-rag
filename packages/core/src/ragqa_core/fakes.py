@@ -22,6 +22,7 @@ WORD = re.compile(r"[a-z0-9]+")
 # The fake Batch API's server side: batches outlive the fake that submitted
 # them, as real ones outlive a restarted process.
 BATCHES: dict[str, dict[str, tuple[str, int, int]]] = {}
+CANCELLED: set[str] = set()
 
 
 def fake_models(dim: int = 256) -> Models:
@@ -94,6 +95,7 @@ def fake_replies(claude: Claude, reply: Callable[[str], str]) -> Claude:
         # A reply of "FAIL" stands for an errored or expired batch entry.
         return {k: None if v[0] == "FAIL" else v for k, v in BATCHES[batch_id].items()}
 
+    claude._cancel_batch = CANCELLED.add  # type: ignore[method-assign]
     claude._send = send  # type: ignore[method-assign]
     claude._submit_batch = submit_batch  # type: ignore[method-assign]
     claude._batch_done = lambda batch_id: True  # type: ignore[method-assign]

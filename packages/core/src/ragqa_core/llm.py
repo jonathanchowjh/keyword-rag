@@ -10,6 +10,8 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import anthropic
@@ -27,6 +29,10 @@ BATCH_POLL_SECONDS = 30
 
 
 class BudgetExceeded(Exception):
+    pass
+
+
+class Cancelled(Exception):
     pass
 
 
@@ -58,6 +64,18 @@ class Claude:
         self._waiting: set[str] = set()  # batches this process is polling; spend in _reserved
         self._collecting = threading.Lock()
         self._next_check = 0.0
+        self._job = threading.local()  # this thread's job_id, check, log
+
+    @contextmanager
+    def for_job(
+        self, job_id: str, check: Callable[[], None], log: Callable[[str], None]
+    ) -> Iterator[None]:
+        """Calls on this thread belong to job_id; check() raises Cancelled to stop a wait."""
+        self._job.job_id, self._job.check, self._job.log = job_id, check, log
+        try:
+            yield
+        finally:
+            self._job.job_id = self._job.check = self._job.log = None
 
     def complete(
         self,
@@ -143,15 +161,18 @@ class Claude:
         tokens_out: int,
         batch: bool,
         purpose: str,
+        job_id: str | None = None,
     ) -> Completion:
+        job_id = job_id or getattr(self._job, "job_id", None)
         usd = self._price(model, tokens_in, tokens_out, batch)
         self.conn.execute(
             "insert or replace into cache values (?, ?, ?, ?)", (key, text, tokens_in, tokens_out)
         )
         self.conn.execute(
-            "insert into ledger (at, model, input_tokens, output_tokens, usd, batch, purpose)"
-            " values (?, ?, ?, ?, ?, ?, ?)",
-            (now(), model, tokens_in, tokens_out, usd, int(batch), purpose),
+            "insert into ledger"
+            " (at, model, input_tokens, output_tokens, usd, batch, purpose, job_id)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (now(), model, tokens_in, tokens_out, usd, int(batch), purpose, job_id),
         )
         return Completion(text, usd, False, tokens_in, tokens_out)
 
@@ -180,28 +201,47 @@ class Claude:
         # Recorded before waiting: a batch is billed once submitted, so a
         # restart must be able to find it, count it and collect what it paid for.
         self.conn.execute(
-            "insert into pending_batches (id, model, purpose, created_at, usd)"
-            " values (?, ?, ?, ?, ?)",
-            (batch_id, model, purpose, now(), usd),
+            "insert into pending_batches (id, model, purpose, created_at, usd, job_id)"
+            " values (?, ?, ?, ?, ?, ?)",
+            (batch_id, model, purpose, now(), usd, getattr(self._job, "job_id", None)),
         )
+        log = getattr(self._job, "log", None)
+        if log:
+            log(f"Claude batch {batch_id} submitted, {len(misses)} requests")
         try:
             while not self._batch_done(batch_id):
-                time.sleep(BATCH_POLL_SECONDS)
+                self._wait(batch_id)
             return self._collect(batch_id, model, purpose, expected=len(misses))
         finally:
             with self._lock:
                 self._waiting.discard(batch_id)
 
+    def _wait(self, batch_id: str) -> None:
+        """Sleep one poll interval in 1-second steps, letting the job's check() stop it."""
+        check = getattr(self._job, "check", None)
+        for _ in range(BATCH_POLL_SECONDS):
+            time.sleep(1)
+            if check:
+                try:
+                    check()
+                except Cancelled:
+                    self._cancel_batch(batch_id)
+                    raise
+
     def _collect(
         self, batch_id: str, model: str, purpose: str, expected: int | None = None
     ) -> dict[str, Completion]:
+        row = self.conn.execute(
+            "select job_id from pending_batches where id = ?", (batch_id,)
+        ).fetchone()
+        job_id = row["job_id"] if row else None
         out: dict[str, Completion] = {}
         failed = 0
         for key, result in self._batch_results(batch_id).items():
             if result is None:
                 failed += 1
                 continue
-            out[key] = self._record(key, model, *result, True, purpose)
+            out[key] = self._record(key, model, *result, True, purpose, job_id=job_id)
         self.conn.execute("delete from pending_batches where id = ?", (batch_id,))
         if failed:
             total = expected if expected is not None else failed + len(out)
@@ -310,6 +350,9 @@ class Claude:
             ]
         )
         return batch.id
+
+    def _cancel_batch(self, batch_id: str) -> None:
+        self._client_or_create().messages.batches.cancel(batch_id)
 
     def _batch_done(self, batch_id: str) -> bool:
         status = self._client_or_create().messages.batches.retrieve(batch_id).processing_status

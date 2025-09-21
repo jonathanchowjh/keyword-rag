@@ -1,9 +1,9 @@
 import pytest
 
-from ragqa_core import llm
-from ragqa_core.db import connect
+from ragqa_core import fakes, llm
+from ragqa_core.db import connect, job_spend
 from ragqa_core.fakes import fake_claude
-from ragqa_core.llm import BudgetExceeded, NoApiKey, UnknownModel
+from ragqa_core.llm import BudgetExceeded, Cancelled, NoApiKey, UnknownModel
 
 
 def test_complete_records_cost_and_caches(tmp_path):
@@ -252,3 +252,43 @@ def test_batch_in_flight_counts_once_against_the_cap(tmp_path, monkeypatch):
     c._batch_done = done
     c.complete_many(prompts, purpose="t")
     assert ledger_rows(c) == 52
+
+
+def test_ledger_rows_carry_the_job(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    claude = fake_claude(conn, lambda p: "ok")
+    with claude.for_job("j1", check=lambda: None, log=lambda m: None):
+        claude.complete("hi", purpose="answer")
+    claude.complete("other", purpose="query")
+    assert job_spend(conn, "j1") > 0
+    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+
+
+def test_cancel_while_waiting_on_a_batch(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "r.db")
+    monkeypatch.setattr(llm, "BATCH_POLL_SECONDS", 1)
+    claude = fake_claude(conn, lambda p: "ok")
+    claude._batch_done = lambda batch_id: False  # type: ignore[method-assign]
+    logs: list[str] = []
+
+    def check():
+        raise Cancelled()
+
+    with pytest.raises(Cancelled), claude.for_job("j1", check=check, log=logs.append):
+        claude.complete_many([f"p{n}" for n in range(51)], purpose="answer")
+    assert fakes.CANCELLED
+    assert conn.execute("select job_id from pending_batches").fetchone()[0] == "j1"
+    assert logs and "submitted, 51 requests" in logs[0]
+    assert claude._reserved == 0 and not claude._waiting
+
+
+def test_job_context_is_per_thread(tmp_path):
+    import threading
+
+    conn = connect(tmp_path / "r.db")
+    claude = fake_claude(conn, lambda p: "ok")
+    with claude.for_job("j1", check=lambda: None, log=lambda m: None):
+        t = threading.Thread(target=lambda: claude.complete("elsewhere", purpose="query"))
+        t.start()
+        t.join()
+    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
