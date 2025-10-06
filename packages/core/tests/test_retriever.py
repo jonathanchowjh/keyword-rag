@@ -1,6 +1,6 @@
 import pytest
 
-from ragqa_core.db import connect
+from ragqa_core.db import claim_next_job, connect, create_job
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import NoApiKey
@@ -64,6 +64,15 @@ def build(tmp_path, summarize=False, lists=True, reply=lambda p: "A summary."):
     if lists:
         ix.set_lists(spec, LISTS)
     return Retriever(conn, store, models, claude, ix), conn
+
+
+def test_keyword_methods_refuse_while_rekeying(tmp_path):
+    r, conn = build(tmp_path)
+    create_job(conn, "rekey", "c", {"version": "v"})
+    claim_next_job(conn)
+    with pytest.raises(MethodUnavailable, match="re-keyed"):
+        r.retrieve("c", "enzyme kinetics", "kw_individual")
+    assert r.retrieve("c", "enzyme kinetics", "hybrid")  # plain methods still answer
 
 
 def test_rrf_sums_reciprocal_ranks():

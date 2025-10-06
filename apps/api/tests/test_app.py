@@ -210,7 +210,7 @@ def test_load_summarize_without_key_503(tmp_path):
 
 
 def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
-    from ragqa_api import app as app_module
+    from ragqa_core import loader
     from ragqa_core.types import Item, Question
 
     def fake_load(name, cache):
@@ -220,7 +220,7 @@ def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
     def ragqa_item(d):
         return Item(d["id"], d["text"] + " shared words", d["answer"], d["explanation"], d["meta"])
 
-    monkeypatch.setattr(app_module, "load_dataset", fake_load)
+    monkeypatch.setattr(loader, "load_dataset", fake_load)
     client = make_client(tmp_path, api_key=None)
     client.post("/collections", json={"name": "m", "qa_type": "multihop"})
     r = client.post("/collections/m/load", json={"dataset": "musique"})
@@ -232,11 +232,11 @@ def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
 
 
 def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
-    from ragqa_api import app as app_module
+    from ragqa_core import loader
     from ragqa_core.types import Item
 
     items = [Item(d["id"], d["text"] + " shared words", d["answer"]) for d in ITEMS]
-    monkeypatch.setattr(app_module, "load_dataset", lambda name, cache: (items, []))
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     client = make_client(tmp_path, reply=lambda p: "I cannot help with that.")
     client.post("/collections", json={"name": "m", "qa_type": "multihop"})
     job = wait(
@@ -252,6 +252,18 @@ def test_propose_lists(client):
     fake_replies(client.app.state.claude, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
     lists = client.post("/collections/c/keyword-lists/propose").json()
     assert lists["topic"] == ["enzymes"] and lists["method"] == ["assay"]
+
+
+def test_put_lists_refused_while_an_eval_runs(client):
+    from ragqa_core import db
+
+    add_collection(client, lists=False)
+    job = db.create_job(client.app.state.conn, "eval", "c", {})
+    db.update_job(client.app.state.conn, job, status="running")
+    r = client.put("/collections/c/keyword-lists", json=asdict(LISTS))
+    assert r.status_code == 409 and "an eval is running on 'c'" in r.json()["detail"]
+    db.update_job(client.app.state.conn, job, status="done")
+    assert client.put("/collections/c/keyword-lists", json=asdict(LISTS)).status_code == 200
 
 
 def test_unknown_collection_404(client):
@@ -333,20 +345,3 @@ def test_model_mismatch_on_query_and_eval(client):
     assert "built with fake/dense" in r.json()["results"]["hybrid"]["error"]
     r = client.post("/eval", json={"collection": "c", "methods": ["hybrid"]})
     assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
-
-
-def test_load_limit_keeps_gold_passages_and_only_answerable_questions():
-    from ragqa_api.app import limited
-    from ragqa_core.types import Item, Question
-
-    items = [Item(f"i{n}", "t") for n in range(6)]
-    questions = [
-        Question("q1", "x", None, ["a"], ["i4", "i5"]),
-        Question("q2", "x", None, ["a"], ["i0", "i3"]),  # would pass the limit
-        Question("q3", "x", None, ["a"], ["i1"]),
-        Question("mcq", "x", ["a"], ["A"], []),  # retrieves examples, not gold passages
-    ]
-    kept, answerable = limited(items, questions, 3)
-    assert [i.id for i in kept] == ["i1", "i4", "i5"]
-    assert [q.id for q in answerable] == ["q1", "q3", "mcq"]
-    assert limited(items, questions, None) == (items, questions)

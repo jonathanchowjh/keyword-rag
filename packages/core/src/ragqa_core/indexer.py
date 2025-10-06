@@ -122,9 +122,8 @@ class Indexer:
         common = tfidf_terms([i.text for i in sample]) or topic + method
         return KeywordLists(topic=topic, method=method, common=common)
 
-    def set_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
-        if db.running_eval(self.conn, spec.name):
-            raise ListsBusy(f"an eval is running on '{spec.name}'; wait for it to finish")
+    def save_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
+        """Validate, embed and store a version of the lists, without switching to it."""
         for facet in FACETS:
             if not getattr(lists, facet):
                 raise ValueError(f"keyword list '{facet}' is empty")
@@ -132,12 +131,32 @@ class Indexer:
         self._lists_embedded(lists)
         version = list_version(lists)
         db.save_keyword_lists(self.conn, spec.name, lists, version)
-        db.set_keyword_version(self.conn, spec.name, version)
-        for hits in self.store.scroll(spec.name):
+        return version
+
+    def rekey(
+        self, name: str, version: str, progress: Callable[[float], None] = lambda p: None
+    ) -> None:
+        """Re-key every item with a saved version's lists, then switch to it.
+        If anything raises, the old version stays in force."""
+        spec = self.spec(name)
+        lists = db.get_keyword_lists(self.conn, name, version)
+        if spec is None or lists is None:
+            raise ValueError(f"no keyword lists {version!r} for collection '{name}'")
+        total, done = self.store.count(name), 0
+        for hits in self.store.scroll(name):
             keywords, vectors = self.keywords_for(
                 spec, lists, [h.text for h in hits], [h.summary for h in hits]
             )
-            self.store.set_keywords(spec.name, [h.id for h in hits], keywords, vectors)
+            self.store.set_keywords(name, [h.id for h in hits], keywords, vectors)
+            done += len(hits)
+            progress(done / total)
+        if total == 0:
+            progress(1.0)
+        db.set_keyword_version(self.conn, name, version)
+
+    def set_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
+        version = self.save_lists(spec, lists)
+        self.rekey(spec.name, version)
         return version
 
     def keywords_for(

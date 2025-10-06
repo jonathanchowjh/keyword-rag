@@ -4,7 +4,6 @@ Run with `uvicorn --factory ragqa_api.app:create_app`.
 """
 
 import base64
-import random
 import secrets
 import threading
 from dataclasses import asdict
@@ -21,8 +20,8 @@ from ragqa_core.datasets import DATASETS
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
-from ragqa_core.keywords import tfidf_terms
 from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
+from ragqa_core.loader import Loader, limited, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import answer_prompt, parse_answer
 from ragqa_core.retriever import (
@@ -34,10 +33,9 @@ from ragqa_core.retriever import (
 )
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, Question
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
 
 STATIC = Path(__file__).parent / "static"
-PROPOSE_SAMPLE = 40
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
 
 
@@ -232,6 +230,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.put("/collections/{name}/keyword-lists")
     def put_lists(name: str, body: Lists) -> dict:
         spec = state.retriever.spec(name)
+        if db.running_eval(state.conn, name):
+            raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
         return {"version": state.indexer.set_lists(spec, KeywordLists(**body.model_dump()))}
 
     @app.post("/query")
@@ -338,85 +338,13 @@ def authorised(request: Request, username: str, password: str) -> bool:
     )
 
 
-def limited(
-    items: list[Item], questions: list[Question], limit: int | None
-) -> tuple[list[Item], list[Question]]:
-    """At most `limit` items, chosen so questions stay answerable: each
-    question's gold passages first, in question order, while they fit; then
-    the rest by id. Questions whose gold was left out are dropped."""
-    if not limit:
-        return items, questions
-    chosen: set[str] = set()
-    for q in questions:
-        extra = set(q.gold_ids) - chosen
-        if len(chosen) + len(extra) <= limit:
-            chosen |= extra
-    for item in sorted(items, key=lambda i: i.id):
-        if len(chosen) >= limit:
-            break
-        chosen.add(item.id)
-    kept = sorted((i for i in items if i.id in chosen), key=lambda i: i.id)
-    return kept, [q for q in questions if set(q.gold_ids) <= chosen]
-
-
-def sample_items(store: Store, name: str) -> list[Item]:
-    hits = [h for batch in store.scroll(name) for h in batch]
-    picked = random.Random(472).sample(hits, min(PROPOSE_SAMPLE, len(hits)))
-    return [Item(h.id, h.text, h.answer, h.explanation, h.meta) for h in picked]
-
-
-def tfidf_lists(texts: list[str]) -> KeywordLists | None:
-    """Lists without Claude: the corpus's own top terms. A small corpus has too
-    few terms to fill all three facets, so a facet that would be empty reuses
-    the head of the ranking rather than leaving its keyword vector undefined."""
-    terms = tfidf_terms(texts, n=565)
-    if not terms:
-        return None
-    return KeywordLists(
-        topic=terms[:50],
-        method=terms[50:65] or terms[:15],
-        common=terms[65:565] or terms,
-    )
-
-
 def run_load(state, settings: Settings, job_id: str, spec: CollectionSpec, body: LoadRequest):
     conn = state.conn
     db.update_job(conn, job_id, status="running")
+    loader = Loader(conn, state.indexer, state.claude, settings.home)
     try:
-        items, questions = load_dataset(body.dataset, settings.home)
-        items, questions = limited(items, questions, body.limit)
-        state.indexer.add(
-            spec, items, progress=lambda p: db.update_job(conn, job_id, progress=0.9 * p)
-        )
-        db.save_questions(conn, spec.name, questions)
-        source = None
-        if db.get_keyword_lists(conn, spec.name) is None:
-            sample = random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
-            lists, source = None, "tfidf"
-            if state.claude.api_key:
-                try:
-                    lists, source = state.indexer.propose_lists(spec, sample), "claude"
-                except ValueError:
-                    source = "tfidf (claude proposal unusable)"
-            if lists is None:
-                lists = tfidf_lists([i.text for i in items])
-            if lists is not None:
-                state.indexer.set_lists(spec, lists)
-            else:
-                source = None
-        fresh = db.get_collection(conn, spec.name)
-        db.update_job(
-            conn,
-            job_id,
-            status="done",
-            progress=1.0,
-            result={
-                "added": len(items),
-                "questions": len(questions),
-                "lists_source": source,
-                "keyword_version": fresh.keyword_version if fresh else None,
-            },
-        )
+        result = loader.run(db.get_job(conn, job_id) or {}, lambda: None)
+        db.update_job(conn, job_id, status="done", progress=1.0, result=result)
     except BudgetExceeded as e:
         db.update_job(conn, job_id, status="stopped_budget", error=str(e))
     except NoApiKey as e:

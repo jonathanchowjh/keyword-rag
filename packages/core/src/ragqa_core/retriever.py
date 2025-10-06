@@ -242,6 +242,10 @@ class Retriever:
         return self.models.embed_query([q], task=QUERY_TASK[spec.qa_type])[0]
 
     def _query_keywords(self, spec: CollectionSpec, q: str) -> tuple[dict, dict]:
+        if db.job_running(self.conn, "rekey", spec.name):
+            raise MethodUnavailable(
+                "keyword lists are being re-keyed; try again when the job finishes"
+            )
         lists = db.get_keyword_lists(self.conn, spec.name)
         if lists is None:
             raise MethodUnavailable(f"keyword lists not set for collection '{spec.name}'")

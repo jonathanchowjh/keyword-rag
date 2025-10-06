@@ -1,9 +1,10 @@
 import pytest
 
-from ragqa_core.db import connect, create_job, get_keyword_lists, update_job
+from ragqa_core.db import connect, get_keyword_lists
 from ragqa_core.fakes import fake_claude, fake_models
-from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
+from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, list_version
+from ragqa_core.llm import Cancelled
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists
 
@@ -11,6 +12,11 @@ LISTS = KeywordLists(
     topic=["enzyme kinetics", "genetics", "market economics", "plate tectonics", "optics"],
     method=["titration", "tabular scrutiny", "field survey", "spectroscopy"],
     common=["rate", "mass", "price", "temperature", "volume", "voltage"],
+)
+OTHER_LISTS = KeywordLists(
+    topic=["history", "chemistry", "astronomy"],
+    method=["interview", "simulation", "meta-analysis"],
+    common=["year", "count", "speed", "length"],
 )
 ITEMS = [
     Item("1", "enzyme kinetics rate rose with temperature", "A", "Rates rise."),
@@ -121,15 +127,50 @@ def test_add_refuses_model_mismatch(env):
         ix.add(spec, ITEMS)
 
 
-def test_set_lists_refused_while_eval_runs(env):
+def test_save_lists_does_not_switch_until_rekey_finishes(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    job = create_job(conn, "eval", "c", {})
-    update_job(conn, job, status="running")
-    with pytest.raises(ListsBusy, match="an eval is running on 'c'"):
-        ix.set_lists(spec, LISTS)
-    update_job(conn, job, status="done")
-    assert ix.set_lists(spec, LISTS)
+    ix.add(spec, ITEMS)
+    v1 = ix.set_lists(spec, LISTS)
+    v2 = ix.save_lists(spec, OTHER_LISTS)
+    assert v2 != v1 and ix.spec("c").keyword_version == v1
+    assert get_keyword_lists(conn, "c", v2) == OTHER_LISTS
+    ix.rekey("c", v2)
+    assert ix.spec("c").keyword_version == v2
+
+
+def test_rekey_that_fails_leaves_the_old_version(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, ITEMS)
+    v1 = ix.set_lists(spec, LISTS)
+    v2 = ix.save_lists(spec, OTHER_LISTS)
+
+    def boom(p):
+        raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        ix.rekey("c", v2, progress=boom)
+    assert ix.spec("c").keyword_version == v1
+
+
+def test_rekey_reports_progress_per_batch_and_once_for_an_empty_collection(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    seen: list[float] = []
+    ix.rekey("c", ix.save_lists(spec, LISTS), seen.append)
+    assert seen == [1.0]
+    ix.add(spec, ITEMS)
+    seen.clear()
+    ix.rekey("c", ix.save_lists(spec, OTHER_LISTS), seen.append)
+    assert seen == [1.0]
+
+
+def test_rekey_rejects_an_unknown_version(env):
+    *_, ix, _ = env
+    ix.create("c", "mcq", False)
+    with pytest.raises(ValueError, match="no keyword lists"):
+        ix.rekey("c", "missing")
 
 
 def test_propose_lists_uses_claude_json_and_tfidf(tmp_path):
