@@ -336,6 +336,50 @@ def test_migration_dedupes_and_backfills(tmp_path):
     assert [get_job(again, j)["setup"] for j in ("j1", "j2")] == setups
 
 
+def test_migration_marks_complete_by_the_answer_key_not_the_word(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table jobs (id text primary key, kind text not null, collection text not null,
+          status text not null, progress real not null default 0, setup_json text not null,
+          result_json text, error text, created_at text not null, updated_at text not null);
+        create table run_items (job_id text not null, method text not null,
+          question_id text not null, row_json text not null);
+        insert into jobs values ('j', 'eval', 'c', 'done', 1, '{"answer": true}',
+          null, null, 't', 't');
+        insert into run_items values ('j', 'hybrid', 'q1', '{"hit_ids": ["answer"]}');
+        insert into run_items values ('j', 'hybrid', 'q2', '{"answer": {"accuracy": 0}}');
+        """
+    )
+    old.commit()
+    old.close()
+
+    conn = connect(path)
+    complete = {r["question_id"]: r["complete"] for r in conn.execute("select * from run_items")}
+    assert complete == {"q1": 0, "q2": 1}
+
+
+def test_question_ids_backfill_skips_queued_and_running_evals(tmp_path):
+    path = tmp_path / "r.db"
+    conn = connect(path)
+    jobs = {
+        status: create_job(conn, "eval", "c", {"answer": False})
+        for status in ("queued", "running", "interrupted")
+    }
+    for status, job in jobs.items():
+        update_job(conn, job, status=status)
+        upsert_run_item(conn, job, "hybrid", "q1", {}, complete=True)
+    conn.close()
+
+    again = connect(path)
+    assert "question_ids" not in get_job(again, jobs["queued"])["setup"]
+    assert "question_ids" not in get_job(again, jobs["running"])["setup"]
+    assert get_job(again, jobs["interrupted"])["setup"]["question_ids"] == ["q1"]
+
+
 def test_job_spend_sums_ledger_rows_for_the_job(conn):
     for job_id, usd in (("j", 0.25), ("j", 0.5), (None, 4.0), ("other", 8.0)):
         conn.execute(

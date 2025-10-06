@@ -1,15 +1,15 @@
-"""Evaluation runs: estimate first, then run in the background, then tabulate
+"""Evaluation runs: estimate first, then queue and run (or resume), then tabulate
 with intervals so a gap that is noise is shown as noise."""
 
 import itertools
 import math
 import sqlite3
-import threading
+from collections.abc import Callable
 from typing import Literal
 
 from ragqa_core import db
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
-from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Claude, NoApiKey
+from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, NoApiKey
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
@@ -78,6 +78,18 @@ class Evaluator:
         questions = db.get_questions(self.conn, spec.name)
         return dev_slice(questions) if split == "dev" else questions
 
+    def _run_questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """The run's recorded questions in recorded order; ids since deleted are skipped."""
+        if "question_ids" not in setup:  # never ran: what the first run will record
+            return self._questions(spec, setup["split"])
+        by_id = {q.id: q for q in db.get_questions(self.conn, spec.name)}
+        return [by_id[i] for i in setup["question_ids"] if i in by_id]
+
+    def _todo(self, job_id: str, method: str, questions: list[Question]) -> list[Question]:
+        # A (method, question) pair with no row at all is incomplete too.
+        complete = db.complete_question_ids(self.conn, job_id, method)
+        return [q for q in questions if q.id not in complete]
+
     def estimate(
         self,
         collection: str,
@@ -89,33 +101,69 @@ class Evaluator:
         spec = self.retriever.spec(collection)
         self.retriever.indexer.check_model(spec)
         questions = self._questions(spec, split)
-        sample = questions[:ESTIMATE_SAMPLE]
-        n = len(questions)
+        parts = self._estimate_parts(
+            spec, {m: len(questions) for m in methods}, answer, model, questions[:ESTIMATE_SAMPLE]
+        )
+        return {"questions": len(questions), **parts}
+
+    def estimate_resume(self, job_id: str) -> dict:
+        """What resuming would cost: only the incomplete (method, question) pairs."""
+        job = db.get_job(self.conn, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        setup = job["setup"]
+        spec = self.retriever.spec(setup["collection"])
+        self.retriever.indexer.check_model(spec)
+        questions = self._run_questions(spec, setup)
+        todo = {m: self._todo(job_id, m, questions) for m in setup["methods"]}
+        pending = {q.id for qs in todo.values() for q in qs}
+        remaining = [q for q in questions if q.id in pending]
+        parts = self._estimate_parts(
+            spec,
+            {m: len(qs) for m, qs in todo.items()},
+            setup["answer"],
+            setup["model"],
+            remaining[:ESTIMATE_SAMPLE],
+        )
+        return {"questions": len(remaining), **parts}
+
+    def _estimate_parts(
+        self,
+        spec: CollectionSpec,
+        n_by_method: dict[str, int],
+        answer: bool,
+        model: str | None,
+        sample: list[Question],
+    ) -> dict:
         # (calls, avg prompt chars, output tokens, batched?, model) — each part
         # priced the way it is sent: one complete_many per part, batched only
         # above 50 calls; iterative hops are single real-time calls. Summaries and
         # hops run on the default model (None); only answers use the requested one.
         parts: list[tuple[int, float, int, bool, str | None]] = []
-        if spec.summarize and any(m in KEYWORD_METHODS for m in methods):
+        summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
+        if spec.summarize and summaries:
             chars = avg(len(summary_prompt(q.text)) for q in sample)
-            parts.append((n, chars, SUMMARY_TOKENS, n > BATCH_THRESHOLD, None))
+            parts.append((summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, None))
         hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
         parts.extend(
-            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, None) for m in methods if m == "iterative"
+            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, None)
+            for m, n in n_by_method.items()
+            if m == "iterative"
         )
-        if answer:
+        if answer and any(n_by_method.values()):
             chars = self._answer_chars(spec, sample)
             parts.extend(
-                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, model) for _ in methods
+                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, model)
+                for n in n_by_method.values()
             )
         calls = sum(part[0] for part in parts)
         if calls == 0:
-            return {"questions": n, "calls": 0, "est_usd": 0.0}
+            return {"calls": 0, "est_usd": 0.0}
         usd = sum(
             c * self.claude.estimate_usd(int(chars), out, model=m, batch=batch)
             for c, chars, out, batch, m in parts
         )
-        return {"questions": n, "calls": calls, "est_usd": usd}
+        return {"calls": calls, "est_usd": usd}
 
     def _answer_chars(self, spec: CollectionSpec, sample: list[Question]) -> float:
         sizes = []
@@ -125,7 +173,7 @@ class Evaluator:
             sizes.append(len(system) + len(user))
         return avg(sizes)
 
-    def start(
+    def queue(
         self,
         collection: str,
         split: Literal["dev", "full"],
@@ -135,7 +183,10 @@ class Evaluator:
         k: int = 5,
         rrf_k: int = 60,
     ) -> str:
+        """Queue a run with the request only; the rest of its setup is recorded when it runs."""
         spec = self.retriever.spec(collection)
+        if not self._questions(spec, split):
+            raise ValueError(f"collection '{collection}' has no questions")
         setup = {
             "collection": collection,
             "split": split,
@@ -144,18 +195,46 @@ class Evaluator:
             "model": model or self.claude.default_model,
             "k": k,
             "rrf_k": rrf_k,
+        }
+        return db.create_job(self.conn, "eval", collection, setup)
+
+    def _record_setup(self, job_id: str, spec: CollectionSpec, setup: dict) -> dict:
+        """On the first run only: the versions the run uses and the questions it asks."""
+        setup = {
+            **setup,
             "dense_model": self.models.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
             "seed": DEV_SEED,
             "dataset_filter": FILTER_NOTES[spec.qa_type],
+            "question_ids": [q.id for q in self._questions(spec, setup["split"])],
         }
-        job_id = db.create_job(self.conn, "eval", collection, setup)
-        threading.Thread(target=self.run, args=(job_id,), daemon=True).start()
-        return job_id
+        db.set_job_setup(self.conn, job_id, setup)
+        return setup
 
-    def run(self, job_id: str) -> None:
+    def resume_refusal(self, job_id: str) -> str | None:
+        job = db.get_job(self.conn, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["kind"] != "eval":
+            return "only evals can be resumed"
+        if job["status"] not in db.JOBS_RESUMABLE:
+            return f"a {job['status']} run cannot be resumed"
+        setup = job["setup"]
+        if "question_ids" not in setup:  # never ran: its setup is recorded when it does
+            return None
+        spec = self.retriever.spec(setup["collection"])
+        old, new = setup.get("keyword_version"), spec.keyword_version
+        if old != new:
+            return f"keyword lists changed since this run ({old} → {new}); start a new run"
+        old, new = setup.get("dense_model"), spec.dense_model
+        if old != new:
+            return f"the dense model changed since this run ({old} → {new}); start a new run"
+        return None
+
+    def run(self, job_id: str, check: Callable[[], None] = lambda: None) -> None:
+        """Run, or resume, a queued eval. check() raises Cancelled to stop it."""
         job = db.get_job(self.conn, job_id)
         if job is None:
             return
@@ -163,14 +242,22 @@ class Evaluator:
         db.update_job(self.conn, job_id, status="running")
         try:
             spec = self.retriever.spec(setup["collection"])
-            questions = self._questions(spec, setup["split"])
+            if "question_ids" not in setup:
+                setup = self._record_setup(job_id, spec, setup)
+            questions = self._run_questions(spec, setup)
             methods = setup["methods"]
-            if any(self.retriever.is_paid(spec, m) for m in methods if m in KEYWORD_METHODS):
-                self.retriever.prepare(spec, [q.text for q in questions])
+            paid = [m for m in methods if m in KEYWORD_METHODS and self.retriever.is_paid(spec, m)]
+            summarise = {q.id for m in paid for q in self._todo(job_id, m, questions)}
+            if summarise:
+                self.retriever.prepare(spec, [q.text for q in questions if q.id in summarise])
             for n, method in enumerate(methods, start=1):
-                self._run_method(job_id, spec, questions, method, setup)
+                check()
+                todo = self._todo(job_id, method, questions)  # read now: a repeat finds none
+                self._run_method(job_id, spec, todo, method, setup, check)
                 db.update_job(self.conn, job_id, progress=n / len(methods))
             db.update_job(self.conn, job_id, status="done")
+        except Cancelled:
+            db.update_job(self.conn, job_id, status="cancelled")
         except BudgetExceeded as e:
             db.update_job(self.conn, job_id, status="stopped_budget", error=str(e))
         except NoApiKey as e:
@@ -185,16 +272,26 @@ class Evaluator:
         questions: list[Question],
         method: str,
         setup: dict,
+        check: Callable[[], None],
     ) -> None:
+        """One method over `questions`, the ones still incomplete for it."""
+        if not questions:
+            return
         all_hits = [
             self.retriever.retrieve(spec.name, q.text, method, setup["k"], setup["rrf_k"])
             for q in questions
         ]
-        rows = self._retrieval_rows(spec, questions, all_hits)
+        if method == "question_only":  # no retrieval, so nothing to score it on
+            rows = [
+                {"hit_ids": [], "hit_skills": [], "retrieval": {}, "usd": 0.0} for _ in questions
+            ]
+        else:
+            rows = self._retrieval_rows(spec, questions, all_hits)
         for q, row in zip(questions, rows, strict=True):
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
             return
+        check()
         prompts = [
             answer_prompt(spec.qa_type, q.text, q.choices, answer_hits(spec.qa_type, hits))
             for q, hits in zip(questions, all_hits, strict=True)
@@ -373,4 +470,6 @@ def is_wrong(row: dict, primary: str) -> bool:
     if answer:
         key = "accuracy" if "accuracy" in answer else "em"
         return answer[key] == 0
+    if not row["retrieval"]:  # question_only: no retrieval, so nothing to miss
+        return False
     return row["retrieval"].get(primary, 0.0) == 0

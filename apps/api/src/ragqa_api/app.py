@@ -272,9 +272,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
-        job_id = state.evaluator.start(
+        job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
+        # Until the worker runs queued jobs, the eval runs on its own thread.
+        threading.Thread(target=state.evaluator.run, args=(job_id,), daemon=True).start()
         return {"job_id": job_id, "estimate": estimate}
 
     @app.get("/eval/{job_id}")

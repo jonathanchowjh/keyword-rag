@@ -96,7 +96,9 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
         for row in conn.execute("select id, setup_json from jobs").fetchall():
             if json.loads(row["setup_json"]).get("answer") is False:
                 conn.execute("update run_items set complete = 1 where job_id = ?", (row["id"],))
-        conn.execute("update run_items set complete = 1 where row_json like '%\"answer\"%'")
+        conn.execute(
+            "update run_items set complete = 1 where json_extract(row_json, '$.answer') is not null"
+        )
     conn.execute(
         "delete from run_items where rowid not in"
         " (select max(rowid) from run_items group by job_id, method, question_id)"
@@ -104,7 +106,12 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
     conn.execute(
         "create unique index if not exists run_items_key on run_items (job_id, method, question_id)"
     )
-    for row in conn.execute("select id, setup_json from jobs where kind = 'eval'").fetchall():
+    # A queued or running eval records its own question ids when it runs.
+    evals = conn.execute(
+        "select id, setup_json from jobs"
+        " where kind = 'eval' and status not in ('queued', 'running')"
+    ).fetchall()
+    for row in evals:
         setup = json.loads(row["setup_json"])
         if "question_ids" in setup:
             continue

@@ -1,11 +1,19 @@
-import time
-
 import pytest
 
-from ragqa_core.db import connect, create_job, get_job, run_items, save_questions
+from ragqa_core import db
+from ragqa_core.db import (
+    connect,
+    create_job,
+    get_job,
+    list_jobs,
+    requeue,
+    run_items,
+    save_questions,
+)
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
+from ragqa_core.llm import Cancelled
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
 from ragqa_core.types import Item, KeywordLists, Question
@@ -27,6 +35,7 @@ QUESTIONS = [
     for t in TOPICS
 ]
 LISTS = KeywordLists(topic=TOPICS, method=["survey", "assay"], common=["things", "question"])
+OTHER_LISTS = KeywordLists(topic=TOPICS[:3], method=["survey"], common=["things"])
 
 
 def setup_for(methods, answer=False, model=None, split="dev"):
@@ -53,15 +62,6 @@ def env(tmp_path):
     save_questions(conn, "c", QUESTIONS)
     retriever = Retriever(conn, store, models, claude, ix)
     return conn, Evaluator(conn, retriever, models, claude)
-
-
-def wait_until_done(conn, job, seconds=10):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if get_job(conn, job)["status"] not in ("queued", "running"):
-            return
-        time.sleep(0.05)
-    raise AssertionError("job did not finish")
 
 
 def test_estimate_counts_calls(env):
@@ -104,6 +104,7 @@ def test_run_writes_rows_and_table_has_cis(env):
     assert any(p["metric"] == "solution_sim@1" for p in t["pairs"])
     assert any(p["metric"] == "accuracy" for p in t["pairs"])
     assert t["proxy"] is not None and set(t["proxy"]) == {"spearman", "trusted"}
+    assert all(r["complete"] for r in run_items(conn, job))
 
 
 def test_run_without_answers_has_no_answer_metrics(env):
@@ -143,8 +144,8 @@ def test_run_records_failure(env):
 
 def test_setup_records_full_configuration(env):
     conn, ev = env
-    job = ev.start("c", "dev", ["hybrid"], False, None)
-    wait_until_done(conn, job)
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
     setup = get_job(conn, job)["setup"]
     assert {"dense_model", "judge_model", "keyword_version", "rrf_k", "k", "seed"} <= set(setup)
     assert {"dataset_filter", "collection", "split", "methods"} <= set(setup)
@@ -237,3 +238,193 @@ def test_estimate_prices_hops_at_the_model_that_sends_them(env):
     default = ev.estimate("c", "dev", ["iterative"], answer=False, model=None)["est_usd"]
     sonnet = ev.estimate("c", "dev", ["iterative"], answer=False, model="claude-sonnet-5-5")
     assert sonnet["est_usd"] == pytest.approx(default)
+
+
+def test_setup_is_recorded_on_first_run_only(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    assert "question_ids" not in get_job(conn, job)["setup"]
+    ev.run(job)
+    ids = get_job(conn, job)["setup"]["question_ids"]
+    assert sorted(ids) == sorted(q.id for q in QUESTIONS)
+    new = Question("q-new", "new", ["a"], ["A"], [], {"skill": "x", "solution": "y"})
+    save_questions(conn, "c", [new])
+    requeue(conn, job)
+    ev.run(job)
+    assert get_job(conn, job)["setup"]["question_ids"] == ids
+    assert "q-new" not in {r["question_id"] for r in run_items(conn, job)}
+
+
+def test_queue_stores_only_the_request(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], True, None, k=3, rrf_k=10)
+    assert get_job(conn, job)["setup"] == {
+        "collection": "c",
+        "split": "dev",
+        "methods": ["hybrid"],
+        "answer": True,
+        "model": ev.claude.default_model,
+        "k": 3,
+        "rrf_k": 10,
+    }
+    assert get_job(conn, job)["status"] == "queued"
+
+
+def test_run_skips_recorded_ids_whose_question_is_gone(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    setup = get_job(conn, job)["setup"]
+    db.set_job_setup(conn, job, {**setup, "question_ids": ["q-gone", "q-market", "q-enzyme"]})
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done"
+    assert [r["question_id"] for r in run_items(conn, job)] == ["q-market", "q-enzyme"]
+
+
+def test_retrieval_only_rows_are_complete_from_the_start(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "vector"], False, None)
+    seen = []
+
+    def check():
+        seen.append([r["complete"] for r in run_items(conn, job, "hybrid")])
+
+    ev.run(job, check=check)
+    assert seen == [[], [True] * 5]
+
+
+def test_resume_redoes_only_incomplete_rows(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "vector"], True, None)
+
+    def stop_after_first_method():
+        hybrid = run_items(conn, job, "hybrid")
+        if hybrid and all(r["complete"] for r in hybrid):
+            raise Cancelled()
+
+    ev.run(job, check=stop_after_first_method)
+    assert get_job(conn, job)["status"] == "cancelled"
+    assert ev.estimate_resume(job)["calls"] == 5  # vector's 5 answers only
+    sent, judged = [], []
+    complete_many, judge = ev.claude.complete_many, ev.models.judge
+
+    def counting_complete_many(prompts, **kw):
+        sent.append(len(prompts))
+        return complete_many(prompts, **kw)
+
+    def counting_judge(texts):
+        judged.append(len(texts))
+        return judge(texts)
+
+    ev.claude.complete_many = counting_complete_many
+    ev.models.judge = counting_judge
+    requeue(conn, job)
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done"
+    assert sent == [5] and judged == [5, 5]  # vector only: answers, then mine and gold
+    assert len(run_items(conn, job)) == 10 and all(r["complete"] for r in run_items(conn, job))
+
+
+def test_resume_of_a_complete_run_estimates_zero(env):  # Review focus 2
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], True, None)
+    ev.run(job)
+    assert ev.estimate_resume(job) == {"questions": 0, "calls": 0, "est_usd": 0.0}
+    rows = run_items(conn, job)
+    ledger = conn.execute("select count(*) from ledger").fetchone()[0]
+    db.update_job(conn, job, status="interrupted")
+    requeue(conn, job)
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done"
+    assert run_items(conn, job) == rows
+    assert conn.execute("select count(*) from ledger").fetchone()[0] == ledger
+
+
+def test_resume_estimate_of_a_run_that_never_started_is_the_full_estimate(env):
+    _, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
+    full = ev.estimate("c", "dev", ["hybrid", "kw_individual"], answer=True, model=None)
+    assert ev.estimate_resume(job) == full
+
+
+def test_resume_estimate_counts_a_method_with_no_rows(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "vector"], True, None)
+    ev.run(job)
+    conn.execute("delete from run_items where job_id = ? and method = 'vector'", (job,))
+    conn.execute(
+        "update run_items set complete = 0 where job_id = ? and question_id = 'q-enzyme'", (job,)
+    )
+    est = ev.estimate_resume(job)
+    assert est["calls"] == 6 and est["questions"] == 5 and est["est_usd"] > 0
+
+
+def test_resume_refused_when_lists_changed(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    db.update_job(conn, job, status="interrupted")
+    assert ev.resume_refusal(job) is None
+    old = ev.retriever.spec("c").keyword_version
+    new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    assert ev.resume_refusal(job) == (
+        f"keyword lists changed since this run ({old} → {new}); start a new run"
+    )
+
+
+def test_resume_refused_when_dense_model_changed(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    db.update_job(conn, job, status="failed")
+    conn.execute("update collections set dense_model = 'other/dense' where name = 'c'")
+    assert ev.resume_refusal(job) == (
+        "the dense model changed since this run (fake/dense → other/dense); start a new run"
+    )
+
+
+def test_resume_refused_by_kind_and_status(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    assert ev.resume_refusal(job) == "a done run cannot be resumed"
+    other = create_job(conn, "load", "c", {})
+    db.update_job(conn, other, status="interrupted")
+    assert ev.resume_refusal(other) == "only evals can be resumed"
+
+
+def test_a_run_that_never_started_is_resumable_after_list_changes(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    db.update_job(conn, job, status="cancelled")
+    ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    assert ev.resume_refusal(job) is None
+
+
+def test_question_only_has_no_retrieval_metrics(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["question_only", "hybrid"], False, None)
+    ev.run(job)
+    rows = run_items(conn, job, "question_only")
+    assert len(rows) == 5 and all(r["retrieval"] == {} for r in rows)
+    t = ev.table(job)
+    assert t["methods"]["question_only"] == {"usd": 0.0, "n": 5}
+    assert all("question_only" not in (p["a"], p["b"]) for p in t["pairs"])
+    assert ev.items(job, "question_only", wrong_only=True) == []
+
+
+def test_question_only_answers_are_scored(env):
+    conn, ev = env
+    ev.claude = fake_claude(conn, lambda p: "Answer: B")
+    job = ev.queue("c", "dev", ["question_only"], True, None)
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done"
+    assert all(r["retrieval"] == {} and r["complete"] for r in run_items(conn, job))
+    assert len(ev.items(job, "question_only", wrong_only=True)) == 5
+
+
+def test_queue_refuses_an_empty_split(env):
+    conn, ev = env
+    ev.retriever.indexer.create("e", "mcq", False)
+    with pytest.raises(ValueError, match="collection 'e' has no questions"):
+        ev.queue("e", "dev", ["hybrid"], False, None)
+    assert list_jobs(conn) == []
