@@ -191,6 +191,8 @@ class Evaluator:
     ) -> str:
         """Queue a run with the request only; the rest of its setup is recorded when it runs."""
         spec = self.retriever.spec(collection)
+        if not methods:
+            raise ValueError("choose at least one method")
         if not self._questions(spec, split):
             raise ValueError(f"collection '{collection}' has no questions")
         setup = {
@@ -349,12 +351,16 @@ class Evaluator:
         for n, (q, hits) in enumerate(zip(questions, all_hits, strict=True)):
             ids = [h.id for h in hits]
             if mine is not None and gold is not None:
-                metrics = {
-                    "solution_sim@1": cosine(mine[n], gold[n]) if hits else 0.0,
-                    "same_skill@1": float(
-                        bool(hits) and hits[0].meta.get("skill") == q.meta.get("skill")
-                    ),
-                }
+                # Only what can be measured: no explanation or solution, no score.
+                metrics = {}
+                if not hits:
+                    metrics = {"solution_sim@1": 0.0, "same_skill@1": 0.0}
+                else:
+                    if hits[0].explanation and q.meta.get("solution"):
+                        metrics["solution_sim@1"] = cosine(mine[n], gold[n])
+                    skill = q.meta.get("skill")
+                    if skill and hits[0].meta.get("skill"):
+                        metrics["same_skill@1"] = float(hits[0].meta["skill"] == skill)
             elif spec.qa_type == "multihop":
                 metrics = {
                     "recall@2": recall_at(ids, q.gold_ids, 2),
@@ -422,18 +428,7 @@ class Evaluator:
                     }
                 )
         measurable = {metric for entry in methods.values() for metric in entry} & set(METRICS)
-        proxy = None
-        if spec.qa_type == "mcq" and has_answers:
-            proxy = verdict.proxy(
-                {
-                    m: {k: entry[k]["mean"] for k in ("solution_sim@1", "accuracy") if k in entry}
-                    for m, entry in methods.items()
-                    if all(
-                        entry.get(k, {}).get("mean") is not None
-                        for k in ("solution_sim@1", "accuracy")
-                    )
-                }
-            )
+        proxy = self._proxy_for(job_id) if spec.qa_type == "mcq" and has_answers else None
         trusted = None
         if spec.qa_type == "mcq" and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
@@ -459,6 +454,7 @@ class Evaluator:
             "pairs": pairs,
             "proxy": proxy,
             "headline": headline,
+            "proxy_trusted": trusted,
             "scale": scaling,
             "reference": reference,
             "gaps": verdict.gaps(per_method, reference, headline, scaling["factor"]),
@@ -493,12 +489,26 @@ class Evaluator:
             **result,
         }
 
+    def _proxy_for(self, job_id: str) -> dict | None:
+        """The proxy check of one answered mcq run, straight from its rows."""
+        by_method: dict[str, list[dict]] = {}
+        for r in db.run_items(self.conn, job_id):
+            by_method.setdefault(r["method"], []).append(r)
+        means = {}
+        for method, rows in by_method.items():
+            sims = metric_values(rows, "solution_sim@1")
+            accs = metric_values(rows, "accuracy")
+            if sims and accs:
+                means[method] = {"solution_sim@1": avg(sims), "accuracy": avg(accs)}
+        return verdict.proxy(means)
+
     def collection_proxy_trusted(self, name: str) -> bool | None:
-        """Whether the newest answered run's proxy check passed (None: no check yet)."""
+        """The latest real proxy check among the done answered runs, newest first."""
         for job in self._done_evals(name):
             if job["setup"].get("answer"):
-                check = self.table(job["id"])["proxy"]
-                return None if check is None else check["trusted"]
+                check = self._proxy_for(job["id"])
+                if check is not None:
+                    return check["trusted"]
         return None
 
     def items(self, job_id: str, method: str, wrong_only: bool) -> list[dict]:

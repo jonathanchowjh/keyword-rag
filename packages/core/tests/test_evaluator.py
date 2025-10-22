@@ -91,7 +91,7 @@ def test_estimate_sonnet_costs_more(env):
 def test_run_writes_rows_and_table_has_cis(env):
     conn, ev = env
     job = create_job(
-        conn, "eval", "c", setup_for(["hybrid", "vector", "kw_individual"], answer=True)
+        conn, "eval", "c", setup_for(["hybrid", "vector", "kw_individual", "keyword"], answer=True)
     )
     ev.run(job)
     t = ev.table(job)
@@ -103,7 +103,7 @@ def test_run_writes_rows_and_table_has_cis(env):
     assert acc["lo"] <= acc["mean"] <= acc["hi"] and acc["mean"] == 1.0
     assert any(p["metric"] == "solution_sim@1" for p in t["pairs"])
     assert any(p["metric"] == "accuracy" for p in t["pairs"])
-    assert t["proxy"] is None  # three methods are too few for the proxy check (needs 4)
+    assert t["proxy"] is not None and t["proxy"]["methods"] == 4
     assert all(r["complete"] for r in run_items(conn, job))
 
 
@@ -565,11 +565,65 @@ def test_collection_answer_is_none_when_the_run_lacks_the_pair(env):
     assert ev.collection_answer("c") is None
 
 
-def test_collection_proxy_trusted_reads_the_newest_answered_run(env):
-    _, ev = env
+def finished_run(conn, scores):
+    """A done answered run with given {method: (solution_sim, accuracy)} for one question."""
+    job = create_job(conn, "eval", "c", {**setup_for(list(scores), answer=True)})
+    for method, (sim, acc) in scores.items():
+        row = {"retrieval": {"solution_sim@1": sim}, "answer": {"accuracy": acc}, "usd": 0.0}
+        db.upsert_run_item(conn, job, method, "q-enzyme", row, complete=True)
+    db.update_job(conn, job, status="done")
+    return job
+
+
+def test_collection_proxy_trusted_uses_the_latest_real_check(env):
+    conn, ev = env
     assert ev.collection_proxy_trusted("c") is None
-    job = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
+    four_bad = {
+        "vector": (0.1, 0.9),
+        "keyword": (0.2, 0.8),
+        "hybrid": (0.3, 0.7),
+        "kw_all": (0.4, 0.6),
+    }
+    finished_run(conn, four_bad)
+    assert ev.collection_proxy_trusted("c") is False
+    finished_run(conn, {"hybrid": (0.5, 0.5), "vector": (0.4, 0.4)})  # too few for a check
+    assert ev.collection_proxy_trusted("c") is False  # the older real check still stands
+
+
+def test_a_run_with_no_methods_is_refused_and_an_empty_one_tabulates(env):
+    conn, ev = env
+    with pytest.raises(ValueError, match="choose at least one method"):
+        ev.queue("c", "dev", [], True, None)
+    job = create_job(conn, "eval", "c", setup_for([], answer=True))
+    ev.run(job)  # a legacy empty run must not recurse
+    t = ev.table(job)
+    assert t["proxy"] is None and t["gaps"] == [] and t["answer"] is None
+
+
+def test_headline_falls_back_when_items_have_no_explanations(env):
+    conn, ev = env
+    ix = ev.retriever.indexer
+    spec = ix.create("e", "mcq", False)
+    ix.add(spec, [Item(f"{t}-item", f"{t} things", "A", None, {"skill": t}) for t in TOPICS])
+    ix.set_lists(spec, LISTS)
+    save_questions(conn, "e", QUESTIONS)
+    job = ev.queue("e", "dev", ["hybrid", "random_example"], False, None)
     ev.run(job)
-    assert ev.collection_proxy_trusted("c") is None  # too few methods for a proxy check
-    ev.table = lambda job_id: {"proxy": {"trusted": True}}  # type: ignore[method-assign]
-    assert ev.collection_proxy_trusted("c") is True
+    t = ev.table(job)
+    assert "solution_sim@1" not in t["methods"]["hybrid"]
+    assert t["headline"] == "same_skill@1" and t["proxy_trusted"] is None
+
+
+def test_unanswered_run_headline_follows_a_failed_proxy_check(env):
+    conn, ev = env
+    four_bad = {
+        "vector": (0.1, 0.9),
+        "keyword": (0.2, 0.8),
+        "hybrid": (0.3, 0.7),
+        "kw_all": (0.4, 0.6),
+    }
+    finished_run(conn, four_bad)
+    job = ev.queue("c", "dev", ["hybrid", "random_example"], False, None)
+    ev.run(job)
+    t = ev.table(job)
+    assert t["proxy_trusted"] is False and t["headline"] == "same_skill@1"

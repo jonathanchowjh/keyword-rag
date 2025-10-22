@@ -119,6 +119,16 @@ METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "table": {"em": "Correct answer", "f1": "Correct answer"},
 }
 
+_TABLE_SAYS = (
+    "Share answered correctly. Numbers are scored all-or-nothing; "
+    "only text answers get partial credit"
+)
+METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
+    "mcq": {},
+    "multihop": {},
+    "table": {"em": _TABLE_SAYS, "f1": _TABLE_SAYS},
+}
+
 QA_TYPES: dict[QaType, dict] = {
     "mcq": {
         "label": "Exam multiple choice",
@@ -143,6 +153,7 @@ def catalog() -> dict:
         "methods": METHODS,
         "metrics": METRICS,
         "metric_labels_by_type": METRIC_LABELS_BY_TYPE,
+        "metric_says_by_type": METRIC_SAYS_BY_TYPE,
         "qa_types": QA_TYPES,
         "answer_pair": list(ANSWER_PAIR),
     }
