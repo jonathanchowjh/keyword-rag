@@ -78,12 +78,19 @@ class Evaluator:
         questions = db.get_questions(self.conn, spec.name)
         return dev_slice(questions) if split == "dev" else questions
 
-    def _run_questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
-        """The run's recorded questions in recorded order; ids since deleted are skipped."""
-        if "question_ids" not in setup:  # never ran: what the first run will record
-            return self._questions(spec, setup["split"])
+    def _question_ids(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[str]:
+        if "question_ids" in setup:
+            return setup["question_ids"]
+        # Not recorded yet: an old run's are the ones it has rows for; a new
+        # run's are its split's, as its first run will record them.
+        return db.run_item_question_ids(self.conn, job_id) or [
+            q.id for q in self._questions(spec, setup["split"])
+        ]
+
+    def _run_questions(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """The run's questions in recorded order; ids since deleted are skipped."""
         by_id = {q.id: q for q in db.get_questions(self.conn, spec.name)}
-        return [by_id[i] for i in setup["question_ids"] if i in by_id]
+        return [by_id[i] for i in self._question_ids(job_id, spec, setup) if i in by_id]
 
     def _todo(self, job_id: str, method: str, questions: list[Question]) -> list[Question]:
         # A (method, question) pair with no row at all is incomplete too.
@@ -114,7 +121,7 @@ class Evaluator:
         setup = job["setup"]
         spec = self.retriever.spec(setup["collection"])
         self.retriever.indexer.check_model(spec)
-        questions = self._run_questions(spec, setup)
+        questions = self._run_questions(job_id, spec, setup)
         todo = {m: self._todo(job_id, m, questions) for m in setup["methods"]}
         pending = {q.id for qs in todo.values() for q in qs}
         remaining = [q for q in questions if q.id in pending]
@@ -199,19 +206,39 @@ class Evaluator:
         return db.create_job(self.conn, "eval", collection, setup)
 
     def _record_setup(self, job_id: str, spec: CollectionSpec, setup: dict) -> dict:
-        """On the first run only: the versions the run uses and the questions it asks."""
+        """On the first run only: the versions the run uses and the questions it asks.
+
+        Whatever the setup already records wins: an old run keeps its versions,
+        and its question ids are the ones it has rows for."""
+        ids = self._question_ids(job_id, spec, setup)
         setup = {
-            **setup,
             "dense_model": self.models.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
             "seed": DEV_SEED,
             "dataset_filter": FILTER_NOTES[spec.qa_type],
-            "question_ids": [q.id for q in self._questions(spec, setup["split"])],
+            "question_ids": ids,
+            **setup,
         }
         db.set_job_setup(self.conn, job_id, setup)
         return setup
+
+    def _version_change(self, spec: CollectionSpec, setup: dict) -> str | None:
+        """Why the recorded versions no longer hold, or None. A setup that records
+        no versions yet (never ran) records today's when it runs."""
+        if "keyword_version" not in setup:
+            return None
+        old, new = setup["keyword_version"], spec.keyword_version
+        if old != new:
+            return f"keyword lists changed since this run ({old} → {new}); start a new run"
+        old, new = setup.get("dense_model"), spec.dense_model
+        if old != new:
+            return f"the dense model changed since this run ({old} → {new}); start a new run"
+        old, new = setup.get("judge_model"), self.models.judge_model
+        if old != new:
+            return f"the judge model changed since this run ({old} → {new}); start a new run"
+        return None
 
     def resume_refusal(self, job_id: str) -> str | None:
         job = db.get_job(self.conn, job_id)
@@ -222,16 +249,7 @@ class Evaluator:
         if job["status"] not in db.JOBS_RESUMABLE:
             return f"a {job['status']} run cannot be resumed"
         setup = job["setup"]
-        if "question_ids" not in setup:  # never ran: its setup is recorded when it does
-            return None
-        spec = self.retriever.spec(setup["collection"])
-        old, new = setup.get("keyword_version"), spec.keyword_version
-        if old != new:
-            return f"keyword lists changed since this run ({old} → {new}); start a new run"
-        old, new = setup.get("dense_model"), spec.dense_model
-        if old != new:
-            return f"the dense model changed since this run ({old} → {new}); start a new run"
-        return None
+        return self._version_change(self.retriever.spec(setup["collection"]), setup)
 
     def run(self, job_id: str, check: Callable[[], None] = lambda: None) -> None:
         """Run, or resume, a queued eval. check() raises Cancelled to stop it."""
@@ -242,9 +260,14 @@ class Evaluator:
         db.update_job(self.conn, job_id, status="running")
         try:
             spec = self.retriever.spec(setup["collection"])
+            # Checked again at claim: a re-key queued ahead of a resume must not mix versions.
+            reason = self._version_change(spec, setup)
+            if reason:
+                db.update_job(self.conn, job_id, status="failed", error=reason)
+                return
             if "question_ids" not in setup:
                 setup = self._record_setup(job_id, spec, setup)
-            questions = self._run_questions(spec, setup)
+            questions = self._run_questions(job_id, spec, setup)
             methods = setup["methods"]
             paid = [m for m in methods if m in KEYWORD_METHODS and self.retriever.is_paid(spec, m)]
             summarise = {q.id for m in paid for q in self._todo(job_id, m, questions)}
@@ -400,7 +423,8 @@ class Evaluator:
                     }
                 )
         proxy = None
-        answered = [m for m in methods if "accuracy" in methods[m]]
+        # question_only has accuracy but no retrieval metric to rank against it.
+        answered = [m for m in methods if {"accuracy", "solution_sim@1"} <= set(methods[m])]
         if spec.qa_type == "mcq" and has_answers and len(answered) >= 3:
             rho = spearman(
                 [methods[m]["solution_sim@1"]["mean"] for m in answered],

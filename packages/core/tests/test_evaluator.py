@@ -428,3 +428,86 @@ def test_queue_refuses_an_empty_split(env):
     with pytest.raises(ValueError, match="collection 'e' has no questions"):
         ev.queue("e", "dev", ["hybrid"], False, None)
     assert list_jobs(conn) == []
+
+
+def test_table_with_question_only_and_two_answered_methods(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["question_only", "hybrid", "vector"], True, None)
+    ev.run(job)
+    t = ev.table(job)
+    q_only = t["methods"]["question_only"]
+    assert "accuracy" in q_only and not {"solution_sim@1", "same_skill@1"} & set(q_only)
+    assert t["proxy"] is None  # two methods with both metrics are too few to rank
+
+
+def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "vector"], True, None)
+
+    def stop_after_first_method():
+        hybrid = run_items(conn, job, "hybrid")
+        if hybrid and all(r["complete"] for r in hybrid):
+            raise Cancelled()
+
+    ev.run(job, check=stop_after_first_method)
+    old = ev.retriever.spec("c").keyword_version
+    new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    rows = run_items(conn, job)
+    ledger = conn.execute("select count(*) from ledger").fetchone()[0]
+    requeue(conn, job)  # as if the re-key was queued after the resume was accepted
+    ev.run(job)
+    after = get_job(conn, job)
+    assert after["status"] == "failed"
+    assert after["error"] == (
+        f"keyword lists changed since this run ({old} → {new}); start a new run"
+    )
+    assert run_items(conn, job) == rows
+    assert conn.execute("select count(*) from ledger").fetchone()[0] == ledger
+
+
+def test_resume_refused_when_judge_model_changed(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    db.update_job(conn, job, status="interrupted")
+    db.set_job_setup(conn, job, {**get_job(conn, job)["setup"], "judge_model": "old/judge"})
+    assert ev.resume_refusal(job) == (
+        "the judge model changed since this run (old/judge → fake/judge); start a new run"
+    )
+
+
+def legacy_job(conn, ev):
+    """An eval from before question ids were recorded: versions, rows, no ids."""
+    setup = {
+        **setup_for(["hybrid"]),
+        "dense_model": "fake/dense",
+        "judge_model": "fake/judge",
+        "keyword_version": ev.retriever.spec("c").keyword_version,
+        "seed": 7,
+        "dataset_filter": "an older filter",
+    }
+    job = create_job(conn, "eval", "c", setup)
+    for qid in ("q-market", "q-enzyme"):
+        db.upsert_run_item(conn, job, "hybrid", qid, {"retrieval": {}}, complete=False)
+    db.update_job(conn, job, status="interrupted")
+    return job, setup
+
+
+def test_a_legacy_run_keeps_its_setup_and_its_own_questions(env):
+    conn, ev = env
+    job, setup = legacy_job(conn, ev)
+    assert ev.estimate_resume(job)["questions"] == 2
+    requeue(conn, job)
+    ev.run(job)
+    after = get_job(conn, job)
+    assert after["status"] == "done"
+    assert after["setup"]["question_ids"] == ["q-enzyme", "q-market"]
+    assert {k: after["setup"][k] for k in setup} == setup
+    assert sorted(r["question_id"] for r in run_items(conn, job)) == ["q-enzyme", "q-market"]
+
+
+def test_a_legacy_run_is_refused_after_list_changes(env):
+    conn, ev = env
+    job, _ = legacy_job(conn, ev)
+    ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    assert "keyword lists changed" in (ev.resume_refusal(job) or "")

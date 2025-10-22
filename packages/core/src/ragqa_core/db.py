@@ -115,12 +115,9 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
         setup = json.loads(row["setup_json"])
         if "question_ids" in setup:
             continue
-        ids = conn.execute(
-            "select distinct question_id from run_items where job_id = ? order by question_id",
-            (row["id"],),
-        ).fetchall()
+        ids = run_item_question_ids(conn, row["id"])
         if ids:
-            set_job_setup(conn, row["id"], {**setup, "question_ids": [r[0] for r in ids]})
+            set_job_setup(conn, row["id"], {**setup, "question_ids": ids})
 
 
 def save_collection(conn: sqlite3.Connection, spec: CollectionSpec) -> None:
@@ -379,6 +376,15 @@ def complete_question_ids(conn: sqlite3.Connection, job_id: str, method: str) ->
         (job_id, method),
     )
     return {r["question_id"] for r in rows}
+
+
+def run_item_question_ids(conn: sqlite3.Connection, job_id: str) -> list[str]:
+    """The questions a run has rows for, sorted: an old run's question ids."""
+    rows = conn.execute(
+        "select distinct question_id from run_items where job_id = ? order by question_id",
+        (job_id,),
+    )
+    return [r["question_id"] for r in rows]
 
 
 def job_spend(conn: sqlite3.Connection, job_id: str) -> float:
