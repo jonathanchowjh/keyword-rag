@@ -7,7 +7,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Literal
 
-from ragqa_core import db
+from ragqa_core import db, verdict
+from ragqa_core.catalog import ANSWER_PAIR, METRICS
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
 from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, NoApiKey
 from ragqa_core.metrics import (
@@ -16,7 +17,6 @@ from ragqa_core.metrics import (
     paired_diff_ci,
     recall_at,
     separated,
-    spearman,
     squad_em_f1,
     tatqa_em_f1,
 )
@@ -52,7 +52,6 @@ MISS_METRIC: dict[QaType, str] = {
 }
 PAIR_ANSWER_METRIC: dict[QaType, str] = {"mcq": "accuracy", "multihop": "f1", "table": "f1"}
 ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "multihop": 100, "table": 100}
-PROXY_TRUST = 0.5
 ESTIMATE_SAMPLE = 5
 
 
@@ -422,15 +421,35 @@ class Evaluator:
                         "separated": separated(lo, hi),
                     }
                 )
+        measurable = {metric for entry in methods.values() for metric in entry} & set(METRICS)
         proxy = None
-        # question_only has accuracy but no retrieval metric to rank against it.
-        answered = [m for m in methods if {"accuracy", "solution_sim@1"} <= set(methods[m])]
-        if spec.qa_type == "mcq" and has_answers and len(answered) >= 3:
-            rho = spearman(
-                [methods[m]["solution_sim@1"]["mean"] for m in answered],
-                [methods[m]["accuracy"]["mean"] for m in answered],
+        if spec.qa_type == "mcq" and has_answers:
+            proxy = verdict.proxy(
+                {
+                    m: {k: entry[k]["mean"] for k in ("solution_sim@1", "accuracy") if k in entry}
+                    for m, entry in methods.items()
+                    if all(
+                        entry.get(k, {}).get("mean") is not None
+                        for k in ("solution_sim@1", "accuracy")
+                    )
+                }
             )
-            proxy = {"spearman": clean(rho), "trusted": bool(rho >= PROXY_TRUST)}
+        trusted = None
+        if spec.qa_type == "mcq" and not has_answers:
+            trusted = self.collection_proxy_trusted(spec.name)
+        headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
+        random_mean = methods.get("random_example", {}).get(headline, {}).get("mean")
+        scaling = verdict.scale(headline, random_mean)
+        per_method = {
+            method: {
+                q: values[0]
+                for q, row in per_q.items()
+                if (values := metric_values([row], headline))
+            }
+            for method, per_q in by_method.items()
+        }
+        reference = ANSWER_PAIR[1]
+        question_ids = {q for per_q in by_method.values() for q in per_q}
         return {
             "setup": setup,
             "status": job["status"],
@@ -439,7 +458,48 @@ class Evaluator:
             "methods": methods,
             "pairs": pairs,
             "proxy": proxy,
+            "headline": headline,
+            "scale": scaling,
+            "reference": reference,
+            "gaps": verdict.gaps(per_method, reference, headline, scaling["factor"]),
+            "answer": verdict.answer(per_method, headline, scaling["factor"]),
+            "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
+            "usd_total": db.job_spend(self.conn, job_id),
+            "question_count": len(setup["question_ids"])
+            if "question_ids" in setup
+            else len(question_ids),
         }
+
+    def _done_evals(self, collection: str) -> list[dict]:
+        return db.list_jobs(
+            self.conn, kind="eval", collection=collection, status="done", limit=1_000_000
+        )
+
+    def collection_answer(self, name: str) -> dict | None:
+        """The collection's answer: the newest answered run's, else the newest run's."""
+        done = self._done_evals(name)
+        answered = [j for j in done if j["setup"].get("answer")]
+        job = (answered or done or [None])[0]
+        if job is None:
+            return None
+        result = self.table(job["id"])["answer"]
+        if result is None:
+            return None
+        return {
+            "run_id": job["id"],
+            "at": job["created_at"],
+            "answered": bool(job["setup"].get("answer")),
+            "runs": len(done),
+            **result,
+        }
+
+    def collection_proxy_trusted(self, name: str) -> bool | None:
+        """Whether the newest answered run's proxy check passed (None: no check yet)."""
+        for job in self._done_evals(name):
+            if job["setup"].get("answer"):
+                check = self.table(job["id"])["proxy"]
+                return None if check is None else check["trusted"]
+        return None
 
     def items(self, job_id: str, method: str, wrong_only: bool) -> list[dict]:
         job = db.get_job(self.conn, job_id)

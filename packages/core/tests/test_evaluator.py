@@ -103,7 +103,7 @@ def test_run_writes_rows_and_table_has_cis(env):
     assert acc["lo"] <= acc["mean"] <= acc["hi"] and acc["mean"] == 1.0
     assert any(p["metric"] == "solution_sim@1" for p in t["pairs"])
     assert any(p["metric"] == "accuracy" for p in t["pairs"])
-    assert t["proxy"] is not None and set(t["proxy"]) == {"spearman", "trusted"}
+    assert t["proxy"] is None  # three methods are too few for the proxy check (needs 4)
     assert all(r["complete"] for r in run_items(conn, job))
 
 
@@ -511,3 +511,65 @@ def test_a_legacy_run_is_refused_after_list_changes(env):
     job, _ = legacy_job(conn, ev)
     ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
     assert "keyword lists changed" in (ev.resume_refusal(job) or "")
+
+
+def test_table_serves_gaps_and_answer(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "kw_individual", "random_example"], True, None)
+    ev.run(job)
+    t = ev.table(job)
+    assert t["reference"] == "hybrid" and t["headline"] == "accuracy"
+    assert {g["method"] for g in t["gaps"]} == {"kw_individual", "random_example"}
+    assert t["answer"]["candidate"] == "kw_individual" and t["usd_total"] >= 0
+    assert t["question_count"] == 5 and t["scale"] == {"unit": "pts", "factor": 100}
+    assert t["best_of_each"]["candidate"] == "kw_individual"
+
+
+def test_table_without_the_pair_has_no_answer_and_headlines_reasoning_match(env):
+    _, ev = env
+    job = ev.queue("c", "dev", ["vector", "random_example"], False, None)
+    ev.run(job)
+    t = ev.table(job)
+    assert t["answer"] is None and t["headline"] == "solution_sim@1"
+    assert t["scale"]["unit"] == "match"
+    assert t["question_count"] == 5
+
+
+def test_collection_answer_prefers_the_latest_answered_run(env):
+    conn, ev = env
+    assert ev.collection_answer("c") is None
+    answered = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
+    ev.run(answered)
+    free = ev.queue("c", "dev", ["hybrid", "kw_individual"], False, None)
+    ev.run(free)
+    a = ev.collection_answer("c")
+    assert a["run_id"] == answered and a["answered"] is True and a["runs"] == 2
+    assert a["candidate"] == "kw_individual" and a["verdict"] in ("yes", "no", "cant_tell")
+    assert a["at"] == get_job(conn, answered)["created_at"]
+
+
+def test_collection_answer_falls_back_to_the_newest_free_run(env):
+    _, ev = env
+    older = ev.queue("c", "dev", ["hybrid", "kw_individual"], False, None)
+    ev.run(older)
+    newer = ev.queue("c", "dev", ["hybrid", "kw_individual"], False, None)
+    ev.run(newer)
+    a = ev.collection_answer("c")
+    assert a["run_id"] == newer and a["answered"] is False and a["runs"] == 2
+
+
+def test_collection_answer_is_none_when_the_run_lacks_the_pair(env):
+    _, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "vector"], True, None)
+    ev.run(job)
+    assert ev.collection_answer("c") is None
+
+
+def test_collection_proxy_trusted_reads_the_newest_answered_run(env):
+    _, ev = env
+    assert ev.collection_proxy_trusted("c") is None
+    job = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
+    ev.run(job)
+    assert ev.collection_proxy_trusted("c") is None  # too few methods for a proxy check
+    ev.table = lambda job_id: {"proxy": {"trusted": True}}  # type: ignore[method-assign]
+    assert ev.collection_proxy_trusted("c") is True
