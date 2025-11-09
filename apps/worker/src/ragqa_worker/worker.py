@@ -64,19 +64,39 @@ class Worker:
                 log(f"progress {pct}%")
 
         with self.claude.for_job(job_id, check, log):
-            log("started")
+            reason = "job ended without a final status"
             try:
+                log("started")
                 self._dispatch(job, check, progress)
-            except Cancelled:
-                db.update_job(conn, job_id, status="cancelled")
-            except BudgetExceeded as e:
-                db.update_job(conn, job_id, status="stopped_budget", error=str(e))
-            except NoApiKey:
-                db.update_job(conn, job_id, status="stopped_no_key")
             except Exception as e:
-                db.update_job(conn, job_id, status="failed", error=repr(e))
-            final = db.get_job(conn, job_id)
-            log(f"finished: {final['status'] if final else 'unknown'}")
+                try:
+                    self._record_failure(job_id, e)
+                except Exception as e2:
+                    self.error = repr(e2)
+                    reason = f"worker could not record a final status: {e2!r}"
+            self._ensure_final(job_id, reason, log)
+
+    def _record_failure(self, job_id: str, e: Exception) -> None:
+        conn = self.conn
+        if isinstance(e, Cancelled):
+            db.update_job(conn, job_id, status="cancelled")
+        elif isinstance(e, BudgetExceeded):
+            db.update_job(conn, job_id, status="stopped_budget", error=str(e))
+        elif isinstance(e, NoApiKey):
+            db.update_job(conn, job_id, status="stopped_no_key")
+        else:
+            db.update_job(conn, job_id, status="failed", error=repr(e))
+
+    def _ensure_final(self, job_id: str, reason: str, log) -> None:
+        """Last resort: a claimed job never stays 'running'; failures here are kept, not raised."""
+        try:
+            job = db.get_job(self.conn, job_id)
+            if job is not None and job["status"] == "running":
+                db.update_job(self.conn, job_id, status="failed", error=reason)
+                job = db.get_job(self.conn, job_id)
+            log(f"finished: {job['status'] if job else 'unknown'}")
+        except Exception as e:
+            self.error = repr(e)
 
     def _dispatch(self, job: dict, check, progress) -> None:
         job_id, kind = job["id"], job["kind"]

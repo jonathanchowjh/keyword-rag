@@ -236,3 +236,30 @@ def test_start_and_stop(env):
     assert w.alive()
     w.stop()
     assert not w.alive()
+
+
+def test_logging_failure_still_ends_in_a_final_status(env, monkeypatch):
+    w, conn = env
+    j = db.create_job(conn, "rekey", "c", {"version": w.other_version})
+    real, state = db.log_job, {"n": 0}
+
+    def flaky(conn, job_id, message):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("log broke")
+        real(conn, job_id, message)
+
+    monkeypatch.setattr(db, "log_job", flaky)
+    assert w.run_one() == j
+    job = get_job(conn, j)
+    assert job["status"] == "failed" and "log broke" in job["error"]
+
+
+def test_eval_returning_without_final_status_is_failed(env):
+    w, conn = env
+    j = queue_eval(w)
+    w.evaluator.run = lambda job_id, check: None
+    assert w.run_one() == j
+    job = get_job(conn, j)
+    assert job["status"] == "failed" and job["error"] == "job ended without a final status"
+    assert "finished: failed" in log_text(conn, j)
