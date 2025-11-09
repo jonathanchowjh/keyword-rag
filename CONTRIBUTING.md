@@ -78,6 +78,8 @@ scripts/                  dev-qdrant.sh, gate.sh, image-smoke.sh
 tests/                    Repo-level guards and the smoke fixture
 ```
 
+The worker loop runs on a thread the API starts; routes only queue jobs.
+
 `ragqa_core` must never import `fastapi`, `starlette`, `uvicorn`, `ragqa_api`
 or `ragqa_worker`; `ragqa_worker` must never import the web layer. `tests/test_boundaries.py` fails if it does.
 

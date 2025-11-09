@@ -29,7 +29,7 @@ ragqa-worker = { workspace = true }
 
 [tool.pytest.ini_options]
 markers = ["integration: needs Docker or model downloads"]
-testpaths = ["tests", "packages/core/tests", "apps/api/tests"]
+testpaths = ["tests", "packages/core/tests", "apps/api/tests", "apps/worker/tests"]
 addopts = "--import-mode=importlib"
 
 [tool.ruff]
