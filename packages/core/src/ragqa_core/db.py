@@ -4,20 +4,28 @@ The jobs table is the work queue: create_job queues, claim_next_job takes the
 oldest queued job by insertion order, and the worker reports through
 update_job and log_job. Cancel is a flag the running job polls.
 
-One connection per process, opened with check_same_thread=False and in
-autocommit mode. Most writes are a single statement, which SQLite's serialized
-threading mode makes safe across the API's threadpool and the job threads.
-log_job, request_cancel, delete_job, delete_collection_rows and the migration in
-connect are several statements and are not atomic; log_job also reads then
-writes, so it assumes a single writer (the worker).
+One connection per process (spec §5.1), shared by the API's request threads and
+the worker thread, opened with check_same_thread=False and in autocommit mode.
+SQLite's serialized mode guards the database, but not Python's cursors and
+statement cache: two threads stepping statements on one connection raise
+InterfaceError. So connect returns a LockedConnection, which runs every
+execute, executemany and executescript under one lock and fetches all the rows
+before releasing it; callers get the rows (Rows), never a live cursor.
+
+The lock covers one statement. log_job, request_cancel, delete_job,
+delete_collection_rows and the migration in connect are several statements and
+are not atomic; log_job also reads then writes, so it assumes a single writer
+(the worker).
 """
 
 import json
 import sqlite3
+import threading
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ragqa_core.types import CollectionSpec, KeywordLists, Question
 
@@ -66,9 +74,55 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+class Rows:
+    """A statement's result, fetched while the connection's lock was held."""
+
+    def __init__(self, rows: list, rowcount: int, lastrowid: int | None):
+        self.rows, self.rowcount, self.lastrowid = rows, rowcount, lastrowid
+        self._next = 0
+
+    def fetchone(self) -> Any:
+        if self._next >= len(self.rows):
+            return None
+        self._next += 1
+        return self.rows[self._next - 1]
+
+    def fetchall(self) -> list:
+        rest, self._next = self.rows[self._next :], len(self.rows)
+        return rest
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class LockedConnection(sqlite3.Connection):
+    """sqlite3.Connection whose statements run one at a time across threads."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+
+    def execute(self, sql: str, parameters: Any = (), /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
+        with self._lock:
+            cursor = super().execute(sql, parameters)
+            return Rows(cursor.fetchall(), cursor.rowcount, cursor.lastrowid)
+
+    def executemany(self, sql: str, parameters: Any, /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
+        with self._lock:
+            cursor = super().executemany(sql, parameters)
+            return Rows(cursor.fetchall(), cursor.rowcount, cursor.lastrowid)
+
+    def executescript(self, script: str, /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
+        with self._lock:
+            super().executescript(script)
+            return Rows([], -1, None)
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    conn = sqlite3.connect(
+        path, check_same_thread=False, isolation_level=None, factory=LockedConnection
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("pragma journal_mode=wal")
     conn.executescript(SCHEMA)

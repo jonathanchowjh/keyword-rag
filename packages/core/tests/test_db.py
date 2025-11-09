@@ -389,3 +389,38 @@ def test_job_spend_sums_ledger_rows_for_the_job(conn):
         )
     assert job_spend(conn, "j") == 0.75
     assert job_spend(conn, "none") == 0.0
+
+
+def test_one_connection_is_safe_from_many_threads(conn):
+    # The API's request threads and the worker share one connection (spec §5.1).
+    import threading
+
+    errors: list[BaseException] = []
+    threads, ops = 8, 300
+
+    def hammer(n: int) -> None:
+        try:
+            for i in range(ops):
+                job = create_job(conn, "eval", f"c{n}", {"i": i})
+                row = get_job(conn, job)
+                assert row is not None and row["setup"] == {"i": i}
+                if i % 3 == 0:
+                    log_job(conn, job, "tick")
+                    assert len(list_jobs(conn, collection=f"c{n}", limit=5)) <= 5
+                if i % 5 == 0:
+                    update = "update jobs set progress = 0.5 where id = ?"
+                    assert conn.execute(update, (job,)).rowcount == 1
+        except BaseException as e:  # every failure is the finding
+            errors.append(e)
+
+    workers = [threading.Thread(target=hammer, args=(n,)) for n in range(threads)]
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join()
+    assert errors == []
+    rows = conn.execute("select collection, count(*) as n from jobs group by collection")
+    assert {r["collection"]: r["n"] for r in rows} == {f"c{n}": ops for n in range(threads)}
+    assert conn.execute("select count(*) as n from jobs where progress = 0.5").fetchone()["n"] == (
+        threads * len(range(0, ops, 5))
+    )
