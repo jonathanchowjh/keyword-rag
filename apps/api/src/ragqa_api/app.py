@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ragqa_core import db
@@ -450,12 +451,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "note": "This service's own spend; the Console shows the credit balance.",
         }
 
-    for page in ("lab", "board"):
-        path = STATIC / f"{page}.html"
-        if path.exists():
-            app.add_api_route(
-                f"/{page}", page_route(path), methods=["GET"], include_in_schema=False
-            )
+    # -- pages: plain HTML plus the shared ui.js, served from /static (behind the same auth) --
+
+    pages = {
+        "/": "collections",
+        "/c/{name}": "collection",
+        "/c/{name}/runs/{id}": "run",
+        "/worker": "worker",
+        "/lab": "lab",
+    }
+    for route, page in pages.items():
+        app.add_api_route(
+            route, page_route(STATIC / f"{page}.html"), methods=["GET"], include_in_schema=False
+        )
+    app.add_api_route(
+        "/board", lambda: RedirectResponse("/", status_code=307), include_in_schema=False
+    )
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     return app
 

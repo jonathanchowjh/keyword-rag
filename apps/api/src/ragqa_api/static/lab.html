@@ -3,26 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Retrieval Lab</title>
+<title>rag-qa · Lab</title>
+<link rel="stylesheet" href="/static/ui.css">
 <style>
-  :root { --bg:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#dedee3; --card:#f6f6f8; --hl:#ffe08a; --bad:#b3261e; --ok:#1e7a3c; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#141416; --fg:#ececf0; --muted:#9a9aa3; --line:#2c2c31; --card:#1c1c20; --hl:#6b5512; --bad:#ff8a80; --ok:#7fd69a; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
-  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; justify-content:space-between; }
-  h1 { font-size:18px; margin:0; }
-  nav a, .muted { color:var(--muted); }
-  form { display:grid; gap:10px; margin:16px 0; max-width:900px; }
-  label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
-  textarea, select, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  form { display:grid; gap:10px; margin:0 0 16px; max-width:900px; }
   textarea { min-height:70px; }
-  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
   .methods { display:flex; flex-wrap:wrap; gap:6px 14px; }
   .methods label { display:flex; gap:4px; align-items:center; color:var(--fg); font-size:13px; }
-  button { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:var(--fg); color:var(--bg); cursor:pointer; }
-  button:disabled { opacity:.5; cursor:default; }
   #results { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; }
   .col { border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; }
   .col h2 { font-size:14px; margin:0 0 6px; display:flex; justify-content:space-between; }
@@ -30,113 +17,32 @@
   .hit .id { font-size:12px; color:var(--muted); display:flex; justify-content:space-between; }
   .chip { display:inline-block; font-size:11px; padding:1px 6px; margin:2px 2px 0 0; border-radius:10px; border:1px solid var(--line); }
   .chip.on { background:var(--hl); border-color:transparent; }
-  .err { color:var(--bad); }
-  .ok { color:var(--ok); }
   .answer { margin-top:6px; font-weight:600; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Retrieval Lab</h1>
-  <nav><a href="/board">Eval Board</a> · <a href="/docs">API docs</a> · <span id="spend" class="muted"></span></nav>
-</header>
-<p class="muted">One question, several methods side by side. Highlighted chips are the keywords the question and the item share.</p>
+<aside id="side"></aside>
+<main id="main">
+  <div id="head"></div>
 
-<form id="form">
-  <div class="row">
-    <label>Collection <select id="collection" required></select></label>
-    <label>k <input id="k" type="number" value="3" min="1" max="20" style="width:70px"></label>
-    <label>rrf_k <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
-  </div>
-  <label>Question <textarea id="question" required></textarea></label>
-  <label>Choices, one per line (multiple choice only) <textarea id="choices" style="min-height:50px"></textarea></label>
-  <div class="methods" id="methods"></div>
-  <div class="row">
-    <label style="flex-direction:row;display:flex;gap:6px;color:var(--fg)"><input id="answer" type="checkbox"> answer (uses credit)</label>
-    <button id="run">Run</button>
-    <span id="status" class="muted"></span>
-  </div>
-</form>
+  <form id="form">
+    <div class="row">
+      <label>Collection <select id="collection" required></select></label>
+      <label>k <input id="k" type="number" value="3" min="1" max="20" style="width:70px"></label>
+      <label>rrf_k <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
+    </div>
+    <label>Question <textarea id="question" required></textarea></label>
+    <label>Choices, one per line (multiple choice only) <textarea id="choices" style="min-height:50px"></textarea></label>
+    <div class="methods" id="methods"></div>
+    <div class="row">
+      <label style="flex-direction:row;display:flex;gap:6px;color:var(--fg)"><input id="answer" type="checkbox"> answer (uses credit)</label>
+      <button id="run">Run</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </form>
 
-<div id="results"></div>
-
-<script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let collections = {};
-
-async function json(response) {
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || response.statusText);
-  return body;
-}
-
-async function loadCollections() {
-  const list = await json(await fetch("/collections"));
-  $("collection").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
-  for (const c of list) collections[c.name] = c;
-  if (list.length) await loadMethods();
-  else $("status").textContent = "No collections yet — create one at /docs.";
-}
-
-async function loadMethods() {
-  const name = $("collection").value;
-  const detail = await json(await fetch(`/collections/${encodeURIComponent(name)}`));
-  const preset = new Set(["hybrid", "kw_individual", "kw_rrf"]);
-  $("methods").innerHTML = detail.methods_available
-    .map((m) => `<label><input type="checkbox" value="${m}" ${preset.has(m) ? "checked" : ""}> ${m}</label>`)
-    .join("");
-}
-
-async function loadSpend() {
-  const b = await json(await fetch("/budget"));
-  $("spend").textContent = `spent $${b.spent_usd.toFixed(4)} of $${b.cap_usd.toFixed(2)} this month`;
-}
-
-function hitCard(hit, question) {
-  const matched = new Set(hit.matched || []);
-  const chips = Object.entries(hit.keywords || {})
-    .filter(([facet]) => facet !== "all")
-    .flatMap(([, words]) => words)
-    .map((w) => `<span class="chip ${matched.has(w) ? "on" : ""}">${esc(w)}</span>`)
-    .join("");
-  const gold = hit.answer ? `<span class="muted">example answer ${esc(hit.answer)}</span>` : "";
-  return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>${hit.score.toFixed(3)}</span></div>
-    <div>${esc(hit.text.slice(0, 300))}${hit.text.length > 300 ? "…" : ""}</div>
-    <div>${chips}</div>${gold}</div>`;
-}
-
-$("collection").addEventListener("change", loadMethods);
-
-$("form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const methods = [...document.querySelectorAll("#methods input:checked")].map((i) => i.value);
-  const choices = $("choices").value.split("\n").map((s) => s.trim()).filter(Boolean);
-  const body = {
-    collection: $("collection").value, question: $("question").value, methods,
-    choices: choices.length ? choices : null, k: +$("k").value, rrf_k: +$("rrfk").value,
-    answer: $("answer").checked,
-  };
-  $("run").disabled = true; $("status").textContent = "running…";
-  try {
-    const r = await json(await fetch("/query", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
-    $("results").innerHTML = Object.entries(r.results).map(([m, v]) => `<section class="col">
-      <h2><span>${esc(m)}</span><span class="muted">$${v.usd.toFixed(4)}</span></h2>
-      ${v.error ? `<div class="err">${esc(v.error)}</div>` : ""}
-      ${v.hits.map((h) => hitCard(h)).join("") || (v.error ? "" : '<div class="muted">no retrieval</div>')}
-      ${v.answer !== null ? `<div class="answer">Answer: ${esc(v.answer)}</div>` : ""}
-    </section>`).join("");
-    $("status").textContent = "";
-    loadSpend();
-  } catch (e) {
-    $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
-  } finally {
-    $("run").disabled = false;
-  }
-});
-
-loadCollections().catch((e) => ($("status").textContent = e.message));
-loadSpend().catch(() => {});
-</script>
+  <div id="results"></div>
+</main>
+<script type="module" src="/static/lab.js"></script>
 </body>
 </html>

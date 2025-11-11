@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -335,23 +338,82 @@ def test_half_set_auth_is_503(tmp_path):
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/ragqa_api/static"
-PUBLIC = {"/collections", "/query", "/eval", "/jobs", "/budget", "/health"}
+PUBLIC = {"/collections", "/query", "/eval", "/jobs", "/budget", "/health", "/catalog", "/status"}
+PAGES = ("/", "/c/x", "/c/x/runs/abc", "/worker", "/lab")
 
 
 def test_pages_are_served(client):
-    for path in ("/lab", "/board"):
+    for path in PAGES:
         r = client.get(path)
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    board = client.get("/board", follow_redirects=False)
+    assert board.status_code == 307 and board.headers["location"] == "/"
+    assert not (STATIC / "board.html").exists()
+
+
+def test_static_assets_are_served(client):
+    assert client.get("/static/ui.css").status_code == 200
+    assert "export" in client.get("/static/ui.js").text
+
+
+def test_static_is_behind_basic_auth(tmp_path):
+    c = TestClient(create_app(settings(tmp_path, username="u", password="p")))
+    for path in ("/static/ui.js", "/static/ui.css", "/", "/lab"):
+        assert c.get(path).status_code == 401
+        assert c.get(path, auth=("u", "p")).status_code == 200
 
 
 def test_pages_only_call_public_endpoints():
     import re
 
-    for page in ("lab.html", "board.html"):
-        text = (STATIC / page).read_text()
-        paths = {"/" + p.split("/")[1] for p in re.findall(r"""fetch\(\s*[`'"](/[a-z/]+)""", text)}
-        assert paths and paths <= PUBLIC, (page, paths)
+    for path in STATIC.glob("*.[hj][ts]*"):
+        text = path.read_text()
+        calls = re.findall(r"""(?:fetch|api)\(\s*[`'"](/[a-z/]+)""", text)
+        assert {"/" + p.split("/")[1] for p in calls} <= PUBLIC, (path.name, calls)
         assert "http://" not in text and "https://" not in text  # no external requests
+    assert {p.name for p in STATIC.glob("*.html")} >= {"collections.html", "lab.html"}
+
+
+NODE = shutil.which("node")
+CHECK = """
+import * as u from './ui.mjs';
+const out = {
+  a: u.pts(6.2, 1.8, 10.4), b: u.pts(-7, -12, -2), c: u.pts(1, -2, 4), d: u.pts(0.4, -3, 3),
+  e: u.pct(0.776), f: u.esc('<a href="x">&</a>'),
+  g: u.clock('2026-10-23T14:02:00', new Date('2026-10-23T09:00:00')),
+  h: u.clock('2026-10-21T14:02:00', new Date('2026-10-23T09:00:00')),
+  i: u.verdictText(null, {}),
+};
+const labels = {methods: {kw_individual: {label: 'Keywords per list'}, hybrid: {label: 'Hybrid'}},
+                metrics: {accuracy: {label: 'Answered correctly'}}};
+const ans = (verdict, diff, lo, hi) => u.verdictText(
+  {candidate: 'kw_individual', reference: 'hybrid', metric: 'accuracy', verdict, diff, lo, hi},
+  labels);
+out.j = ans('yes', 6.2, 1.8, 10.4);
+out.k = ans('no', -7, -12, -2);
+out.l = ans('cant_tell', 1, -2, 4);
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_ui_formatting(tmp_path):
+    (tmp_path / "ui.mjs").write_text((STATIC / "ui.js").read_text())
+    (tmp_path / "check.mjs").write_text(CHECK)
+    r = subprocess.run([NODE, "check.mjs"], cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["a"] == "+6 pts (2–10)"
+    assert got["b"] == "−7 pts (−12 to −2)"
+    assert got["c"] == "+1 pt (−2 to 4)"
+    assert got["d"] == "+0 pts (−3 to 3)"
+    assert got["e"] == "78%"
+    assert got["f"] == "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
+    assert got["g"] == "14:02" and got["h"] == "21 Oct 14:02"
+    assert got["i"] == "No answer yet"
+    assert got["j"] == "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
+    assert got["k"].startswith("No: Keywords per list −7 pts")
+    assert got["l"].startswith("Can't tell: Keywords per list +1 pt")
 
 
 def test_model_mismatch_on_query_and_eval(client):
