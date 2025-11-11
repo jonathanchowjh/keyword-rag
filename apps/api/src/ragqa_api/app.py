@@ -1,22 +1,26 @@
 """The HTTP API. Thin: every decision lives in ragqa_core; this maps it to HTTP.
 
+Routes never run long work: loads, re-keys and evals are queued as jobs, and
+the worker thread (ragqa_worker), started by the lifespan, runs them in order.
+
 Run with `uvicorn --factory ragqa_api.app:create_app`.
 """
 
 import base64
 import secrets
-import threading
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from ragqa_core import db
-from ragqa_core.datasets import DATASETS
+from ragqa_core.catalog import catalog
+from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
@@ -34,9 +38,19 @@ from ragqa_core.retriever import (
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
+from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
+ALL = 1_000_000  # list_jobs limit meaning "every job"
+BUSY_STATE = {"load": "loading", "rekey": "rekeying", "eval": "evaluating"}
+KIND_LABEL = {"load": "Load", "rekey": "Re-key", "eval": "Eval"}
+PROBLEM = {
+    "failed": "failed",
+    "interrupted": "was interrupted by a restart",
+    "stopped_budget": "stopped at the monthly cap",
+    "stopped_no_key": "stopped: needs ANTHROPIC_API_KEY",
+}
 
 
 class NewCollection(BaseModel):
@@ -92,6 +106,10 @@ class EvalRequest(BaseModel):
     confirm: bool = False
 
 
+class ResumeRequest(BaseModel):
+    confirm: bool = False
+
+
 def spec_json(spec: CollectionSpec) -> dict:
     return asdict(spec)
 
@@ -102,13 +120,23 @@ def check_methods(methods: list[str]) -> None:
         raise HTTPException(422, f"unknown methods {unknown}; known: {list(METHOD_NAMES)}")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Jobs left running by a stopped process are interrupted; queued ones stay queued."""
+    db.interrupt_running(app.state.conn)
+    app.state.worker.start()
+    try:
+        yield
+    finally:
+        app.state.worker.stop()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
-    app = FastAPI(title="rag-qa", version="0.1.0")
+    app = FastAPI(title="rag-qa", version="0.1.0", lifespan=lifespan)
     state = app.state
     state.settings = settings
     state.conn = db.connect(settings.home / "ragqa.db")
-    db.interrupt_running(state.conn)
     state.store = Store(
         settings.qdrant_url, None if settings.qdrant_url else settings.home / "qdrant"
     )
@@ -122,6 +150,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     state.indexer = Indexer(state.conn, state.store, state.models, state.claude)
     state.retriever = Retriever(state.conn, state.store, state.models, state.claude, state.indexer)
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.claude)
+    state.loader = Loader(state.conn, state.indexer, state.claude, settings.home)
+    state.worker = Worker(state.conn, state.claude, state.indexer, state.loader, state.evaluator)
 
     # -- auth ------------------------------------------------------------------
 
@@ -177,12 +207,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(name)
         lists = db.get_keyword_lists(state.conn, name)
         available = [m for m in METHOD_NAMES if lists is not None or m not in KEYWORD_METHODS]
+        count = state.store.count(name)
+        jobs = db.list_jobs(state.conn, collection=name, limit=ALL)
+        busy, job = collection_state(jobs, count, lists is not None)
+        questions = db.get_questions(state.conn, name)
         return {
             **spec_json(spec),
-            "count": state.store.count(name),
+            "count": count,
             "keyword_lists": asdict(lists) if lists else None,
             "methods_available": available,
+            "state": busy,
+            "progress": job["progress"] if job and job["status"] == "running" else None,
+            "job": job,
+            "questions": len(questions),
+            "dev_questions": len(dev_slice(questions)),
+            "answer": state.evaluator.collection_answer(name),
+            "runs": sum(1 for j in jobs if j["kind"] == "eval"),
         }
+
+    @app.delete("/collections/{name}", status_code=204)
+    def delete_collection(name: str) -> Response:
+        state.retriever.spec(name)
+        running = db.list_jobs(state.conn, collection=name, status="running", limit=1)
+        if running:
+            raise HTTPException(
+                409, f"a {running[0]['kind']} job is running on '{name}'; cancel it first"
+            )
+        for job in db.list_jobs(state.conn, collection=name, status="queued", limit=ALL):
+            if db.request_cancel(state.conn, job["id"]) == "running":  # claimed meanwhile
+                raise HTTPException(
+                    409, f"a {job['kind']} job started on '{name}'; it is being cancelled"
+                )
+        state.store.drop(name)
+        db.delete_collection_rows(state.conn, name)
+        return Response(status_code=204)
 
     @app.post("/collections/{name}/documents")
     def add_documents(name: str, body: Documents) -> dict:
@@ -216,9 +274,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         job_id = db.create_job(
             state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
         )
-        threading.Thread(
-            target=run_load, args=(state, settings, job_id, spec, body), daemon=True
-        ).start()
         return {"job_id": job_id}
 
     @app.post("/collections/{name}/keyword-lists/propose")
@@ -227,12 +282,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sample = sample_items(state.store, name)
         return asdict(state.indexer.propose_lists(spec, sample))
 
-    @app.put("/collections/{name}/keyword-lists")
+    @app.put("/collections/{name}/keyword-lists", status_code=202)
     def put_lists(name: str, body: Lists) -> dict:
+        """Saves the lists as a version; a queued rekey job switches to it once every
+        item is re-keyed (spec §5.5)."""
         spec = state.retriever.spec(name)
         if db.running_eval(state.conn, name):
             raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
-        return {"version": state.indexer.set_lists(spec, KeywordLists(**body.model_dump()))}
+        version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
+        job_id = db.create_job(state.conn, "rekey", name, {"version": version})
+        return {"version": version, "job_id": job_id}
 
     @app.post("/query")
     def query(body: QueryRequest) -> dict:
@@ -275,16 +334,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
-        # Until the worker runs queued jobs, the eval runs on its own thread.
-        threading.Thread(target=state.evaluator.run, args=(job_id,), daemon=True).start()
         return {"job_id": job_id, "estimate": estimate}
+
+    @app.get("/eval")
+    def list_runs(collection: str | None = None) -> list[dict]:
+        jobs = db.list_jobs(state.conn, kind="eval", collection=collection, limit=ALL)
+        return [run_summary(job, state.evaluator.table(job["id"])) for job in jobs]
 
     @app.get("/eval/{job_id}")
     def eval_table(job_id: str) -> dict:
-        try:
-            return state.evaluator.table(job_id)
-        except KeyError:
-            raise HTTPException(404, f"no job {job_id}") from None
+        job = db.get_job(state.conn, job_id)
+        if job is None or job["kind"] != "eval":
+            raise HTTPException(404, f"no run {job_id}")
+        return {
+            **state.evaluator.table(job_id),
+            "log": job["log"],
+            "created_at": job["created_at"],
+        }
+
+    @app.delete("/eval/{job_id}", status_code=204)
+    def delete_run(job_id: str) -> Response:
+        job = db.get_job(state.conn, job_id)
+        if job is None or job["kind"] != "eval":
+            raise HTTPException(404, f"no run {job_id}")
+        if job["status"] in ("queued", "running"):
+            raise HTTPException(409, f"the run is {job['status']}; cancel it first")
+        db.delete_job(state.conn, job_id)
+        return Response(status_code=204)
 
     @app.get("/eval/{job_id}/items")
     def eval_items(job_id: str, method: str, wrong: bool = False) -> list[dict]:
@@ -293,12 +369,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"no job {job_id}") from None
 
+    @app.get("/jobs")
+    def list_jobs(
+        collection: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        return db.list_jobs(
+            state.conn, kind=kind, collection=collection, status=status, limit=limit
+        )
+
     @app.get("/jobs/{job_id}")
     def job(job_id: str) -> dict:
         row = db.get_job(state.conn, job_id)
         if row is None:
             raise HTTPException(404, f"no job {job_id}")
         return row
+
+    @app.post("/jobs/{job_id}/cancel")
+    def cancel(job_id: str) -> dict:
+        row = job(job_id)
+        if row["status"] not in ("queued", "running"):
+            raise HTTPException(409, f"job is {row['status']}")
+        return {"status": db.request_cancel(state.conn, job_id)}
+
+    @app.post("/jobs/{job_id}/resume", status_code=202)
+    def resume(job_id: str, body: ResumeRequest | None = None):
+        """Without confirm, what resuming would cost (spec §5.4); with it, requeued."""
+        try:
+            refusal = state.evaluator.resume_refusal(job_id)
+        except KeyError:
+            raise HTTPException(404, f"no job {job_id}") from None
+        if refusal:
+            raise HTTPException(409, refusal)
+        if body is None or not body.confirm:
+            return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
+        db.requeue(state.conn, job_id)
+        return {"job_id": job_id}
+
+    @app.get("/status")
+    def status() -> dict:
+        worker, alive = state.worker, state.worker.alive()
+        running = db.list_jobs(state.conn, status="running", limit=1)
+        problems = []
+        if not alive:
+            problems.append("The worker thread has stopped; restart the service")
+        if worker.error:
+            problems.append(f"Worker error: {worker.error}")
+        problems += job_problems(db.list_jobs(state.conn, limit=ALL))
+        return {
+            "worker": {
+                "alive": alive,
+                "running": running[0] if running else None,
+                "error": worker.error,
+            },
+            "queue": db.list_jobs(state.conn, status="queued", limit=ALL)[::-1],
+            "batches": db.pending_batches(state.conn),
+            "problems": problems,
+        }
+
+    @app.get("/catalog")
+    def get_catalog() -> dict:
+        return catalog()
 
     @app.get("/budget")
     def budget() -> dict:
@@ -340,16 +473,48 @@ def authorised(request: Request, username: str, password: str) -> bool:
     )
 
 
-def run_load(state, settings: Settings, job_id: str, spec: CollectionSpec, body: LoadRequest):
-    conn = state.conn
-    db.update_job(conn, job_id, status="running")
-    loader = Loader(conn, state.indexer, state.claude, settings.home)
-    try:
-        result = loader.run(db.get_job(conn, job_id) or {}, lambda: None)
-        db.update_job(conn, job_id, status="done", progress=1.0, result=result)
-    except BudgetExceeded as e:
-        db.update_job(conn, job_id, status="stopped_budget", error=str(e))
-    except NoApiKey as e:
-        db.update_job(conn, job_id, status="stopped_no_key", error=str(e))
-    except Exception as e:  # recorded on the job; the thread must not die silently
-        db.update_job(conn, job_id, status="failed", error=repr(e))
+def collection_state(jobs: list[dict], count: int, has_lists: bool) -> tuple[str, dict | None]:
+    """A collection's state and the job behind it; `jobs` are its jobs, newest first."""
+    running = next((j for j in jobs if j["status"] == "running"), None)
+    if running:
+        return BUSY_STATE.get(running["kind"], "busy"), running
+    queued = [j for j in jobs if j["status"] == "queued"]
+    if queued:
+        return "queued", queued[-1]  # the one the worker takes first
+    if count == 0:
+        return "empty", None
+    return ("ready" if has_lists else "no_lists"), None
+
+
+def run_summary(job: dict, table: dict) -> dict:
+    setup = job["setup"]
+    return {
+        "id": job["id"],
+        "collection": job["collection"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "created_at": job["created_at"],
+        "methods": setup.get("methods"),
+        "split": setup.get("split"),
+        "answer": setup.get("answer"),
+        "model": setup.get("model"),
+        "question_count": table["question_count"],
+        "usd_total": table["usd_total"],
+        "answer_summary": table["answer"],
+    }
+
+
+def job_problems(jobs: list[dict]) -> list[str]:
+    """One line per collection and kind whose newest job (jobs: newest first) went wrong."""
+    seen, problems = set(), []
+    for job in jobs:
+        key = (job["collection"], job["kind"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if job["status"] in PROBLEM:
+            kind = KIND_LABEL.get(job["kind"], job["kind"].capitalize())
+            problems.append(
+                f"{kind} {job['id'][:4]} on {job['collection']} {PROBLEM[job['status']]}"
+            )
+    return problems

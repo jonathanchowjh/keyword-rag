@@ -446,6 +446,11 @@ def job_spend(conn: sqlite3.Connection, job_id: str) -> float:
     return row["usd"] or 0.0
 
 
+def pending_batches(conn: sqlite3.Connection) -> list[dict]:
+    """Claude batches submitted and not yet collected, oldest first."""
+    return [dict(r) for r in conn.execute("select * from pending_batches order by rowid")]
+
+
 def run_items(conn: sqlite3.Connection, job_id: str, method: str | None = None) -> list[dict]:
     if method is None:
         rows = conn.execute("select * from run_items where job_id = ? order by rowid", (job_id,))

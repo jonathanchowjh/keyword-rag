@@ -26,7 +26,7 @@ and where.
 - [Retrieval methods](#retrieval-methods)
 - [Datasets](#datasets)
 - [Cost safety](#cost-safety)
-- [Reading the Board](#reading-the-board)
+- [Reading a run](#reading-a-run)
 
 How it is built and how to work on it is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -118,16 +118,27 @@ A collection remembers the dense model it was built with. Changing
 |---|---|
 | `GET /health` | Liveness, and whether a key is set |
 | `POST /collections` | `{name, qa_type: mcq\|multihop\|table, summarize}` |
-| `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists and available methods |
+| `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
+| `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}` |
-| `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa` as a job |
+| `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`: queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved |
-| `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}`; re-assigns every item's keywords and returns the version |
+| `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it |
 | `POST /query` | One question, several methods side by side, optionally answered |
-| `POST /eval` | Without `confirm`: the estimate. With it: a background evaluation run |
-| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | Results table with intervals; per-question rows |
-| `GET /jobs/{job_id}` | Any job's status and progress |
+| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}` |
+| `GET /eval?collection=` | Every run, newest first, one summary row each |
+| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log (see [Reading a run](#reading-a-run)); per-question rows |
+| `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
+| `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
+| `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again |
+| `GET /status` | The worker, the queue, pending Claude batches and the problems that need a person |
+| `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
 | `GET /budget` | This service's spend this month against its cap |
+
+Loads, re-keys and evaluations run one at a time, in the order they were
+queued, on a worker thread inside the service. A job that was running when the
+service stopped comes back `interrupted`; queued jobs stay queued.
 
 A method that cannot run inside `/query`, for example a keyword method before
 lists exist, reports its own `error`, and the other methods still return.
@@ -208,14 +219,32 @@ Rough prices on Haiku 5.5: a one-shot science answer is about $0.0005, and a
 200-question × 10-method evaluation with answers about $1. Sonnet costs
 about 20 times as much.
 
-## Reading the Board
+## Reading a run
 
-- Each cell is `mean [low, high]`, a 95% bootstrap interval over questions.
-- **Not separated** lists method pairs whose paired difference interval
-  crosses zero. At 200 questions, a gap of a few points is usually noise:
-  the paper's 78.9% vs 76.3% was two questions out of 76.
-- **Proxy check** (exam QA type, with answers, 3 or more methods): whether
-  solution similarity, the free metric, ranks methods the way accuracy does.
-  If it doesn't, the free metric is marked untrusted for that run.
+`GET /eval/{job_id}` returns everything the Board shows, computed in the
+service:
+
+- **`answer`** compares one pair declared in advance: `kw_individual`
+  (Keywords per list) against `hybrid` (Hybrid), on the same questions. Its
+  `verdict` is `yes`, `no` or `cant_tell`, read from the 95% paired bootstrap
+  interval of the gap. A run without both methods has no answer.
+- **`headline`** is the metric the answer uses: accuracy (or F1 for multi-hop
+  and tables) when the run answered, else a free retrieval metric.
+- **`gaps`** puts every method against the reference (Hybrid), as a paired
+  difference with its interval: `ahead`, `behind` or `cant_tell`. Two
+  intervals that overlap say nothing about a paired gap. At 200 questions, a
+  gap of a few points is usually noise: the paper's 78.9% vs 76.3% was two
+  questions out of 76.
+- **`best_of_each`** (best keyword method against best other method) is
+  picked after the fact, so its gap is likely overstated. It is never the
+  answer.
+- **`methods`** holds each method's own score as `mean [low, high]`, and
+  **`pairs`** every pair compared.
+- **`proxy`** (exam QA type, with answers): whether solution similarity, the
+  free metric, ranks retrieval methods the way accuracy does. It needs 4 or
+  more methods, leaves out No retrieval and the controls, and passes only if
+  the rank correlation is at least 0.5 and the declared pair points the same
+  way on both.
 - Every run records its full setup: models, keyword-list version, `k`,
-  `rrf_k`, seed and dataset filter.
+  `rrf_k`, seed, dataset filter and question ids. `log` holds the run's last
+  50 events.
