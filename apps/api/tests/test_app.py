@@ -348,6 +348,8 @@ def test_pages_are_served(client):
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
     board = client.get("/board", follow_redirects=False)
     assert board.status_code == 307 and board.headers["location"] == "/"
+    for path in PAGES:  # /favicon.ico is not served, so every page opts out of asking for it
+        assert 'rel="icon"' in client.get(path).text, path
     assert not (STATIC / "board.html").exists()
 
 
@@ -366,11 +368,15 @@ def test_static_is_behind_basic_auth(tmp_path):
 def test_pages_only_call_public_endpoints():
     import re
 
+    called: set[str] = set()
     for path in STATIC.glob("*.[hj][ts]*"):
         text = path.read_text()
-        calls = re.findall(r"""(?:fetch|api)\(\s*[`'"](/[a-z/]+)""", text)
-        assert {"/" + p.split("/")[1] for p in calls} <= PUBLIC, (path.name, calls)
+        assert not re.search(r"(?:fetch|api)\(\s*`\$\{", text), path.name  # unreadable target
+        for _, target in re.findall(r"""(?:fetch|api)\(\s*([`'"])(/[^`'"]*)""", text):
+            called.add("/" + re.match(r"/?([A-Za-z0-9_-]*)", target).group(1))
         assert "http://" not in text and "https://" not in text  # no external requests
+    assert called <= PUBLIC, called - PUBLIC
+    assert {"/collections", "/query", "/catalog", "/status", "/budget"} <= called
     assert {p.name for p in STATIC.glob("*.html")} >= {"collections.html", "lab.html"}
 
 
@@ -383,6 +389,10 @@ const out = {
   g: u.clock('2026-10-23T14:02:00', new Date('2026-10-23T09:00:00')),
   h: u.clock('2026-10-21T14:02:00', new Date('2026-10-23T09:00:00')),
   i: u.verdictText(null, {}),
+  n: [u.pct(null), u.pct(undefined), u.pct(NaN), u.pct(Infinity), u.pct(0)],
+  o: [u.pts(undefined, 1, 2), u.pts(null, 1, 2), u.pts(NaN, 1, 2), u.pts(-2.5, -4, -1)],
+  p: [u.clock('garbage'), u.clock(null), u.clock(undefined)],
+  q: [u.pts(2.5, 1.5, 3.5), u.pts(5, null, undefined)],
 };
 const labels = {methods: {kw_individual: {label: 'Keywords per list'}, hybrid: {label: 'Hybrid'}},
                 metrics: {accuracy: {label: 'Answered correctly'}}};
@@ -411,6 +421,10 @@ def test_ui_formatting(tmp_path):
     assert got["f"] == "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
     assert got["g"] == "14:02" and got["h"] == "21 Oct 14:02"
     assert got["i"] == "No answer yet"
+    assert got["n"] == ["–", "–", "–", "–", "0%"]
+    assert got["o"] == ["–", "–", "–", "−3 pts (−4 to −1)"]
+    assert got["p"] == ["–", "–", "–"]
+    assert got["q"] == ["+3 pts (2–4)", "+5 pts"]
     assert got["j"] == "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
     assert got["k"].startswith("No: Keywords per list −7 pts")
     assert got["l"].startswith("Can't tell: Keywords per list +1 pt")

@@ -1,4 +1,4 @@
-import { api, catalog, esc, head, methodLabel, shell } from "/static/ui.js";
+import { api, catalog, esc, head, methodLabel, refreshSpend, shell } from "/static/ui.js";
 
 const $ = (id) => document.getElementById(id);
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
@@ -37,7 +37,7 @@ function hitCard(hit) {
     .map((w) => `<span class="chip ${matched.has(w) ? "on" : ""}">${esc(w)}</span>`)
     .join("");
   const gold = hit.answer ? `<span class="muted">example answer ${esc(hit.answer)}</span>` : "";
-  return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>${hit.score.toFixed(3)}</span></div>
+  return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>${hit.score.toFixed(2)}</span></div>
     <div>${esc(hit.text.slice(0, 300))}${hit.text.length > 300 ? "…" : ""}</div>
     <div>${chips}</div>${gold}</div>`;
 }
@@ -72,6 +72,7 @@ $("form").addEventListener("submit", async (event) => {
     const r = await api("/query", { method: "POST", body });
     $("results").innerHTML = Object.entries(r.results).map(([m, v]) => column(m, v)).join("");
     $("status").textContent = "";
+    refreshSpend();
   } catch (e) {
     $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   } finally {

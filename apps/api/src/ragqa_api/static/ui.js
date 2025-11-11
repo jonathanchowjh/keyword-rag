@@ -43,8 +43,16 @@ export function esc(s) {
 
 // -- formatting -----------------------------------------------------------------
 
+const NONE = "–"; // shown for a missing or invalid value
+
 export function pct(x) {
-  return `${Math.round(x * 100)}%`;
+  return Number.isFinite(x) ? `${Math.round(x * 100)}%` : NONE;
+}
+
+// Whole number, rounded away from zero on halves so -2.5 and 2.5 mirror each other.
+function whole(n) {
+  const r = Math.round(Math.abs(n));
+  return n < 0 && r > 0 ? -r : r;
 }
 
 function signed(n) {
@@ -52,20 +60,25 @@ function signed(n) {
 }
 
 // "+6 pts (2–10)", "−7 pts (−12 to −2)": whole points, true minus, "pt" for exactly one.
+// The range is left out when its bounds are missing.
 export function pts(diff, lo, hi) {
-  const d = Math.round(diff);
-  const l = Math.round(lo);
-  const h = Math.round(hi);
+  if (!Number.isFinite(diff)) return NONE;
+  const d = whole(diff);
   const unit = Math.abs(d) === 1 ? "pt" : "pts";
+  const text = `${d < 0 ? MINUS : "+"}${Math.abs(d)} ${unit}`;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return text;
+  const l = whole(lo);
+  const h = whole(hi);
   const range = l >= 0 && h >= 0 ? `${l}–${h}` : `${signed(l)} to ${signed(h)}`;
-  return `${d < 0 ? MINUS : "+"}${Math.abs(d)} ${unit} (${range})`;
+  return `${text} (${range})`;
 }
 
 const two = (n) => String(n).padStart(2, "0");
 
 // Clock time in the reader's zone; anything not from today carries its date.
 export function clock(iso, now = new Date()) {
-  const t = new Date(iso);
+  const t = iso == null ? new Date(NaN) : new Date(iso);
+  if (Number.isNaN(t.getTime())) return NONE;
   const time = `${two(t.getHours())}:${two(t.getMinutes())}`;
   const today =
     t.getFullYear() === now.getFullYear() &&
@@ -155,6 +168,26 @@ function sideHtml(active, names) {
     <div class="spend" id="spend"></div>`;
 }
 
+// The sidebar's spend line; pages call it after anything that may have spent.
+export function refreshSpend() {
+  return api("/budget")
+    .then((b) => {
+      const el = document.getElementById("spend");
+      if (el) el.textContent = `$${b.spent_usd.toFixed(2)} of $${money(b.cap_usd)} this month`;
+    })
+    .catch(() => {});
+}
+
+function refreshDot() {
+  return api("/status")
+    .then((s) => {
+      const kind = s.problems.length ? "bad" : s.worker.running ? "run" : "ok";
+      const dot = document.getElementById("worker-dot");
+      if (dot) dot.className = `dot ${kind}`;
+    })
+    .catch(() => {});
+}
+
 // Renders the sidebar into <aside id="side">. `active` is "collections", "lab", "worker",
 // or "c/<name>" for a collection's page.
 export function shell(active) {
@@ -165,21 +198,6 @@ export function shell(active) {
     refreshSpend();
     refreshDot();
   };
-  const refreshSpend = () =>
-    api("/budget")
-      .then((b) => {
-        document.getElementById("spend").textContent =
-          `$${b.spent_usd.toFixed(2)} of $${money(b.cap_usd)} this month`;
-      })
-      .catch(() => {});
-  const refreshDot = () =>
-    api("/status")
-      .then((s) => {
-        const kind = s.problems.length ? "bad" : s.worker.running ? "run" : "ok";
-        const dot = document.getElementById("worker-dot");
-        if (dot) dot.className = `dot ${kind}`;
-      })
-      .catch(() => {});
   draw();
   api("/collections")
     .then((list) => {
