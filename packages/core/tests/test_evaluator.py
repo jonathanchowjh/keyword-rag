@@ -565,6 +565,34 @@ def test_collection_answer_is_none_when_the_run_lacks_the_pair(env):
     assert ev.collection_answer("c") is None
 
 
+def test_summary_matches_the_table_without_building_it(env, monkeypatch):
+    from ragqa_core import evaluator
+
+    _, ev = env
+    methods = ["hybrid", "kw_individual", "random_example"]
+    answered = ev.queue("c", "dev", methods, True, None)
+    ev.run(answered)
+    free = ev.queue("c", "dev", methods, False, None)
+    ev.run(free)
+    trusted = ev.collection_proxy_trusted("c")
+    tables = {job: ev.table(job) for job in (answered, free)}
+
+    def no_intervals(*args, **kwargs):
+        raise AssertionError("summary must not compute per-method intervals")
+
+    monkeypatch.setattr(evaluator, "bootstrap_ci", no_intervals)
+    ev.table = no_intervals
+    for job, t in tables.items():
+        s = ev.summary(job, trusted)
+        assert s is not None and s["answer"] is not None
+        assert s["answer"] == t["answer"]  # the same numbers
+        keys = ("headline", "scale", "usd_total", "question_count")
+        assert {k: s[k] for k in keys} == {k: t[k] for k in keys}
+    assert tables[answered]["headline"] == "accuracy"
+    assert tables[free]["headline"] != "accuracy"
+    assert ev.summary("missing", None) is None
+
+
 def finished_run(conn, scores):
     """A done answered run with given {method: (solution_sim, accuracy)} for one question."""
     job = create_job(conn, "eval", "c", {**setup_for(list(scores), answer=True)})

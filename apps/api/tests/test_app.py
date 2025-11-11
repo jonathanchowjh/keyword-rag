@@ -556,6 +556,30 @@ def test_status_reports_problems(client):
     ]
 
 
+def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):
+    from datetime import UTC, datetime, timedelta
+
+    conn = client.app.state.conn
+    client.post("/collections", json={"name": "c", "qa_type": "mcq"})
+    job = db.create_job(conn, "load", "c", {})
+    set_running(conn, job)
+    assert client.get("/status").json()["problems"] == []  # just updated
+    for minutes, stalled in ((9, False), (11, True)):
+        at = datetime.now(UTC) - timedelta(minutes=minutes)
+        conn.execute(
+            "update jobs set updated_at = ? where id = ?", (at.isoformat(timespec="seconds"), job)
+        )
+        line = f"Load {job[:8]} on c has made no progress since {at:%H:%M}"
+        assert (line in client.get("/status").json()["problems"]) is stalled
+    # Waiting on a Claude batch can take hours: not a stall.
+    conn.execute(
+        "insert into pending_batches (id, model, purpose, created_at, usd, job_id)"
+        " values ('b1', 'm', 'answer', 't', 0.5, ?)",
+        (job,),
+    )
+    assert client.get("/status").json()["problems"] == []
+
+
 def test_catalog_lists_every_method(client):
     body = client.get("/catalog").json()
     assert set(body["methods"]) == set(METHOD_NAMES)

@@ -10,7 +10,7 @@ import base64
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -44,7 +44,7 @@ STATIC = Path(__file__).parent / "static"
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
 ALL = 1_000_000  # list_jobs limit meaning "every job"
 BUSY_STATE = {"load": "loading", "rekey": "rekeying", "eval": "evaluating"}
-KIND_LABEL = {"load": "Load", "rekey": "Re-key", "eval": "Eval"}
+STALL_AFTER = timedelta(minutes=10)
 PROBLEM = {
     "failed": "failed",
     "interrupted": "was interrupted by a restart",
@@ -339,7 +339,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/eval")
     def list_runs(collection: str | None = None) -> list[dict]:
         jobs = db.list_jobs(state.conn, kind="eval", collection=collection, limit=ALL)
-        return [run_summary(job, state.evaluator.table(job["id"])) for job in jobs]
+        trusted = {  # the proxy check once per collection, not once per run
+            name: state.evaluator.collection_proxy_trusted(name)
+            for name in {j["collection"] for j in jobs}
+        }
+        out = []
+        for job in jobs:
+            summary = state.evaluator.summary(job["id"], trusted[job["collection"]])
+            if summary is not None:  # deleted since it was listed
+                out.append(run_summary(job, summary))
+        return out
 
     @app.get("/eval/{job_id}")
     def eval_table(job_id: str) -> dict:
@@ -411,21 +420,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/status")
     def status() -> dict:
         worker, alive = state.worker, state.worker.alive()
-        running = db.list_jobs(state.conn, status="running", limit=1)
+        running = next(iter(db.list_jobs(state.conn, status="running", limit=1)), None)
+        batches = db.pending_batches(state.conn)
         problems = []
         if not alive:
             problems.append("The worker thread has stopped; restart the service")
         if worker.error:
             problems.append(f"Worker error: {worker.error}")
-        problems += job_problems(db.list_jobs(state.conn, limit=ALL))
+        if line := stalled(running, batches, datetime.now(UTC)):
+            problems.append(line)
+        problems += job_problems(db.newest_jobs(state.conn))
         return {
-            "worker": {
-                "alive": alive,
-                "running": running[0] if running else None,
-                "error": worker.error,
-            },
+            "worker": {"alive": alive, "running": running, "error": worker.error},
             "queue": db.list_jobs(state.conn, status="queued", limit=ALL)[::-1],
-            "batches": db.pending_batches(state.conn),
+            "batches": batches,
             "problems": problems,
         }
 
@@ -486,7 +494,7 @@ def collection_state(jobs: list[dict], count: int, has_lists: bool) -> tuple[str
     return ("ready" if has_lists else "no_lists"), None
 
 
-def run_summary(job: dict, table: dict) -> dict:
+def run_summary(job: dict, summary: dict) -> dict:
     setup = job["setup"]
     return {
         "id": job["id"],
@@ -498,23 +506,31 @@ def run_summary(job: dict, table: dict) -> dict:
         "split": setup.get("split"),
         "answer": setup.get("answer"),
         "model": setup.get("model"),
-        "question_count": table["question_count"],
-        "usd_total": table["usd_total"],
-        "answer_summary": table["answer"],
+        "question_count": summary["question_count"],
+        "usd_total": summary["usd_total"],
+        "answer_summary": summary["answer"],
     }
 
 
-def job_problems(jobs: list[dict]) -> list[str]:
-    """One line per collection and kind whose newest job (jobs: newest first) went wrong."""
-    seen, problems = set(), []
-    for job in jobs:
-        key = (job["collection"], job["kind"])
-        if key in seen:
-            continue
-        seen.add(key)
-        if job["status"] in PROBLEM:
-            kind = KIND_LABEL.get(job["kind"], job["kind"].capitalize())
-            problems.append(
-                f"{kind} {job['id'][:4]} on {job['collection']} {PROBLEM[job['status']]}"
-            )
-    return problems
+def job_problems(newest: list[dict]) -> list[str]:
+    """One line per collection and kind whose newest job went wrong."""
+    return [
+        f"{job['kind'].capitalize()} {job['id'][:4]} on {job['collection']} "
+        f"{PROBLEM[job['status']]}"
+        for job in newest
+        if job["status"] in PROBLEM
+    ]
+
+
+def stalled(job: dict | None, batches: list[dict], at: datetime) -> str | None:
+    """A running job that has not reported for STALL_AFTER and is not waiting on a
+    Claude batch: the worker may be hung while its thread is still alive (spec §5.7)."""
+    if job is None or any(b["job_id"] == job["id"] for b in batches):
+        return None
+    updated = datetime.fromisoformat(job["updated_at"])
+    if at - updated < STALL_AFTER:
+        return None
+    return (
+        f"{job['kind'].capitalize()} {job['id'][:8]} on {job['collection']}"
+        f" has made no progress since {updated:%H:%M}"
+    )

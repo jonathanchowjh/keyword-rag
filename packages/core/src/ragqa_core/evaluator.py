@@ -381,17 +381,75 @@ class Evaluator:
             )
         return rows
 
+    def _rows_by_method(self, job_id: str) -> tuple[dict[str, dict[str, dict]], bool]:
+        """A run's rows by method and question id, and whether any row has an answer."""
+        rows = db.run_items(self.conn, job_id)
+        by_method: dict[str, dict[str, dict]] = {}
+        for r in rows:
+            by_method.setdefault(r["method"], {})[r["question_id"]] = r
+        return by_method, any("answer" in r for r in rows)
+
+    def _headline(
+        self,
+        spec: CollectionSpec,
+        by_method: dict[str, dict[str, dict]],
+        has_answers: bool,
+        trusted: bool | None,
+    ) -> tuple[str, dict, dict[str, dict[str, float]]]:
+        """The headline metric, its scale, and each method's per-question values of it."""
+        names = RETRIEVAL_METRICS[spec.qa_type] + (
+            ANSWER_METRICS[spec.qa_type] if has_answers else ()
+        )
+        measurable = {
+            m
+            for m in names
+            if m in METRICS and any(metric_values(q.values(), m) for q in by_method.values())
+        }
+        headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
+        per_method = {
+            method: {
+                q: values[0]
+                for q, row in per_q.items()
+                if (values := metric_values([row], headline))
+            }
+            for method, per_q in by_method.items()
+        }
+        random = list(per_method.get("random_example", {}).values())
+        return headline, verdict.scale(headline, avg(random) if random else None), per_method
+
+    def _question_count(self, setup: dict, by_method: dict[str, dict[str, dict]]) -> int:
+        if "question_ids" in setup:
+            return len(setup["question_ids"])
+        return len({q for per_q in by_method.values() for q in per_q})
+
+    def summary(self, job_id: str, proxy_trusted: bool | None) -> dict | None:
+        """What a list of runs needs: the headline, its scale and the declared pair's
+        answer, without the per-method intervals, all pairs, best of each or proxy.
+        `proxy_trusted` is the collection's (collection_proxy_trusted), computed once
+        by the caller; it matters only for an unanswered exam run."""
+        job = db.get_job(self.conn, job_id)
+        if job is None:
+            return None
+        setup = job["setup"]
+        spec = self.retriever.spec(setup["collection"])
+        by_method, has_answers = self._rows_by_method(job_id)
+        trusted = proxy_trusted if spec.qa_type == "mcq" and not has_answers else None
+        headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
+        return {
+            "headline": headline,
+            "scale": scaling,
+            "answer": verdict.answer(per_method, headline, scaling["factor"]),
+            "usd_total": db.job_spend(self.conn, job_id),
+            "question_count": self._question_count(setup, by_method),
+        }
+
     def table(self, job_id: str) -> dict:
         job = db.get_job(self.conn, job_id)
         if job is None:
             raise KeyError(job_id)
         setup = job["setup"]
         spec = self.retriever.spec(setup["collection"])
-        rows = db.run_items(self.conn, job_id)
-        by_method: dict[str, dict[str, dict]] = {}
-        for r in rows:
-            by_method.setdefault(r["method"], {})[r["question_id"]] = r
-        has_answers = any("answer" in r for r in rows)
+        by_method, has_answers = self._rows_by_method(job_id)
         metric_names = RETRIEVAL_METRICS[spec.qa_type] + (
             ANSWER_METRICS[spec.qa_type] if has_answers else ()
         )
@@ -427,24 +485,12 @@ class Evaluator:
                         "separated": separated(lo, hi),
                     }
                 )
-        measurable = {metric for entry in methods.values() for metric in entry} & set(METRICS)
         proxy = self._proxy_for(job_id) if spec.qa_type == "mcq" and has_answers else None
         trusted = None
         if spec.qa_type == "mcq" and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
-        headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
-        random_mean = methods.get("random_example", {}).get(headline, {}).get("mean")
-        scaling = verdict.scale(headline, random_mean)
-        per_method = {
-            method: {
-                q: values[0]
-                for q, row in per_q.items()
-                if (values := metric_values([row], headline))
-            }
-            for method, per_q in by_method.items()
-        }
+        headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
         reference = ANSWER_PAIR[1]
-        question_ids = {q for per_q in by_method.values() for q in per_q}
         return {
             "setup": setup,
             "status": job["status"],
@@ -461,9 +507,7 @@ class Evaluator:
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "usd_total": db.job_spend(self.conn, job_id),
-            "question_count": len(setup["question_ids"])
-            if "question_ids" in setup
-            else len(question_ids),
+            "question_count": self._question_count(setup, by_method),
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
@@ -474,17 +518,21 @@ class Evaluator:
     def collection_answer(self, name: str) -> dict | None:
         """The collection's answer: the newest answered run's, else the newest run's."""
         done = self._done_evals(name)
-        answered = [j for j in done if j["setup"].get("answer")]
-        job = (answered or done or [None])[0]
+        answered_runs = [j for j in done if j["setup"].get("answer")]
+        job = (answered_runs or done or [None])[0]
         if job is None:
             return None
-        result = self.table(job["id"])["answer"]
+        answered = bool(job["setup"].get("answer"))
+        # Only an unanswered run's headline depends on the collection's proxy check.
+        trusted = None if answered else self.collection_proxy_trusted(name)
+        summary = self.summary(job["id"], trusted)
+        result = summary["answer"] if summary else None
         if result is None:
             return None
         return {
             "run_id": job["id"],
             "at": job["created_at"],
-            "answered": bool(job["setup"].get("answer")),
+            "answered": answered,
             "runs": len(done),
             **result,
         }

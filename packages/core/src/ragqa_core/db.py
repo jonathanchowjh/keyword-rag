@@ -235,8 +235,10 @@ def update_job(
 
 def get_job(conn: Connection, job_id: str) -> dict | None:
     row = first(conn.execute("select * from jobs where id = ?", (job_id,)))
-    if row is None:
-        return None
+    return None if row is None else _job(row)
+
+
+def _job(row: sqlite3.Row) -> dict:
     job = dict(row)
     job["setup"] = json.loads(job.pop("setup_json"))
     raw = job.pop("result_json")
@@ -244,6 +246,15 @@ def get_job(conn: Connection, job_id: str) -> dict | None:
     job["log"] = json.loads(job.pop("log_json") or "[]")
     job["cancel_requested"] = bool(job["cancel_requested"])
     return job
+
+
+def newest_jobs(conn: Connection) -> list[dict]:
+    """The newest job of each (collection, kind), newest first, in one query."""
+    rows = conn.execute(
+        "select * from jobs where rowid in"
+        " (select max(rowid) from jobs group by collection, kind) order by rowid desc"
+    )
+    return [_job(r) for r in rows]
 
 
 JOBS_RESUMABLE = ("interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed")

@@ -21,6 +21,7 @@ from ragqa_core.db import (
     list_collections,
     list_jobs,
     log_job,
+    newest_jobs,
     request_cancel,
     requeue,
     run_items,
@@ -437,6 +438,16 @@ def test_connection_returns_rows_already_fetched(conn):
     assert isinstance(rows, list) and len(rows) == 3
     assert [r["kind"] for r in rows] == ["eval"] * 3
     assert conn.execute("select * from jobs") == []
+
+
+def test_newest_jobs_is_one_per_collection_and_kind(conn):
+    old = create_job(conn, "eval", "a", {})
+    new = create_job(conn, "eval", "a", {"n": 2})
+    load = create_job(conn, "load", "a", {})
+    other = create_job(conn, "eval", "b", {})
+    newest = newest_jobs(conn)
+    assert [j["id"] for j in newest] == [other, load, new]
+    assert newest[2]["setup"] == {"n": 2} and old not in {j["id"] for j in newest}
 
 
 def test_interrupt_running_counts_the_jobs_it_changed(conn):
