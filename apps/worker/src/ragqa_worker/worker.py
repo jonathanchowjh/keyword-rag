@@ -1,7 +1,7 @@
-import sqlite3
 import threading
 
 from ragqa_core import db
+from ragqa_core.connection import Connection
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import BudgetExceeded, Cancelled, Claude, NoApiKey
@@ -13,7 +13,7 @@ class Worker:
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         claude: Claude,
         indexer: Indexer,
         loader: Loader,

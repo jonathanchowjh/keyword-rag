@@ -112,7 +112,7 @@ def test_connect_adds_the_batch_estimate_to_a_0_1_0_database(tmp_path):
     old.execute("insert into pending_batches values ('b', 'm', 'p', 'now')")
     old.commit()
     old.close()
-    row = connect(tmp_path / "r.db").execute("select usd from pending_batches").fetchone()
+    row = connect(tmp_path / "r.db").execute("select usd from pending_batches")[0]
     assert row["usd"] == 0
 
 
@@ -325,8 +325,8 @@ def test_migration_dedupes_and_backfills(tmp_path):
     assert rows[("j2", "q3")]["complete"] == 0
     assert get_job(conn, "j1")["setup"] == {"answer": False, "question_ids": ["q1"]}
     assert get_job(conn, "j2")["setup"]["question_ids"] == ["q2", "q3"]
-    assert conn.execute("select job_id from ledger").fetchone()["job_id"] is None
-    assert conn.execute("select job_id from pending_batches").fetchone()["job_id"] is None
+    assert conn.execute("select job_id from ledger")[0]["job_id"] is None
+    assert conn.execute("select job_id from pending_batches")[0]["job_id"] is None
 
     before = [tuple(r) for r in conn.execute("select * from run_items order by rowid")]
     setups = [get_job(conn, j)["setup"] for j in ("j1", "j2")]
@@ -409,7 +409,9 @@ def test_one_connection_is_safe_from_many_threads(conn):
                     assert len(list_jobs(conn, collection=f"c{n}", limit=5)) <= 5
                 if i % 5 == 0:
                     update = "update jobs set progress = 0.5 where id = ?"
-                    assert conn.execute(update, (job,)).rowcount == 1
+                    with conn.lock:
+                        conn.execute(update, (job,))
+                        assert conn.changes() == 1
         except BaseException as e:  # every failure is the finding
             errors.append(e)
 
@@ -421,6 +423,25 @@ def test_one_connection_is_safe_from_many_threads(conn):
     assert errors == []
     rows = conn.execute("select collection, count(*) as n from jobs group by collection")
     assert {r["collection"]: r["n"] for r in rows} == {f"c{n}": ops for n in range(threads)}
-    assert conn.execute("select count(*) as n from jobs where progress = 0.5").fetchone()["n"] == (
+    assert conn.execute("select count(*) as n from jobs where progress = 0.5")[0]["n"] == (
         threads * len(range(0, ops, 5))
     )
+
+
+def test_connection_returns_rows_already_fetched(conn):
+    for i in range(3):
+        create_job(conn, "eval", "c", {"i": i})
+    rows = conn.execute("select id, kind from jobs order by rowid")
+    conn.execute("delete from jobs")  # a later statement cannot touch rows already returned
+    conn.execute("select * from collections")
+    assert isinstance(rows, list) and len(rows) == 3
+    assert [r["kind"] for r in rows] == ["eval"] * 3
+    assert conn.execute("select * from jobs") == []
+
+
+def test_interrupt_running_counts_the_jobs_it_changed(conn):
+    jobs = [create_job(conn, "eval", "c", {}) for _ in range(3)]
+    for job in jobs[:2]:
+        update_job(conn, job, status="running")
+    assert interrupt_running(conn) == 2
+    assert interrupt_running(conn) == 0

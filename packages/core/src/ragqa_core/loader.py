@@ -1,11 +1,11 @@
 """The dataset-load job: read a dataset, index it, and give the collection lists."""
 
 import random
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
 from ragqa_core import db
+from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import tfidf_terms
@@ -58,7 +58,7 @@ def tfidf_lists(texts: list[str]) -> KeywordLists | None:
 
 
 class Loader:
-    def __init__(self, conn: sqlite3.Connection, indexer: Indexer, claude: Claude, home: Path):
+    def __init__(self, conn: Connection, indexer: Indexer, claude: Claude, home: Path):
         self.conn = conn
         self.indexer = indexer
         self.claude = claude

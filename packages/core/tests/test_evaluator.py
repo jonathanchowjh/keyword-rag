@@ -330,13 +330,13 @@ def test_resume_of_a_complete_run_estimates_zero(env):  # Review focus 2
     ev.run(job)
     assert ev.estimate_resume(job) == {"questions": 0, "calls": 0, "est_usd": 0.0}
     rows = run_items(conn, job)
-    ledger = conn.execute("select count(*) from ledger").fetchone()[0]
+    ledger = conn.execute("select count(*) from ledger")[0][0]
     db.update_job(conn, job, status="interrupted")
     requeue(conn, job)
     ev.run(job)
     assert get_job(conn, job)["status"] == "done"
     assert run_items(conn, job) == rows
-    assert conn.execute("select count(*) from ledger").fetchone()[0] == ledger
+    assert conn.execute("select count(*) from ledger")[0][0] == ledger
 
 
 def test_resume_estimate_of_a_run_that_never_started_is_the_full_estimate(env):
@@ -453,7 +453,7 @@ def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
     old = ev.retriever.spec("c").keyword_version
     new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
     rows = run_items(conn, job)
-    ledger = conn.execute("select count(*) from ledger").fetchone()[0]
+    ledger = conn.execute("select count(*) from ledger")[0][0]
     requeue(conn, job)  # as if the re-key was queued after the resume was accepted
     ev.run(job)
     after = get_job(conn, job)
@@ -462,7 +462,7 @@ def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
         f"keyword lists changed since this run ({old} → {new}); start a new run"
     )
     assert run_items(conn, job) == rows
-    assert conn.execute("select count(*) from ledger").fetchone()[0] == ledger
+    assert conn.execute("select count(*) from ledger")[0][0] == ledger
 
 
 def test_resume_refused_when_judge_model_changed(env):

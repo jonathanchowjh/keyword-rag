@@ -1,12 +1,12 @@
 """Builds and refreshes every representation of a collection's items."""
 
 import re
-import sqlite3
 from collections.abc import Callable
 
 import numpy as np
 
 from ragqa_core import db
+from ragqa_core.connection import Connection
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, tfidf_terms
 from ragqa_core.llm import Claude
 from ragqa_core.models import Models
@@ -40,7 +40,7 @@ def dedupe(words: list[str]) -> list[str]:
 
 
 class Indexer:
-    def __init__(self, conn: sqlite3.Connection, store: Store, models: Models, claude: Claude):
+    def __init__(self, conn: Connection, store: Store, models: Models, claude: Claude):
         self.conn = conn
         self.store = store
         self.models = models

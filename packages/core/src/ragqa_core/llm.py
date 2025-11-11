@@ -7,7 +7,6 @@ made by this service; the Console workspace spend limit is the real ceiling.
 import hashlib
 import json
 import math
-import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -16,7 +15,8 @@ from datetime import UTC, datetime
 
 import anthropic
 
-from ragqa_core.db import now
+from ragqa_core.connection import Connection
+from ragqa_core.db import first, now
 from ragqa_core.types import Completion
 
 # USD per million tokens, (input, output), real-time. The Batch API is half.
@@ -53,7 +53,7 @@ def estimate_tokens(chars: int) -> int:
 
 class Claude:
     def __init__(
-        self, conn: sqlite3.Connection, api_key: str | None, cap_usd: float, default_model: str
+        self, conn: Connection, api_key: str | None, cap_usd: float, default_model: str
     ) -> None:
         self.conn = conn
         self.api_key = api_key
@@ -104,7 +104,7 @@ class Claude:
         keys = [self._key(model, system, p, max_tokens) for p in prompts]
         results: dict[str, Completion] = {}
         for key in dict.fromkeys(keys):
-            row = self.conn.execute("select * from cache where key = ?", (key,)).fetchone()
+            row = first(self.conn.execute("select * from cache where key = ?", (key,)))
             if row:
                 results[key] = Completion(
                     row["text"], 0.0, True, row["input_tokens"], row["output_tokens"]
@@ -114,7 +114,7 @@ class Claude:
             # A batch submitted before a crash may already hold these answers.
             self.collect_pending()
             for key in list(misses):
-                row = self.conn.execute("select * from cache where key = ?", (key,)).fetchone()
+                row = first(self.conn.execute("select * from cache where key = ?", (key,)))
                 if row:
                     results[key] = Completion(
                         row["text"], 0.0, True, row["input_tokens"], row["output_tokens"]
@@ -241,9 +241,9 @@ class Claude:
     def _collect(
         self, batch_id: str, model: str, purpose: str, expected: int | None = None
     ) -> dict[str, Completion]:
-        row = self.conn.execute(
-            "select job_id from pending_batches where id = ?", (batch_id,)
-        ).fetchone()
+        row = first(
+            self.conn.execute("select job_id from pending_batches where id = ?", (batch_id,))
+        )
         job_id = row["job_id"] if row else None
         out: dict[str, Completion] = {}
         failed = 0
@@ -271,7 +271,7 @@ class Claude:
             if time.monotonic() < self._next_check:
                 return
             self._next_check = time.monotonic() + BATCH_POLL_SECONDS
-            for row in self.conn.execute("select * from pending_batches").fetchall():
+            for row in self.conn.execute("select * from pending_batches"):
                 if row["id"] in self._waiting:
                     continue
                 try:
@@ -288,7 +288,7 @@ class Claude:
     def _pending_usd(self) -> float:
         """Estimated spend of submitted batches not yet in the ledger, except the
         ones this process is polling: their spend is already in _reserved."""
-        rows = self.conn.execute("select id, usd from pending_batches").fetchall()
+        rows = self.conn.execute("select id, usd from pending_batches")
         return sum(row["usd"] for row in rows if row["id"] not in self._waiting)
 
     def estimate_usd(
@@ -306,10 +306,10 @@ class Claude:
 
     def month_spend(self) -> float:
         month = datetime.now(UTC).strftime("%Y-%m")
-        row = self.conn.execute(
+        rows = self.conn.execute(
             "select coalesce(sum(usd), 0) from ledger where substr(at, 1, 7) = ?", (month,)
-        ).fetchone()
-        return float(row[0])
+        )
+        return float(rows[0][0])  # an aggregate always has one row
 
     def _model(self, model: str | None) -> str:
         model = model or self.default_model

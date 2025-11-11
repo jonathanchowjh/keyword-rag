@@ -58,7 +58,7 @@ def test_many_uses_batch_above_50_and_halves_price(tmp_path):
     c = fake_claude(connect(tmp_path / "r.db"), lambda p: "x" * 4000)
     out = c.complete_many(["y" * 4000 + str(i) for i in range(51)], purpose="t")
     assert [o.text for o in out] == ["x" * 4000] * 51
-    rows = c.conn.execute("select batch, usd from ledger").fetchall()
+    rows = c.conn.execute("select batch, usd from ledger")
     assert {r["batch"] for r in rows} == {1}
     assert rows[0]["usd"] == pytest.approx((1001 * 0.10e-6 + 1000 * 0.50e-6) / 2)
 
@@ -96,11 +96,11 @@ def test_estimate(tmp_path):
 
 
 def ledger_rows(c):
-    return c.conn.execute("select count(*) from ledger").fetchone()[0]
+    return c.conn.execute("select count(*) from ledger")[0][0]
 
 
 def cache_rows(c):
-    return c.conn.execute("select count(*) from cache").fetchone()[0]
+    return c.conn.execute("select count(*) from cache")[0][0]
 
 
 def test_realtime_failure_keeps_completed_calls(tmp_path):
@@ -261,7 +261,7 @@ def test_ledger_rows_carry_the_job(tmp_path):
         claude.complete("hi", purpose="answer")
     claude.complete("other", purpose="query")
     assert job_spend(conn, "j1") > 0
-    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+    assert conn.execute("select count(*) from ledger where job_id is null")[0][0] == 1
 
 
 def test_cancel_while_waiting_on_a_batch(tmp_path, monkeypatch):
@@ -277,7 +277,7 @@ def test_cancel_while_waiting_on_a_batch(tmp_path, monkeypatch):
     with pytest.raises(Cancelled), claude.for_job("j1", check=check, log=logs.append):
         claude.complete_many([f"p{n}" for n in range(51)], purpose="answer")
     assert fakes.CANCELLED
-    assert conn.execute("select job_id from pending_batches").fetchone()[0] == "j1"
+    assert conn.execute("select job_id from pending_batches")[0][0] == "j1"
     assert logs and "submitted, 51 requests" in logs[0]
     assert claude._reserved == 0 and not claude._waiting
 
@@ -291,7 +291,7 @@ def test_job_context_is_per_thread(tmp_path):
         t = threading.Thread(target=lambda: claude.complete("elsewhere", purpose="query"))
         t.start()
         t.join()
-    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+    assert conn.execute("select count(*) from ledger where job_id is null")[0][0] == 1
 
 
 def test_failed_cancel_still_reports_cancelled(tmp_path, monkeypatch):
@@ -313,7 +313,7 @@ def test_failed_cancel_still_reports_cancelled(tmp_path, monkeypatch):
         claude.complete_many([f"p{n}" for n in range(51)], purpose="answer")
     assert any("could not cancel Claude batch" in m for m in logs)
     assert claude._reserved == 0
-    assert conn.execute("select count(*) from pending_batches").fetchone()[0] == 1
+    assert conn.execute("select count(*) from pending_batches")[0][0] == 1
 
 
 def test_collected_batch_keeps_its_own_job(tmp_path):
@@ -336,5 +336,5 @@ def test_collected_batch_keeps_its_own_job(tmp_path):
     )
     with claude.for_job("j2", check=lambda: None, log=lambda m: None):
         claude._collect(batch_id, "claude-haiku-5-5", "answer")
-    assert conn.execute("select count(*) from ledger where job_id is null").fetchone()[0] == 1
+    assert conn.execute("select count(*) from ledger where job_id is null")[0][0] == 1
     assert job_spend(conn, "j2") == 0

@@ -5,12 +5,8 @@ oldest queued job by insertion order, and the worker reports through
 update_job and log_job. Cancel is a flag the running job polls.
 
 One connection per process (spec §5.1), shared by the API's request threads and
-the worker thread, opened with check_same_thread=False and in autocommit mode.
-SQLite's serialized mode guards the database, but not Python's cursors and
-statement cache: two threads stepping statements on one connection raise
-InterfaceError. So connect returns a LockedConnection, which runs every
-execute, executemany and executescript under one lock and fetches all the rows
-before releasing it; callers get the rows (Rows), never a live cursor.
+the worker thread: a ragqa_core.connection.Connection, in autocommit mode, which
+runs each statement under one lock and returns its rows as a list.
 
 The lock covers one statement. log_job, request_cancel, delete_job,
 delete_collection_rows and the migration in connect are several statements and
@@ -20,13 +16,12 @@ are not atomic; log_job also reads then writes, so it assumes a single writer
 
 import json
 import sqlite3
-import threading
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
+from ragqa_core.connection import Connection
 from ragqa_core.types import CollectionSpec, KeywordLists, Question
 
 SCHEMA = """
@@ -74,57 +69,13 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-class Rows:
-    """A statement's result, fetched while the connection's lock was held."""
-
-    def __init__(self, rows: list, rowcount: int, lastrowid: int | None):
-        self.rows, self.rowcount, self.lastrowid = rows, rowcount, lastrowid
-        self._next = 0
-
-    def fetchone(self) -> Any:
-        if self._next >= len(self.rows):
-            return None
-        self._next += 1
-        return self.rows[self._next - 1]
-
-    def fetchall(self) -> list:
-        rest, self._next = self.rows[self._next :], len(self.rows)
-        return rest
-
-    def __iter__(self):
-        return iter(self.fetchall())
+def first(rows: list[sqlite3.Row]) -> sqlite3.Row | None:
+    return rows[0] if rows else None
 
 
-class LockedConnection(sqlite3.Connection):
-    """sqlite3.Connection whose statements run one at a time across threads."""
-
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self._lock = threading.RLock()
-
-    def execute(self, sql: str, parameters: Any = (), /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
-        with self._lock:
-            cursor = super().execute(sql, parameters)
-            return Rows(cursor.fetchall(), cursor.rowcount, cursor.lastrowid)
-
-    def executemany(self, sql: str, parameters: Any, /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
-        with self._lock:
-            cursor = super().executemany(sql, parameters)
-            return Rows(cursor.fetchall(), cursor.rowcount, cursor.lastrowid)
-
-    def executescript(self, script: str, /) -> Rows:  # pyright: ignore[reportIncompatibleMethodOverride]
-        with self._lock:
-            super().executescript(script)
-            return Rows([], -1, None)
-
-
-def connect(path: Path) -> sqlite3.Connection:
+def connect(path: Path) -> Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(
-        path, check_same_thread=False, isolation_level=None, factory=LockedConnection
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("pragma journal_mode=wal")
+    conn = Connection(path)
     conn.executescript(SCHEMA)
     columns = {row["name"] for row in conn.execute("pragma table_info(pending_batches)")}
     if "usd" not in columns:  # a 0.1.0 database
@@ -138,7 +89,7 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _migrate_run_items(conn: sqlite3.Connection) -> None:
+def _migrate_run_items(conn: Connection) -> None:
     """Make run_items resumable and let ledger rows name their job. Idempotent."""
     for table in ("ledger", "pending_batches"):
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
@@ -147,7 +98,7 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("pragma table_info(run_items)")}
     if "complete" not in columns:
         conn.execute("alter table run_items add column complete integer not null default 0")
-        for row in conn.execute("select id, setup_json from jobs").fetchall():
+        for row in conn.execute("select id, setup_json from jobs"):
             if json.loads(row["setup_json"]).get("answer") is False:
                 conn.execute("update run_items set complete = 1 where job_id = ?", (row["id"],))
         conn.execute(
@@ -164,7 +115,7 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
     evals = conn.execute(
         "select id, setup_json from jobs"
         " where kind = 'eval' and status not in ('queued', 'running')"
-    ).fetchall()
+    )
     for row in evals:
         setup = json.loads(row["setup_json"])
         if "question_ids" in setup:
@@ -174,7 +125,7 @@ def _migrate_run_items(conn: sqlite3.Connection) -> None:
             set_job_setup(conn, row["id"], {**setup, "question_ids": ids})
 
 
-def save_collection(conn: sqlite3.Connection, spec: CollectionSpec) -> None:
+def save_collection(conn: Connection, spec: CollectionSpec) -> None:
     conn.execute(
         "insert or replace into collections values (?, ?, ?, ?, ?, ?, ?)",
         (
@@ -200,56 +151,56 @@ def _spec(row: sqlite3.Row) -> CollectionSpec:
     )
 
 
-def get_collection(conn: sqlite3.Connection, name: str) -> CollectionSpec | None:
-    row = conn.execute("select * from collections where name = ?", (name,)).fetchone()
+def get_collection(conn: Connection, name: str) -> CollectionSpec | None:
+    row = first(conn.execute("select * from collections where name = ?", (name,)))
     return _spec(row) if row else None
 
 
-def list_collections(conn: sqlite3.Connection) -> list[CollectionSpec]:
+def list_collections(conn: Connection) -> list[CollectionSpec]:
     return [_spec(r) for r in conn.execute("select * from collections order by name")]
 
 
-def save_keyword_lists(
-    conn: sqlite3.Connection, name: str, lists: KeywordLists, version: str
-) -> None:
+def save_keyword_lists(conn: Connection, name: str, lists: KeywordLists, version: str) -> None:
     conn.execute(
         "insert or replace into keyword_lists values (?, ?, ?, ?)",
         (name, version, json.dumps(asdict(lists)), now()),
     )
 
 
-def set_keyword_version(conn: sqlite3.Connection, name: str, version: str) -> None:
+def set_keyword_version(conn: Connection, name: str, version: str) -> None:
     conn.execute("update collections set keyword_version = ? where name = ?", (version, name))
 
 
 def get_keyword_lists(
-    conn: sqlite3.Connection, name: str, version: str | None = None
+    conn: Connection, name: str, version: str | None = None
 ) -> KeywordLists | None:
     if version is None:
         spec = get_collection(conn, name)
         version = spec.keyword_version if spec else None
         if version is None:
             return None
-    row = conn.execute(
-        "select lists_json from keyword_lists where collection = ? and version = ?",
-        (name, version),
-    ).fetchone()
+    row = first(
+        conn.execute(
+            "select lists_json from keyword_lists where collection = ? and version = ?",
+            (name, version),
+        )
+    )
     return KeywordLists(**json.loads(row["lists_json"])) if row else None
 
 
-def save_questions(conn: sqlite3.Connection, name: str, questions: list[Question]) -> None:
+def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
     conn.executemany(
         "insert or replace into questions values (?, ?, ?)",
         [(name, q.id, json.dumps(asdict(q))) for q in questions],
     )
 
 
-def get_questions(conn: sqlite3.Connection, name: str) -> list[Question]:
+def get_questions(conn: Connection, name: str) -> list[Question]:
     rows = conn.execute("select json from questions where collection = ? order by id", (name,))
     return [Question(**json.loads(r["json"])) for r in rows]
 
 
-def create_job(conn: sqlite3.Connection, kind: str, collection: str, setup: dict) -> str:
+def create_job(conn: Connection, kind: str, collection: str, setup: dict) -> str:
     job_id = uuid.uuid4().hex
     conn.execute(
         "insert into jobs (id, kind, collection, status, setup_json, created_at, updated_at)"
@@ -260,7 +211,7 @@ def create_job(conn: sqlite3.Connection, kind: str, collection: str, setup: dict
 
 
 def update_job(
-    conn: sqlite3.Connection,
+    conn: Connection,
     job_id: str,
     *,
     status: str | None = None,
@@ -282,8 +233,8 @@ def update_job(
     conn.execute(f"update jobs set {', '.join(sets)} where id = ?", (*args, job_id))
 
 
-def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
-    row = conn.execute("select * from jobs where id = ?", (job_id,)).fetchone()
+def get_job(conn: Connection, job_id: str) -> dict | None:
+    row = first(conn.execute("select * from jobs where id = ?", (job_id,)))
     if row is None:
         return None
     job = dict(row)
@@ -298,19 +249,21 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
 JOBS_RESUMABLE = ("interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed")
 
 
-def claim_next_job(conn: sqlite3.Connection) -> dict | None:
+def claim_next_job(conn: Connection) -> dict | None:
     """The oldest queued job by insertion, marked running in the same statement."""
-    row = conn.execute(
-        "update jobs set status = 'running', updated_at = ? where status = 'queued'"
-        " and id = (select id from jobs where status = 'queued' order by rowid limit 1)"
-        " returning id",
-        (now(),),
-    ).fetchone()
+    row = first(
+        conn.execute(
+            "update jobs set status = 'running', updated_at = ? where status = 'queued'"
+            " and id = (select id from jobs where status = 'queued' order by rowid limit 1)"
+            " returning id",
+            (now(),),
+        )
+    )
     return get_job(conn, row["id"]) if row else None
 
 
 def list_jobs(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     kind: str | None = None,
     collection: str | None = None,
@@ -323,13 +276,11 @@ def list_jobs(
             clauses.append(f"{column} = ?")
             args.append(value)
     where = f" where {' and '.join(clauses)}" if clauses else ""
-    rows = conn.execute(
-        f"select id from jobs{where} order by rowid desc limit ?", (*args, limit)
-    ).fetchall()
+    rows = conn.execute(f"select id from jobs{where} order by rowid desc limit ?", (*args, limit))
     return [job for r in rows if (job := get_job(conn, r["id"])) is not None]
 
 
-def request_cancel(conn: sqlite3.Connection, job_id: str) -> str:
+def request_cancel(conn: Connection, job_id: str) -> str:
     """A queued job is cancelled at once; a running one is flagged. Returns the status."""
     conn.execute(
         "update jobs set status = 'cancelled', updated_at = ? where id = ? and status = 'queued'",
@@ -343,12 +294,12 @@ def request_cancel(conn: sqlite3.Connection, job_id: str) -> str:
     return job["status"] if job else "missing"
 
 
-def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:
-    row = conn.execute("select cancel_requested from jobs where id = ?", (job_id,)).fetchone()
+def is_cancel_requested(conn: Connection, job_id: str) -> bool:
+    row = first(conn.execute("select cancel_requested from jobs where id = ?", (job_id,)))
     return bool(row and row["cancel_requested"])
 
 
-def log_job(conn: sqlite3.Connection, job_id: str, message: str) -> None:
+def log_job(conn: Connection, job_id: str, message: str) -> None:
     job = get_job(conn, job_id)
     if job is None:
         return
@@ -359,14 +310,14 @@ def log_job(conn: sqlite3.Connection, job_id: str, message: str) -> None:
     )
 
 
-def set_job_setup(conn: sqlite3.Connection, job_id: str, setup: dict) -> None:
+def set_job_setup(conn: Connection, job_id: str, setup: dict) -> None:
     conn.execute(
         "update jobs set setup_json = ?, updated_at = ? where id = ?",
         (json.dumps(setup), now(), job_id),
     )
 
 
-def requeue(conn: sqlite3.Connection, job_id: str) -> None:
+def requeue(conn: Connection, job_id: str) -> None:
     conn.execute(
         "update jobs set status = 'queued', cancel_requested = 0, error = null, updated_at = ?"
         " where id = ?",
@@ -374,33 +325,36 @@ def requeue(conn: sqlite3.Connection, job_id: str) -> None:
     )
 
 
-def interrupt_running(conn: sqlite3.Connection) -> int:
-    cursor = conn.execute(
-        "update jobs set status = 'interrupted', updated_at = ? where status = 'running'",
-        (now(),),
-    )
-    return cursor.rowcount
+def interrupt_running(conn: Connection) -> int:
+    with conn.lock:  # no other statement between the update and changes()
+        conn.execute(
+            "update jobs set status = 'interrupted', updated_at = ? where status = 'running'",
+            (now(),),
+        )
+        return conn.changes()
 
 
-def running_eval(conn: sqlite3.Connection, collection: str) -> bool:
+def running_eval(conn: Connection, collection: str) -> bool:
     return job_running(conn, "eval", collection)
 
 
-def job_running(conn: sqlite3.Connection, kind: str, collection: str) -> bool:
-    row = conn.execute(
-        "select 1 from jobs where kind = ? and collection = ? and status = 'running' limit 1",
-        (kind, collection),
-    ).fetchone()
+def job_running(conn: Connection, kind: str, collection: str) -> bool:
+    row = first(
+        conn.execute(
+            "select 1 from jobs where kind = ? and collection = ? and status = 'running' limit 1",
+            (kind, collection),
+        )
+    )
     return row is not None
 
 
-def delete_job(conn: sqlite3.Connection, job_id: str) -> None:
+def delete_job(conn: Connection, job_id: str) -> None:
     conn.execute("delete from run_items where job_id = ?", (job_id,))
     conn.execute("delete from jobs where id = ?", (job_id,))
 
 
-def delete_collection_rows(conn: sqlite3.Connection, name: str) -> None:
-    for row in conn.execute("select id from jobs where collection = ?", (name,)).fetchall():
+def delete_collection_rows(conn: Connection, name: str) -> None:
+    for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])
     conn.execute("delete from questions where collection = ?", (name,))
     conn.execute("delete from keyword_lists where collection = ?", (name,))
@@ -408,7 +362,7 @@ def delete_collection_rows(conn: sqlite3.Connection, name: str) -> None:
 
 
 def upsert_run_item(
-    conn: sqlite3.Connection,
+    conn: Connection,
     job_id: str,
     method: str,
     question_id: str,
@@ -424,7 +378,7 @@ def upsert_run_item(
     )
 
 
-def complete_question_ids(conn: sqlite3.Connection, job_id: str, method: str) -> set[str]:
+def complete_question_ids(conn: Connection, job_id: str, method: str) -> set[str]:
     rows = conn.execute(
         "select question_id from run_items where job_id = ? and method = ? and complete = 1",
         (job_id, method),
@@ -432,7 +386,7 @@ def complete_question_ids(conn: sqlite3.Connection, job_id: str, method: str) ->
     return {r["question_id"] for r in rows}
 
 
-def run_item_question_ids(conn: sqlite3.Connection, job_id: str) -> list[str]:
+def run_item_question_ids(conn: Connection, job_id: str) -> list[str]:
     """The questions a run has rows for, sorted: an old run's question ids."""
     rows = conn.execute(
         "select distinct question_id from run_items where job_id = ? order by question_id",
@@ -441,17 +395,17 @@ def run_item_question_ids(conn: sqlite3.Connection, job_id: str) -> list[str]:
     return [r["question_id"] for r in rows]
 
 
-def job_spend(conn: sqlite3.Connection, job_id: str) -> float:
-    row = conn.execute("select sum(usd) as usd from ledger where job_id = ?", (job_id,)).fetchone()
-    return row["usd"] or 0.0
+def job_spend(conn: Connection, job_id: str) -> float:
+    rows = conn.execute("select sum(usd) as usd from ledger where job_id = ?", (job_id,))
+    return rows[0]["usd"] or 0.0  # an aggregate always has one row
 
 
-def pending_batches(conn: sqlite3.Connection) -> list[dict]:
+def pending_batches(conn: Connection) -> list[dict]:
     """Claude batches submitted and not yet collected, oldest first."""
     return [dict(r) for r in conn.execute("select * from pending_batches order by rowid")]
 
 
-def run_items(conn: sqlite3.Connection, job_id: str, method: str | None = None) -> list[dict]:
+def run_items(conn: Connection, job_id: str, method: str | None = None) -> list[dict]:
     if method is None:
         rows = conn.execute("select * from run_items where job_id = ? order by rowid", (job_id,))
     else:

@@ -6,12 +6,12 @@ k=1 and today's k=60 behave identically in every storage mode.
 """
 
 import random
-import sqlite3
 from collections.abc import Callable
 
 import numpy as np
 
 from ragqa_core import db
+from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import matched
 from ragqa_core.llm import Claude
@@ -83,7 +83,7 @@ def shuffled(ids: list[str], seed: str) -> list[str]:
 class Retriever:
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         store: Store,
         models: Models,
         claude: Claude,

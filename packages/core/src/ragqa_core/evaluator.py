@@ -3,12 +3,12 @@ with intervals so a gap that is noise is shown as noise."""
 
 import itertools
 import math
-import sqlite3
 from collections.abc import Callable
 from typing import Literal
 
 from ragqa_core import db, verdict
 from ragqa_core.catalog import ANSWER_PAIR, METRICS
+from ragqa_core.connection import Connection
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
 from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, NoApiKey
 from ragqa_core.metrics import (
@@ -66,7 +66,7 @@ def answer_hits(qa_type: QaType, hits: list[Hit]) -> list[Hit]:
 
 class Evaluator:
     def __init__(
-        self, conn: sqlite3.Connection, retriever: Retriever, models: Models, claude: Claude
+        self, conn: Connection, retriever: Retriever, models: Models, claude: Claude
     ) -> None:
         self.conn = conn
         self.retriever = retriever

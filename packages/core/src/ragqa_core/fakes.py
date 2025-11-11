@@ -7,7 +7,6 @@ here calls Claude or downloads a model.
 import hashlib
 import math
 import re
-import sqlite3
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +14,7 @@ from pathlib import Path
 import numpy as np
 from qdrant_client.models import SparseVector
 
+from ragqa_core.connection import Connection
 from ragqa_core.llm import Claude
 from ragqa_core.models import Models, normalise
 
@@ -69,7 +69,7 @@ def fake_embeddings(models: Models, dim: int = 256) -> Models:
 
 
 def fake_claude(
-    conn: sqlite3.Connection,
+    conn: Connection,
     reply: Callable[[str], str],
     api_key: str | None = "test",
     cap_usd: float = 20.0,
