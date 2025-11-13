@@ -26,6 +26,7 @@ and where.
 - [Retrieval methods](#retrieval-methods)
 - [Datasets](#datasets)
 - [Cost safety](#cost-safety)
+- [Pages](#pages)
 - [Reading a run](#reading-a-run)
 
 How it is built and how to work on it is in [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -55,8 +56,8 @@ docker compose up --build
 ```
 
 Open http://localhost:8080/docs for every endpoint, http://localhost:8080/lab
-to compare methods on one question, and http://localhost:8080/board to run
-and read evaluations.
+to compare methods on one question, and http://localhost:8080/ for the
+collections and their evaluations (see [Pages](#pages)).
 
 With no key, the service still starts. Every free retrieval method works, and
 calls that would spend return 503 `needs ANTHROPIC_API_KEY`.
@@ -219,9 +220,20 @@ Rough prices on Haiku 5.5: a one-shot science answer is about $0.0005, and a
 200-question × 10-method evaluation with answers about $1. Sonnet costs
 about 20 times as much.
 
+## Pages
+
+| Route | What it shows |
+|---|---|
+| `/` | Every collection with its answer (does keyword retrieval help?), the run it came from and its state; create a collection or set up the three benchmarks |
+| `/c/{name}` | One collection: the answer with its gap bar, its runs and a form to start one, its items and questions, the three keyword lists (edit, propose, save), delete |
+| `/c/{name}/runs/{id}` | One run |
+| `/lab` | One question, methods side by side |
+| `/worker` | The worker, its queue and what needs a person |
+| `/docs` | Every endpoint |
+
 ## Reading a run
 
-`GET /eval/{job_id}` returns everything the Board shows, computed in the
+`GET /eval/{job_id}` returns everything the run page shows, computed in the
 service:
 
 - **`answer`** compares one pair declared in advance: `kw_individual`

@@ -1,0 +1,146 @@
+"""Fixtures for the page tests: the real app on fakes, served over HTTP to a real browser."""
+
+import socket
+import threading
+import time
+from dataclasses import dataclass, replace
+
+import httpx
+import pytest
+import uvicorn
+
+from ragqa_api.app import create_app
+from ragqa_core import db
+from ragqa_core.fakes import fake_embeddings, fake_replies
+from ragqa_core.settings import load_settings
+from ragqa_core.types import Question
+
+ITEMS = [
+    {
+        "id": "enzyme-item",
+        "text": "enzyme kinetics rate experiment",
+        "answer": "A",
+        "explanation": "Rates rise.",
+        "meta": {"skill": "enzymes"},
+    },
+    {
+        "id": "market-item",
+        "text": "stock market price demand",
+        "answer": "B",
+        "explanation": "Prices fall.",
+        "meta": {"skill": "markets"},
+    },
+    {
+        "id": "volcano-item",
+        "text": "volcano magma lava pressure",
+        "answer": "C",
+        "explanation": "Magma rises.",
+        "meta": {"skill": "volcanoes"},
+    },
+]
+LISTS = {
+    "topic": ["enzyme", "market", "volcano", "optics"],
+    "method": ["experiment", "survey", "sampling"],
+    "common": ["rate", "price", "lava", "light"],
+}
+TOPICS = ["enzyme", "market", "volcano"]
+
+
+@dataclass
+class Seeded:
+    url: str
+    app: object
+    run_id: str
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_job(url: str, job_id: str, seconds: float = 30) -> dict:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        job = httpx.get(f"{url}/jobs/{job_id}").json()
+        if job["status"] not in ("queued", "running"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish")
+
+
+def questions(n: int = 40) -> list[Question]:
+    return [
+        Question(
+            f"q{i}",
+            f"{TOPICS[i % 3]} question {i}",
+            ["x", "y", "z"],
+            ["A"],
+            [],
+            {"skill": TOPICS[i % 3], "solution": "Rates rise."},
+        )
+        for i in range(n)
+    ]
+
+
+@pytest.fixture(scope="module")
+def seeded(tmp_path_factory):
+    """Collection `c` (mcq, 3 items, lists, 40 questions) with one answered run, done."""
+    home = tmp_path_factory.mktemp("home")
+    base = load_settings({"ANTHROPIC_API_KEY": "test"})
+    fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
+    app = create_app(replace(base, home=home, **fake))
+    fake_embeddings(app.state.models)
+    fake_replies(app.state.claude, lambda p: "Answer: A")
+    app.state.worker.idle_seconds = 0.01
+    port = free_port()
+    url = f"http://127.0.0.1:{port}"
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                if httpx.get(f"{url}/health").status_code == 200:
+                    break
+            except httpx.TransportError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("server did not start")
+        r = httpx.post(f"{url}/collections", json={"name": "c", "qa_type": "mcq"})
+        assert r.status_code == 201, r.text
+        r = httpx.post(f"{url}/collections/c/documents", json={"items": ITEMS, "confirm": True})
+        assert r.status_code == 200, r.text
+        r = httpx.put(f"{url}/collections/c/keyword-lists", json=LISTS)
+        assert r.status_code == 202, r.text
+        assert wait_job(url, r.json()["job_id"])["status"] == "done"
+        db.save_questions(app.state.conn, "c", questions())
+        body = {
+            "collection": "c",
+            "methods": ["kw_individual", "hybrid", "random_example"],
+            "answer": True,
+            "confirm": True,
+        }
+        r = httpx.post(f"{url}/eval", json=body)
+        assert r.status_code == 202, r.text
+        run_id = r.json()["job_id"]
+        assert wait_job(url, run_id)["status"] == "done"
+        yield Seeded(url, app, run_id)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+@pytest.fixture
+def page(context):
+    """A page that fails its test on any console error or failed request."""
+    p = context.new_page()
+    p.set_default_timeout(5000)
+    problems: list[str] = []
+    p.on("console", lambda m: problems.append(f"console: {m.text}") if m.type == "error" else None)
+    p.on("pageerror", lambda e: problems.append(f"page error: {e}"))
+    p.on("requestfailed", lambda r: problems.append(f"request failed: {r.url}"))
+    p.on("response", lambda r: problems.append(f"{r.status} {r.url}") if r.status >= 400 else None)
+    yield p
+    assert not problems, problems

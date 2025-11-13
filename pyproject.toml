@@ -20,6 +20,8 @@ dev = [
   "ragqa-core",
   "ragqa-api",
   "ragqa-worker",
+  "playwright==1.64.*",
+  "pytest-playwright==0.10.*",
 ]
 
 [tool.uv.sources]
@@ -28,7 +30,10 @@ ragqa-api = { workspace = true }
 ragqa-worker = { workspace = true }
 
 [tool.pytest.ini_options]
-markers = ["integration: needs Docker or model downloads"]
+markers = [
+  "integration: needs Docker or model downloads",
+  "pages: drives a real browser against the console (Playwright)",
+]
 testpaths = ["tests", "packages/core/tests", "apps/api/tests", "apps/worker/tests"]
 addopts = "--import-mode=importlib"
 

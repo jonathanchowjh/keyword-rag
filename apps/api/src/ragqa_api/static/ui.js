@@ -106,6 +106,29 @@ export function verdictText(answer, labels = known) {
   return `${head}: ${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
 }
 
+// An inline SVG gap bar: a centre line at 0, a bar from lo to hi, a dot at diff. All values in
+// points; `span` is the axis half-width in the same units, and anything beyond it is clamped.
+export function gapBar(lo, diff, hi, span) {
+  const W = 220;
+  const H = 18;
+  const half = Number.isFinite(span) && span > 0 ? span : 10;
+  const x = (v) => W / 2 + (Math.max(-half, Math.min(half, v)) / half) * (W / 2 - 4);
+  const label = esc(`Gap ${pts(diff, lo, hi)}`);
+  const bar =
+    Number.isFinite(lo) && Number.isFinite(hi)
+      ? `<rect x="${x(Math.min(lo, hi)).toFixed(1)}" y="5" width="${Math.max(
+          x(Math.max(lo, hi)) - x(Math.min(lo, hi)),
+          1
+        ).toFixed(1)}" height="8" rx="2" fill="currentColor" opacity=".3"/>`
+      : "";
+  const dot = Number.isFinite(diff)
+    ? `<circle cx="${x(diff).toFixed(1)}" cy="9" r="4" fill="currentColor"/>`
+    : "";
+  return `<svg class="gap" role="img" aria-label="${label}" viewBox="0 0 ${W} ${H}" width="${W}"
+    height="${H}"><line x1="${W / 2}" x2="${W / 2}" y1="0" y2="${H}" stroke="currentColor"
+    stroke-width="1" opacity=".6"/>${bar}${dot}</svg>`;
+}
+
 // -- layout ---------------------------------------------------------------------
 
 export function pill(state) {

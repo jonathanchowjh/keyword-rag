@@ -26,7 +26,7 @@ RAGQA_QDRANT_URL=$(./scripts/dev-qdrant.sh url) RAGQA_HOME=.ragqa-dev \
 
 | Command | What it runs | Needs Docker |
 |---|---|---|
-| `uv run pytest -m "not integration"` | Unit suite: pure logic, the API on fakes, source guards | No |
+| `uv run pytest -m "not integration and not pages"` | Unit suite: pure logic, the API on fakes, source guards | No |
 | `RAGQA_TEST_QDRANT_URL=$(./scripts/dev-qdrant.sh url) uv run pytest -m integration` | Real Qdrant, real small models, real dataset downloads | Yes |
 | `./scripts/image-smoke.sh` | Builds the image and drives it with no API key | Yes |
 | `./scripts/gate.sh` | Both of the above, then records the commit as pushable | Yes |
