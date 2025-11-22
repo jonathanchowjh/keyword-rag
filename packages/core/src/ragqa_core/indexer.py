@@ -105,6 +105,10 @@ class Indexer:
                 self.store.set_keywords(spec.name, [i.id for i in part], keywords, vectors)
             progress(min(start + BATCH, len(items)) / len(items))
 
+    def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
+        prompt = propose_prompt([i.text for i in sample], spec.qa_type)
+        return self.claude.estimate_usd(len(prompt), 2000)
+
     def propose_lists(self, spec: CollectionSpec, sample: list[Item]) -> KeywordLists:
         reply = self.claude.complete(
             propose_prompt([i.text for i in sample], spec.qa_type),

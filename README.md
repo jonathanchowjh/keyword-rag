@@ -123,7 +123,7 @@ A collection remembers the dense model it was built with. Changing
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}` |
 | `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`: queues a job and returns `{job_id}` |
-| `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved |
+| `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it |
 | `POST /query` | One question, several methods side by side, optionally answered |
 | `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}` |

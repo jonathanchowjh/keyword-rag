@@ -52,6 +52,30 @@ class Seeded:
     app: object
     run_id: str
 
+    def build(self, name: str, run: bool = False) -> str:
+        """An mcq collection with items, lists and 40 questions; with `run`, one answered run
+        of kw_individual, hybrid and random_example, done. Returns the run id ("" without)."""
+        url = self.url
+        r = httpx.post(f"{url}/collections", json={"name": name, "qa_type": "mcq"})
+        assert r.status_code == 201, r.text
+        r = httpx.post(
+            f"{url}/collections/{name}/documents", json={"items": ITEMS, "confirm": True}
+        )
+        assert r.status_code == 200, r.text
+        r = httpx.put(f"{url}/collections/{name}/keyword-lists", json=LISTS)
+        assert r.status_code == 202, r.text
+        assert wait_job(url, r.json()["job_id"])["status"] == "done"
+        db.save_questions(self.app.state.conn, name, questions())  # type: ignore[attr-defined]
+        if not run:
+            return ""
+        methods = ["kw_individual", "hybrid", "random_example"]
+        body = {"collection": name, "methods": methods, "answer": True, "confirm": True}
+        r = httpx.post(f"{url}/eval", json=body)
+        assert r.status_code == 202, r.text
+        run_id = r.json()["job_id"]
+        assert wait_job(url, run_id)["status"] == "done"
+        return run_id
+
 
 def free_port() -> int:
     with socket.socket() as s:
@@ -108,25 +132,9 @@ def seeded(tmp_path_factory):
                 time.sleep(0.05)
         else:
             raise AssertionError("server did not start")
-        r = httpx.post(f"{url}/collections", json={"name": "c", "qa_type": "mcq"})
-        assert r.status_code == 201, r.text
-        r = httpx.post(f"{url}/collections/c/documents", json={"items": ITEMS, "confirm": True})
-        assert r.status_code == 200, r.text
-        r = httpx.put(f"{url}/collections/c/keyword-lists", json=LISTS)
-        assert r.status_code == 202, r.text
-        assert wait_job(url, r.json()["job_id"])["status"] == "done"
-        db.save_questions(app.state.conn, "c", questions())
-        body = {
-            "collection": "c",
-            "methods": ["kw_individual", "hybrid", "random_example"],
-            "answer": True,
-            "confirm": True,
-        }
-        r = httpx.post(f"{url}/eval", json=body)
-        assert r.status_code == 202, r.text
-        run_id = r.json()["job_id"]
-        assert wait_job(url, run_id)["status"] == "done"
-        yield Seeded(url, app, run_id)
+        seeded = Seeded(url, app, "")
+        seeded.run_id = seeded.build("c", run=True)
+        yield seeded
     finally:
         server.should_exit = True
         thread.join(timeout=10)

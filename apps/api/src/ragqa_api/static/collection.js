@@ -22,6 +22,8 @@ const $ = (id) => document.getElementById(id);
 let cat = null;
 let col = null; // the latest GET /collections/{name}
 let runs = [];
+let answerSetup = null; // the setup the answer's run recorded, fetched once per run
+let answerSetupFor = null;
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
@@ -39,6 +41,17 @@ const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
 // -- head and answer -------------------------------------------------------------
 
+// Why the answer's run no longer matches the collection, in words.
+function staleNotes() {
+  const a = col.answer;
+  if (!a || !answerSetup) return [];
+  const after = `after run ${a.run_id.slice(0, 4)}`;
+  const notes = [];
+  if (answerSetup.keyword_version !== col.keyword_version) notes.push(`keyword lists changed ${after}`);
+  if (answerSetup.dense_model !== col.dense_model) notes.push(`dense model changed ${after}`);
+  return notes;
+}
+
 function headHtml() {
   const type = cat.qa_types[col.qa_type];
   const noun = type?.item_noun ?? "item";
@@ -47,11 +60,12 @@ function headHtml() {
     .map(esc)
     .join(" · ");
   const progress = col.progress != null ? ` ${pct(col.progress)}` : "";
+  const stale = staleNotes().map((n) => ` · <span class="warn">${esc(n)}</span>`).join("");
   return head({
     title: name,
     crumb: [{ label: "Collections", href: "/" }],
     sub: `${type?.label ?? col.qa_type}: retrieves ${type?.retrieves ?? "items"}`,
-    aside: `${status} · ${pill(col.state)}${esc(progress)}`,
+    aside: `${status} · ${pill(col.state)}${esc(progress)}${stale}`,
   });
 }
 
@@ -64,7 +78,7 @@ function answerHtml() {
     <p>${gapBar(a.lo, a.diff, a.hi, span)} <span class="muted">${esc(label)}, ${esc(pts(a.diff, a.lo, a.hi))}</span></p>
     <p class="muted">From <a href="/c/${encodeURIComponent(name)}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
       a.run_id.slice(0, 4))}</a> at ${esc(clock(a.at))}${a.answered ? "" : ", retrieval only"} ·
-      run ${esc(col.runs)} on this collection</p>`;
+      run ${esc(a.runs)} on this collection</p>`;
 }
 
 // -- runs --------------------------------------------------------------------------
@@ -230,7 +244,7 @@ function buildLists() {
     best few from each list.</p><div class="lists">${areas}</div>
     <div class="actions"><button type="button" id="kw-save">Save lists</button>
       <button type="button" id="kw-propose" class="secondary">Propose with Claude</button></div>
-    <p id="kw-msg" role="status"></p>`;
+    <p id="kw-hint" class="muted"></p><p id="kw-msg" role="status"></p>`;
   for (const [k] of LIST_KEYS) $(`kw-${k}`).addEventListener("input", () => (listsDirty = true));
   $("kw-save").addEventListener("click", saveLists);
   $("kw-propose").addEventListener("click", proposeLists);
@@ -257,7 +271,7 @@ async function saveLists() {
   try {
     const saved = await api("/collections/" + enc + "/keyword-lists", { method: "PUT", body: readLists() });
     listsDirty = false;
-    listsVersion = undefined; // refill from the server once the version changes
+    listsVersion = col.keyword_version ?? null; // keep the edits until the rekey switches version
     note(`<span class="ok">Saved as version ${esc(saved.version)}: re-keys ${esc(
       plural(col.count, "item"))}.</span> Job ${esc(
       saved.job_id.slice(0, 4))} ${pill("queued")}`);
@@ -268,21 +282,29 @@ async function saveLists() {
 }
 
 async function proposeLists() {
-  note("Asking Claude…");
-  $("kw-propose").disabled = true;
+  note("");
+  const path = "/collections/" + enc + "/keyword-lists/propose";
   try {
-    fillLists(await api("/collections/" + enc + "/keyword-lists/propose", { method: "POST" }));
-    listsDirty = true;
-    note("Proposed by Claude. Review them, then Save lists.");
-    refreshSpend();
+    const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
+    const slot = document.createElement("span");
+    $("kw-msg").replaceChildren("Proposing costs ", slot);
+    confirmSpend(slot, estimate, async () => {
+      try {
+        fillLists(await api(path, { method: "POST", body: { confirm: true } }));
+        listsDirty = true;
+        note("Proposed by Claude. Review them, then Save lists.");
+        refreshSpend();
+      } catch (e) {
+        note(`<span class="err">${esc(e.message)}</span>`);
+      }
+    });
   } catch (e) {
     note(`<span class="err">${esc(e.message)}</span>`);
-  } finally {
-    $("kw-propose").disabled = false;
   }
 }
 
 function syncLists() {
+  $("kw-hint").textContent = `Saving re-keys ${plural(col.count, "item")}, free.`;
   const version = col.keyword_version ?? null;
   if (version !== listsVersion && !listsDirty) {
     fillLists(col.keyword_lists);
@@ -322,6 +344,10 @@ async function refresh() {
   try {
     cat = await catalog();
     [col, runs] = await Promise.all([api("/collections/" + enc), api("/eval?collection=" + enc)]);
+    if (col.answer && answerSetupFor !== col.answer.run_id) {
+      answerSetup = (await api("/eval/" + encodeURIComponent(col.answer.run_id))).setup;
+      answerSetupFor = col.answer.run_id;
+    }
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("runs", runsHtml());

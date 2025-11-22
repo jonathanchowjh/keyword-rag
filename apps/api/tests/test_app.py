@@ -258,8 +258,20 @@ def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeyp
 def test_propose_lists(client):
     add_collection(client, lists=False)
     fake_replies(client.app.state.claude, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
-    lists = client.post("/collections/c/keyword-lists/propose").json()
+    url = "/collections/c/keyword-lists/propose"
+    spent = client.get("/budget").json()["spent_usd"]
+    r = client.post(url)
+    assert r.status_code == 200 and r.json()["estimate"]["calls"] == 1
+    assert r.json()["estimate"]["est_usd"] > 0
+    assert client.get("/budget").json()["spent_usd"] == spent  # the estimate spent nothing
+    lists = client.post(url, json={"confirm": True}).json()
     assert lists["topic"] == ["enzymes"] and lists["method"] == ["assay"]
+
+
+def test_propose_lists_needs_a_key(client):
+    add_collection(client, lists=False)
+    client.app.state.claude.api_key = ""
+    assert client.post("/collections/c/keyword-lists/propose").status_code == 503
 
 
 def test_lists_save_is_busy_only_while_an_eval_runs(client):

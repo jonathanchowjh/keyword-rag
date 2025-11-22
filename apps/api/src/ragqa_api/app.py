@@ -79,6 +79,10 @@ class LoadRequest(BaseModel):
     confirm: bool = False
 
 
+class ProposeRequest(BaseModel):
+    confirm: bool = False
+
+
 class Lists(BaseModel):
     topic: list[str]
     method: list[str]
@@ -278,9 +282,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"job_id": job_id}
 
     @app.post("/collections/{name}/keyword-lists/propose")
-    def propose(name: str) -> dict:
+    def propose(name: str, body: ProposeRequest | None = None):
         spec = state.retriever.spec(name)
+        if not state.claude.api_key:
+            raise NoApiKey()
         sample = sample_items(state.store, name)
+        if not (body and body.confirm):
+            estimate = state.indexer.estimate_propose_usd(spec, sample)
+            return JSONResponse({"estimate": {"est_usd": estimate, "calls": 1}}, 200)
         return asdict(state.indexer.propose_lists(spec, sample))
 
     @app.put("/collections/{name}/keyword-lists", status_code=202)
