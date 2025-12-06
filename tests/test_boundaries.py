@@ -80,6 +80,7 @@ def test_compose_binds_localhost_only():
 def test_gate_has_the_slow_steps():
     g = (ROOT / "scripts/gate.sh").read_text()
     assert "pytest -m integration" in g and "image-smoke.sh" in g and "ragqa-gate-receipt" in g
+    assert "pytest -m pages" in g
 
 
 def test_env_example_lists_every_setting():

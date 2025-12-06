@@ -229,6 +229,7 @@ about 20 times as much.
 | `/c/{name}/runs/{id}` | One run |
 | `/lab` | One question, methods side by side |
 | `/worker` | The worker, its queue and what needs a person |
+| `/board` | Redirects to `/` (the old Eval Board) |
 | `/docs` | Every endpoint |
 
 ## Reading a run

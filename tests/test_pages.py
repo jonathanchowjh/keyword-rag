@@ -277,3 +277,15 @@ def test_worker_page_poll_error_clears_when_it_recovers(page, seeded):
     page.goto(seeded.url + "/worker")
     expect(page.locator("#poll-err")).to_contain_text("Couldn't refresh at")
     expect(page.locator("#poll-err")).to_have_text("", timeout=8000)
+
+
+def test_one_path_end_to_end(page, seeded):
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New collection").click()
+    page.get_by_label("Name").fill("e2e")
+    page.get_by_role("button", name="Create").click()
+    page.locator("main a.row-link", has_text="e2e").click()
+    expect(page).to_have_url(seeded.url + "/c/e2e")
+    expect(page.get_by_text("No answer yet").first).to_be_visible()
+    page.goto(seeded.url + "/worker")
+    expect(page.locator("#main")).to_be_visible()

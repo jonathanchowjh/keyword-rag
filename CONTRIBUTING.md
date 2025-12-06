@@ -28,8 +28,9 @@ RAGQA_QDRANT_URL=$(./scripts/dev-qdrant.sh url) RAGQA_HOME=.ragqa-dev \
 |---|---|---|
 | `uv run pytest -m "not integration and not pages"` | Unit suite: pure logic, the API on fakes, source guards | No |
 | `RAGQA_TEST_QDRANT_URL=$(./scripts/dev-qdrant.sh url) uv run pytest -m integration` | Real Qdrant, real small models, real dataset downloads | Yes |
+| `uv run playwright install chromium && uv run pytest -m pages` | The console pages in a real browser, on the app with fakes; fails on any console error or failed request | No |
 | `./scripts/image-smoke.sh` | Builds the image and drives it with no API key | Yes |
-| `./scripts/gate.sh` | Both of the above, then records the commit as pushable | Yes |
+| `./scripts/gate.sh` | The integration suite, the page tests and the image smoke test, then records the commit as pushable | Yes |
 | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | Lint, format, types | No |
 
 ## Hooks instead of CI

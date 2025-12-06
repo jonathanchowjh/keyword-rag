@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The console replaces the Eval Board: `/` lists collections with their answer,
+  `/c/{name}` and `/c/{name}/runs/{id}` show one collection and one run, and
+  `/worker` shows the queue and what needs a person. `/lab` stays. `/board`
+  redirects to `/`.
+- A worker thread inside the service runs loads, re-keys and evaluations one at
+  a time. Jobs can be cancelled and stopped runs resumed (the estimate comes
+  first); `GET /jobs`, `/jobs/{id}`, `/status` and `/catalog` are new.
+- `PUT /collections/{name}/keyword-lists` now returns 202 with a `job_id` and
+  queues a `rekey` job instead of re-keying in the request. `DELETE
+  /collections/{name}` and `DELETE /eval/{id}` are new.
+- Every run has a plain-language answer, paired gaps against Hybrid and a log.
+- The gate runs a browser smoke test of the pages (`pytest -m pages`).
+
 - Two control methods, `random_example` and `fixed_example`, so a method can
   be checked against an example chosen without looking at the question.
 - Dense queries on Qwen3-Embedding carry the query-side task instruction the

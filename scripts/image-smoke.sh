@@ -27,8 +27,18 @@ post() { curl -sf -X "$1" "$BASE$2" -H 'content-type: application/json' -d "$3";
 
 post POST /collections '{"name":"smoke","qa_type":"mcq"}' >/dev/null
 post POST /collections/smoke/documents "{\"items\": $(cat "$FIXTURE")}" >/dev/null
-post PUT /collections/smoke/keyword-lists \
-  '{"topic":["photosynthesis","gravity","magnetism","evaporation"],"method":["experiment","observation"],"common":["energy","water","force","light"]}' >/dev/null
+# Saving lists queues a rekey job; queries use the new lists only once it is done.
+job=$(post PUT /collections/smoke/keyword-lists \
+  '{"topic":["photosynthesis","gravity","magnetism","evaporation"],"method":["experiment","observation"],"common":["energy","water","force","light"]}' \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+echo "smoke: waiting for rekey job $job"
+status=""
+for _ in $(seq 1 120); do
+  status=$(curl -sf "$BASE/jobs/$job" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+  case "$status" in done | failed | cancelled) break ;; esac
+  sleep 1
+done
+[ "$status" = "done" ] || { echo "smoke: rekey job ended as '$status'" >&2; exit 1; }
 
 post POST /query '{"collection":"smoke","question":"Which gas do plants take in for photosynthesis?","methods":["keyword","hybrid","kw_individual"]}' \
   | python3 -I -c 'import json,sys; r=json.load(sys.stdin)["results"]; bad=[m for m,v in r.items() if not v["hits"] or v["error"]]; assert not bad, r; print("smoke: retrieval ok:", {m: v["hits"][0]["id"] for m,v in r.items()})'

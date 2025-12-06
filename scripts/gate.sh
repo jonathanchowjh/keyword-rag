@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The slow half of verification: the integration suite against a real Qdrant
-# and real models, then the image smoke test. .githooks/pre-push refuses any
+# and real models, the page tests in a real browser, then the image smoke test. .githooks/pre-push refuses any
 # commit this has not passed.
 #
 # WHY A SCRIPT AND NOT THE HOOK (learned in pg-ops). `git push` opens the
@@ -24,6 +24,10 @@ fi
 echo "gate: integration tests against a real Qdrant"
 ./scripts/dev-qdrant.sh up
 RAGQA_TEST_QDRANT_URL=$(./scripts/dev-qdrant.sh url) uv run pytest -m integration -q
+
+echo "gate: page smoke test in a real browser"
+uv run playwright install chromium
+uv run pytest -m pages -q
 
 echo "gate: image smoke test"
 ./scripts/image-smoke.sh
