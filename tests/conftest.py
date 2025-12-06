@@ -71,6 +71,9 @@ class Seeded:
             return ""
         return self.run(name, ["kw_individual", "hybrid", "random_example"])
 
+    def wait(self, job_id: str) -> dict:
+        return wait_job(self.url, job_id)
+
     def run(self, name: str, methods: list[str]) -> str:
         """One answered run of `methods` on `name`, done. Returns its id."""
         body = {"collection": name, "methods": methods, "answer": True, "confirm": True}
@@ -157,5 +160,7 @@ def page(context):
     p.on("pageerror", lambda e: problems.append(f"page error: {e}"))
     p.on("requestfailed", lambda r: problems.append(f"request failed: {r.url}"))
     p.on("response", lambda r: problems.append(f"{r.status} {r.url}") if r.status >= 400 else None)
+    p.expected = []  # a test that provokes a 4xx on purpose lists its status here, e.g. "409"
     yield p
+    problems = [x for x in problems if not any(e in x for e in p.expected)]
     assert not problems, problems

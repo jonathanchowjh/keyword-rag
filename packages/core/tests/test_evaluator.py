@@ -655,3 +655,14 @@ def test_unanswered_run_headline_follows_a_failed_proxy_check(env):
     ev.run(job)
     t = ev.table(job)
     assert t["proxy_trusted"] is False and t["headline"] == "same_skill@1"
+
+
+def test_rows_carry_the_matched_keywords_per_hit(env):
+    conn, ev = env
+    job = create_job(conn, "eval", "c", setup_for(["kw_individual", "vector"]))
+    ev.run(job)
+    for row in run_items(conn, job, "kw_individual"):
+        assert len(row["hit_matched"]) == len(row["hit_ids"])
+        assert all(isinstance(m, list) for m in row["hit_matched"])
+    assert any(m for row in run_items(conn, job, "kw_individual") for m in row["hit_matched"])
+    assert all(not m for row in run_items(conn, job, "vector") for m in row["hit_matched"])

@@ -375,6 +375,7 @@ class Evaluator:
                 {
                     "hit_ids": ids,
                     "hit_skills": [h.meta.get("skill") for h in hits],
+                    "hit_matched": [h.matched for h in hits],
                     "retrieval": metrics,
                     "usd": 0.0,
                 }

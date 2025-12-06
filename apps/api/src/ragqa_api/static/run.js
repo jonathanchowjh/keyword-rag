@@ -14,6 +14,7 @@ const $ = (x) => document.getElementById(x);
 
 let cat = null;
 let run = null; // the latest GET /eval/{id}
+let resumeProbe = null; // for a resumable run: {refusal} or {} when it may resume, probed once
 let qaType = null; // the collection's, fetched once, for metric labels
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 
@@ -171,15 +172,19 @@ function questionHtml(row) {
   const right = a ? (a.accuracy ?? a.em) === 1 : null;
   const mark = right == null ? "" : right ? "right " : "wrong ";
   const choices = (row.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
-  const hits = (row.hit_ids ?? []).map((h, i) => {
-    const skill = row.hit_skills?.[i];
-    return skill ? `${h} (${skill})` : h;
-  });
+  const hits = (row.hit_ids ?? [])
+    .map((h, i) => {
+      const skill = row.hit_skills?.[i];
+      const words = show(row.hit_matched?.[i]); // rows from before hit_matched lack it
+      return `<li>${esc(skill ? `${h} (${skill})` : h)}, matched keywords:
+        <span data-matched>${esc(words)}</span></li>`;
+    })
+    .join("");
   return `<details><summary>${esc(mark)}${esc(row.question ?? row.question_id)}</summary>
     ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
     <p>Gold: ${esc(show(row.gold_answers?.length ? row.gold_answers : row.gold_ids))}</p>
     <p>Parsed answer: ${esc(show(row.pred))} <span class="muted">${esc(show(row.raw))}</span></p>
-    <p>Top hits: ${esc(show(hits))}</p></details>`;
+    <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></details>`;
 }
 
 async function loadQuestions() {
@@ -207,7 +212,11 @@ function actionsHtml() {
   const s = run.status;
   const buttons = [];
   if (BUSY.has(s)) buttons.push('<button type="button" id="act-cancel">Cancel</button>');
-  if (RESUMABLE.has(s)) buttons.push('<button type="button" id="act-resume">Resume</button>');
+  if (RESUMABLE.has(s) && resumeProbe?.refusal) {
+    buttons.push(`<span class="warn" id="act-refusal">${esc(resumeProbe.refusal)}</span>`);
+  } else if (RESUMABLE.has(s)) {
+    buttons.push('<button type="button" id="act-resume">Resume</button>');
+  }
   buttons.push('<button type="button" id="act-rerun" class="secondary">Re-run</button>');
   buttons.push('<button type="button" id="act-delete" class="secondary">Delete…</button>');
   return `<div class="actions">${buttons.join("")}</div>
@@ -215,6 +224,16 @@ function actionsHtml() {
 }
 
 const say = (text) => ($("act-msg").textContent = text);
+
+// Free: without confirm the endpoint only estimates, or refuses with the reason in `detail`.
+async function probeResume() {
+  try {
+    await api(`/jobs/${encodeURIComponent(id)}/resume`, { method: "POST", body: { confirm: false } });
+    resumeProbe = {};
+  } catch (e) {
+    resumeProbe = { refusal: e.message };
+  }
+}
 
 async function cancel() {
   say("");
@@ -299,6 +318,7 @@ async function refresh() {
     cat = await catalog();
     run = await api(`/eval/${encodeURIComponent(id)}`);
     qaType ??= (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
+    if (RESUMABLE.has(run.status) && resumeProbe === null) await probeResume();
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("gaps", gapsHtml());

@@ -4,6 +4,7 @@ import httpx
 import pytest
 from playwright.sync_api import expect
 
+from ragqa_core import db
 from ragqa_core.fakes import fake_replies
 
 pytestmark = pytest.mark.pages
@@ -124,7 +125,7 @@ def test_run_page_answer_and_gaps(page, seeded):
 
 
 def test_run_without_the_pair_says_so(page, seeded):
-    page.goto(f"{seeded.url}/c/c/runs/{seeded.vector_only_run_id}")
+    page.goto(f"{seeded.url}/c/vo/runs/{seeded.vector_only_run_id}")
     expect(page.get_by_text("does not include Keywords per list and Hybrid")).to_be_visible()
 
 
@@ -153,6 +154,8 @@ def test_run_page_questions_open_with_gold_and_answer(page, seeded):
     page.locator("#questions details > summary").first.click()
     expect(page.locator("#questions details[open]").first).to_contain_text("Gold")
     expect(page.locator("#questions details[open]").first).to_contain_text("Parsed answer")
+    # kw_individual is the first method; the matched words are rendered per hit
+    expect(page.locator("#questions details[open] [data-matched]").first).to_be_visible()
 
 
 def test_run_rerun_estimates_then_starts(page, seeded):
@@ -177,3 +180,30 @@ def test_run_delete_asks_inline_then_deletes(page, seeded):
     page.get_by_role("button", name="Yes, delete this run").click()
     page.wait_for_url(f"{seeded.url}/c/gone")
     assert httpx.get(f"{seeded.url}/eval", params={"collection": "gone"}).json() == []
+
+
+def interrupt(seeded, run_id):
+    db.update_job(seeded.app.state.conn, run_id, status="interrupted")
+
+
+def test_resume_refusal_shows_instead_of_the_button(page, seeded):
+    run_id = seeded.build("refused", run=True)
+    lists = {"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]}
+    r = httpx.put(f"{seeded.url}/collections/refused/keyword-lists", json=lists)
+    assert r.status_code == 202
+    seeded.wait(r.json()["job_id"])
+    interrupt(seeded, run_id)
+    page.expected = ["409"]  # the probe is refused, which is the point
+    page.goto(f"{seeded.url}/c/refused/runs/{run_id}")
+    expect(page.get_by_text("keyword lists changed since this run")).to_be_visible()
+    expect(page.get_by_role("button", name="Resume")).to_have_count(0)
+
+
+def test_resume_without_refusal_shows_the_button(page, seeded):
+    run_id = seeded.build("resumable", run=True)
+    interrupt(seeded, run_id)
+    page.goto(f"{seeded.url}/c/resumable/runs/{run_id}")
+    expect(page.get_by_role("button", name="Resume")).to_be_visible()
+    page.get_by_role("button", name="Resume").click()
+    expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
+    assert httpx.get(f"{seeded.url}/jobs/{run_id}").json()["status"] == "interrupted"
