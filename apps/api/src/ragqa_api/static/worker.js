@@ -131,8 +131,9 @@ async function refresh() {
     paint("queued", queuedHtml(status.queue));
     paint("batches", batchesHtml(status.batches));
     paint("finished", finishedHtml(jobs.filter((j) => !BUSY.has(j.status)).slice(0, FINISHED)));
+    $("poll-err").textContent = "";
   } catch (e) {
-    say(e.message);
+    $("poll-err").textContent = `Couldn't refresh at ${clock(new Date().toISOString())}: ${e.message}`;
   }
 }
 

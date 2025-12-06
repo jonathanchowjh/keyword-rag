@@ -221,9 +221,11 @@ def worker_stopped(seeded, name):
     try:
         yield seeded.queue_eval(name)
     finally:
-        for job in httpx.get(f"{seeded.url}/jobs", params={"status": "queued"}).json():
-            httpx.post(f"{seeded.url}/jobs/{job['id']}/cancel")
-        worker.start()
+        try:
+            for job in httpx.get(f"{seeded.url}/jobs", params={"status": "queued"}).json():
+                httpx.post(f"{seeded.url}/jobs/{job['id']}/cancel")
+        finally:
+            worker.start()
 
 
 def test_worker_page_shows_problems_and_queue(page, seeded):
@@ -258,3 +260,20 @@ def test_worker_page_resume_estimates_first_and_shows_a_refusal(page, seeded):
     page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
     expect(page.locator("[data-refusal]")).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
+
+
+def test_worker_page_poll_error_clears_when_it_recovers(page, seeded):
+    page.expected = ["503"]
+    failed = []
+
+    def fail_once(route):
+        if len(failed) >= 2:  # the sidebar dot and the page both ask on load
+            route.continue_()
+        else:
+            failed.append(1)
+            route.fulfill(status=503, json={"detail": "busy"})
+
+    page.route("**/status", fail_once)
+    page.goto(seeded.url + "/worker")
+    expect(page.locator("#poll-err")).to_contain_text("Couldn't refresh at")
+    expect(page.locator("#poll-err")).to_have_text("", timeout=8000)
