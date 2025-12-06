@@ -93,3 +93,5 @@ svg.gap { color:var(--fg); vertical-align:middle; }
 .verdict { font-size:16px; margin:4px 0; }
 .steps { margin:8px 0; padding-left:18px; }
 button.danger { background:var(--bad); color:#fff; }
+tr.rule td { border-top:2px dotted var(--muted); color:var(--muted); font-size:12px; }
+main > details { margin:10px 0; } main summary { cursor:pointer; padding:4px 0; }

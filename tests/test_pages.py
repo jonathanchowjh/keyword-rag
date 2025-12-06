@@ -112,3 +112,68 @@ def test_gap_bar_is_accessible_and_clamped(page, seeded):
     assert 'role="img"' in svg and 'aria-label="Gap +50 pts (−30 to 80)"' in svg
     cx = float(svg.split('<circle cx="')[1].split('"')[0])
     assert cx <= 220  # clamped to the axis, not drawn at 50/10 of the way out
+
+
+def test_run_page_answer_and_gaps(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.get_by_text("Do keywords help?")).to_be_visible()
+    expect(page.get_by_text("chance level")).to_be_visible()
+    expect(page.locator("[data-gap-row]").first).to_be_visible()
+    assert page.locator("[data-gap-row]").count() == 2  # kw_individual, random_example
+    expect(page.locator("[data-ref-row]")).to_have_count(1)
+
+
+def test_run_without_the_pair_says_so(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.vector_only_run_id}")
+    expect(page.get_by_text("does not include Keywords per list and Hybrid")).to_be_visible()
+
+
+def test_pts_and_clock_format(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      return [m.pts(6.2, 1.8, 10.4), m.pts(-7, -12, -2),
+              m.clock('2026-10-21T06:02:00Z', new Date('2026-10-23T00:00:00Z'))] }"""
+    )
+    assert out[0] == "+6 pts (2–10)" and out[1] == "−7 pts (−12 to −2)" and "21 Oct" in out[2]
+
+
+def test_run_page_shows_na_without_retrieval(page, seeded):
+    seeded.build("na")
+    run_id = seeded.run("na", ["question_only", "hybrid"])
+    page.goto(f"{seeded.url}/c/na/runs/{run_id}")
+    page.get_by_text("Each method's own score").click()
+    expect(page.locator("#scores td", has_text="n/a").first).to_be_visible()
+
+
+def test_run_page_questions_open_with_gold_and_answer(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details").first).to_be_visible()
+    page.locator("#questions details > summary").first.click()
+    expect(page.locator("#questions details[open]").first).to_contain_text("Gold")
+    expect(page.locator("#questions details[open]").first).to_contain_text("Parsed answer")
+
+
+def test_run_rerun_estimates_then_starts(page, seeded):
+    seeded.build("rerun", run=True)
+    runs = httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()
+    page.goto(f"{seeded.url}/c/rerun/runs/{runs[0]['id']}")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("Claude calls", exact=False)).to_be_visible()
+    assert len(httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()) == 1
+    page.get_by_role("button", name="Start").click()
+    page.wait_for_url(lambda u: "/runs/" in u and runs[0]["id"] not in u)
+    assert len(httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()) == 2
+
+
+def test_run_delete_asks_inline_then_deletes(page, seeded):
+    run_id = seeded.build("gone", run=True)
+    page.goto(f"{seeded.url}/c/gone/runs/{run_id}")
+    page.get_by_role("button", name="Delete…").click()
+    page.get_by_role("button", name="Keep it").click()
+    expect(page.get_by_role("button", name="Yes, delete this run")).to_have_count(0)
+    page.get_by_role("button", name="Delete…").click()
+    page.get_by_role("button", name="Yes, delete this run").click()
+    page.wait_for_url(f"{seeded.url}/c/gone")
+    assert httpx.get(f"{seeded.url}/eval", params={"collection": "gone"}).json() == []

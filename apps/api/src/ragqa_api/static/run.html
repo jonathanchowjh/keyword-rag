@@ -9,7 +9,25 @@
 </head>
 <body>
 <aside id="side"></aside>
-<main id="main"></main>
+<main id="main">
+  <div id="head"></div>
+  <div id="answer"></div>
+  <div id="gaps" class="scroll"></div>
+  <p id="note" class="muted"></p>
+  <div id="best"></div>
+  <details><summary>Each method's own score</summary><div id="scores" class="scroll"></div></details>
+  <details><summary>Can the free score be trusted here?</summary><div id="proxy"></div></details>
+  <details><summary>Every pair compared</summary><div id="pairs" class="scroll"></div></details>
+  <details id="questions-box"><summary>Questions</summary>
+    <div class="row">
+      <label>Method<select id="q-method"></select></label>
+      <label class="check"><input type="checkbox" id="q-wrong"> Wrong only</label>
+    </div>
+    <div id="questions"></div>
+  </details>
+  <details><summary>Setup this ran with</summary><div id="setup"></div></details>
+  <div id="actions"></div>
+</main>
 <script type="module" src="/static/run.js"></script>
 </body>
 </html>

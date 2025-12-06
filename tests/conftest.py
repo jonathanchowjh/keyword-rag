@@ -51,6 +51,7 @@ class Seeded:
     url: str
     app: object
     run_id: str
+    vector_only_run_id: str = ""
 
     def build(self, name: str, run: bool = False) -> str:
         """An mcq collection with items, lists and 40 questions; with `run`, one answered run
@@ -68,12 +69,15 @@ class Seeded:
         db.save_questions(self.app.state.conn, name, questions())  # type: ignore[attr-defined]
         if not run:
             return ""
-        methods = ["kw_individual", "hybrid", "random_example"]
+        return self.run(name, ["kw_individual", "hybrid", "random_example"])
+
+    def run(self, name: str, methods: list[str]) -> str:
+        """One answered run of `methods` on `name`, done. Returns its id."""
         body = {"collection": name, "methods": methods, "answer": True, "confirm": True}
-        r = httpx.post(f"{url}/eval", json=body)
+        r = httpx.post(f"{self.url}/eval", json=body)
         assert r.status_code == 202, r.text
         run_id = r.json()["job_id"]
-        assert wait_job(url, run_id)["status"] == "done"
+        assert wait_job(self.url, run_id)["status"] == "done"
         return run_id
 
 
@@ -134,6 +138,9 @@ def seeded(tmp_path_factory):
             raise AssertionError("server did not start")
         seeded = Seeded(url, app, "")
         seeded.run_id = seeded.build("c", run=True)
+        # On its own collection: a vector-only run on `c` would become its newest answer.
+        seeded.build("vo")
+        seeded.vector_only_run_id = seeded.run("vo", ["vector"])
         yield seeded
     finally:
         server.should_exit = True
