@@ -74,6 +74,13 @@ class Seeded:
     def wait(self, job_id: str) -> dict:
         return wait_job(self.url, job_id)
 
+    def queue_eval(self, name: str) -> str:
+        """Queue one answered eval on `name`; it stays queued while the worker is stopped."""
+        body = {"collection": name, "methods": ["kw_individual"], "answer": True, "confirm": True}
+        r = httpx.post(f"{self.url}/eval", json=body)
+        assert r.status_code == 202, r.text
+        return r.json()["job_id"]
+
     def run(self, name: str, methods: list[str]) -> str:
         """One answered run of `methods` on `name`, done. Returns its id."""
         body = {"collection": name, "methods": methods, "answer": True, "confirm": True}

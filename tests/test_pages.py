@@ -1,5 +1,7 @@
 """The console pages, driven in a real browser against the app on fakes."""
 
+from contextlib import contextmanager
+
 import httpx
 import pytest
 from playwright.sync_api import expect
@@ -207,3 +209,52 @@ def test_resume_without_refusal_shows_the_button(page, seeded):
     page.get_by_role("button", name="Resume").click()
     expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{run_id}").json()["status"] == "interrupted"
+
+
+@contextmanager
+def worker_stopped(seeded, name):
+    """Stop the shared worker and queue an eval on its own collection `name`. Always leaves the
+    worker running again with that job no longer queued (R18)."""
+    worker = seeded.app.state.worker
+    seeded.build(name)  # its lists are keyed by the worker, so before stopping it
+    worker.stop()
+    try:
+        yield seeded.queue_eval(name)
+    finally:
+        for job in httpx.get(f"{seeded.url}/jobs", params={"status": "queued"}).json():
+            httpx.post(f"{seeded.url}/jobs/{job['id']}/cancel")
+        worker.start()
+
+
+def test_worker_page_shows_problems_and_queue(page, seeded):
+    with worker_stopped(seeded, "wq"):
+        page.goto(seeded.url + "/worker")
+        expect(page.get_by_text("The worker thread has stopped")).to_be_visible()
+        expect(page.locator("[data-queued-job]")).to_have_count(1)
+        expect(page.locator("[data-queued-job]")).to_contain_text("Evaluating wq")
+
+
+def test_worker_page_cancels_a_queued_job(page, seeded):
+    with worker_stopped(seeded, "wc") as job_id:
+        page.goto(seeded.url + "/worker")
+        page.locator("[data-queued-job] button", has_text="Cancel").click()
+        expect(page.locator("[data-queued-job]")).to_have_count(0)
+        expect(page.locator(f"[data-finished-job='{job_id}']")).to_contain_text("Cancelled")
+        assert httpx.get(f"{seeded.url}/jobs/{job_id}").json()["status"] == "cancelled"
+
+
+def test_worker_page_resume_estimates_first_and_shows_a_refusal(page, seeded):
+    ok = seeded.build("wr", run=True)
+    interrupt(seeded, ok)
+    page.goto(seeded.url + "/worker")
+    page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
+    expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
+    assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
+    page.expected = ["409"]
+    httpx.put(
+        f"{seeded.url}/collections/wr/keyword-lists",
+        json={"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]},
+    )
+    page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
+    expect(page.locator("[data-refusal]")).to_be_visible()
+    assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"

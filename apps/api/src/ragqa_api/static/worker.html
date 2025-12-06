@@ -9,7 +9,21 @@
 </head>
 <body>
 <aside id="side"></aside>
-<main id="main"></main>
+<main id="main">
+  <div id="head"></div>
+  <h2>What needs a person</h2>
+  <div id="problems"></div>
+  <h2>Running now</h2>
+  <div id="running"></div>
+  <h2>Queued</h2>
+  <div id="queued" class="scroll"></div>
+  <h2>Claude batches</h2>
+  <div id="batches" class="scroll"></div>
+  <h2>Finished</h2>
+  <div id="finished" class="scroll"></div>
+  <div id="resume-box"></div>
+  <p id="msg" class="err"></p>
+</main>
 <script type="module" src="/static/worker.js"></script>
 </body>
 </html>
