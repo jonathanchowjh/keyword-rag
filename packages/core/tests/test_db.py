@@ -200,6 +200,19 @@ def test_requeue_clears_cancel_and_error(conn):
     assert job["error"] is None
 
 
+def test_requeue_moves_only_a_resumable_job(conn):
+    j = create_job(conn, "eval", "c", {})
+    assert requeue(conn, j) is False  # already queued
+    claim_next_job(conn)
+    assert requeue(conn, j) is False and get_job(conn, j)["status"] == "running"
+    for status in JOBS_RESUMABLE:
+        update_job(conn, j, status=status)
+        assert requeue(conn, j) is True and get_job(conn, j)["status"] == "queued"
+    update_job(conn, j, status="done")
+    assert requeue(conn, j) is False and get_job(conn, j)["status"] == "done"
+    assert requeue(conn, "missing") is False
+
+
 def test_set_job_setup_and_list_jobs(conn):
     a = create_job(conn, "load", "c", {})
     b = create_job(conn, "eval", "c", {})

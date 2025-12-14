@@ -260,6 +260,18 @@ def newest_jobs(conn: Connection) -> list[dict]:
 JOBS_RESUMABLE = ("interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed")
 
 
+def requeue(conn: Connection, job_id: str) -> bool:
+    """Queues a resumable job again; False when it was not resumable (already moved)."""
+    marks = ", ".join("?" * len(JOBS_RESUMABLE))
+    with conn.lock:  # no other statement between the update and changes()
+        conn.execute(
+            "update jobs set status = 'queued', cancel_requested = 0, error = null,"
+            f" updated_at = ? where id = ? and status in ({marks})",
+            (now(), job_id, *JOBS_RESUMABLE),
+        )
+        return conn.changes() > 0
+
+
 def claim_next_job(conn: Connection) -> dict | None:
     """The oldest queued job by insertion, marked running in the same statement."""
     row = first(
@@ -325,14 +337,6 @@ def set_job_setup(conn: Connection, job_id: str, setup: dict) -> None:
     conn.execute(
         "update jobs set setup_json = ?, updated_at = ? where id = ?",
         (json.dumps(setup), now(), job_id),
-    )
-
-
-def requeue(conn: Connection, job_id: str) -> None:
-    conn.execute(
-        "update jobs set status = 'queued', cancel_requested = 0, error = null, updated_at = ?"
-        " where id = ?",
-        (now(), job_id),
     )
 
 

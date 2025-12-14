@@ -590,6 +590,8 @@ def test_summary_matches_the_table_without_building_it(env, monkeypatch):
         assert {k: s[k] for k in keys} == {k: t[k] for k in keys}
     assert tables[answered]["headline"] == "accuracy"
     assert tables[free]["headline"] != "accuracy"
+    for job, t in tables.items():
+        assert ev.summary(job, trusted)["proxy_trusted"] == t["proxy_trusted"]
     assert ev.summary("missing", None) is None
 
 
@@ -666,3 +668,76 @@ def test_rows_carry_the_matched_keywords_per_hit(env):
         assert all(isinstance(m, list) for m in row["hit_matched"])
     assert any(m for row in run_items(conn, job, "kw_individual") for m in row["hit_matched"])
     assert all(not m for row in run_items(conn, job, "vector") for m in row["hit_matched"])
+
+
+def test_collection_answer_keeps_the_pair_run_when_a_newer_run_lacks_the_pair(env):
+    _, ev = env
+    pair = ev.queue("c", "dev", ["kw_individual", "hybrid"], True, None)
+    ev.run(pair)
+    ev.run(ev.queue("c", "dev", ["vector"], True, None))
+    a = ev.collection_answer("c")
+    assert a is not None and a["run_id"] == pair and a["runs"] == 2
+    # An answered pair run wins over a newer free one; the newest wins among equals.
+    free = ev.queue("c", "dev", ["kw_individual", "hybrid"], False, None)
+    ev.run(free)
+    assert ev.collection_answer("c")["run_id"] == pair
+    newer = ev.queue("c", "dev", ["kw_individual", "hybrid"], True, None)
+    ev.run(newer)
+    assert ev.collection_answer("c")["run_id"] == newer
+
+
+def test_collection_answer_carries_proxy_trusted(env):
+    _, ev = env
+    ev.run(ev.queue("c", "dev", ["kw_individual", "hybrid"], False, None))
+    a = ev.collection_answer("c")
+    assert "proxy_trusted" in a and a["proxy_trusted"] == ev.collection_proxy_trusted("c")
+
+
+def many_questions(conn, n=25):
+    save_questions(
+        conn,
+        "c",
+        [
+            Question(f"m{i:02}", f"a {TOPICS[i % 5]} question", ["yes", "no"], ["A"], [], {})
+            for i in range(n)
+        ],
+    )
+
+
+def test_a_long_method_reports_progress_and_checks_inside(env):
+    conn, ev = env
+    many_questions(conn)
+    job = ev.queue("c", "dev", ["vector"], False, None)
+    seen = []
+
+    def check():
+        seen.append(get_job(conn, job)["progress"])
+
+    ev.run(job, check=check)
+    inside = [p for p in seen if 0 < p < 1]
+    assert len(set(inside)) >= 2, seen  # beyond the one report between methods
+    assert seen == sorted(seen) and get_job(conn, job)["progress"] == 1.0
+
+
+def test_cancel_takes_effect_inside_a_method(env):
+    conn, ev = env
+    many_questions(conn)
+    job = ev.queue("c", "dev", ["vector"], False, None)
+    calls = []
+
+    def check():
+        calls.append(1)
+        if len(calls) > 2 and get_job(conn, job)["progress"] > 0:
+            raise Cancelled()
+
+    ev.run(job, check=check)
+    assert get_job(conn, job)["status"] == "cancelled"
+    assert len(run_items(conn, job)) == 0  # stopped while retrieving, before any row
+
+
+def test_an_absent_primary_metric_is_not_wrong():
+    from ragqa_core.evaluator import is_wrong
+
+    assert is_wrong({"retrieval": {"same_skill@1": 0.0}}, "same_skill@1") is True
+    assert is_wrong({"retrieval": {"solution_sim@1": 0.4}}, "same_skill@1") is False
+    assert is_wrong({"retrieval": {}}, "same_skill@1") is False

@@ -277,7 +277,11 @@ class Evaluator:
             for n, method in enumerate(methods, start=1):
                 check()
                 todo = self._todo(job_id, method, questions)  # read now: a repeat finds none
-                self._run_method(job_id, spec, todo, method, setup, check)
+
+                def report(done: float, n: int = n) -> None:  # inside this method, 0..1
+                    db.update_job(self.conn, job_id, progress=(n - 1 + done) / len(methods))
+
+                self._run_method(job_id, spec, todo, method, setup, check, report)
                 db.update_job(self.conn, job_id, progress=n / len(methods))
             db.update_job(self.conn, job_id, status="done")
         except Cancelled:
@@ -297,14 +301,22 @@ class Evaluator:
         method: str,
         setup: dict,
         check: Callable[[], None],
+        report: Callable[[float], None],
     ) -> None:
-        """One method over `questions`, the ones still incomplete for it."""
+        """One method over `questions`, the ones still incomplete for it. Every 10
+        questions and after each Claude step it reports and checks, so the job's
+        updated_at stays fresh and a cancel does not wait for the method to end."""
         if not questions:
             return
-        all_hits = [
-            self.retriever.retrieve(spec.name, q.text, method, setup["k"], setup["rrf_k"])
-            for q in questions
-        ]
+        span = 0.5 if setup["answer"] else 0.99  # the share the retrieval step is worth
+        all_hits = []
+        for n, q in enumerate(questions, start=1):
+            all_hits.append(
+                self.retriever.retrieve(spec.name, q.text, method, setup["k"], setup["rrf_k"])
+            )
+            if n % 10 == 0 and n < len(questions):
+                report(span * n / len(questions))
+                check()
         if method == "question_only":  # no retrieval, so nothing to score it on
             rows = [
                 {"hit_ids": [], "hit_skills": [], "retrieval": {}, "usd": 0.0} for _ in questions
@@ -315,6 +327,7 @@ class Evaluator:
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
             return
+        report(span)
         check()
         prompts = [
             answer_prompt(spec.qa_type, q.text, q.choices, answer_hits(spec.qa_type, hits))
@@ -338,6 +351,8 @@ class Evaluator:
                 }
             )
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)
+        report(0.99)
+        check()
 
     def _retrieval_rows(
         self, spec: CollectionSpec, questions: list[Question], all_hits: list[list[Hit]]
@@ -440,6 +455,7 @@ class Evaluator:
             "headline": headline,
             "scale": scaling,
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
+            "proxy_trusted": trusted,
             "usd_total": db.job_spend(self.conn, job_id),
             "question_count": self._question_count(setup, by_method),
         }
@@ -517,25 +533,27 @@ class Evaluator:
         )
 
     def collection_answer(self, name: str) -> dict | None:
-        """The collection's answer: the newest answered run's, else the newest run's."""
+        """The collection's answer: the newest answered run that has the pair, else the
+        newest run that has it (spec §7.3: a run lacking the pair gives no answer)."""
         done = self._done_evals(name)
-        answered_runs = [j for j in done if j["setup"].get("answer")]
-        job = (answered_runs or done or [None])[0]
+        paired = [j for j in done if set(ANSWER_PAIR) <= set(j["setup"]["methods"])]
+        answered_runs = [j for j in paired if j["setup"].get("answer")]
+        job = (answered_runs or paired or [None])[0]
         if job is None:
             return None
         answered = bool(job["setup"].get("answer"))
         # Only an unanswered run's headline depends on the collection's proxy check.
         trusted = None if answered else self.collection_proxy_trusted(name)
         summary = self.summary(job["id"], trusted)
-        result = summary["answer"] if summary else None
-        if result is None:
+        if summary is None or summary["answer"] is None:
             return None
         return {
             "run_id": job["id"],
             "at": job["created_at"],
             "answered": answered,
             "runs": len(done),
-            **result,
+            "proxy_trusted": summary["proxy_trusted"],
+            **summary["answer"],
         }
 
     def _proxy_for(self, job_id: str) -> dict | None:
@@ -613,6 +631,6 @@ def is_wrong(row: dict, primary: str) -> bool:
     if answer:
         key = "accuracy" if "accuracy" in answer else "em"
         return answer[key] == 0
-    if not row["retrieval"]:  # question_only: no retrieval, so nothing to miss
+    if primary not in row["retrieval"]:  # absent means unmeasured (or question_only), never 0
         return False
-    return row["retrieval"].get(primary, 0.0) == 0
+    return row["retrieval"][primary] == 0

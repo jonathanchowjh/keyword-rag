@@ -26,7 +26,7 @@ from ragqa_core.datasets import load as load_dataset
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
-from ragqa_core.loader import Loader, limited, sample_items
+from ragqa_core.loader import Loader, limited, propose_sample, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import answer_prompt, parse_answer
 from ragqa_core.retriever import (
@@ -52,6 +52,7 @@ PROBLEM = {
     "stopped_budget": "stopped at the monthly cap",
     "stopped_no_key": "stopped: needs ANTHROPIC_API_KEY",
 }
+REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
 
 
 class NewCollection(BaseModel):
@@ -270,12 +271,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if spec.summarize and not state.claude.api_key:
             raise NoApiKey()
-        if spec.summarize and not body.confirm:
-            # Summaries cost; the dataset is read (and cached) to price them.
+        # What the loader spends on: summaries, and a Claude proposal when there are no lists.
+        proposes = bool(state.claude.api_key) and db.get_keyword_lists(state.conn, name) is None
+        if (spec.summarize or proposes) and not body.confirm:
+            # The dataset is read (and cached) to price them.
             items, questions = load_dataset(body.dataset, settings.home)
             items, _ = limited(items, questions, body.limit)
             estimate = state.indexer.estimate_add_usd(spec, items)
-            return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
+            calls = len(items) if spec.summarize else 0
+            if proposes:
+                estimate += state.indexer.estimate_propose_usd(spec, propose_sample(items))
+                calls += 1
+            return JSONResponse(
+                {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
+            )
         job_id = db.create_job(
             state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
         )
@@ -424,7 +433,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, refusal)
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
-        db.requeue(state.conn, job_id)
+        if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
+            raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
 
     @app.get("/status")
@@ -535,12 +545,17 @@ def run_summary(job: dict, summary: dict) -> dict:
 
 def job_problems(newest: list[dict]) -> list[str]:
     """One line per collection and kind whose newest job went wrong."""
-    return [
-        f"{job['kind'].capitalize()} {job['id'][:4]} on {job['collection']} "
-        f"{PROBLEM[job['status']]}"
-        for job in newest
-        if job["status"] in PROBLEM
-    ]
+    lines = []
+    for job in newest:
+        if job["kind"] == "rekey" and job["status"] in REKEY_PARTLY_DONE:
+            name = job["collection"]
+            lines.append(f"Keyword lists on {name} are partly re-keyed; save them again")
+        elif job["status"] in PROBLEM:
+            lines.append(
+                f"{job['kind'].capitalize()} {job['id'][:4]} on {job['collection']} "
+                f"{PROBLEM[job['status']]}"
+            )
+    return lines
 
 
 def stalled(job: dict | None, batches: list[dict], at: datetime) -> str | None:

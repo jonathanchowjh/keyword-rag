@@ -248,11 +248,75 @@ def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeyp
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     with make_client(tmp_path, reply=lambda p: "I cannot help with that.") as client:
         client.post("/collections", json={"name": "m", "qa_type": "multihop"})
-        r = client.post("/collections/m/load", json={"dataset": "musique"})
+        r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done", job
         assert job["result"]["lists_source"] == "tfidf (claude proposal unusable)"
         assert client.get("/collections/m").json()["keyword_lists"]["topic"]
+
+
+def ledger_purposes(client):
+    rows = client.app.state.conn.execute("select purpose from ledger")
+    return [r["purpose"] for r in rows]
+
+
+def three_items(monkeypatch):
+    from ragqa_core import loader
+    from ragqa_core.types import Item
+
+    items = [Item(d["id"], d["text"] + " shared words", d["answer"]) for d in ITEMS]
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
+    monkeypatch.setattr("ragqa_api.app.load_dataset", lambda name, cache: (items, []))
+    return items
+
+
+def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    reply = lambda p: '{"topic": ["enzymes"], "method": ["assay"]}'  # noqa: E731
+    with make_client(tmp_path, reply=reply) as client:
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        r = client.post("/collections/m/load", json={"dataset": "musique"})
+        assert r.status_code == 200 and set(r.json()) == {"estimate"}
+        estimate = r.json()["estimate"]
+        assert estimate["est_usd"] > 0 and estimate["items"] == 3 and estimate["calls"] == 1
+        assert ledger_purposes(client) == [] and client.get("/jobs").json() == []
+        r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
+        assert r.status_code == 202 and set(r.json()) == {"job_id"}
+        job = wait(client, r.json()["job_id"])
+        assert job["result"]["lists_source"] == "claude"
+        assert ledger_purposes(client) == ["propose"]
+
+
+def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:  # tfidf lists, no Claude
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        assert client.post("/collections/m/load", json={"dataset": "musique"}).status_code == 202
+    with make_client(tmp_path / "k") as client:  # lists exist: no propose
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        lists = {"topic": ["enzyme"], "method": ["assay"], "common": ["shared"]}
+        wait(client, client.put("/collections/m/keyword-lists", json=lists).json()["job_id"])
+        r = client.post("/collections/m/load", json={"dataset": "musique"})
+        assert r.status_code == 202 and "estimate" not in r.json()
+
+
+def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
+    items = three_items(monkeypatch)
+    with make_client(tmp_path) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "multihop", "summarize": True})
+        spec = client.app.state.retriever.spec("s")
+        summaries = client.app.state.indexer.estimate_add_usd(spec, items)
+        r = client.post("/collections/s/load", json={"dataset": "musique"})
+        estimate = r.json()["estimate"]
+        assert r.status_code == 200 and estimate["est_usd"] > summaries
+        assert estimate["calls"] == 3 + 1 and ledger_purposes(client) == []
+        # With lists already saved, only the summaries are priced.
+        lists = KeywordLists(["enzyme"], ["assay"], ["shared"])
+        db.save_keyword_lists(client.app.state.conn, "s", lists, "v1")
+        db.set_keyword_version(client.app.state.conn, "s", "v1")
+        estimate = client.post("/collections/s/load", json={"dataset": "musique"}).json()
+        assert estimate["estimate"]["est_usd"] == pytest.approx(summaries)
+        assert estimate["estimate"]["calls"] == 3
 
 
 def test_propose_lists(client):
@@ -642,6 +706,43 @@ def test_status_reports_problems(client):
         f"Load {failed[:4]} on c failed",
         f"Eval {stopped[:4]} on c stopped at the monthly cap",
     ]
+
+
+def test_resume_requeues_only_a_resumable_job(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    j = client.post("/eval", json={**EVAL, "answer": True, "confirm": True}).json()["job_id"]
+    for status in ("queued", "running"):
+        db.update_job(conn, j, status=status)
+        r = client.post(f"/jobs/{j}/resume", json={"confirm": True})
+        assert r.status_code == 409 and db.get_job(conn, j)["status"] == status
+    db.update_job(conn, j, status="interrupted")
+    assert client.post(f"/jobs/{j}/resume", json={"confirm": True}).status_code == 202
+    # A second confirm (a double click) finds it queued and moves nothing.
+    r = client.post(f"/jobs/{j}/resume", json={"confirm": True})
+    assert r.status_code == 409 and db.get_job(conn, j)["status"] == "queued"
+
+
+def test_status_reports_partly_rekeyed_lists(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    line = "Keyword lists on c are partly re-keyed; save them again"
+    for status in ("failed", "cancelled", "interrupted"):
+        rekey = db.create_job(conn, "rekey", "c", {})
+        db.update_job(conn, rekey, status=status)
+        assert line in client.get("/status").json()["problems"], status
+    db.update_job(conn, db.create_job(conn, "rekey", "c", {}), status="done")
+    assert not any("re-keyed" in p for p in client.get("/status").json()["problems"])
+
+
+def test_answer_carries_proxy_trusted(client):
+    add_collection(client)
+    run = client.post("/eval", json={**EVAL, "methods": PAIR, "confirm": True}).json()["job_id"]
+    wait(client, run)
+    answer = client.get("/collections/c").json()["answer"]
+    assert "proxy_trusted" in answer
+    assert answer["proxy_trusted"] == client.app.state.evaluator.collection_proxy_trusted("c")
 
 
 def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):

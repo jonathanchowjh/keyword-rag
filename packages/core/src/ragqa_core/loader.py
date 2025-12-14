@@ -43,6 +43,11 @@ def sample_items(store: Store, name: str) -> list[Item]:
     return [Item(h.id, h.text, h.answer, h.explanation, h.meta) for h in picked]
 
 
+def propose_sample(items: list[Item]) -> list[Item]:
+    """The items a load shows Claude when it proposes the keyword lists."""
+    return random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
+
+
 def tfidf_lists(texts: list[str]) -> KeywordLists | None:
     """Lists without Claude: the corpus's own top terms. A small corpus has too
     few terms to fill all three facets, so a facet that would be empty reuses
@@ -81,7 +86,7 @@ class Loader:
         db.save_questions(conn, name, questions)
         source = None
         if db.get_keyword_lists(conn, name) is None:
-            sample = random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
+            sample = propose_sample(items)
             lists, source = None, "tfidf"
             if self.claude.api_key:
                 try:
