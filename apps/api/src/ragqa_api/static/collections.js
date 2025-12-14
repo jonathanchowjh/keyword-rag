@@ -101,6 +101,7 @@ function step(text, cls = "") {
 async function setup() {
   $("steps").innerHTML = '<ol class="steps"></ol>';
   $("setup").disabled = true;
+  const paying = []; // loads whose first answer was an estimate: {b, estimate}
   try {
     const existing = new Set((await api("/collections")).map((c) => c.name));
     for (const b of BENCHMARKS) {
@@ -114,36 +115,44 @@ async function setup() {
           body: { name: b.name, qa_type: b.qa_type, summarize: b.summarize },
         });
         step(`${b.name} created`, "ok");
-        await load(b);
+        const first = await api(`/collections/${b.name}/load`, { method: "POST", body: { dataset: b.dataset } });
+        if (first.estimate) paying.push({ b, estimate: first.estimate });
+        else step(`${b.name}: loading ${b.dataset} (queued, job ${first.job_id.slice(0, 4)})`, "ok");
       } catch (e) {
         step(`${b.name}: ${e.message}`, "err");
       }
     }
+    if (paying.length) confirmLoads(paying);
   } finally {
     $("setup").disabled = false;
     await refresh();
   }
 }
 
-async function load(b) {
-  const path = `/collections/${b.name}/load`;
-  const first = await api(path, { method: "POST", body: { dataset: b.dataset } });
-  if (!first.estimate) {
-    step(`${b.name}: loading ${b.dataset} (queued, job ${first.job_id.slice(0, 4)})`, "ok");
-    return;
-  }
-  const li = step(`${b.name}: loading ${b.dataset} costs `);
+// One summed estimate and one Start for every load that would spend; loads that were
+// queued free are already running and are not posted again.
+function confirmLoads(paying) {
+  const sum = (key) => paying.reduce((total, p) => total + Number(p.estimate[key] ?? 0), 0);
+  const names = paying.map((p) => p.b.name).join(", ");
+  const li = step(`Loading ${names} costs `);
   const slot = document.createElement("span");
   li.append(slot);
-  confirmSpend(slot, { ...first.estimate, calls: first.estimate.items }, async () => {
-    try {
-      const job = await api(path, { method: "POST", body: { dataset: b.dataset, confirm: true } });
-      slot.textContent = `queued (job ${job.job_id.slice(0, 4)})`;
-      refreshSpend();
-      refresh();
-    } catch (e) {
-      slot.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  confirmSpend(slot, { est_usd: sum("est_usd"), calls: sum("calls") }, async () => {
+    slot.textContent = "starting…";
+    for (const { b } of paying) {
+      try {
+        const job = await api(`/collections/${b.name}/load`, {
+          method: "POST",
+          body: { dataset: b.dataset, confirm: true },
+        });
+        step(`${b.name}: loading ${b.dataset} (queued, job ${job.job_id.slice(0, 4)})`, "ok");
+      } catch (e) {
+        step(`${b.name}: ${e.message}`, "err");
+      }
     }
+    slot.textContent = "confirmed";
+    refreshSpend();
+    refresh();
   });
 }
 

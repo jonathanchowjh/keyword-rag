@@ -22,6 +22,7 @@ const $ = (id) => document.getElementById(id);
 let cat = null;
 let col = null; // the latest GET /collections/{name}
 let runs = [];
+let loadJob = null; // the newest load job, or null
 let answerSetup = null; // the setup the answer's run recorded, fetched once per run
 let answerSetupFor = null;
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
@@ -177,18 +178,26 @@ function toggleRunForm() {
 
 // -- items and questions --------------------------------------------------------------
 
+// A load is offered while nothing is loaded, or the newest load did not finish.
+function needsLoad() {
+  if (BUSY.has(col.state)) return false;
+  return col.count === 0 || col.questions === 0 || (loadJob != null && loadJob.status !== "done");
+}
+
 function itemsHtml() {
   const type = cat.qa_types[col.qa_type];
   const noun = type?.item_noun ?? "item";
   const count = `<p>${esc(plural(col.count, noun))}.</p>`;
-  if (col.count > 0) {
+  if (!needsLoad()) {
     return `${count}<p class="muted">Items are read-only here for now; adding, editing and sources come later.</p>`;
   }
   const dataset = DATASETS[col.qa_type];
+  const unfinished = col.count > 0 || loadJob != null;
+  const label = unfinished ? "Finish loading" : `Load ${dataset}`;
   return `${count}<div class="card form">
-    <div>Load <code>${esc(dataset)}</code> into this collection.</div>
+    <div>${unfinished ? "Finish loading" : "Load"} <code>${esc(dataset)}</code> into this collection.</div>
     <div class="row"><label>Limit (blank for all)<input id="ld-limit" type="number" min="1"></label>
-      <button type="button" id="ld-go">Load ${esc(dataset)}</button>
+      <button type="button" id="ld-go">${esc(label)}</button>
       <span id="ld-confirm"></span><span id="ld-msg" class="err"></span></div></div>`;
 }
 
@@ -207,7 +216,7 @@ function bindLoad() {
         await refresh();
         return;
       }
-      confirmSpend($("ld-confirm"), { ...first.estimate, calls: first.estimate.items }, async () => {
+      confirmSpend($("ld-confirm"), first.estimate, async () => {
         try {
           const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, confirm: true } });
           $("ld-confirm").textContent = `Queued (job ${job.job_id.slice(0, 4)})`;
@@ -343,7 +352,13 @@ async function refresh() {
   clearTimeout(timer);
   try {
     cat = await catalog();
-    [col, runs] = await Promise.all([api("/collections/" + enc), api("/eval?collection=" + enc)]);
+    let loads;
+    [col, runs, loads] = await Promise.all([
+      api("/collections/" + enc),
+      api("/eval?collection=" + enc),
+      api("/jobs?collection=" + enc + "&kind=load&limit=1"),
+    ]);
+    loadJob = loads[0] ?? null;
     if (col.answer && answerSetupFor !== col.answer.run_id) {
       answerSetup = (await api("/eval/" + encodeURIComponent(col.answer.run_id))).setup;
       answerSetupFor = col.answer.run_id;

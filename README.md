@@ -73,7 +73,7 @@ api=http://localhost:8080
 curl -X POST $api/collections -H 'content-type: application/json' \
   -d '{"name":"sqa","qa_type":"mcq","summarize":true}'
 curl -X POST $api/collections/sqa/load -H 'content-type: application/json' \
-  -d '{"dataset":"scienceqa"}'                  # returns the cost estimate
+  -d '{"dataset":"scienceqa"}'                  # returns the cost estimate, if it would spend
 curl -X POST $api/collections/sqa/load -H 'content-type: application/json' \
   -d '{"dataset":"scienceqa","confirm":true}'   # starts the job
 
@@ -122,7 +122,7 @@ A collection remembers the dense model it was built with. Changing
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}` |
-| `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`: queues a job and returns `{job_id}` |
+| `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it |
 | `POST /query` | One question, several methods side by side, optionally answered |

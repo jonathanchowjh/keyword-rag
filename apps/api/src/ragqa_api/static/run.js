@@ -56,7 +56,7 @@ function answerHtml() {
     return `<p class="verdict"><strong>Do keywords help?</strong> This run does not include ${esc(
       method(cand))} and ${esc(method(ref))}, so it gives no answer.</p>`;
   }
-  return `<p class="verdict"><strong>Do keywords help?</strong> ${esc(verdictText(a, cat))}, on the same ${esc(
+  return `<p class="verdict"><strong>Do keywords help?</strong> ${esc(verdictText({ ...a, proxy_trusted: run.proxy_trusted }, cat))}, on the same ${esc(
     plural(run.question_count, "question"))}.</p>`;
 }
 
@@ -142,13 +142,15 @@ function proxyHtml() {
   return '<p class="muted">Not checked here: it needs an answered run of at least 4 retrieval methods.</p>';
 }
 
+const x100 = (v) => (v == null ? NaN : v * 100); // a NaN-cleaned null stays missing, not 0
+
 function pairsHtml() {
   if (!run.pairs.length) return '<p class="muted">Fewer than two methods, so nothing to compare.</p>';
   const rows = run.pairs
     .map((p) => {
       const result = !p.separated ? "can't tell" : p.diff > 0 ? `${method(p.a)} ahead` : `${method(p.b)} ahead`;
       return `<tr><td>${esc(metric(p.metric))}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
-        <td class="num">${esc(pts(p.diff * 100, p.lo * 100, p.hi * 100))}</td><td>${esc(result)}</td></tr>`;
+        <td class="num">${esc(pts(x100(p.diff), x100(p.lo), x100(p.hi)))}</td><td>${esc(result)}</td></tr>`;
     })
     .join("");
   return `<table><thead><tr><th>Measure</th><th>Pair</th><th>Gap</th><th>Result</th></tr></thead>

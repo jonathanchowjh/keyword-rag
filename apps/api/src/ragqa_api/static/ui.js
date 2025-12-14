@@ -96,6 +96,13 @@ export function metricLabel(id, qaType, cat = known) {
   return cat?.metric_labels_by_type?.[qaType]?.[id] ?? cat?.metrics?.[id]?.label ?? id;
 }
 
+export const FREE_SCORE_NOTE = "free score, not yet checked against answers";
+
+// True when the headline is the free reasoning match and nothing has vouched for it (spec §7.3).
+function freeScore(answer) {
+  return answer.metric === "solution_sim@1" && answer.proxy_trusted !== true;
+}
+
 // "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
 export function verdictText(answer, labels = known) {
   if (!answer) return "No answer yet";
@@ -103,7 +110,8 @@ export function verdictText(answer, labels = known) {
   const cand = methodLabel(answer.candidate, labels);
   const ref = methodLabel(answer.reference, labels);
   const metric = (labels?.metrics?.[answer.metric]?.label ?? answer.metric).toLowerCase();
-  return `${head}: ${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
+  const text = `${head}: ${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
+  return freeScore(answer) ? `${text} · ${FREE_SCORE_NOTE}` : text;
 }
 
 // An inline SVG gap bar: a centre line at 0, a bar from lo to hi, a dot at diff. All values in
@@ -157,7 +165,8 @@ export function confirmSpend(el, estimate, onStart) {
   const usd = Number(estimate.est_usd ?? 0);
   const calls = Number(estimate.calls ?? 0);
   const what = calls === 1 ? "1 Claude call" : `${calls} Claude calls`;
-  el.innerHTML = `<span class="confirm">≈ $${usd.toFixed(2)} · ${esc(what)} ·
+  const cost = usd > 0 && usd < 0.01 ? "< $0.01" : `≈ $${usd.toFixed(2)}`;
+  el.innerHTML = `<span class="confirm">${cost} · ${esc(what)} ·
     <button type="button">Start</button></span>`;
   const button = el.querySelector("button");
   button.addEventListener("click", async () => {

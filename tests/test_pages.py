@@ -253,10 +253,11 @@ def test_worker_page_resume_estimates_first_and_shows_a_refusal(page, seeded):
     expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
     page.expected = ["409"]
-    httpx.put(
+    r = httpx.put(
         f"{seeded.url}/collections/wr/keyword-lists",
         json={"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]},
     )
+    seeded.wait(r.json()["job_id"])
     page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
     expect(page.locator("[data-refusal]")).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
@@ -289,3 +290,167 @@ def test_one_path_end_to_end(page, seeded):
     expect(page.get_by_text("No answer yet").first).to_be_visible()
     page.goto(seeded.url + "/worker")
     expect(page.locator("#main")).to_be_visible()
+
+
+# -- final fix round, batch B ------------------------------------------------------
+
+
+def route_load(page, name, reply):
+    """Answer POST .../{name}/load with `reply(body)` -> (status, json); returns the bodies seen."""
+    seen = []
+
+    def handle(route):
+        if route.request.method != "POST":
+            return route.continue_()
+        body = route.request.post_data_json
+        seen.append(body)
+        status, payload = reply(body)
+        route.fulfill(status=status, json=payload)
+
+    page.route(f"**/collections/{name}/load", handle)
+    return seen
+
+
+def test_collection_load_shows_its_estimate_and_queues_only_on_start(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "est", "qa_type": "mcq"})
+    estimate = {"est_usd": 0.12, "items": 50, "calls": 51}
+    seen = route_load(
+        page,
+        "est",
+        lambda b: (
+            (200, {"estimate": estimate}) if not b.get("confirm") else (202, {"job_id": "ab12cd"})
+        ),
+    )
+    page.goto(seeded.url + "/c/est")
+    page.get_by_role("button", name="Load scienceqa").click()
+    expect(page.get_by_text("51 Claude calls")).to_be_visible()
+    assert [b.get("confirm") for b in seen] == [False]
+    page.get_by_role("button", name="Start").click()
+    expect(page.get_by_text("Queued (job ab12)")).to_be_visible()
+    assert [b.get("confirm") for b in seen] == [False, True]
+
+
+def test_collection_load_that_is_free_queues_at_once(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "freeload", "qa_type": "mcq"})
+    seen = route_load(page, "freeload", lambda b: (202, {"job_id": "ee99ff"}))
+    page.goto(seeded.url + "/c/freeload")
+    page.get_by_role("button", name="Load scienceqa").click()
+    expect(page.get_by_text("Queued (job ee99)")).to_be_visible()
+    assert len(seen) == 1
+
+
+def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, seeded):
+    for n in ("sqa", "mq", "tq"):
+        assert n not in [c["name"] for c in httpx.get(f"{seeded.url}/collections").json()]
+    paying = {"sqa": 0.10, "tq": 0.25}
+    seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq")}
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="Set up the three benchmark collections").click()
+    expect(page.get_by_text("5 Claude calls")).to_be_visible()
+    expect(page.get_by_text("$0.35")).to_be_visible()
+    expect(page.get_by_role("button", name="Start")).to_have_count(1)
+    assert [b.get("confirm") for b in seen["sqa"]] == [None] and len(seen["tq"]) == 1
+    page.get_by_role("button", name="Start").click()
+    expect(page.get_by_text("sqa: loading scienceqa (queued, job sqa0)")).to_be_visible()
+    expect(page.get_by_text("tq: loading tatqa (queued, job tq01)")).to_be_visible()
+    assert [b.get("confirm") for b in seen["sqa"]] == [None, True]
+    assert [b.get("confirm") for b in seen["tq"]] == [None, True]
+    assert len(seen["mq"]) == 1  # already queued by its first answer, never posted twice
+
+
+def _reply(paying, name):
+    def reply(body):
+        if name in paying and not body.get("confirm"):
+            return 200, {
+                "estimate": {
+                    "est_usd": paying[name],
+                    "items": 1,
+                    "calls": 2 if name == "sqa" else 3,
+                }
+            }
+        return 202, {"job_id": f"{name}012345"}
+
+    return reply
+
+
+def free_run(seeded, name):
+    """A retrieval-only mcq run with the pair; its headline is the free reasoning match."""
+    seeded.build(name)
+    body = {
+        "collection": name,
+        "methods": ["kw_individual", "hybrid"],
+        "answer": False,
+        "confirm": True,
+    }
+    r = httpx.post(f"{seeded.url}/eval", json=body)
+    assert r.status_code == 202, r.text
+    assert seeded.wait(r.json()["job_id"])["status"] == "done"
+    return r.json()["job_id"]
+
+
+CAVEAT = "free score, not yet checked against answers"
+
+
+def test_free_score_verdict_carries_the_caveat_on_every_page(page, seeded):
+    run_id = free_run(seeded, "fs")
+    answer = httpx.get(f"{seeded.url}/collections/fs").json()["answer"]
+    assert answer["metric"] == "solution_sim@1" and answer["proxy_trusted"] is not True
+    page.goto(seeded.url + "/")
+    expect(page.locator('main a.row-link[href="/c/fs"]')).to_contain_text(CAVEAT)
+    expect(page.locator('main a.row-link[href="/c/c"]')).not_to_contain_text(CAVEAT)
+    page.goto(seeded.url + "/c/fs")
+    expect(page.locator(".verdict")).to_contain_text(CAVEAT)
+    page.goto(f"{seeded.url}/c/fs/runs/{run_id}")
+    expect(page.locator(".verdict")).to_contain_text(CAVEAT)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator(".verdict")).not_to_contain_text(CAVEAT)
+
+
+def test_collection_offers_finish_loading_after_an_interrupted_load(page, seeded):
+    seeded.build("fl")
+    job = [{"id": "dead0000", "kind": "load", "collection": "fl", "status": "interrupted"}]
+    page.route("**/jobs?*kind=load*", lambda route: route.fulfill(json=job))
+    page.goto(seeded.url + "/c/fl")
+    expect(page.get_by_role("button", name="Finish loading")).to_be_visible()
+
+
+def test_collection_without_questions_offers_finish_loading(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "noq", "qa_type": "mcq"})
+    r = httpx.post(
+        f"{seeded.url}/collections/noq/documents", json={"items": ITEMS_ONE, "confirm": True}
+    )
+    assert r.status_code == 200, r.text
+    page.goto(seeded.url + "/c/noq")
+    expect(page.get_by_role("button", name="Finish loading")).to_be_visible()
+    page.goto(seeded.url + "/c/c")
+    expect(page.get_by_role("button", name="Finish loading")).to_have_count(0)
+
+
+ITEMS_ONE = [
+    {"id": "one", "text": "enzyme kinetics", "answer": "A", "explanation": "x", "meta": {}}
+]
+
+
+def test_pairs_show_a_dash_for_a_nan_cleaned_gap(page, seeded):
+    def nan_pair(route):
+        data = route.fetch().json()
+        data["pairs"][0].update(diff=None, lo=None, hi=None)
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", nan_pair)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Every pair compared").click()
+    first = page.locator("#pairs tbody tr").first
+    expect(first).to_contain_text("–")
+    expect(first).not_to_contain_text("+0 pts")
+
+
+def test_confirm_spend_prints_sub_cent_and_zero(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      return [0.004, 0, 0.41].map((usd) => { const el = document.createElement('div');
+        m.confirmSpend(el, { est_usd: usd, calls: 2 }, () => {}); return el.textContent; }) }"""
+    )
+    assert "< $0.01" in out[0] and "≈ $0.00" in out[1] and "< $0.01" not in out[1]
+    assert "$0.41" in out[2]

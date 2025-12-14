@@ -12,6 +12,15 @@
 - `PUT /collections/{name}/keyword-lists` now returns 202 with a `job_id` and
   queues a `rekey` job instead of re-keying in the request. `DELETE
   /collections/{name}` and `DELETE /eval/{id}` are new.
+- Breaking: `POST /collections/{name}/keyword-lists/propose` now needs
+  `confirm: true` to call Claude; without it, it returns the estimate
+  `{est_usd, calls}`.
+- `POST /collections/{name}/load` now returns `200 {estimate: {est_usd, items,
+  calls}}` first whenever the load would spend (summaries, or a Claude keyword
+  proposal because a key is set and there are no lists yet), and queues only
+  with `confirm: true`. A load that spends nothing still returns 202 `{job_id}`.
+- Known gap: The Lab still spends on answers, hops and query summaries without
+  showing an estimate first; spend stays capped and ledgered.
 - Every run has a plain-language answer, paired gaps against Hybrid and a log.
 - The gate runs a browser smoke test of the pages (`pytest -m pages`).
 
