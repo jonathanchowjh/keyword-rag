@@ -33,19 +33,18 @@ class Worker:
 
     def run_one(self) -> str | None:
         """Claim the oldest queued job and run it to a final status; None if the queue is empty."""
-        job = db.claim_next_job(self.conn)
-        if job is None:
+        job_id = db.claim_next_job_id(self.conn)
+        if job_id is None:
             return None
-        job_id = job["id"]
         self.running_job_id = job_id
         try:
-            self._run(job)
+            self._run(job_id)
         finally:
             self.running_job_id = None
         return job_id
 
-    def _run(self, job: dict) -> None:
-        conn, job_id = self.conn, job["id"]
+    def _run(self, job_id: str) -> None:
+        conn = self.conn
         step = {"last": 0}
 
         def check() -> None:
@@ -67,6 +66,9 @@ class Worker:
             reason = "job ended without a final status"
             try:
                 log("started")
+                job = db.get_job(conn, job_id)
+                if job is None:
+                    raise KeyError(job_id)
                 self._dispatch(job, check, progress)
             except Exception as e:
                 try:

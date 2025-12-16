@@ -48,8 +48,10 @@ function staleNotes() {
   if (!a || !answerSetup) return [];
   const after = `after run ${a.run_id.slice(0, 4)}`;
   const notes = [];
-  if (answerSetup.keyword_version !== col.keyword_version) notes.push(`keyword lists changed ${after}`);
-  if (answerSetup.dense_model !== col.dense_model) notes.push(`dense model changed ${after}`);
+  // A run that recorded no version (migrated) has nothing to compare against.
+  const changed = (key) => answerSetup[key] != null && answerSetup[key] !== col[key];
+  if (changed("keyword_version")) notes.push(`keyword lists changed ${after}`);
+  if (changed("dense_model")) notes.push(`dense model changed ${after}`);
   return notes;
 }
 
@@ -360,7 +362,7 @@ async function refresh() {
     ]);
     loadJob = loads[0] ?? null;
     if (col.answer && answerSetupFor !== col.answer.run_id) {
-      answerSetup = (await api("/eval/" + encodeURIComponent(col.answer.run_id))).setup;
+      answerSetup = (await api("/jobs/" + encodeURIComponent(col.answer.run_id))).setup;
       answerSetupFor = col.answer.run_id;
     }
     $("head").innerHTML = headHtml();

@@ -14,7 +14,8 @@ const $ = (x) => document.getElementById(x);
 
 let cat = null;
 let run = null; // the latest GET /eval/{id}
-let resumeProbe = null; // for a resumable run: {refusal} or {} when it may resume, probed once
+let resumeProbe = null; // for a resumable run: {refusal} or {} when it may resume
+let probedStatus = null; // the status resumeProbe was computed for; a new status probes again
 let qaType = null; // the collection's, fetched once, for metric labels
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 
@@ -320,7 +321,11 @@ async function refresh() {
     cat = await catalog();
     run = await api(`/eval/${encodeURIComponent(id)}`);
     qaType ??= (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
-    if (RESUMABLE.has(run.status) && resumeProbe === null) await probeResume();
+    if (run.status !== probedStatus) resumeProbe = null;
+    if (RESUMABLE.has(run.status) && resumeProbe === null) {
+      await probeResume();
+      probedStatus = run.status;
+    }
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("gaps", gapsHtml());

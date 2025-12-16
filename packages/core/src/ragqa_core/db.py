@@ -274,6 +274,11 @@ def requeue(conn: Connection, job_id: str) -> bool:
 
 def claim_next_job(conn: Connection) -> dict | None:
     """The oldest queued job by insertion, marked running in the same statement."""
+    job_id = claim_next_job_id(conn)
+    return None if job_id is None else get_job(conn, job_id)
+
+
+def claim_next_job_id(conn: Connection) -> str | None:
     row = first(
         conn.execute(
             "update jobs set status = 'running', updated_at = ? where status = 'queued'"
@@ -282,7 +287,7 @@ def claim_next_job(conn: Connection) -> dict | None:
             (now(),),
         )
     )
-    return get_job(conn, row["id"]) if row else None
+    return row["id"] if row else None
 
 
 def list_jobs(

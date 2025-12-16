@@ -72,6 +72,21 @@ def test_stale_lists_show_in_the_head(page, seeded):
     )
 
 
+def test_a_run_without_recorded_versions_does_not_warn_of_stale_lists(page, seeded):
+    run_id = seeded.build("migrated", run=True)
+    conn = seeded.app.state.conn
+    setup = db.get_job(conn, run_id)["setup"]
+    for key in ("keyword_version", "dense_model"):
+        del setup[key]
+    db.set_job_setup(conn, run_id, setup)
+    lists = {"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]}
+    r = httpx.put(seeded.url + "/collections/migrated/keyword-lists", json=lists)
+    seeded.wait(r.json()["job_id"])
+    page.goto(seeded.url + "/c/migrated")
+    expect(page.get_by_text("run " + run_id[:4]).first).to_be_visible(timeout=15000)
+    expect(page.get_by_text("changed after run")).to_have_count(0)
+
+
 def test_propose_shows_its_estimate_first(page, seeded):
     seeded.build("prop")
     claude = seeded.app.state.claude

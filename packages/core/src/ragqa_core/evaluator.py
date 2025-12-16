@@ -540,7 +540,7 @@ class Evaluator:
             return None
         answered = bool(job["setup"].get("answer"))
         # Only an unanswered run's headline depends on the collection's proxy check.
-        trusted = None if answered else self.collection_proxy_trusted(name)
+        trusted = None if answered else self.collection_proxy_trusted(name, done)
         summary = self.summary(job["id"], trusted)
         if summary is None or summary["answer"] is None:
             return None
@@ -566,9 +566,9 @@ class Evaluator:
                 means[method] = {"solution_sim@1": avg(sims), "accuracy": avg(accs)}
         return verdict.proxy(means)
 
-    def collection_proxy_trusted(self, name: str) -> bool | None:
+    def collection_proxy_trusted(self, name: str, done: list[dict] | None = None) -> bool | None:
         """The latest real proxy check among the done answered runs, newest first."""
-        for job in self._done_evals(name):
+        for job in self._done_evals(name) if done is None else done:
             if job["setup"].get("answer"):
                 check = self._proxy_for(job["id"])
                 if check is not None:

@@ -263,3 +263,21 @@ def test_eval_returning_without_final_status_is_failed(env):
     job = get_job(conn, j)
     assert job["status"] == "failed" and job["error"] == "job ended without a final status"
     assert "finished: failed" in log_text(conn, j)
+
+
+def test_a_job_whose_read_after_the_claim_fails_ends_failed_not_running(env, monkeypatch):
+    w, conn = env
+    j = db.create_job(conn, "rekey", "c", {"version": w.other_version})
+    real, calls = db.get_job, []
+
+    def flaky(conn, job_id):
+        calls.append(job_id)
+        if len(calls) == 1:  # the read right after the claim
+            raise RuntimeError("disk hiccup")
+        return real(conn, job_id)
+
+    monkeypatch.setattr(db, "get_job", flaky)
+    assert w.run_one() == j
+    job = get_job(conn, j)
+    assert job["status"] == "failed" and "disk hiccup" in job["error"]
+    assert w.running_job_id is None
