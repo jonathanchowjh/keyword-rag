@@ -14,7 +14,6 @@ from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, N
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
-    paired_diff_ci,
     recall_at,
     separated,
     squad_em_f1,
@@ -213,7 +212,7 @@ class Evaluator:
         and its question ids are the ones it has rows for."""
         ids = self._question_ids(job_id, spec, setup)
         setup = {
-            "dense_model": self.models.dense_model,
+            "dense_model": spec.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
@@ -229,6 +228,9 @@ class Evaluator:
         """Why the recorded versions no longer hold, or None. A setup that records
         no versions yet (never ran) records today's when it runs."""
         if "keyword_version" not in setup:
+            # Migrated runs have question ids and no versions: nothing to check a resume against.
+            if "question_ids" in setup:
+                return "this run predates version tracking; start a new run"
             return None
         old, new = setup["keyword_version"], spec.keyword_version
         if old != new:
@@ -423,12 +425,7 @@ class Evaluator:
         }
         headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
         per_method = {
-            method: {
-                q: values[0]
-                for q, row in per_q.items()
-                if (values := metric_values([row], headline))
-            }
-            for method, per_q in by_method.items()
+            method: metric_by_question(per_q, headline) for method, per_q in by_method.items()
         }
         random = list(per_method.get("random_example", {}).values())
         return headline, verdict.scale(headline, avg(random) if random else None), per_method
@@ -485,12 +482,12 @@ class Evaluator:
         pairs = []
         for metric in pair_metrics:
             for a, b in itertools.combinations(by_method, 2):
-                shared = sorted(set(by_method[a]) & set(by_method[b]))
-                va = metric_values((by_method[a][q] for q in shared), metric)
-                vb = metric_values((by_method[b][q] for q in shared), metric)
-                if not va or len(va) != len(vb):
+                # By question id: absent values drop out per method, so position can't pair them.
+                va, vb = (metric_by_question(by_method[m], metric) for m in (a, b))
+                paired = verdict.paired_by_question(va, vb, 1.0)
+                if paired is None:
                     continue
-                diff, lo, hi = paired_diff_ci(va, vb)
+                diff, lo, hi = paired
                 pairs.append(
                     {
                         "a": a,
@@ -624,6 +621,10 @@ def metric_values(rows, metric: str) -> list[float]:
         if metric in source:
             values.append(float(source[metric]))
     return values
+
+
+def metric_by_question(per_q: dict[str, dict], metric: str) -> dict[str, float]:
+    return {q: values[0] for q, row in per_q.items() if (values := metric_values([row], metric))}
 
 
 def is_wrong(row: dict, primary: str) -> bool:

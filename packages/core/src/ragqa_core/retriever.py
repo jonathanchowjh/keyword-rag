@@ -229,6 +229,10 @@ class Retriever:
         Against these, a method shows whether choosing the example helped at all."""
         return self.store.get(spec.name, shuffled(self._all_ids(spec.name), seed)[:k])
 
+    def forget(self, name: str) -> None:
+        """Drops what is cached for a collection that is gone."""
+        self._ids.pop(name, None)
+
     def _all_ids(self, name: str) -> list[str]:
         count = self.store.count(name)
         cached = self._ids.get(name)

@@ -730,7 +730,7 @@ def test_status_reports_partly_rekeyed_lists(client):
     line = "Keyword lists on c are partly re-keyed; save them again"
     for status in ("failed", "cancelled", "interrupted"):
         rekey = db.create_job(conn, "rekey", "c", {})
-        db.update_job(conn, rekey, status=status)
+        db.update_job(conn, rekey, status=status, progress=0.5)
         assert line in client.get("/status").json()["problems"], status
     db.update_job(conn, db.create_job(conn, "rekey", "c", {}), status="done")
     assert not any("re-keyed" in p for p in client.get("/status").json()["problems"])
@@ -810,3 +810,55 @@ def test_collection_detail_has_state_and_answer(client):
     load = db.create_job(conn, "load", "c", {})
     set_running(conn, load)
     assert client.get("/collections/c").json()["state"] == "loading"
+
+
+def test_documents_are_refused_while_a_rekey_or_eval_is_queued_or_running(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    body = {"items": ITEMS[:1], "confirm": True}
+    for kind in ("rekey", "eval"):
+        for status in ("queued", "running"):
+            job = db.create_job(conn, kind, "c", {})
+            db.update_job(conn, job, status=status)
+            r = client.post("/collections/c/documents", json=body)
+            assert r.status_code == 409 and f"a {kind} job" in r.json()["detail"], (kind, status)
+            db.update_job(conn, job, status="done")
+    assert client.post("/collections/c/documents", json=body).status_code == 200
+
+
+def test_status_says_partly_rekeyed_only_when_the_rekey_started(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    partly = "Keyword lists on c are partly re-keyed; save them again"
+
+    def problems() -> list[str]:
+        found = client.get("/status").json()["problems"]
+        return [p for p in found if "Rekey" in p or "re-keyed" in p]
+
+    never = db.create_job(conn, "rekey", "c", {})
+    assert db.request_cancel(conn, never) == "cancelled"
+    assert problems() == []  # cancelled while queued: no line at all
+    failed = db.create_job(conn, "rekey", "c", {})
+    db.update_job(conn, failed, status="failed", error="boom")
+    assert problems() == [f"Rekey {failed[:4]} on c failed"]
+    started = db.create_job(conn, "rekey", "c", {})
+    db.update_job(conn, started, status="failed", progress=0.4)
+    assert problems() == [partly]
+
+
+def test_a_recreated_collection_does_not_reuse_the_controls_id_cache(client):
+    add_collection(client, lists=False, questions=False)
+    query = {"collection": "c", "question": "enzyme", "methods": ["random_example"], "k": 3}
+
+    def hit_ids() -> set[str]:
+        hits = client.post("/query", json=query).json()["results"]["random_example"]["hits"]
+        return {h["id"] for h in hits}
+
+    assert hit_ids() == {i["id"] for i in ITEMS}
+    assert client.delete("/collections/c").status_code == 204
+    client.post("/collections", json={"name": "c", "qa_type": "mcq"})
+    fresh = [{**i, "id": "new-" + i["id"]} for i in ITEMS]
+    client.post("/collections/c/documents", json={"items": fresh, "confirm": True})
+    assert hit_ids() == {i["id"] for i in fresh}

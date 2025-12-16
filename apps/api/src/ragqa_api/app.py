@@ -245,12 +245,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     409, f"a {job['kind']} job started on '{name}'; it is being cancelled"
                 )
         state.store.drop(name)
+        state.retriever.forget(name)
         db.delete_collection_rows(state.conn, name)
         return Response(status_code=204)
 
     @app.post("/collections/{name}/documents")
     def add_documents(name: str, body: Documents) -> dict:
         spec = state.retriever.spec(name)
+        for kind in ("rekey", "eval"):  # an item added now would miss a version or skew a run
+            if db.job_waiting_or_running(state.conn, kind, name):
+                raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         items = [Item(**i.model_dump()) for i in body.items]
         estimate = state.indexer.estimate_add_usd(spec, items)
         if estimate > 0 and not body.confirm:
@@ -547,7 +551,9 @@ def job_problems(newest: list[dict]) -> list[str]:
     """One line per collection and kind whose newest job went wrong."""
     lines = []
     for job in newest:
-        if job["kind"] == "rekey" and job["status"] in REKEY_PARTLY_DONE:
+        # Progress is written after each re-keyed batch, so progress > 0 means items changed.
+        # (The jobs row has no started_at, and every claimed job logs "started".)
+        if job["kind"] == "rekey" and job["status"] in REKEY_PARTLY_DONE and job["progress"] > 0:
             name = job["collection"]
             lines.append(f"Keyword lists on {name} are partly re-keyed; save them again")
         elif job["status"] in PROBLEM:

@@ -37,7 +37,7 @@ def _state(lo: float, hi: float) -> str:
     return "ahead" if lo > 0 else "behind" if hi < 0 else "cant_tell"
 
 
-def _paired(
+def paired_by_question(
     candidate: dict[str, float], reference: dict[str, float], factor: float
 ) -> tuple[float, float, float] | None:
     shared = sorted(set(candidate) & set(reference))
@@ -54,7 +54,9 @@ def gaps(per_method: PerMethod, reference: str, metric: str, factor: float) -> l
         return []
     out = []
     for method, values in per_method.items():
-        paired = None if method == reference or not values else _paired(values, ref, factor)
+        paired = (
+            None if method == reference or not values else paired_by_question(values, ref, factor)
+        )
         if paired is not None:
             diff, lo, hi = paired
             out.append(
@@ -67,7 +69,7 @@ def _compare(
     per_method: PerMethod, candidate: str, reference: str, metric: str, factor: float
 ) -> dict | None:
     cand, ref = per_method.get(candidate), per_method.get(reference)
-    paired = _paired(cand, ref, factor) if cand and ref else None
+    paired = paired_by_question(cand, ref, factor) if cand and ref else None
     if paired is None:
         return None
     diff, lo, hi = paired

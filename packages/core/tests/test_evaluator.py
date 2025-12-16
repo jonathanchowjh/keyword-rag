@@ -274,7 +274,9 @@ def test_run_skips_recorded_ids_whose_question_is_gone(env):
     conn, ev = env
     job = ev.queue("c", "dev", ["hybrid"], False, None)
     setup = get_job(conn, job)["setup"]
-    db.set_job_setup(conn, job, {**setup, "question_ids": ["q-gone", "q-market", "q-enzyme"]})
+    ids = ["q-gone", "q-market", "q-enzyme"]
+    versions = ev._record_setup(job, ev.retriever.spec("c"), setup)
+    db.set_job_setup(conn, job, {**versions, "question_ids": ids})
     ev.run(job)
     assert get_job(conn, job)["status"] == "done"
     assert [r["question_id"] for r in run_items(conn, job)] == ["q-market", "q-enzyme"]
@@ -741,3 +743,44 @@ def test_an_absent_primary_metric_is_not_wrong():
     assert is_wrong({"retrieval": {"same_skill@1": 0.0}}, "same_skill@1") is True
     assert is_wrong({"retrieval": {"solution_sim@1": 0.4}}, "same_skill@1") is False
     assert is_wrong({"retrieval": {}}, "same_skill@1") is False
+
+
+def test_pairs_match_questions_by_id_when_a_metric_is_absent_on_different_ones(env):
+    conn, ev = env
+    job = create_job(conn, "eval", "c", setup_for(["vector", "keyword"]))
+    sims = {
+        "vector": {"q-enzyme": 0.9, "q-market": 0.5, "q-volcano": None, "q-optics": 0.2},
+        "keyword": {"q-enzyme": 0.1, "q-market": None, "q-volcano": 0.7, "q-optics": 0.0},
+    }
+    for method, per_q in sims.items():
+        for q, sim in per_q.items():
+            retrieval = {"same_skill@1": 1.0} | ({} if sim is None else {"solution_sim@1": sim})
+            row = {"retrieval": retrieval, "usd": 0.0}
+            db.upsert_run_item(conn, job, method, q, row, complete=True)
+    db.update_job(conn, job, status="done")
+    pair = next(p for p in ev.table(job)["pairs"] if p["metric"] == "solution_sim@1")
+    # shared: enzyme (0.9-0.1) and optics (0.2-0.0), not a positional 0.5-0.7 mix
+    assert pair["a"] == "vector" and pair["diff"] == pytest.approx(0.5)
+
+
+def test_setup_records_the_collections_dense_model_the_resume_check_compares(env):
+    conn, ev = env
+    conn.execute("update collections set dense_model = 'other/dense' where name = 'c'")
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    assert get_job(conn, job)["setup"]["dense_model"] == "other/dense"
+    db.update_job(conn, job, status="interrupted")
+    assert ev.resume_refusal(job) is None
+
+
+def test_a_migrated_run_without_versions_cannot_be_resumed(env):
+    conn, ev = env
+    job, setup = legacy_job(conn, ev)
+    unversioned = {k: v for k, v in setup.items() if k not in ("keyword_version", "dense_model")}
+    db.set_job_setup(conn, job, {**unversioned, "question_ids": ["q-enzyme", "q-market"]})
+    reason = "this run predates version tracking; start a new run"
+    assert ev.resume_refusal(job) == reason
+    requeue(conn, job)
+    ev.run(job)
+    after = get_job(conn, job)
+    assert after["status"] == "failed" and after["error"] == reason

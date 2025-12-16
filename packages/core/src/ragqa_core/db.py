@@ -299,8 +299,8 @@ def list_jobs(
             clauses.append(f"{column} = ?")
             args.append(value)
     where = f" where {' and '.join(clauses)}" if clauses else ""
-    rows = conn.execute(f"select id from jobs{where} order by rowid desc limit ?", (*args, limit))
-    return [job for r in rows if (job := get_job(conn, r["id"])) is not None]
+    rows = conn.execute(f"select * from jobs{where} order by rowid desc limit ?", (*args, limit))
+    return [_job(r) for r in rows]
 
 
 def request_cancel(conn: Connection, job_id: str) -> str:
@@ -357,6 +357,17 @@ def job_running(conn: Connection, kind: str, collection: str) -> bool:
     row = first(
         conn.execute(
             "select 1 from jobs where kind = ? and collection = ? and status = 'running' limit 1",
+            (kind, collection),
+        )
+    )
+    return row is not None
+
+
+def job_waiting_or_running(conn: Connection, kind: str, collection: str) -> bool:
+    row = first(
+        conn.execute(
+            "select 1 from jobs where kind = ? and collection = ?"
+            " and status in ('queued', 'running') limit 1",
             (kind, collection),
         )
     )
