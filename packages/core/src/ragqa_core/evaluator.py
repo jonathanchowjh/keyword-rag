@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Literal
 
 from ragqa_core import db, verdict
-from ragqa_core.catalog import ANSWER_PAIR, METRICS
+from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
 from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, NoApiKey
@@ -61,6 +61,28 @@ def clean(value: float) -> float | None:
 def answer_hits(qa_type: QaType, hits: list[Hit]) -> list[Hit]:
     # The paper's one-shot: the single best example for mcq; passages otherwise.
     return hits[:1] if qa_type == "mcq" else hits
+
+
+def untracked(setup: dict) -> bool:
+    """A migrated run: it has question ids and recorded no versions."""
+    return "keyword_version" not in setup and "question_ids" in setup
+
+
+def changes_since(setup: dict, spec: CollectionSpec) -> dict:
+    """What differs between a run's recorded setup and the collection now, in plain terms.
+    A migrated run records no versions, so it is untracked rather than unchanged."""
+    if untracked(setup):
+        return {"untracked": True, "changes": []}
+    changes = []
+    # A version the setup does not record (a run that never started) has nothing to compare.
+    if (
+        setup.get("keyword_version") is not None
+        and setup["keyword_version"] != spec.keyword_version
+    ):
+        changes.append("keyword lists")
+    if setup.get("dense_model") is not None and setup["dense_model"] != spec.dense_model:
+        changes.append("dense model")
+    return {"untracked": False, "changes": changes}
 
 
 class Evaluator:
@@ -229,7 +251,7 @@ class Evaluator:
         no versions yet (never ran) records today's when it runs."""
         if "keyword_version" not in setup:
             # Migrated runs have question ids and no versions: nothing to check a resume against.
-            if "question_ids" in setup:
+            if untracked(setup):
                 return "this run predates version tracking; start a new run"
             return None
         old, new = setup["keyword_version"], spec.keyword_version
@@ -522,6 +544,7 @@ class Evaluator:
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "usd_total": db.job_spend(self.conn, job_id),
             "question_count": self._question_count(setup, by_method),
+            "since": changes_since(setup, spec),
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
@@ -550,6 +573,7 @@ class Evaluator:
             "answered": answered,
             "runs": len(done),
             "proxy_trusted": summary["proxy_trusted"],
+            "since": changes_since(job["setup"], self.retriever.spec(name)),
             **summary["answer"],
         }
 
@@ -598,6 +622,45 @@ class Evaluator:
             )
         return out
 
+    def questions(self, job_id: str, disagree: bool) -> list[dict]:
+        """Each question of a run with every method's row and its right/wrong outcome. With
+        `disagree`, only the questions where the methods' outcomes differ; the controls are
+        left out of that, and a method with no outcome has nothing to differ from."""
+        job = db.get_job(self.conn, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        spec = self.retriever.spec(job["setup"]["collection"])
+        questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
+        primary = MISS_METRIC[spec.qa_type]
+        by_question: dict[str, dict[str, dict]] = {}
+        for r in db.run_items(self.conn, job_id):
+            by_question.setdefault(r["question_id"], {})[r["method"]] = r
+        out = []
+        for qid, rows in by_question.items():
+            methods = {}
+            for method, r in rows.items():
+                result = outcome(r, primary)
+                methods[method] = {**r, "outcome": result} if result else r
+            judged = {
+                m["outcome"]
+                for name, m in methods.items()
+                if name not in CONTROLS and name != "question_only" and "outcome" in m
+            }
+            if disagree and len(judged) < 2:
+                continue
+            q = questions.get(qid)
+            out.append(
+                {
+                    "question_id": qid,
+                    "question": q.text if q else None,
+                    "choices": q.choices if q else None,
+                    "gold_answers": q.gold_answers if q else [],
+                    "gold_ids": q.gold_ids if q else [],
+                    "methods": methods,
+                }
+            )
+        return out
+
 
 def avg(values) -> float:
     values = list(values)
@@ -627,11 +690,16 @@ def metric_by_question(per_q: dict[str, dict], metric: str) -> dict[str, float]:
     return {q: values[0] for q, row in per_q.items() if (values := metric_values([row], metric))}
 
 
-def is_wrong(row: dict, primary: str) -> bool:
+def outcome(row: dict, primary: str) -> str | None:
+    """ "right" or "wrong" on the row's primary measure; None when it has none (unmeasured)."""
     answer = row.get("answer")
     if answer:
         key = "accuracy" if "accuracy" in answer else "em"
-        return answer[key] == 0
+        return "wrong" if answer[key] == 0 else "right"
     if primary not in row["retrieval"]:  # absent means unmeasured (or question_only), never 0
-        return False
-    return row["retrieval"][primary] == 0
+        return None
+    return "wrong" if row["retrieval"][primary] == 0 else "right"
+
+
+def is_wrong(row: dict, primary: str) -> bool:
+    return outcome(row, primary) == "wrong"

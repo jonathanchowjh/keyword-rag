@@ -401,6 +401,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"no job {job_id}") from None
 
+    # One row per question with every method's row, where /items is one method's rows.
+    @app.get("/eval/{job_id}/questions")
+    def eval_questions(job_id: str, disagree: bool = False) -> list[dict]:
+        try:
+            return state.evaluator.questions(job_id, disagree)
+        except KeyError:
+            raise HTTPException(404, f"no job {job_id}") from None
+
     @app.get("/jobs")
     def list_jobs(
         collection: str | None = None,

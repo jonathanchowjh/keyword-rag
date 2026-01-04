@@ -23,8 +23,6 @@ let cat = null;
 let col = null; // the latest GET /collections/{name}
 let runs = [];
 let loadJob = null; // the newest load job, or null
-let answerSetup = null; // the setup the answer's run recorded, fetched once per run
-let answerSetupFor = null;
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
@@ -45,14 +43,8 @@ const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 // Why the answer's run no longer matches the collection, in words.
 function staleNotes() {
   const a = col.answer;
-  if (!a || !answerSetup) return [];
-  const after = `after run ${a.run_id.slice(0, 4)}`;
-  const notes = [];
-  // A run that recorded no version (migrated) has nothing to compare against.
-  const changed = (key) => answerSetup[key] != null && answerSetup[key] !== col[key];
-  if (changed("keyword_version")) notes.push(`keyword lists changed ${after}`);
-  if (changed("dense_model")) notes.push(`dense model changed ${after}`);
-  return notes;
+  // A run that recorded no versions (migrated) has nothing to compare against: no note.
+  return a ? a.since.changes.map((c) => `${c} changed after run ${a.run_id.slice(0, 4)}`) : [];
 }
 
 function headHtml() {
@@ -361,10 +353,6 @@ async function refresh() {
       api("/jobs?collection=" + enc + "&kind=load&limit=1"),
     ]);
     loadJob = loads[0] ?? null;
-    if (col.answer && answerSetupFor !== col.answer.run_id) {
-      answerSetup = (await api("/jobs/" + encodeURIComponent(col.answer.run_id))).setup;
-      answerSetupFor = col.answer.run_id;
-    }
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("runs", runsHtml());

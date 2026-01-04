@@ -175,6 +175,80 @@ def test_run_page_questions_open_with_gold_and_answer(page, seeded):
     expect(page.locator("#questions details[open] [data-matched]").first).to_be_visible()
 
 
+def test_run_head_says_what_changed_since_the_run(page, seeded):
+    run_id = seeded.build("since", run=True)
+    page.goto(f"{seeded.url}/c/since/runs/{run_id}")
+    expect(page.locator("#head")).to_contain_text("Run " + run_id[:4])
+    expect(page.get_by_text("changed after this run")).to_have_count(0)
+    lists = {"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]}
+    r = httpx.put(seeded.url + "/collections/since/keyword-lists", json=lists)
+    seeded.wait(r.json()["job_id"])
+    page.goto(f"{seeded.url}/c/since/runs/{run_id}")
+    expect(page.get_by_text("keyword lists changed after this run")).to_be_visible()
+
+
+def test_run_head_names_a_changed_dense_model(page, seeded):
+    run_id = seeded.build("dense", run=True)
+    conn = seeded.app.state.conn
+    conn.execute("update collections set dense_model = 'other/model' where name = 'dense'")
+    page.goto(f"{seeded.url}/c/dense/runs/{run_id}")
+    expect(page.get_by_text("dense model changed after this run")).to_be_visible()
+
+
+def test_run_head_says_when_settings_were_not_tracked(page, seeded):
+    run_id = seeded.build("untracked", run=True)
+    conn = seeded.app.state.conn
+    setup = db.get_job(conn, run_id)["setup"]
+    for key in ("keyword_version", "dense_model"):
+        del setup[key]
+    db.set_job_setup(conn, run_id, setup)
+    page.goto(f"{seeded.url}/c/untracked/runs/{run_id}")
+    expect(page.get_by_text("recorded before settings were tracked")).to_be_visible()
+    expect(page.get_by_text("changed after this run")).to_have_count(0)
+
+
+def disagreeing_run(seeded, name):
+    """A done run where hybrid gets q0 wrong and every other cell right."""
+    run_id = seeded.build(name, run=True)
+    conn = seeded.app.state.conn
+    row = next(r for r in db.run_items(conn, run_id, "hybrid") if r["question_id"] == "q0")
+    row = {k: v for k, v in row.items() if k not in ("method", "question_id", "complete")}
+    row["answer"] = {"accuracy": 0.0}
+    db.upsert_run_item(conn, run_id, "hybrid", "q0", row, complete=True)
+    return run_id
+
+
+def test_an_opened_question_shows_every_methods_hits(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    page.locator("#questions details > summary").first.click()
+    opened = page.locator("#questions details[open]").first
+    expect(opened.locator("[data-method-hits]")).to_have_count(3)  # kw_individual, hybrid, random
+    expect(opened.locator("[data-method-hits]").nth(1)).to_contain_text("Hybrid")
+    expect(opened.locator("[data-method-hits]").nth(1)).to_contain_text("matched keywords")
+
+
+def test_where_methods_disagree_filters_the_questions(page, seeded):
+    run_id = disagreeing_run(seeded, "dis")
+    page.goto(f"{seeded.url}/c/dis/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details")).to_have_count(40)
+    page.get_by_label("Where methods disagree").check()
+    expect(page.locator("#questions details")).to_have_count(1)
+    expect(page.locator("#questions details")).to_contain_text("question 0")
+    page.get_by_label("Where methods disagree").uncheck()
+    expect(page.locator("#questions details")).to_have_count(40)
+
+
+def test_wrong_only_still_filters_the_picked_method(page, seeded):
+    run_id = disagreeing_run(seeded, "wrongonly")
+    page.goto(f"{seeded.url}/c/wrongonly/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    page.locator("#q-method").select_option("hybrid")
+    page.get_by_label("Wrong only").check()
+    expect(page.locator("#questions details")).to_have_count(1)
+
+
 def test_run_rerun_estimates_then_starts(page, seeded):
     seeded.build("rerun", run=True)
     runs = httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `GET /eval/{id}` and the `answer` of `GET /collections/{name}` carry `since`
+  (`{untracked, changes}`): what changed after the run (keyword lists, dense
+  model), or untracked for a migrated run. The Run page head says so, and the
+  Collection page reads it instead of fetching the job.
+- `GET /eval/{id}/questions?disagree=` is new: each question with every
+  method's row and outcome. The Run page's Questions section opens a question
+  to every method's hits side by side and can show only where methods disagree.
 - The console replaces the Eval Board: `/` lists collections with their answer,
   `/c/{name}` and `/c/{name}/runs/{id}` show one collection and one run, and
   `/worker` shows the queue and what needs a person. `/lab` stays. `/board`

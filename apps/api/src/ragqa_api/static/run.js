@@ -41,12 +41,15 @@ function headHtml() {
   const s = run.setup;
   const model = s.answer ? s.model : "retrieval only";
   const progress = run.status === "running" ? ` ${pct(run.progress)}` : "";
+  const since = run.since.untracked
+    ? ' · <span class="muted">recorded before settings were tracked</span>'
+    : run.since.changes.map((c) => ` · <span class="warn">${esc(c)} changed after this run</span>`).join("");
   const failed = run.error ? `<p class="err">${esc(run.error)}</p>` : "";
   return head({
     title: `Run ${id.slice(0, 4)}`,
     crumb: [{ label: "Collections", href: "/" }, { label: name, href: `/c/${enc}` }, "Runs"],
     aside: [clock(run.created_at), model, plural(run.question_count, "question"),
-      `$${Number(run.usd_total ?? 0).toFixed(2)}`].map(esc).join(" · ") + ` · ${pill(run.status)}${esc(progress)}`,
+      `$${Number(run.usd_total ?? 0).toFixed(2)}`].map(esc).join(" · ") + ` · ${pill(run.status)}${esc(progress)}${since}`,
   }) + failed;
 }
 
@@ -191,12 +194,9 @@ function setupHtml() {
 
 // -- questions --------------------------------------------------------------------------------
 
-function questionHtml(row) {
-  const a = row.answer;
-  const right = a ? (a.accuracy ?? a.em) === 1 : null;
-  const mark = right == null ? "" : right ? "right " : "wrong ";
-  const choices = (row.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
-  const hits = (row.hit_ids ?? [])
+// One method's hits and parsed answer, one column of an opened question.
+function methodHtml(m, row) {
+  const hits = (row?.hit_ids ?? [])
     .map((h, i) => {
       const skill = row.hit_skills?.[i];
       const words = show(row.hit_matched?.[i]); // rows from before hit_matched lack it
@@ -204,20 +204,31 @@ function questionHtml(row) {
         <span data-matched>${esc(words)}</span></li>`;
     })
     .join("");
-  return `<details><summary>${esc(mark)}${esc(row.question ?? row.question_id)}</summary>
-    ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
-    <p>Gold: ${esc(show(row.gold_answers?.length ? row.gold_answers : row.gold_ids))}</p>
-    <p>Parsed answer: ${esc(show(row.pred))} <span class="muted">${esc(show(row.raw))}</span></p>
-    <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></details>`;
+  const parsed = row?.pred == null ? "" : `<p>Parsed answer: ${esc(show(row.pred))}
+    <span class="muted">${esc(show(row.raw))}</span></p>`;
+  return `<div data-method-hits><strong>${esc(method(m))}</strong>${parsed}
+    <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></div>`;
 }
 
+function questionHtml(q, picked) {
+  const outcome = q.methods[picked]?.outcome;
+  const mark = outcome ? `${outcome} ` : "";
+  const choices = (q.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
+  const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m]));
+  return `<details><summary>${esc(mark)}${esc(q.question ?? q.question_id)}</summary>
+    ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
+    <p>Gold: ${esc(show(q.gold_answers?.length ? q.gold_answers : q.gold_ids))}</p>
+    <div class="sides">${columns.join("")}</div></details>`;
+}
+
+// The picker names the method whose outcome heads each question and "wrong only" judges.
 async function loadQuestions() {
   const m = $("q-method").value;
   if (!m) return;
   try {
-    const rows = await api(`/eval/${encodeURIComponent(id)}/items?method=${encodeURIComponent(m)}&wrong=${
-      $("q-wrong").checked}`);
-    $("questions").innerHTML = rows.length ? rows.map(questionHtml).join("") : '<p class="muted">None.</p>';
+    const rows = await api(`/eval/${encodeURIComponent(id)}/questions?disagree=${$("q-disagree").checked}`);
+    const shown = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
+    $("questions").innerHTML = shown.length ? shown.map((q) => questionHtml(q, m)).join("") : '<p class="muted">None.</p>';
   } catch (e) {
     $("questions").innerHTML = `<p class="err">${esc(e.message)}</p>`;
   }
@@ -369,6 +380,7 @@ async function refresh() {
 
 $("q-method").addEventListener("change", loadQuestions);
 $("q-wrong").addEventListener("change", loadQuestions);
+$("q-disagree").addEventListener("change", loadQuestions);
 $("questions-box").addEventListener("toggle", () => {
   if ($("questions-box").open) loadQuestions();
 });

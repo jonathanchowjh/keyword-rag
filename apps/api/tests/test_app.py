@@ -879,3 +879,145 @@ def test_a_recreated_collection_does_not_reuse_the_controls_id_cache(client):
     fresh = [{**i, "id": "new-" + i["id"]} for i in ITEMS]
     client.post("/collections/c/documents", json={"items": fresh, "confirm": True})
     assert hit_ids() == {i["id"] for i in fresh}
+
+
+def run_pair(client) -> str:
+    body = {"collection": "c", "methods": PAIR + ["random_example"], "answer": False}
+    job_id = client.post("/eval", json={**body, "confirm": True}).json()["job_id"]
+    assert wait(client, job_id)["status"] == "done"
+    return job_id
+
+
+def test_since_is_empty_when_nothing_changed(client):
+    add_collection(client)
+    job_id = run_pair(client)
+    expected = {"untracked": False, "changes": []}
+    assert client.get(f"/eval/{job_id}").json()["since"] == expected
+    assert client.get("/collections/c").json()["answer"]["since"] == expected
+
+
+def test_since_names_changed_keyword_lists(client):
+    add_collection(client)
+    job_id = run_pair(client)
+    r = client.put("/collections/c/keyword-lists", json=asdict(OTHER_LISTS))
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    expected = {"untracked": False, "changes": ["keyword lists"]}
+    assert client.get(f"/eval/{job_id}").json()["since"] == expected
+    assert client.get("/collections/c").json()["answer"]["since"] == expected
+
+
+def test_since_names_a_changed_dense_model(client):
+    add_collection(client)
+    job_id = run_pair(client)
+    conn = client.app.state.conn
+    conn.execute("update collections set dense_model = 'other/model' where name = 'c'")
+    expected = {"untracked": False, "changes": ["dense model"]}
+    assert client.get(f"/eval/{job_id}").json()["since"] == expected
+
+
+def test_since_marks_a_run_without_recorded_versions_untracked(client):
+    add_collection(client)
+    job_id = run_pair(client)
+    conn = client.app.state.conn
+    setup = db.get_job(conn, job_id)["setup"]
+    for key in ("keyword_version", "dense_model"):
+        del setup[key]
+    db.set_job_setup(conn, job_id, setup)
+    client.put("/collections/c/keyword-lists", json=asdict(OTHER_LISTS))
+    expected = {"untracked": True, "changes": []}
+    assert client.get(f"/eval/{job_id}").json()["since"] == expected
+    assert client.get("/collections/c").json()["answer"]["since"] == expected
+
+
+def seed_rows(client, job_id, rows):
+    """Replace a run's rows: {method: {question_id: row}}."""
+    conn = client.app.state.conn
+    conn.execute("delete from run_items where job_id = ?", (job_id,))
+    for method, per_q in rows.items():
+        for qid, row in per_q.items():
+            db.upsert_run_item(conn, job_id, method, qid, row, complete=True)
+
+
+def row(hit, right=None, retrieval=None):
+    out = {"hit_ids": [hit], "hit_skills": ["s"], "hit_matched": [["rate"]], "retrieval": {}}
+    if retrieval is not None:
+        out["retrieval"] = retrieval
+    if right is not None:
+        out["pred"] = "A"
+        out["answer"] = {"accuracy": float(right)}
+    return out
+
+
+def test_questions_lists_every_methods_row_per_question(client):
+    add_collection(client)
+    db.save_questions(
+        client.app.state.conn,
+        "c",
+        [QUESTION, Question("q2", "market price", ["x", "y"], ["B"], [], {})],
+    )
+    job_id = run_pair(client)
+    seed_rows(
+        client,
+        job_id,
+        {
+            "kw_individual": {"q1": row("enzyme-item", 1), "q2": row("market-item", 1)},
+            "hybrid": {"q1": row("enzyme-item", 1), "q2": row("volcano-item", 0)},
+            "random_example": {"q1": row("volcano-item", 0), "q2": row("volcano-item", 0)},
+        },
+    )
+    out = client.get(f"/eval/{job_id}/questions").json()
+    assert [q["question_id"] for q in out] == ["q1", "q2"]
+    first = out[0]
+    assert first["question"] == "enzyme rate" and first["gold_answers"] == ["A"]
+    assert set(first["methods"]) == {"kw_individual", "hybrid", "random_example"}
+    assert first["methods"]["kw_individual"]["hit_ids"] == ["enzyme-item"]
+    assert first["methods"]["kw_individual"]["hit_matched"] == [["rate"]]
+    assert first["methods"]["hybrid"]["outcome"] == "right"
+    assert first["methods"]["random_example"]["outcome"] == "wrong"
+    assert client.get("/eval/nope/questions").status_code == 404
+
+
+def test_questions_disagree_filter_ignores_controls_and_absent_outcomes(client):
+    add_collection(client)
+    qs = [Question(f"q{i}", f"enzyme {i}", ["x", "y"], ["A"], [], {}) for i in range(1, 5)]
+    db.save_questions(client.app.state.conn, "c", qs)
+    job_id = run_pair(client)
+    seed_rows(
+        client,
+        job_id,
+        {
+            "kw_individual": {
+                "q1": row("a", 1),  # q1: both right, control wrong -> agree
+                "q2": row("a", 1),  # q2: differ
+                "q3": row("a", 0),  # q3: both wrong
+                "q4": row("a", 1),  # q4: hybrid has no outcome -> nothing to differ from
+            },
+            "hybrid": {
+                "q1": row("a", 1),
+                "q2": row("a", 0),
+                "q3": row("a", 0),
+                "q4": {"hit_ids": [], "hit_skills": [], "retrieval": {}},
+            },
+            "random_example": {f"q{i}": row("a", 0) for i in range(1, 5)},
+        },
+    )
+    got = client.get(f"/eval/{job_id}/questions", params={"disagree": True}).json()
+    assert [q["question_id"] for q in got] == ["q2"]
+    assert "outcome" not in client.get(f"/eval/{job_id}/questions").json()[3]["methods"]["hybrid"]
+
+
+def test_questions_outcome_falls_back_to_the_free_metric(client):
+    add_collection(client)
+    job_id = run_pair(client)
+    seed_rows(
+        client,
+        job_id,
+        {
+            "kw_individual": {"q1": row("a", retrieval={"same_skill@1": 1.0})},
+            "hybrid": {"q1": row("a", retrieval={"same_skill@1": 0.0})},
+            "random_example": {"q1": row("a", retrieval={})},
+        },
+    )
+    got = client.get(f"/eval/{job_id}/questions", params={"disagree": True}).json()
+    assert len(got) == 1
+    assert "outcome" not in got[0]["methods"]["random_example"]

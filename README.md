@@ -128,7 +128,8 @@ A collection remembers the dense model it was built with. Changing
 | `POST /query` | One question, several methods side by side, optionally answered |
 | `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
-| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log (see [Reading a run](#reading-a-run)); per-question rows |
+| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since`, what changed after it (see [Reading a run](#reading-a-run)); one method's per-question rows |
+| `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome` (`right` or `wrong`, absent when unmeasured); `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
@@ -251,6 +252,10 @@ service:
 - **`best_of_each`** (best keyword method against best other method) is
   picked after the fact, so its gap is likely overstated. It is never the
   answer.
+- **`since`** says what changed after the run: `{untracked, changes}`, where
+  `changes` lists `keyword lists` and/or `dense model`. A migrated run that
+  recorded no versions is `untracked: true`. `GET /collections/{name}` carries
+  the same field on its `answer`.
 - **`methods`** holds each method's own score as `mean [low, high]`, and
   **`pairs`** every pair compared.
 - **`proxy`** (exam QA type, with answers): whether solution similarity, the
