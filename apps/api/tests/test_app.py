@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -471,13 +472,19 @@ const out = {
   q: [u.pts(2.5, 1.5, 3.5), u.pts(5, null, undefined)],
 };
 const labels = {methods: {kw_individual: {label: 'Keywords per list'}, hybrid: {label: 'Hybrid'}},
-                metrics: {accuracy: {label: 'Answered correctly'}}};
-const ans = (verdict, diff, lo, hi) => u.verdictText(
-  {candidate: 'kw_individual', reference: 'hybrid', metric: 'accuracy', verdict, diff, lo, hi},
-  labels);
+                metrics: {accuracy: {label: 'Answered correctly'}, em: {label: 'Exact match'}},
+                metric_labels_by_type: {table: {em: 'Correct answer'}}};
+const ans = (verdict, diff, lo, hi, metric = 'accuracy', qaType = 'mcq') => u.verdictText(
+  {candidate: 'kw_individual', reference: 'hybrid', metric, verdict, diff, lo, hi},
+  qaType, labels);
 out.j = ans('yes', 6.2, 1.8, 10.4);
 out.k = ans('no', -7, -12, -2);
 out.l = ans('cant_tell', 1, -2, 4);
+out.t = ans('yes', 6, 2, 10, 'em', 'table');
+out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
+out.v = ['rekeying', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
+out.w = [u.count(11656), u.count(0)];
+out.x = [0.004, 0, 0.4141, 12].map(u.usd);
 console.log(JSON.stringify(out));
 """
 
@@ -504,6 +511,16 @@ def test_ui_formatting(tmp_path):
     assert got["j"] == "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
     assert got["k"].startswith("No: Keywords per list −7 pts")
     assert got["l"].startswith("Can't tell: Keywords per list +1 pt")
+    assert got["t"] == "Yes: Keywords per list +6 pts (2–10) correct answer vs Hybrid"
+    assert got["u"].endswith("exact match vs Hybrid")  # no label for this type: the plain one
+    assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
+        "Re-keying",
+        "Stopped budget",
+        "Stopped no key",
+        "Cancelled",
+    ]
+    assert got["w"] == ["11,656", "0"]
+    assert got["x"] == ["< $0.01", "$0.00", "$0.41", "$12.00"]
 
 
 def test_model_mismatch_on_query_and_eval(client):

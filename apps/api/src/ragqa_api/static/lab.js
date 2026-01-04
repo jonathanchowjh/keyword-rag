@@ -1,4 +1,4 @@
-import { api, catalog, esc, head, methodLabel, refreshSpend, shell } from "/static/ui.js";
+import { api, catalog, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
 
 const $ = (id) => document.getElementById(id);
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
@@ -44,7 +44,7 @@ function hitCard(hit) {
 
 function column(method, v) {
   return `<section class="col">
-    <h2><span>${named(method)}</span><span class="muted">$${v.usd.toFixed(4)}</span></h2>
+    <h2><span>${named(method)}</span><span class="muted">${usd(v.usd)}</span></h2>
     ${v.error ? `<div class="err">${esc(v.error)}</div>` : ""}
     ${v.hits.map(hitCard).join("") || (v.error ? "" : '<div class="muted">no retrieval</div>')}
     ${v.answer !== null ? `<div class="answer">Answer: ${esc(v.answer)}</div>` : ""}

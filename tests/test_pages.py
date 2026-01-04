@@ -469,3 +469,34 @@ def test_confirm_spend_prints_sub_cent_and_zero(page, seeded):
     )
     assert "< $0.01" in out[0] and "≈ $0.00" in out[1] and "< $0.01" not in out[1]
     assert "$0.41" in out[2]
+
+
+def test_reasoning_match_is_rescaled_in_own_scores_and_pairs(page, seeded):
+    sim = "solution_sim@1"
+
+    def rescaled(route):
+        data = route.fetch().json()
+        row = lambda mean: {"mean": mean, "lo": mean - 0.05, "hi": mean + 0.05}  # noqa: E731
+        data["methods"]["random_example"][sim] = row(0.5)
+        data["methods"]["hybrid"][sim] = row(0.75)
+        data["pairs"] = [
+            {
+                "metric": sim,
+                "a": "hybrid",
+                "b": "random_example",
+                "diff": 0.25,
+                "lo": 0.2,
+                "hi": 0.3,
+                "separated": True,
+            }
+        ]
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", rescaled)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Each method's own score").click()
+    hybrid = page.locator("#scores tbody tr", has_text="hybrid").first
+    expect(hybrid).to_contain_text("50 match")  # (0.75 - 0.5) / (1 - 0.5) * 100
+    expect(hybrid).not_to_contain_text("75%")
+    page.get_by_text("Every pair compared").click()
+    expect(page.locator("#pairs tbody tr").first).to_contain_text("+50 pts")

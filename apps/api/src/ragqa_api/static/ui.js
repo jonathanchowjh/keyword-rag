@@ -96,6 +96,17 @@ export function metricLabel(id, qaType, cat = known) {
   return cat?.metric_labels_by_type?.[qaType]?.[id] ?? cat?.metrics?.[id]?.label ?? id;
 }
 
+// Counts with thousands separators: 11,656.
+export function count(n) {
+  return Number(n).toLocaleString("en-US");
+}
+
+// Money as the spend line shows it: two decimals, "< $0.01" below a cent.
+export function usd(x) {
+  const v = Number(x ?? 0);
+  return v > 0 && v < 0.01 ? "< $0.01" : `$${v.toFixed(2)}`;
+}
+
 export const FREE_SCORE_NOTE = "free score, not yet checked against answers";
 
 // True when the headline is the free reasoning match and nothing has vouched for it (spec §7.3).
@@ -104,12 +115,12 @@ function freeScore(answer) {
 }
 
 // "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
-export function verdictText(answer, labels = known) {
+export function verdictText(answer, qaType, labels = known) {
   if (!answer) return "No answer yet";
   const head = { yes: "Yes", no: "No", cant_tell: "Can't tell" }[answer.verdict] ?? "Can't tell";
   const cand = methodLabel(answer.candidate, labels);
   const ref = methodLabel(answer.reference, labels);
-  const metric = (labels?.metrics?.[answer.metric]?.label ?? answer.metric).toLowerCase();
+  const metric = metricLabel(answer.metric, qaType, labels).toLowerCase();
   const text = `${head}: ${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
   return freeScore(answer) ? `${text} · ${FREE_SCORE_NOTE}` : text;
 }
@@ -144,7 +155,7 @@ export function pill(state) {
     { ready: "ok", done: "ok", loading: "run", rekeying: "run", evaluating: "run", running: "run",
       busy: "run", queued: "idle", failed: "bad", interrupted: "bad", stopped_budget: "bad",
       stopped_no_key: "bad", cancelled: "idle" }[state] ?? "idle";
-  const text = String(state ?? "").replace(/_/g, " ");
+  const text = String(state ?? "").replace(/_/g, " ").replace("rekeying", "re-keying");
   return `<span class="pill ${kind}">${esc(text.charAt(0).toUpperCase() + text.slice(1))}</span>`;
 }
 

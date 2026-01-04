@@ -1,4 +1,4 @@
-import { api, catalog, clock, confirmSpend, esc, gapBar, head, methodLabel, pct, pill, pts,
+import { api, catalog, clock, confirmSpend, count, esc, gapBar, head, methodLabel, pct, pill, pts,
   refreshSpend, shell, verdictText } from "/static/ui.js";
 
 const SLOW_MS = 15000;
@@ -38,7 +38,7 @@ function paint(id, html) {
   return true;
 }
 
-const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 
 // -- head and answer -------------------------------------------------------------
 
@@ -77,7 +77,7 @@ function answerHtml() {
   if (!a) return '<p class="muted">No answer yet. Run the keyword methods against Hybrid to get one.</p>';
   const span = Math.max(10, Math.ceil(Math.max(Math.abs(a.lo), Math.abs(a.hi), Math.abs(a.diff)) / 5) * 5);
   const label = `${methodLabel(a.candidate, cat)} against ${methodLabel(a.reference, cat)}`;
-  return `<p class="verdict">${esc(verdictText(a, cat))}</p>
+  return `<p class="verdict">${esc(verdictText(a, col.qa_type, cat))}</p>
     <p>${gapBar(a.lo, a.diff, a.hi, span)} <span class="muted">${esc(label)}, ${esc(pts(a.diff, a.lo, a.hi))}</span></p>
     <p class="muted">From <a href="/c/${encodeURIComponent(name)}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
       a.run_id.slice(0, 4))}</a> at ${esc(clock(a.at))}${a.answered ? "" : ", retrieval only"} ·
@@ -121,8 +121,8 @@ function runFormHtml() {
     <label class="check"><input type="checkbox" id="rf-answer" checked> Have Claude answer the questions</label>
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
       <label>Questions<select id="rf-split">
-        <option value="dev">Dev slice (${esc(col.dev_questions)})</option>
-        <option value="full">All (${esc(col.questions)})</option></select></label></div>
+        <option value="dev">Dev slice (${esc(count(col.dev_questions))})</option>
+        <option value="full">All (${esc(count(col.questions))})</option></select></label></div>
     <div class="row"><button type="button" id="rf-estimate">Estimate</button>
       <span id="rf-confirm"></span><span id="rf-msg" class="err"></span></div></div>`;
 }
@@ -235,7 +235,7 @@ function bindLoad() {
 }
 
 function askedHtml() {
-  return `<p>${esc(plural(col.questions, "question"))}, of which ${esc(col.dev_questions)} in the dev
+  return `<p>${esc(plural(col.questions, "question"))}, of which ${esc(count(col.dev_questions))} in the dev
     slice that runs use by default.</p>`;
 }
 

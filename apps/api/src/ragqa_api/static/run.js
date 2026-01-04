@@ -1,4 +1,4 @@
-import { api, catalog, clock, confirmSpend, esc, gapBar, head, methodLabel, metricLabel, pct, pill,
+import { api, catalog, clock, confirmSpend, count, esc, gapBar, head, methodLabel, metricLabel, pct, pill,
   pts, refreshSpend, shell, verdictText } from "/static/ui.js";
 
 const POLL_MS = 3000;
@@ -28,7 +28,7 @@ function paint(section, html) {
   return true;
 }
 
-const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 const metric = (m) => metricLabel(m, qaType, cat);
 const method = (m) => methodLabel(m, cat);
 const isControl = (m) => cat.methods[m]?.group === "control";
@@ -57,11 +57,31 @@ function answerHtml() {
     return `<p class="verdict"><strong>Do keywords help?</strong> This run does not include ${esc(
       method(cand))} and ${esc(method(ref))}, so it gives no answer.</p>`;
   }
-  return `<p class="verdict"><strong>Do keywords help?</strong> ${esc(verdictText({ ...a, proxy_trusted: run.proxy_trusted }, cat))}, on the same ${esc(
+  return `<p class="verdict"><strong>Do keywords help?</strong> ${esc(verdictText({ ...a, proxy_trusted: run.proxy_trusted }, qaType, cat))}, on the same ${esc(
     plural(run.question_count, "question"))}.</p>`;
 }
 
 // -- the gap chart ------------------------------------------------------------------------
+
+// Reasoning match is shown above the random example's: (score - random) / (1 - random) x 100,
+// the scale verdict.scale gives the gaps. Null when this run has no random example to judge by.
+const SIM = "solution_sim@1";
+function matchFactor() {
+  const chance = run.methods.random_example?.[SIM]?.mean;
+  return Number.isFinite(chance) && chance < 1 ? 100 / (1 - chance) : null;
+}
+
+function ownScore(m, k) {
+  const cell = m[k];
+  if (k !== SIM) return `${esc(pct(cell.mean))} <span class="muted">${esc(range(cell))}</span>`;
+  const f = matchFactor();
+  if (f === null) {
+    return `${esc(pct(cell.mean))} <span class="muted">${esc(range(cell))} · no chance level</span>`;
+  }
+  const chance = run.methods.random_example[SIM].mean;
+  const at = (v) => Math.round((v - chance) * f);
+  return `${at(cell.mean)} match <span class="muted">${at(cell.lo)}–${at(cell.hi)}</span>`;
+}
 
 // The reference's own score; reasoning match is rescaled against the run's random example.
 function referenceScore() {
@@ -120,8 +140,7 @@ function scoresHtml() {
   const rows = Object.entries(run.methods)
     .map(([m, row]) => {
       const cells = names
-        .map((k) => (row[k] ? `<td class="num">${esc(pct(row[k].mean))}
-          <span class="muted">${esc(range(row[k]))}</span></td>` : '<td class="num muted">n/a</td>'))
+        .map((k) => (row[k] ? `<td class="num">${ownScore(row, k)}</td>` : '<td class="num muted">n/a</td>'))
         .join("");
       return `<tr><td>${esc(method(m))}<code>${esc(m)}</code></td>${cells}</tr>`;
     })
@@ -143,15 +162,17 @@ function proxyHtml() {
   return '<p class="muted">Not checked here: it needs an answered run of at least 4 retrieval methods.</p>';
 }
 
-const x100 = (v) => (v == null ? NaN : v * 100); // a NaN-cleaned null stays missing, not 0
-
 function pairsHtml() {
   if (!run.pairs.length) return '<p class="muted">Fewer than two methods, so nothing to compare.</p>';
   const rows = run.pairs
     .map((p) => {
       const result = !p.separated ? "can't tell" : p.diff > 0 ? `${method(p.a)} ahead` : `${method(p.b)} ahead`;
-      return `<tr><td>${esc(metric(p.metric))}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
-        <td class="num">${esc(pts(x100(p.diff), x100(p.lo), x100(p.hi)))}</td><td>${esc(result)}</td></tr>`;
+      const f = p.metric === SIM ? matchFactor() : null; // null: shown as it is
+      const raw = p.metric === SIM && f === null ? " (no chance level)" : "";
+      const k = f ?? 100;
+      const scaled = (v) => (v == null ? NaN : v * k);
+      return `<tr><td>${esc(metric(p.metric) + raw)}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
+        <td class="num">${esc(pts(scaled(p.diff), scaled(p.lo), scaled(p.hi)))}</td><td>${esc(result)}</td></tr>`;
     })
     .join("");
   return `<table><thead><tr><th>Measure</th><th>Pair</th><th>Gap</th><th>Result</th></tr></thead>

@@ -1,4 +1,4 @@
-import { api, catalog, clock, confirmSpend, esc, head, pct, pill, refreshSpend, shell, verdictText }
+import { api, catalog, clock, confirmSpend, count, esc, head, pct, pill, refreshSpend, shell, verdictText }
   from "/static/ui.js";
 
 const REFRESH_MS = 15000;
@@ -23,10 +23,10 @@ $("head").innerHTML = head({
 function rowHtml(c) {
   const type = cat.qa_types[c.qa_type];
   const noun = type?.item_noun ?? "item";
-  const counts = `${c.count} ${noun}${c.count === 1 ? "" : "s"}, ${c.questions} Qs`;
+  const counts = `${count(c.count)} ${noun}${c.count === 1 ? "" : "s"}, ${count(c.questions)} Qs`;
   const a = c.answer;
   const answer = a
-    ? `${esc(verdictText(a, cat))}<div class="small">run ${esc(a.run_id.slice(0, 4))} · ${esc(clock(a.at))}${
+    ? `${esc(verdictText(a, c.qa_type, cat))}<div class="small">run ${esc(a.run_id.slice(0, 4))} · ${esc(clock(a.at))}${
         a.answered ? "" : " · retrieval only"}</div>`
     : '<span class="muted">No run yet</span>';
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
