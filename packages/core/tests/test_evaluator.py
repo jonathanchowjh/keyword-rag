@@ -414,6 +414,27 @@ def test_question_only_has_no_retrieval_metrics(env):
     assert ev.items(job, "question_only", wrong_only=True) == []
 
 
+def test_legacy_question_only_zeros_are_cleared_on_connect(env, tmp_path):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["question_only", "hybrid"], False, None)
+    ev.run(job)
+    legacy = {"hit_ids": [], "hit_skills": [], "usd": 0.0}
+    legacy["retrieval"] = {"recall@1": 0.0, "recall@2": 0.0, "solution_sim@1": 0.0}
+    for r in run_items(conn, job, "question_only"):
+        db.upsert_run_item(conn, job, "question_only", r["question_id"], legacy, complete=True)
+
+    migrated = connect(tmp_path / "r.db")  # a second connection, as a restart would open
+    rows = run_items(migrated, job, "question_only")
+    assert len(rows) == 5 and all(r["retrieval"] == {} for r in rows)
+    t = ev.table(job)
+    assert t["methods"]["question_only"] == {"usd": 0.0, "n": 5}
+    assert all(g["method"] != "question_only" for g in t["gaps"])
+    assert ev.items(job, "question_only", wrong_only=True) == []
+    before = [tuple(r) for r in migrated.execute("select * from run_items order by rowid")]
+    again = connect(tmp_path / "r.db")
+    assert [tuple(r) for r in again.execute("select * from run_items order by rowid")] == before
+
+
 def test_question_only_answers_are_scored(env):
     conn, ev = env
     ev.claude = fake_claude(conn, lambda p: "Answer: B")

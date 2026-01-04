@@ -111,6 +111,12 @@ def _migrate_run_items(conn: Connection) -> None:
     conn.execute(
         "create unique index if not exists run_items_key on run_items (job_id, method, question_id)"
     )
+    # question_only retrieves nothing: older runs stored 0.0 scores, which read as measured.
+    conn.execute(
+        "update run_items set row_json = json_set(row_json, '$.retrieval', json('{}'))"
+        " where method = 'question_only'"
+        " and coalesce(json_extract(row_json, '$.retrieval'), '{}') != '{}'"
+    )
     # A queued or running eval records its own question ids when it runs.
     evals = conn.execute(
         "select id, setup_json from jobs"

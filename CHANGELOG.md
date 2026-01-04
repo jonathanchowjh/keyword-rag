@@ -23,6 +23,16 @@
   showing an estimate first; spend stays capped and ledgered.
 - Every run has a plain-language answer, paired gaps against Hybrid and a log.
 - The gate runs a browser smoke test of the pages (`pytest -m pages`).
+- `POST /collections/{name}/documents` is refused with 409 while a re-key or an
+  eval on the collection is queued or running, so the items cannot change under it.
+- Runs from before version tracking cannot be resumed; the resume estimate
+  says so instead of guessing.
+- Question only rows carry no retrieval scores, since it retrieves nothing:
+  absent means unmeasured, never 0. Older rows that stored 0.0 are cleaned
+  when the database is opened after upgrading.
+- Reasoning match is shown on the rescaled scale in each method's own score and
+  in every pair, as in the gaps; counts have thousands separators, the Lab shows
+  cost to the cent, and the verdict names the metric the collection's type uses.
 
 - Two control methods, `random_example` and `fixed_example`, so a method can
   be checked against an example chosen without looking at the question.
