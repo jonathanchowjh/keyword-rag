@@ -194,6 +194,23 @@ def get_keyword_lists(
     return KeywordLists(**json.loads(row["lists_json"])) if row else None
 
 
+def list_keyword_versions(conn: Connection, name: str) -> list[dict]:
+    """Every saved version of a collection's lists, newest first."""
+    rows = conn.execute(
+        "select version, created_at, lists_json from keyword_lists where collection = ?"
+        " order by created_at desc, rowid desc",
+        (name,),
+    )
+    return [
+        {
+            "version": r["version"],
+            "created_at": r["created_at"],
+            "lists": KeywordLists(**json.loads(r["lists_json"])),
+        }
+        for r in rows
+    ]
+
+
 def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
     conn.executemany(
         "insert or replace into questions values (?, ?, ?)",

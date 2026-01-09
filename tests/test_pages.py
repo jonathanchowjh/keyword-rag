@@ -11,6 +11,8 @@ from ragqa_core.fakes import fake_replies
 
 pytestmark = pytest.mark.pages
 
+ORIGINAL_TOPICS = "enzyme\nmarket\nvolcano\noptics"  # the topic list `seeded.build` saves
+
 
 def test_collections_page_shows_the_answer(page, seeded):
     page.goto(seeded.url + "/")
@@ -574,3 +576,43 @@ def test_reasoning_match_is_rescaled_in_own_scores_and_pairs(page, seeded):
     expect(hybrid).not_to_contain_text("75%")
     page.get_by_text("Every pair compared").click()
     expect(page.locator("#pairs tbody tr").first).to_contain_text("+50 pts")
+
+
+def test_paid_methods_carry_a_uses_credit_mark(page, seeded):
+    seeded.build("credit")
+    page.goto(seeded.url + "/c/credit")
+    page.get_by_role("button", name="New run").click()
+    paid = page.locator("label.check", has=page.get_by_label("iterative"))
+    free = page.locator("label.check", has=page.get_by_label("hybrid", exact=True))
+    expect(paid.locator(".credit")).to_have_text("uses credit")
+    expect(free.locator(".credit")).to_have_count(0)
+    expect(
+        page.locator("label.check", has=page.locator("#rf-answer")).locator(".credit")
+    ).to_have_text("uses credit")
+
+
+def test_lab_marks_paid_methods_and_the_answer_box(page, seeded):
+    page.goto(seeded.url + "/lab")
+    expect(page.locator("#methods label", has_text="iterative").locator(".credit")).to_have_text(
+        "uses credit"
+    )
+    expect(
+        page.locator("#methods label", has_text="hybrid").first.locator(".credit")
+    ).to_have_count(0)
+    expect(page.locator("label", has=page.locator("#answer")).locator(".credit")).to_have_text(
+        "uses credit"
+    )
+
+
+def test_lists_history_loads_an_old_version_and_keeps_it(page, seeded):
+    seeded.build("hist")
+    page.goto(seeded.url + "/c/hist")
+    expect(page.locator("#lists-history li")).to_have_count(1)
+    expect(page.locator("#lists-history li").first).to_contain_text("active")
+    page.locator("#kw-topic").fill("alpha\nbeta")
+    page.get_by_role("button", name="Save lists").click()
+    expect(page.locator("#lists-history li")).to_have_count(2)
+    page.locator("#lists-history li").nth(1).get_by_role("button", name="Load into editor").click()
+    expect(page.locator("#kw-topic")).to_have_value(ORIGINAL_TOPICS)
+    page.wait_for_timeout(3500)  # past one fast refresh
+    assert page.locator("#kw-topic").input_value() == ORIGINAL_TOPICS

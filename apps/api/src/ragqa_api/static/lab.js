@@ -1,4 +1,4 @@
-import { api, catalog, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
+import { api, catalog, creditMark, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
 
 const $ = (id) => document.getElementById(id);
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
@@ -24,7 +24,7 @@ async function loadMethods() {
   const detail = await api(`/collections/${encodeURIComponent(name)}`);
   $("methods").innerHTML = detail.methods_available
     .map(
-      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}</label>`,
+      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${creditMark(m)}</label>`,
     )
     .join("");
 }

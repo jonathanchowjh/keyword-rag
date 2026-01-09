@@ -92,6 +92,14 @@ export function methodLabel(id, cat = known) {
   return cat?.methods?.[id]?.label ?? id;
 }
 
+// The muted "uses credit" note beside a paid method (spec §7.1); "" for a free one. A keyword
+// method spends only on a collection with summaries, and says so.
+const CREDIT_NOTE = { always: "uses credit", with_summaries: "uses credit with summaries" };
+export function creditMark(id, cat = known) {
+  const note = CREDIT_NOTE[cat?.methods?.[id]?.paid];
+  return note ? ` <span class="credit muted">${esc(note)}</span>` : "";
+}
+
 export function metricLabel(id, qaType, cat = known) {
   return cat?.metric_labels_by_type?.[qaType]?.[id] ?? cat?.metrics?.[id]?.label ?? id;
 }

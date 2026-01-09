@@ -124,6 +124,8 @@ A collection remembers the dense model it was built with. Changing
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a re-key or eval on the collection is queued or running |
 | `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
+| `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
+| `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it |
 | `POST /query` | One question, several methods side by side, optionally answered |
 | `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}` |

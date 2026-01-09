@@ -1021,3 +1021,42 @@ def test_questions_outcome_falls_back_to_the_free_metric(client):
     got = client.get(f"/eval/{job_id}/questions", params={"disagree": True}).json()
     assert len(got) == 1
     assert "outcome" not in got[0]["methods"]["random_example"]
+
+
+def test_keyword_list_versions_newest_first_with_counts_and_active(client):
+    add_collection(client)
+    first = db.get_collection(client.app.state.conn, "c")
+    assert first
+    put = client.put("/collections/c/keyword-lists", json=asdict(OTHER_LISTS)).json()
+    wait(client, put["job_id"])
+    rows = client.get("/collections/c/keyword-lists").json()
+    assert [r["version"] for r in rows] == [put["version"], first.keyword_version]
+    assert [r["active"] for r in rows] == [True, False]
+    assert rows[0]["counts"] == {"topic": 2, "method": 1, "common": 1}
+    assert rows[1]["counts"] == {k: len(v) for k, v in asdict(LISTS).items()}
+    assert rows[0]["created_at"]
+
+
+def test_keyword_list_versions_of_a_collection_without_lists_is_empty(client):
+    add_collection(client, lists=False)
+    assert client.get("/collections/c/keyword-lists").json() == []
+
+
+def test_one_keyword_list_version(client):
+    add_collection(client)
+    version = db.get_collection(client.app.state.conn, "c").keyword_version
+    r = client.get(f"/collections/c/keyword-lists/{version}")
+    assert r.status_code == 200
+    assert r.json() == {
+        "version": version,
+        "created_at": r.json()["created_at"],
+        "active": True,
+        "lists": asdict(LISTS),
+    }
+
+
+def test_keyword_list_version_404s(client):
+    add_collection(client)
+    assert client.get("/collections/c/keyword-lists/nope").status_code == 404
+    assert client.get("/collections/ghost/keyword-lists").status_code == 404
+    assert client.get("/collections/ghost/keyword-lists/x").status_code == 404

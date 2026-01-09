@@ -305,6 +305,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"estimate": {"est_usd": estimate, "calls": 1}}, 200)
         return asdict(state.indexer.propose_lists(spec, sample))
 
+    @app.get("/collections/{name}/keyword-lists")
+    def list_versions(name: str) -> list[dict]:
+        """Every saved version of the lists, newest first, with a count per list."""
+        spec = state.retriever.spec(name)
+        return [
+            {
+                "version": v["version"],
+                "created_at": v["created_at"],
+                "counts": {k: len(items) for k, items in asdict(v["lists"]).items()},
+                "active": v["version"] == spec.keyword_version,
+            }
+            for v in db.list_keyword_versions(state.conn, name)
+        ]
+
+    @app.get("/collections/{name}/keyword-lists/{version}")
+    def get_version(name: str, version: str) -> dict:
+        spec = state.retriever.spec(name)
+        for v in db.list_keyword_versions(state.conn, name):
+            if v["version"] == version:
+                return {
+                    "version": version,
+                    "created_at": v["created_at"],
+                    "active": version == spec.keyword_version,
+                    "lists": asdict(v["lists"]),
+                }
+        raise HTTPException(404, f"no keyword-list version {version!r} on '{name}'")
+
     @app.put("/collections/{name}/keyword-lists", status_code=202)
     def put_lists(name: str, body: Lists) -> dict:
         """Saves the lists as a version; a queued rekey job switches to it once every

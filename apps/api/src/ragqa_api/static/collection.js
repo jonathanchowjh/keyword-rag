@@ -1,4 +1,4 @@
-import { api, catalog, clock, confirmSpend, count, esc, gapBar, head, methodLabel, pct, pill, pts,
+import { api, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, head, methodLabel, pct, pill, pts,
   refreshSpend, shell, verdictText } from "/static/ui.js";
 
 const SLOW_MS = 15000;
@@ -22,6 +22,7 @@ const $ = (id) => document.getElementById(id);
 let cat = null;
 let col = null; // the latest GET /collections/{name}
 let runs = [];
+let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
 const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
@@ -103,14 +104,14 @@ function runFormHtml() {
         const on = cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
         const ok = col.methods_available.includes(mid);
         return `<label class="check"><input type="checkbox" name="method" value="${esc(mid)}"
-          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code></label>`;
+          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${creditMark(mid, cat)}</label>`;
       })
       .join("");
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";
   }).join("");
   const models = MODELS.map((m) => `<option>${esc(m)}</option>`).join("");
   return `<div class="card form">${groups}
-    <label class="check"><input type="checkbox" id="rf-answer" checked> Have Claude answer the questions</label>
+    <label class="check"><input type="checkbox" id="rf-answer" checked> Have Claude answer the questions <span class="credit muted">uses credit</span></label>
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
       <label>Questions<select id="rf-split">
         <option value="dev">Dev slice (${esc(count(col.dev_questions))})</option>
@@ -247,10 +248,41 @@ function buildLists() {
     best few from each list.</p><div class="lists">${areas}</div>
     <div class="actions"><button type="button" id="kw-save">Save lists</button>
       <button type="button" id="kw-propose" class="secondary">Propose with Claude</button></div>
-    <p id="kw-hint" class="muted"></p><p id="kw-msg" role="status"></p>`;
+    <p id="kw-hint" class="muted"></p><p id="kw-msg" role="status"></p>
+    <h3>Earlier versions</h3><ul id="lists-history" class="history"></ul>`;
   for (const [k] of LIST_KEYS) $(`kw-${k}`).addEventListener("input", () => (listsDirty = true));
   $("kw-save").addEventListener("click", saveLists);
   $("kw-propose").addEventListener("click", proposeLists);
+  $("lists-history").addEventListener("click", (e) => {
+    const button = e.target.closest("button[data-version]");
+    if (button) loadVersion(button.dataset.version);
+  });
+}
+
+function historyHtml() {
+  if (!versions.length) return '<li class="muted">No versions yet.</li>';
+  return versions
+    .map((v) => {
+      const counts = LIST_KEYS.map(([k]) => `${count(v.counts[k] ?? 0)} ${k}`).join(", ");
+      const active = v.active ? ' · <span class="ok">active</span>' : "";
+      return `<li><code>${esc(v.version.slice(0, 6))}</code> ${esc(clock(v.created_at))} · ${esc(counts)}${active}
+        <button type="button" class="secondary" data-version="${esc(v.version)}">Load into editor</button></li>`;
+    })
+    .join("");
+}
+
+// Fills the editor with an old version. The editor is then dirty, so a refresh keeps it; saving
+// goes through the usual save, which makes a new version and re-keys.
+async function loadVersion(version) {
+  note("");
+  try {
+    const v = await api("/collections/" + enc + "/keyword-lists/" + encodeURIComponent(version));
+    fillLists(v.lists);
+    listsDirty = true;
+    note(`Loaded version ${esc(version.slice(0, 6))}. Save lists to use it.`);
+  } catch (e) {
+    note(`<span class="err">${esc(e.message)}</span>`);
+  }
 }
 
 function fillLists(lists) {
@@ -307,6 +339,7 @@ async function proposeLists() {
 }
 
 function syncLists() {
+  paint("lists-history", historyHtml());
   $("kw-hint").textContent = `Saving re-keys ${plural(col.count, "item")}, free.`;
   const version = col.keyword_version ?? null;
   if (version !== listsVersion && !listsDirty) {
@@ -347,10 +380,11 @@ async function refresh() {
   try {
     cat = await catalog();
     let loads;
-    [col, runs, loads] = await Promise.all([
+    [col, runs, loads, versions] = await Promise.all([
       api("/collections/" + enc),
       api("/eval?collection=" + enc),
       api("/jobs?collection=" + enc + "&kind=load&limit=1"),
+      api("/collections/" + enc + "/keyword-lists"),
     ]);
     loadJob = loads[0] ?? null;
     $("head").innerHTML = headHtml();

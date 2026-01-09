@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `GET /collections/{name}/keyword-lists` (every version, newest first, with
+  counts and which is active) and `GET .../keyword-lists/{version}` are new. The
+  Collection page lists them and can load an old version into the editor; saving
+  makes a new version and re-keys as usual.
+- Paid methods and the "Have Claude answer" box carry a muted "uses credit" mark
+  in the run form and the Lab.
 - `GET /eval/{id}` and the `answer` of `GET /collections/{name}` carry `since`
   (`{untracked, changes}`): what changed after the run (keyword lists, dense
   model), or untracked for a migrated run. The Run page head says so, and the
