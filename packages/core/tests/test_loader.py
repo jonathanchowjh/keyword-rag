@@ -29,27 +29,26 @@ def test_loader_runs_a_load_job(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
     ld.claude.api_key = None
     seen: list[float] = []
-    result = ld.run(job, lambda: seen.append(0.0))
+    result = ld.run(job, seen.append)
     assert result["added"] == 3 and result["questions"] == 1
     assert result["lists_source"] == "tfidf"
     assert result["keyword_version"] == ix.spec("m").keyword_version is not None
-    assert seen  # check() ran through the add progress callback
-    assert get_job(conn, job["id"])["progress"] == pytest.approx(0.9)
+    assert max(seen) == pytest.approx(0.9)  # the reporter got the add progress, scaled to 90%
 
 
 def test_loader_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    assert ld.run(job, lambda: None)["lists_source"] == "tfidf (claude proposal unusable)"
+    assert ld.run(job, lambda p: None)["lists_source"] == "tfidf (claude proposal unusable)"
 
 
 def test_loader_propagates_cancelled_from_check(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
 
-    def check():
+    def progress(p):
         raise Cancelled()
 
     with pytest.raises(Cancelled):
-        ld.run(job, check)
+        ld.run(job, progress)
 
 
 def test_load_limit_keeps_gold_passages_and_only_answerable_questions():

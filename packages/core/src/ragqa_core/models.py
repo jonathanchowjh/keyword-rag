@@ -4,6 +4,9 @@ Each model loads on first use and downloads into cache_dir, which in the
 container is the ragqa volume, so a restart does not download again.
 """
 
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,16 @@ class Models:
         self.rerank_model = rerank
         self.cache_dir = cache_dir
         self._loaded: dict[str, Any] = {}
+        self._job = threading.local()  # this thread's job log
+
+    @contextmanager
+    def for_job(self, log: Callable[[str], None]) -> Iterator[None]:
+        """A model first loaded on this thread says so in the job's log."""
+        self._job.log = log
+        try:
+            yield
+        finally:
+            self._job.log = None
 
     def dense_dim(self) -> int:
         for entry in TextEmbedding.list_supported_models():
@@ -41,7 +54,10 @@ class Models:
         key = f"{kind}:{name}"
         if key not in self._loaded:
             cls = {"text": TextEmbedding, "sparse": SparseTextEmbedding, "rerank": TextCrossEncoder}
+            log = getattr(self._job, "log", None) or (lambda message: None)
+            log(f"loading model {name}")
             self._loaded[key] = cls[kind](model_name=name, cache_dir=str(self.cache_dir))
+            log(f"model {name} ready")
         return self._loaded[key]
 
     def embed(self, texts: list[str]) -> np.ndarray:

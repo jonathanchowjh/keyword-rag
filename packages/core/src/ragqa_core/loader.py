@@ -69,20 +69,17 @@ class Loader:
         self.claude = claude
         self.home = home
 
-    def run(self, job: dict, check: Callable[[], None]) -> dict:
-        """Load the job's dataset; `check` may raise Cancelled. Returns the result dict."""
+    def run(self, job: dict, progress: Callable[[float], None]) -> dict:
+        """Load the job's dataset. `progress(p)` records and logs the job's progress and may raise
+        Cancelled; indexing is the first 90%. Returns the result dict."""
         conn, name = self.conn, job["collection"]
         spec = self.indexer.spec(name)
         if spec is None:
             raise ValueError(f"unknown collection {name!r}")
 
-        def progress(p: float) -> None:
-            check()
-            db.update_job(conn, job["id"], progress=0.9 * p)
-
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
         items, questions = limited(items, questions, job["setup"].get("limit"))
-        self.indexer.add(spec, items, progress=progress)
+        self.indexer.add(spec, items, progress=lambda p: progress(0.9 * p))
         db.save_questions(conn, name, questions)
         source = None
         if db.get_keyword_lists(conn, name) is None:

@@ -62,7 +62,7 @@ class Worker:
                 step["last"] = pct
                 log(f"progress {pct}%")
 
-        with self.claude.for_job(job_id, check, log):
+        with self.claude.for_job(job_id, check, log), self.indexer.models.for_job(log):
             reason = "job ended without a final status"
             try:
                 log("started")
@@ -103,7 +103,7 @@ class Worker:
     def _dispatch(self, job: dict, check, progress) -> None:
         job_id, kind = job["id"], job["kind"]
         if kind == "load":
-            result = self.loader.run(job, check)
+            result = self.loader.run(job, progress)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "rekey":
             version = job["setup"]["version"]

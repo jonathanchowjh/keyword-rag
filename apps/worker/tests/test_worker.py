@@ -159,7 +159,7 @@ def test_unknown_kind_fails(env):
 def test_load_job_runs_loader_and_records_result(env):
     w, conn = env
     j = db.create_job(conn, "load", "c", {"dataset": "x"})
-    w.loader.run = lambda job, check: (check(), {"added": 3})[1]
+    w.loader.run = lambda job, progress: (progress(0.0), {"added": 3})[1]
     w.run_one()
     job = get_job(conn, j)
     assert job["status"] == "done" and job["progress"] == 1.0 and job["result"] == {"added": 3}
@@ -281,3 +281,35 @@ def test_a_job_whose_read_after_the_claim_fails_ends_failed_not_running(env, mon
     job = get_job(conn, j)
     assert job["status"] == "failed" and "disk hiccup" in job["error"]
     assert w.running_job_id is None
+
+
+def test_load_job_logs_progress_steps(env, monkeypatch):
+    w, conn = env
+    from ragqa_core import loader
+
+    items = [Item(f"i{n}", f"text {n}", "A") for n in range(30)]
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
+    j = db.create_job(conn, "load", "c", {"dataset": "x", "limit": None})
+    w.claude.api_key = None
+    w.run_one()
+    assert get_job(conn, j)["status"] == "done"
+    assert "progress 90%" in log_text(conn, j)
+
+
+def test_job_logs_when_a_model_loads(env, monkeypatch):
+    w, conn = env
+    from ragqa_core import models as models_module
+
+    class Stub:
+        def __init__(self, model_name, cache_dir):
+            pass
+
+    monkeypatch.setattr(models_module, "TextEmbedding", Stub)
+    models = w.indexer.models
+    models.embed = lambda texts: models._load("text", "BAAI/test") and None  # type: ignore[assignment]
+    j = db.create_job(conn, "load", "c", {"dataset": "x"})
+    w.loader.run = lambda job, progress: (models.embed(["a"]), models.embed(["b"]), {})[2]
+    w.run_one()
+    text = log_text(conn, j)
+    assert text.index("loading model BAAI/test") < text.index("model BAAI/test ready")
+    assert text.count("loading model BAAI/test") == 1  # cached after the first load
