@@ -53,11 +53,13 @@ class Seeded:
     run_id: str
     vector_only_run_id: str = ""
 
-    def build(self, name: str, run: bool = False) -> str:
+    def build(self, name: str, run: bool = False, summarize: bool = False) -> str:
         """An mcq collection with items, lists and 40 questions; with `run`, one answered run
         of kw_individual, hybrid and random_example, done. Returns the run id ("" without)."""
         url = self.url
-        r = httpx.post(f"{url}/collections", json={"name": name, "qa_type": "mcq"})
+        r = httpx.post(
+            f"{url}/collections", json={"name": name, "qa_type": "mcq", "summarize": summarize}
+        )
         assert r.status_code == 201, r.text
         r = httpx.post(
             f"{url}/collections/{name}/documents", json={"items": ITEMS, "confirm": True}

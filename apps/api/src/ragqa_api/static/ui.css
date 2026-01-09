@@ -23,6 +23,8 @@ h2 { font-size:15px; margin:24px 0 8px; }
   text-decoration:none; }
 #side a:hover { background:var(--card); }
 #side a.active { background:var(--card); font-weight:600; }
+#side a.problem { display:block; padding:0 8px 4px 22px; font-size:11px; color:var(--bad); }
+#side a.problem:empty { display:none; }
 #side a.sub { padding-left:20px; color:var(--muted); }
 #side a.sub.active { color:var(--fg); }
 #side .group { color:var(--muted); font-size:11px; letter-spacing:.06em; padding:14px 8px 4px; }

@@ -93,10 +93,10 @@ export function methodLabel(id, cat = known) {
 }
 
 // The muted "uses credit" note beside a paid method (spec §7.1); "" for a free one. A keyword
-// method spends only on a collection with summaries, and says so.
-const CREDIT_NOTE = { always: "uses credit", with_summaries: "uses credit with summaries" };
-export function creditMark(id, cat = known) {
-  const note = CREDIT_NOTE[cat?.methods?.[id]?.paid];
+// method spends only on a collection with summaries (`summarize`), and is unmarked elsewhere.
+export function creditMark(id, summarize, cat = known) {
+  const paid = cat?.methods?.[id]?.paid;
+  const note = paid === "always" ? "uses credit" : paid === "with_summaries" && summarize ? "uses credit" : "";
   return note ? ` <span class="credit muted">${esc(note)}</span>` : "";
 }
 
@@ -215,6 +215,7 @@ function sideHtml(active, names) {
     ${link("/lab", "Lab", "", active, "lab")}
     <div class="group">BEHIND THE NUMBERS</div>
     ${link("/worker", 'Worker <span id="worker-dot" class="dot"></span>', "", active, "worker")}
+    <a id="worker-problem" class="problem" href="/worker"></a>
     <a href="/docs">API docs</a>
     <div class="spend" id="spend"></div>`;
 }
@@ -235,6 +236,13 @@ function refreshDot() {
       const kind = s.problems.length ? "bad" : s.worker.running ? "run" : "ok";
       const dot = document.getElementById("worker-dot");
       if (dot) dot.className = `dot ${kind}`;
+      const box = document.getElementById("worker-problem");
+      if (box) {
+        const more = s.problems.length - 1;
+        box.innerHTML = s.problems.length
+          ? `${esc(s.problems[0])}${more ? ` and ${more} more` : ""}`
+          : "";
+      }
     })
     .catch(() => {});
 }

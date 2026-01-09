@@ -22,9 +22,10 @@ async function loadCollections() {
 async function loadMethods() {
   const name = $("collection").value;
   const detail = await api(`/collections/${encodeURIComponent(name)}`);
+  if ($("collection").value !== name) return; // the choice moved on while this was loading
   $("methods").innerHTML = detail.methods_available
     .map(
-      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${creditMark(m)}</label>`,
+      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${creditMark(m, detail.summarize)}</label>`,
     )
     .join("");
 }

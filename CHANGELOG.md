@@ -7,7 +7,13 @@
   Collection page lists them and can load an old version into the editor; saving
   makes a new version and re-keys as usual.
 - Paid methods and the "Have Claude answer" box carry a muted "uses credit" mark
-  in the run form and the Lab.
+  in the run form and the Lab. A keyword method carries it only on a collection
+  with summaries.
+- A load job's log shows its progress at each 10% step, as a re-key's does, and a
+  job that loads a model logs "loading model X" and "model X ready". The sidebar
+  shows the first worker problem under the dot, with "and N more", linking to
+  /worker. The Lab ignores a method list that arrives after the collection
+  choice has moved on.
 - `GET /eval/{id}` and the `answer` of `GET /collections/{name}` carry `since`
   (`{untracked, changes}`): what changed after the run (keyword lists, dense
   model), or untracked for a migrated run. The Run page head says so, and the

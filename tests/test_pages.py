@@ -322,7 +322,9 @@ def worker_stopped(seeded, name):
 def test_worker_page_shows_problems_and_queue(page, seeded):
     with worker_stopped(seeded, "wq"):
         page.goto(seeded.url + "/worker")
-        expect(page.get_by_text("The worker thread has stopped")).to_be_visible()
+        expect(
+            page.locator("[data-problem]", has_text="The worker thread has stopped")
+        ).to_be_visible()
         expect(page.locator("[data-queued-job]")).to_have_count(1)
         expect(page.locator("[data-queued-job]")).to_contain_text("Evaluating wq")
 
@@ -578,17 +580,29 @@ def test_reasoning_match_is_rescaled_in_own_scores_and_pairs(page, seeded):
     expect(page.locator("#pairs tbody tr").first).to_contain_text("+50 pts")
 
 
+def credit_label(page, name):
+    return page.locator(f"label.check:has(input[value='{name}'])").locator(".credit")
+
+
 def test_paid_methods_carry_a_uses_credit_mark(page, seeded):
     seeded.build("credit")
     page.goto(seeded.url + "/c/credit")
     page.get_by_role("button", name="New run").click()
-    paid = page.locator("label.check", has=page.get_by_label("iterative"))
-    free = page.locator("label.check", has=page.get_by_label("hybrid", exact=True))
-    expect(paid.locator(".credit")).to_have_text("uses credit")
-    expect(free.locator(".credit")).to_have_count(0)
+    expect(credit_label(page, "iterative")).to_have_text("uses credit")
+    expect(credit_label(page, "hybrid")).to_have_count(0)
+    # a keyword method spends only with summaries, and this collection has none
+    expect(credit_label(page, "kw_individual")).to_have_count(0)
     expect(
         page.locator("label.check", has=page.locator("#rf-answer")).locator(".credit")
     ).to_have_text("uses credit")
+
+
+def test_keyword_methods_say_uses_credit_on_a_summarising_collection(page, seeded):
+    seeded.build("sumcol", summarize=True)
+    page.goto(seeded.url + "/c/sumcol")
+    page.get_by_role("button", name="New run").click()
+    expect(credit_label(page, "kw_individual")).to_have_text("uses credit")
+    expect(credit_label(page, "iterative")).to_have_text("uses credit")
 
 
 def test_lab_marks_paid_methods_and_the_answer_box(page, seeded):
@@ -599,9 +613,58 @@ def test_lab_marks_paid_methods_and_the_answer_box(page, seeded):
     expect(
         page.locator("#methods label", has_text="hybrid").first.locator(".credit")
     ).to_have_count(0)
+    expect(
+        page.locator("#methods label", has_text="kw_individual").locator(".credit")
+    ).to_have_count(0)  # `c` has no summaries
     expect(page.locator("label", has=page.locator("#answer")).locator(".credit")).to_have_text(
         "uses credit"
     )
+
+
+def test_lab_marks_keyword_methods_on_a_summarising_collection(page, seeded):
+    seeded.build("labsum", summarize=True)
+    page.goto(seeded.url + "/lab")
+    page.locator("#collection").select_option("labsum")
+    expect(
+        page.locator("#methods label", has_text="kw_individual").locator(".credit")
+    ).to_have_text("uses credit")
+
+
+def test_lab_renders_its_method_picker_for_a_collection(page, seeded):
+    page.goto(seeded.url + "/lab")
+    expect(page.locator("#collection option", has_text="c")).not_to_have_count(0)
+    picker = page.locator("#methods input[type=checkbox]")
+    expect(picker.first).to_be_visible()
+    expect(page.locator("#methods input[value=hybrid]")).to_be_checked()
+    expect(page.locator("#methods input[value=iterative]")).not_to_be_checked()
+
+
+def test_run_with_overlapping_own_scores_but_a_separated_pair_says_ahead(page, seeded):
+    sim = "solution_sim@1"
+    run_id = seeded.build("ovl", run=True)
+    conn = seeded.app.state.conn
+    for r in db.run_items(conn, run_id):
+        if r["method"] not in ("kw_individual", "hybrid"):
+            continue
+        n = int(r["question_id"][1:])
+        base = 0.8 * (n % 2)  # 0 or 0.8: a wide spread within each method
+        r["retrieval"][sim] = base + (0.1 if r["method"] == "kw_individual" else 0.0)
+        row = {k: v for k, v in r.items() if k not in ("method", "question_id", "complete")}
+        db.upsert_run_item(conn, run_id, r["method"], r["question_id"], row, True)
+    data = httpx.get(f"{seeded.url}/eval/{run_id}").json()
+    kw, hy = data["methods"]["kw_individual"][sim], data["methods"]["hybrid"][sim]
+    assert kw["lo"] < hy["hi"] and hy["lo"] < kw["hi"]  # the own-score ranges overlap
+    pair = next(
+        p
+        for p in data["pairs"]
+        if p["metric"] == sim and {p["a"], p["b"]} == {"kw_individual", "hybrid"}
+    )
+    assert pair["separated"] and pair["diff"] != 0
+    page.goto(f"{seeded.url}/c/ovl/runs/{run_id}")
+    page.get_by_text("Every pair compared").click()
+    row = page.locator("#pairs tbody tr", has_text="Reasoning match").first
+    expect(row).to_contain_text("ahead")
+    expect(row).not_to_contain_text("can't tell")
 
 
 def test_lists_history_loads_an_old_version_and_keeps_it(page, seeded):
@@ -616,3 +679,37 @@ def test_lists_history_loads_an_old_version_and_keeps_it(page, seeded):
     expect(page.locator("#kw-topic")).to_have_value(ORIGINAL_TOPICS)
     page.wait_for_timeout(3500)  # past one fast refresh
     assert page.locator("#kw-topic").input_value() == ORIGINAL_TOPICS
+
+
+def test_sidebar_shows_the_first_problem_under_the_worker_dot(page, seeded):
+    with worker_stopped(seeded, "sp"):
+        page.goto(seeded.url + "/")
+        problem = page.locator("#worker-problem")
+        expect(problem).to_contain_text("The worker thread has stopped")
+        expect(problem).to_have_attribute("href", "/worker")
+
+
+def test_sidebar_counts_further_problems_and_escapes_the_text(page, seeded):
+    def problems(route):
+        data = route.fetch().json()
+        data["problems"] = ["<b>first</b> trouble", "second", "third"]
+        route.fulfill(json=data)
+
+    page.route("**/status", problems)
+    page.goto(seeded.url + "/")
+    box = page.locator("#worker-problem")
+    expect(box).to_contain_text("<b>first</b> trouble")
+    expect(box).to_contain_text("and 2 more")
+    expect(box.locator("b")).to_have_count(0)
+
+
+def test_sidebar_shows_no_problem_text_when_there_are_none(page, seeded):
+    def none(route):
+        data = route.fetch().json()
+        data["problems"] = []
+        route.fulfill(json=data)
+
+    page.route("**/status", none)
+    page.goto(seeded.url + "/")
+    expect(page.locator("#worker-dot")).to_have_class("dot ok")
+    expect(page.locator("#worker-problem")).to_be_empty()
