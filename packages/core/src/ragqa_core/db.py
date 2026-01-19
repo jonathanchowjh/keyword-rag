@@ -117,10 +117,11 @@ def _migrate_run_items(conn: Connection) -> None:
         " where method = 'question_only'"
         " and coalesce(json_extract(row_json, '$.retrieval'), '{}') != '{}'"
     )
-    # A queued or running eval records its own question ids when it runs.
+    # A queued eval records its own question ids when it runs. Nothing runs at connect
+    # time, so a 'running' eval is a leftover the lifespan marks interrupted: backfilled,
+    # it is an untracked run that resume refuses rather than mixing versions.
     evals = conn.execute(
-        "select id, setup_json from jobs"
-        " where kind = 'eval' and status not in ('queued', 'running')"
+        "select id, setup_json from jobs where kind = 'eval' and status != 'queued'"
     )
     for row in evals:
         setup = json.loads(row["setup_json"])

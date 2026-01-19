@@ -74,10 +74,12 @@ def changes_since(setup: dict, spec: CollectionSpec) -> dict:
     if untracked(setup):
         return {"untracked": True, "changes": []}
     changes = []
-    # A version the setup does not record (a run that never started) has nothing to compare.
+    # A setup without the key (a run that never started) has nothing to compare; one that
+    # recorded None ran before the collection had lists. Only keyword methods use the lists.
     if (
-        setup.get("keyword_version") is not None
+        "keyword_version" in setup
         and setup["keyword_version"] != spec.keyword_version
+        and any(m in KEYWORD_METHODS for m in setup.get("methods", []))
     ):
         changes.append("keyword lists")
     if setup.get("dense_model") is not None and setup["dense_model"] != spec.dense_model:
@@ -605,10 +607,10 @@ class Evaluator:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
-        primary = MISS_METRIC[spec.qa_type]
+        primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
         out = []
         for row in db.run_items(self.conn, job_id, method):
-            if wrong_only and not is_wrong(row, primary):
+            if wrong_only and not is_wrong(row, primary, answering):
                 continue
             q = questions.get(row["question_id"])
             out.append(
@@ -625,13 +627,14 @@ class Evaluator:
     def questions(self, job_id: str, disagree: bool) -> list[dict]:
         """Each question of a run with every method's row and its right/wrong outcome. With
         `disagree`, only the questions where the methods' outcomes differ; the controls are
-        left out of that, and a method with no outcome has nothing to differ from."""
+        left out of that, and a method with no outcome has nothing to differ from. An
+        answering run is judged on answers only, so a method not answered yet has none."""
         job = db.get_job(self.conn, job_id)
         if job is None:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
-        primary = MISS_METRIC[spec.qa_type]
+        primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
         by_question: dict[str, dict[str, dict]] = {}
         for r in db.run_items(self.conn, job_id):
             by_question.setdefault(r["question_id"], {})[r["method"]] = r
@@ -639,7 +642,7 @@ class Evaluator:
         for qid, rows in by_question.items():
             methods = {}
             for method, r in rows.items():
-                result = outcome(r, primary)
+                result = outcome(r, primary, answering)
                 methods[method] = {**r, "outcome": result} if result else r
             judged = {
                 m["outcome"]
@@ -690,16 +693,19 @@ def metric_by_question(per_q: dict[str, dict], metric: str) -> dict[str, float]:
     return {q: values[0] for q, row in per_q.items() if (values := metric_values([row], metric))}
 
 
-def outcome(row: dict, primary: str) -> str | None:
-    """ "right" or "wrong" on the row's primary measure; None when it has none (unmeasured)."""
+def outcome(row: dict, primary: str, answering: bool = False) -> str | None:
+    """ "right" or "wrong" on the row's primary measure; None when it has none (unmeasured).
+    In an `answering` run the measure is the answer, so a row without one is unmeasured."""
     answer = row.get("answer")
     if answer:
         key = "accuracy" if "accuracy" in answer else "em"
         return "wrong" if answer[key] == 0 else "right"
+    if answering:
+        return None
     if primary not in row["retrieval"]:  # absent means unmeasured (or question_only), never 0
         return None
     return "wrong" if row["retrieval"][primary] == 0 else "right"
 
 
-def is_wrong(row: dict, primary: str) -> bool:
-    return outcome(row, primary) == "wrong"
+def is_wrong(row: dict, primary: str, answering: bool = False) -> bool:
+    return outcome(row, primary, answering) == "wrong"

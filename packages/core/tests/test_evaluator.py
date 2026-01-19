@@ -805,3 +805,50 @@ def test_a_migrated_run_without_versions_cannot_be_resumed(env):
     ev.run(job)
     after = get_job(conn, job)
     assert after["status"] == "failed" and after["error"] == reason
+
+
+def test_an_answering_run_judges_only_answers(env):
+    conn, ev = env
+    job = create_job(conn, "eval", "c", setup_for(["hybrid", "vector"], answer=True))
+    right = {"retrieval": {"same_skill@1": 0.0}, "answer": {"accuracy": 1.0}, "usd": 0.0}
+    db.upsert_run_item(conn, job, "hybrid", "q-enzyme", right, complete=True)
+    # vector stopped before its answer (a budget stop): a miss on retrieval, but unmeasured
+    missed = {"retrieval": {"same_skill@1": 0.0}, "usd": 0.0}
+    db.upsert_run_item(conn, job, "vector", "q-enzyme", missed, complete=False)
+    db.update_job(conn, job, status="stopped_budget")
+    assert ev.questions(job, disagree=True) == []
+    methods = ev.questions(job, disagree=False)[0]["methods"]
+    assert methods["hybrid"]["outcome"] == "right" and "outcome" not in methods["vector"]
+    assert ev.items(job, "vector", wrong_only=True) == []
+
+
+def test_since_notes_lists_set_after_a_run_that_had_none(env):
+    from ragqa_core.evaluator import changes_since
+
+    spec = env[1].retriever.spec("c")
+    assert spec.keyword_version is not None
+    setup = {**setup_for(["kw_individual"]), "keyword_version": None, "dense_model": "fake/dense"}
+    assert changes_since(setup, spec) == {"untracked": False, "changes": ["keyword lists"]}
+
+
+def test_since_has_no_keyword_note_for_a_run_without_keyword_methods(env):
+    from ragqa_core.evaluator import changes_since
+
+    spec = env[1].retriever.spec("c")
+    for version in (None, "older"):
+        setup = {
+            **setup_for(["vector", "keyword", "hybrid"]),
+            "keyword_version": version,
+            "dense_model": "fake/dense",
+        }
+        assert changes_since(setup, spec) == {"untracked": False, "changes": []}
+
+
+def test_a_legacy_run_left_running_by_a_stopped_process_is_refused_on_resume(env, tmp_path):
+    conn, ev = env
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True))
+    db.upsert_run_item(conn, job, "hybrid", "q-enzyme", {"retrieval": {}}, complete=False)
+    db.update_job(conn, job, status="running")  # an old process stopped mid-run
+    connect(tmp_path / "r.db")  # the restart: its migration, then the lifespan's interrupt
+    db.interrupt_running(conn)
+    assert ev.resume_refusal(job) == "this run predates version tracking; start a new run"

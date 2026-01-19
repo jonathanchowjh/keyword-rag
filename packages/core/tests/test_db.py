@@ -376,7 +376,7 @@ def test_migration_marks_complete_by_the_answer_key_not_the_word(tmp_path):
     assert complete == {"q1": 0, "q2": 1}
 
 
-def test_question_ids_backfill_skips_queued_and_running_evals(tmp_path):
+def test_question_ids_backfill_skips_only_queued_evals(tmp_path):
     path = tmp_path / "r.db"
     conn = connect(path)
     jobs = {
@@ -388,9 +388,10 @@ def test_question_ids_backfill_skips_queued_and_running_evals(tmp_path):
         upsert_run_item(conn, job, "hybrid", "q1", {}, complete=True)
     conn.close()
 
+    # Nothing runs at connect time: a running eval is a leftover, interrupted by the lifespan.
     again = connect(path)
     assert "question_ids" not in get_job(again, jobs["queued"])["setup"]
-    assert "question_ids" not in get_job(again, jobs["running"])["setup"]
+    assert get_job(again, jobs["running"])["setup"]["question_ids"] == ["q1"]
     assert get_job(again, jobs["interrupted"])["setup"]["question_ids"] == ["q1"]
 
 
