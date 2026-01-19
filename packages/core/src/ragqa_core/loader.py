@@ -71,7 +71,8 @@ class Loader:
 
     def run(self, job: dict, progress: Callable[[float], None]) -> dict:
         """Load the job's dataset. `progress(p)` records and logs the job's progress and may raise
-        Cancelled; indexing is the first 90%. Returns the result dict."""
+        Cancelled. Adding is the whole of it, or the first half when the load makes the lists:
+        then re-keying every item with them is the second. Returns the result dict."""
         conn, name = self.conn, job["collection"]
         spec = self.indexer.spec(name)
         if spec is None:
@@ -79,10 +80,12 @@ class Loader:
 
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
         items, questions = limited(items, questions, job["setup"].get("limit"))
-        self.indexer.add(spec, items, progress=lambda p: progress(0.9 * p))
+        makes_lists = db.get_keyword_lists(conn, name) is None
+        share = 0.5 if makes_lists else 1.0
+        self.indexer.add(spec, items, progress=lambda p: progress(share * p))
         db.save_questions(conn, name, questions)
         source = None
-        if db.get_keyword_lists(conn, name) is None:
+        if makes_lists:
             sample = propose_sample(items)
             lists, source = None, "tfidf"
             if self.claude.api_key:
@@ -93,7 +96,7 @@ class Loader:
             if lists is None:
                 lists = tfidf_lists([i.text for i in items])
             if lists is not None:
-                self.indexer.set_lists(spec, lists)
+                self.indexer.set_lists(spec, lists, progress=lambda p: progress(0.5 + 0.5 * p))
             else:
                 source = None
         fresh = db.get_collection(conn, name)

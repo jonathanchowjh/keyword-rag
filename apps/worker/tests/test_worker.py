@@ -285,15 +285,18 @@ def test_a_job_whose_read_after_the_claim_fails_ends_failed_not_running(env, mon
 
 def test_load_job_logs_progress_steps(env, monkeypatch):
     w, conn = env
-    from ragqa_core import loader
+    from ragqa_core import indexer, loader
 
-    items = [Item(f"i{n}", f"text {n}", "A") for n in range(30)]
+    # Over two batches: the collection has lists, so adding is the whole load and
+    # each batch is a step (64 of 150 is 42%).
+    items = [Item(f"i{n}", f"text {n}", "A") for n in range(indexer.BATCH * 2 + 22)]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     j = db.create_job(conn, "load", "c", {"dataset": "x", "limit": None})
     w.claude.api_key = None
     w.run_one()
     assert get_job(conn, j)["status"] == "done"
-    assert "progress 90%" in log_text(conn, j)
+    text = log_text(conn, j)
+    assert "progress 40%" in text and "progress 80%" in text and "progress 100%" in text
 
 
 def test_job_logs_when_a_model_loads(env, monkeypatch):

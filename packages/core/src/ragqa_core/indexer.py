@@ -158,9 +158,14 @@ class Indexer:
             progress(1.0)
         db.set_keyword_version(self.conn, name, version)
 
-    def set_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
+    def set_lists(
+        self,
+        spec: CollectionSpec,
+        lists: KeywordLists,
+        progress: Callable[[float], None] = lambda p: None,
+    ) -> str:
         version = self.save_lists(spec, lists)
-        self.rekey(spec.name, version)
+        self.rekey(spec.name, version, progress)
         return version
 
     def keywords_for(

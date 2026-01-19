@@ -33,7 +33,40 @@ def test_loader_runs_a_load_job(tmp_path, monkeypatch):
     assert result["added"] == 3 and result["questions"] == 1
     assert result["lists_source"] == "tfidf"
     assert result["keyword_version"] == ix.spec("m").keyword_version is not None
-    assert max(seen) == pytest.approx(0.9)  # the reporter got the add progress, scaled to 90%
+    assert seen[-1] == pytest.approx(1.0) and seen == sorted(seen)
+
+
+def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    real = ix.store.scroll
+    ix.store.scroll = lambda name: real(name, batch=1)  # one item per re-keyed step
+    seen: list[float] = []
+    ld.run(job, seen.append)
+    assert 0.5 in seen  # adding is the first half
+    assert any(0.5 < p < 1.0 for p in seen)  # the re-key reports its own steps
+
+    conn, ix, ld, job = build(tmp_path / "again", monkeypatch)
+    ld.claude.api_key = None
+    ix.store.scroll = lambda name: real(name, batch=1)
+
+    def progress(p):
+        if 0.5 < p < 1.0:
+            raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        ld.run(job, progress)
+    assert ix.spec("m").keyword_version is None  # the lists never took effect
+
+
+def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    ld.run(job, lambda p: None)
+    version = ix.spec("m").keyword_version
+    seen: list[float] = []
+    ld.run(job, seen.append)
+    assert seen == [1.0] and ix.spec("m").keyword_version == version
 
 
 def test_loader_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
