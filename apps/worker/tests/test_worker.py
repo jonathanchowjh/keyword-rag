@@ -227,7 +227,23 @@ def test_loop_survives_unexpected_error_outside_a_job(env):
     assert state.get("ran") == j
     w.stop()
     assert get_job(conn, j)["status"] == "done"
-    assert w.error == repr(RuntimeError("db gone"))
+    assert w.error is None  # the clean cycle that ran the job cleared it
+
+
+def test_an_error_clears_after_the_next_clean_cycle(env):
+    w, _ = env
+    state = {"n": 0}
+
+    def collect():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("network blip")
+
+    w.claude.collect_pending = collect
+    w.cycle()
+    assert w.error == repr(RuntimeError("network blip"))
+    w.cycle()
+    assert w.error is None
 
 
 def test_start_and_stop(env):

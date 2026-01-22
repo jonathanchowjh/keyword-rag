@@ -35,3 +35,29 @@ def test_no_task_means_no_prefix():
     models, recorder = models_with("Qwen/Qwen3-Embedding-0.6B-Q")
     models.embed_query(["q"])
     assert recorder.texts == ["q"]
+
+
+def test_a_model_is_built_once_when_two_threads_ask_at_once(monkeypatch):
+    import threading
+    import time
+
+    from ragqa_core import models as models_module
+
+    built = []
+
+    class Slow:
+        def __init__(self, model_name, cache_dir):
+            built.append(model_name)
+            time.sleep(0.05)  # long enough for the other thread to miss the cache too
+
+    monkeypatch.setattr(models_module, "TextEmbedding", Slow)
+    models = Models("d", "j", "r", Path("/nonexistent"))
+    got = []
+    threads = [
+        threading.Thread(target=lambda: got.append(models._load("text", "d"))) for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert built == ["d"] and got[0] is got[1]

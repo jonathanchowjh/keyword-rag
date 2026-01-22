@@ -33,6 +33,7 @@ class Models:
         self.rerank_model = rerank
         self.cache_dir = cache_dir
         self._loaded: dict[str, Any] = {}
+        self._loading = threading.Lock()  # the Lab and the worker may ask for one model at once
         self._job = threading.local()  # this thread's job log
 
     @contextmanager
@@ -52,12 +53,19 @@ class Models:
 
     def _load(self, kind: str, name: str) -> Any:
         key = f"{kind}:{name}"
-        if key not in self._loaded:
-            cls = {"text": TextEmbedding, "sparse": SparseTextEmbedding, "rerank": TextCrossEncoder}
-            log = getattr(self._job, "log", None) or (lambda message: None)
-            log(f"loading model {name}")
-            self._loaded[key] = cls[kind](model_name=name, cache_dir=str(self.cache_dir))
-            log(f"model {name} ready")
+        if key in self._loaded:
+            return self._loaded[key]
+        with self._loading:  # checked again inside: another thread may have just built it
+            if key not in self._loaded:
+                cls = {
+                    "text": TextEmbedding,
+                    "sparse": SparseTextEmbedding,
+                    "rerank": TextCrossEncoder,
+                }
+                log = getattr(self._job, "log", None) or (lambda message: None)
+                log(f"loading model {name}")
+                self._loaded[key] = cls[kind](model_name=name, cache_dir=str(self.cache_dir))
+                log(f"model {name} ready")
         return self._loaded[key]
 
     def embed(self, texts: list[str]) -> np.ndarray:

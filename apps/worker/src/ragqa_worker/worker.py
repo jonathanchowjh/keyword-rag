@@ -27,7 +27,8 @@ class Worker:
         self.evaluator = evaluator
         self.idle_seconds = idle_seconds
         self.running_job_id: str | None = None
-        self.error: str | None = None
+        self.error: str | None = None  # the last cycle's error, until a clean cycle
+        self._cycle_failed = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -74,7 +75,7 @@ class Worker:
                 try:
                     self._record_failure(job_id, e)
                 except Exception as e2:
-                    self.error = repr(e2)
+                    self._failed(e2)
                     reason = f"worker could not record a final status: {e2!r}"
             self._ensure_final(job_id, reason, log)
 
@@ -98,7 +99,7 @@ class Worker:
                 job = db.get_job(self.conn, job_id)
             log(f"finished: {job['status'] if job else 'unknown'}")
         except Exception as e:
-            self.error = repr(e)
+            self._failed(e)
 
     def _dispatch(self, job: dict, check, progress) -> None:
         job_id, kind = job["id"], job["kind"]
@@ -116,18 +117,29 @@ class Worker:
         else:
             db.update_job(self.conn, job_id, status="failed", error=f"unknown job kind {kind!r}")
 
+    def _failed(self, e: Exception) -> None:
+        self.error = repr(e)
+        self._cycle_failed = True
+
+    def cycle(self) -> None:
+        """Run one job, or collect pending batches and idle; a clean cycle clears the error."""
+        self._cycle_failed = False
+        try:
+            if self.run_one() is None:
+                try:
+                    self.claude.collect_pending()
+                except Exception as e:
+                    self._failed(e)
+                self._stop.wait(self.idle_seconds)
+        except Exception as e:
+            self._failed(e)
+            self._stop.wait(self.idle_seconds)
+        if not self._cycle_failed:
+            self.error = None
+
     def loop(self) -> None:
         while not self._stop.is_set():
-            try:
-                if self.run_one() is None:
-                    try:
-                        self.claude.collect_pending()
-                    except Exception as e:
-                        self.error = repr(e)
-                    self._stop.wait(self.idle_seconds)
-            except Exception as e:
-                self.error = repr(e)
-                self._stop.wait(self.idle_seconds)
+            self.cycle()
 
     def start(self) -> None:
         self._stop.clear()
