@@ -338,3 +338,20 @@ def test_collected_batch_keeps_its_own_job(tmp_path):
         claude._collect(batch_id, "claude-haiku-5-5", "answer")
     assert conn.execute("select count(*) from ledger where job_id is null")[0][0] == 1
     assert job_spend(conn, "j2") == 0
+
+
+def test_tally_adds_up_this_threads_spend_only(tmp_path):
+    import threading
+
+    c = fake_claude(connect(tmp_path / "r.db"), lambda p: "ok")
+    with c.tally() as spent:
+        mine = c.complete("mine", purpose="t").usd + c.complete("mine", purpose="t").usd
+        other = threading.Thread(target=lambda: c.complete("the worker's", purpose="t"))
+        other.start()
+        other.join()
+        # "a" twice is one call, paid once
+        many = sum(d.usd for d in c.complete_many(["a", "b", "a"], purpose="t")[:2])
+    assert spent["usd"] == pytest.approx(mine + many) and spent["usd"] > 0
+    assert c.month_spend() > spent["usd"]  # the other thread's call was not counted
+    c.complete("after", purpose="t")
+    assert spent["usd"] == pytest.approx(mine + many)

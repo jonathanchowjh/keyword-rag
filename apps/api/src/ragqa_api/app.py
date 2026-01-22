@@ -252,7 +252,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/documents")
     def add_documents(name: str, body: Documents) -> dict:
         spec = state.retriever.spec(name)
-        for kind in ("rekey", "eval"):  # an item added now would miss a version or skew a run
+        # An item added now would be keyed under mixed lists, miss a version or skew a run.
+        for kind in ("load", "rekey", "eval"):
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         items = [Item(**i.model_dump()) for i in body.items]
@@ -350,26 +351,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         results = {}
         for method in body.methods:
             out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None}
-            try:
-                hits = state.retriever.retrieve(
-                    body.collection, body.question, method, body.k, body.rrf_k
-                )
-                out["hits"] = [asdict(h) for h in hits]
-                if body.answer:
-                    system, user = answer_prompt(
-                        spec.qa_type, body.question, body.choices, answer_hits(spec.qa_type, hits)
+            # Every call the method makes: query summaries, hops and the answer.
+            with state.claude.tally() as spent:
+                try:
+                    hits = state.retriever.retrieve(
+                        body.collection, body.question, method, body.k, body.rrf_k
                     )
-                    done = state.claude.complete(
-                        user,
-                        system=system,
-                        model=body.model,
-                        max_tokens=ANSWER_TOKENS[spec.qa_type],
-                        purpose="query",
-                    )
-                    out["answer"] = parse_answer(spec.qa_type, done.text)
-                    out["usd"] = done.usd
-            except PER_METHOD_ERRORS as e:
-                out["error"] = str(e)
+                    out["hits"] = [asdict(h) for h in hits]
+                    if body.answer:
+                        system, user = answer_prompt(
+                            spec.qa_type,
+                            body.question,
+                            body.choices,
+                            answer_hits(spec.qa_type, hits),
+                        )
+                        done = state.claude.complete(
+                            user,
+                            system=system,
+                            model=body.model,
+                            max_tokens=ANSWER_TOKENS[spec.qa_type],
+                            purpose="query",
+                        )
+                        out["answer"] = parse_answer(spec.qa_type, done.text)
+                except PER_METHOD_ERRORS as e:
+                    out["error"] = str(e)
+            out["usd"] = spent["usd"]
             results[method] = out
         return {"results": results}
 
@@ -381,6 +387,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
+        if estimate["est_usd"] > 0 and not state.claude.api_key:  # it would stop at once
+            raise NoApiKey()
         job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
@@ -472,6 +480,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, refusal)
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
+        if not state.claude.api_key and state.evaluator.estimate_resume(job_id)["est_usd"] > 0:
+            raise NoApiKey()
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
@@ -604,10 +614,11 @@ def stalled(job: dict | None, batches: list[dict], at: datetime) -> str | None:
     Claude batch: the worker may be hung while its thread is still alive (spec §5.7)."""
     if job is None or any(b["job_id"] == job["id"] for b in batches):
         return None
-    updated = datetime.fromisoformat(job["updated_at"])
-    if at - updated < STALL_AFTER:
+    quiet = at - datetime.fromisoformat(job["updated_at"])
+    if quiet < STALL_AFTER:
         return None
+    # A duration, not a clock time: the server's clock is UTC and the console's is local.
     return (
         f"{job['kind'].capitalize()} {job['id'][:8]} on {job['collection']}"
-        f" has made no progress since {updated:%H:%M}"
+        f" has made no progress for {int(quiet.total_seconds() // 60)} minutes"
     )

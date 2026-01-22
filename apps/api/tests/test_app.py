@@ -126,6 +126,14 @@ def test_query_with_answer(client):
     assert result["answer"] == "A" and result["usd"] > 0
 
 
+def test_query_usd_counts_every_claude_call_of_the_method(client):
+    add_collection(client, summarize=True)
+    body = {"collection": "c", "question": "enzyme rate", "methods": ["kw_individual", "hybrid"]}
+    results = client.post("/query", json=body).json()["results"]
+    assert results["kw_individual"]["usd"] > 0  # the question's summary
+    assert results["hybrid"]["usd"] == 0
+
+
 def test_collection_detail(client):
     add_collection(client, lists=False)
     detail = client.get("/collections/c").json()
@@ -532,6 +540,37 @@ def test_model_mismatch_on_query_and_eval(client):
     assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
 
 
+def test_saving_lists_is_refused_when_the_dense_model_changed(client):
+    add_collection(client, lists=False)
+    client.app.state.models.dense_model = "other/model"
+    r = client.put("/collections/c/keyword-lists", json=asdict(LISTS))
+    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
+    assert client.get("/collections/c/keyword-lists").json() == []
+
+
+def test_confirmed_paid_eval_without_a_key_is_503_and_queues_nothing(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        body = {**EVAL, "answer": True, "confirm": True}
+        r = client.post("/eval", json=body)
+        assert r.status_code == 503 and r.json()["detail"] == "needs ANTHROPIC_API_KEY"
+        assert client.get("/eval").json() == []
+        free = client.post("/eval", json={**EVAL, "confirm": True})  # nothing to pay for
+        assert free.status_code == 202
+
+
+def test_confirmed_paid_resume_without_a_key_is_503(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        conn = client.app.state.conn
+        job = client.app.state.evaluator.queue("c", "dev", ["hybrid"], True, None)
+        db.update_job(conn, job, status="stopped_no_key")
+        r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
+        assert r.status_code == 503 and db.get_job(conn, job)["status"] == "stopped_no_key"
+
+
 def set_running(conn, job_id, progress=0.0):
     conn.execute("update jobs set status='running', progress=? where id=?", (progress, job_id))
 
@@ -775,7 +814,7 @@ def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):
         conn.execute(
             "update jobs set updated_at = ? where id = ?", (at.isoformat(timespec="seconds"), job)
         )
-        line = f"Load {job[:8]} on c has made no progress since {at:%H:%M}"
+        line = f"Load {job[:8]} on c has made no progress for {minutes} minutes"
         assert (line in client.get("/status").json()["problems"]) is stalled
     # Waiting on a Claude batch can take hours: not a stall.
     conn.execute(
@@ -829,12 +868,12 @@ def test_collection_detail_has_state_and_answer(client):
     assert client.get("/collections/c").json()["state"] == "loading"
 
 
-def test_documents_are_refused_while_a_rekey_or_eval_is_queued_or_running(client):
+def test_documents_are_refused_while_a_load_rekey_or_eval_is_queued_or_running(client):
     add_collection(client)
     conn = client.app.state.conn
     client.app.state.worker.stop()
     body = {"items": ITEMS[:1], "confirm": True}
-    for kind in ("rekey", "eval"):
+    for kind in ("load", "rekey", "eval"):
         for status in ("queued", "running"):
             job = db.create_job(conn, kind, "c", {})
             db.update_job(conn, job, status=status)

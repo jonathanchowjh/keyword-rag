@@ -128,6 +128,7 @@ class Indexer:
 
     def save_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
         """Validate, embed and store a version of the lists, without switching to it."""
+        self.check_model(spec)  # the re-key would key items with another model's vectors
         for facet in FACETS:
             if not getattr(lists, facet):
                 raise ValueError(f"keyword list '{facet}' is empty")

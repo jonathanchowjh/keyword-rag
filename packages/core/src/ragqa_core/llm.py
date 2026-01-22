@@ -66,6 +66,7 @@ class Claude:
         self._collecting = threading.Lock()
         self._next_check = 0.0
         self._job = threading.local()  # this thread's job_id, check, log
+        self._tally = threading.local()  # this thread's running total, inside tally()
 
     @contextmanager
     def for_job(
@@ -77,6 +78,17 @@ class Claude:
             yield
         finally:
             self._job.job_id = self._job.check = self._job.log = None
+
+    @contextmanager
+    def tally(self) -> Iterator[dict[str, float]]:
+        """Adds up what this thread's calls spend inside the block, as {"usd": total}.
+        Per thread: the worker spending at the same time is not counted."""
+        total = {"usd": 0.0}
+        self._tally.total = total
+        try:
+            yield total
+        finally:
+            self._tally.total = None
 
     def complete(
         self,
@@ -151,6 +163,9 @@ class Claude:
             finally:
                 with self._lock:
                     self._reserved -= estimate
+                total = getattr(self._tally, "total", None)
+                if total is not None:  # what was paid for, even when a later send failed
+                    total["usd"] += sum(results[k].usd for k in misses if k in results)
         return [results[k] for k in keys]
 
     def _record(
