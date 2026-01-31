@@ -38,17 +38,17 @@ def test_gaps_are_paired_sorted_and_skip_the_reference():
     ref = {f"q{n}": 0.0 if n < 30 else 1.0 for n in range(40)}
     up = {f"q{n}": 1.0 for n in range(40)}
     down = {f"q{n}": 0.0 for n in range(40)}
-    out = gaps({"hybrid": ref, "up": up, "down": down, "empty": {}}, "hybrid", "accuracy", 100)
+    out = gaps({"hybrid": ref, "up": up, "down": down, "empty": {}}, "hybrid", 100)
     assert [g["method"] for g in out] == ["up", "down"]
     assert out[0]["state"] == "ahead" and out[0]["diff"] == pytest.approx(75.0)
     assert out[1]["state"] == "behind"
-    assert gaps({"up": up}, "hybrid", "accuracy", 100) == []
+    assert gaps({"up": up}, "hybrid", 100) == []
 
 
 def test_gaps_use_only_shared_questions():
     ref = {"q0": 0.0, "q1": 0.0}
     other = {"q1": 1.0, "q2": 0.0}
-    (g,) = gaps({"hybrid": ref, "x": other}, "hybrid", "accuracy", 100)
+    (g,) = gaps({"hybrid": ref, "x": other}, "hybrid", 100)
     assert g["diff"] == pytest.approx(100.0)
 
 

@@ -47,7 +47,7 @@ def paired_by_question(
     return diff * factor, lo * factor, hi * factor
 
 
-def gaps(per_method: PerMethod, reference: str, metric: str, factor: float) -> list[dict]:
+def gaps(per_method: PerMethod, reference: str, factor: float) -> list[dict]:
     """Each method against the reference, over the questions both have."""
     ref = per_method.get(reference)
     if not ref:

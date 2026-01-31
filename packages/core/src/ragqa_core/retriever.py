@@ -40,7 +40,6 @@ METHOD_NAMES = (
     "random_example",
     "fixed_example",
 )
-CONTROL_METHODS = ("random_example", "fixed_example")
 FIXED_SEED = "fixed_example"
 KEYWORD_METHODS = ("kw_all", "kw_individual", "kw_rrf", "kw_hybrid")
 POOL = 50

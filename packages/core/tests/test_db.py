@@ -4,7 +4,7 @@ import pytest
 
 from ragqa_core.db import (
     JOBS_RESUMABLE,
-    claim_next_job,
+    claim_next_job_id,
     complete_question_ids,
     connect,
     create_job,
@@ -25,7 +25,6 @@ from ragqa_core.db import (
     request_cancel,
     requeue,
     run_items,
-    running_eval,
     save_collection,
     save_keyword_lists,
     save_questions,
@@ -125,17 +124,16 @@ def conn(tmp_path):
 def test_claim_takes_the_oldest_queued_job_by_insertion(conn):
     a = create_job(conn, "load", "c", {})
     b = create_job(conn, "eval", "c", {})
-    first = claim_next_job(conn)
-    assert first is not None and first["id"] == a and first["status"] == "running"
+    assert claim_next_job_id(conn) == a
     assert get_job(conn, a)["status"] == "running"
-    second = claim_next_job(conn)
-    assert second is not None and second["id"] == b and claim_next_job(conn) is None
+    assert get_job(conn, b)["status"] == "queued"
+    assert claim_next_job_id(conn) == b and claim_next_job_id(conn) is None
 
 
 def test_interrupt_running_keeps_the_queue(conn):
     a = create_job(conn, "load", "c", {})
     b = create_job(conn, "eval", "c", {})
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     assert interrupt_running(conn) == 1
     assert get_job(conn, a)["status"] == "interrupted"
     assert get_job(conn, b)["status"] == "queued"
@@ -144,24 +142,24 @@ def test_interrupt_running_keeps_the_queue(conn):
 def test_cancel_queued_is_immediate_running_is_requested(conn):
     a = create_job(conn, "load", "c", {})
     b = create_job(conn, "eval", "c", {})
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     assert request_cancel(conn, b) == "cancelled"
     assert request_cancel(conn, a) == "running" and is_cancel_requested(conn, a)
     assert not is_cancel_requested(conn, b)
 
 
-def test_running_eval_ignores_queued(conn):
+def test_job_running_ignores_queued(conn):
     create_job(conn, "eval", "c", {})
-    assert running_eval(conn, "c") is False
-    claim_next_job(conn)
-    assert running_eval(conn, "c") is True
-    assert running_eval(conn, "other") is False
+    assert job_running(conn, "eval", "c") is False
+    claim_next_job_id(conn)
+    assert job_running(conn, "eval", "c") is True
+    assert job_running(conn, "eval", "other") is False
 
 
 def test_job_running_matches_kind_and_collection(conn):
     create_job(conn, "load", "c", {})
     assert job_running(conn, "load", "c") is False
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     assert job_running(conn, "load", "c") is True
     assert job_running(conn, "eval", "c") is False
 
@@ -191,7 +189,7 @@ def test_lists_saved_without_switching_version(conn):
 
 def test_requeue_clears_cancel_and_error(conn):
     j = create_job(conn, "eval", "c", {})
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     request_cancel(conn, j)
     update_job(conn, j, status="failed", error="boom")
     requeue(conn, j)
@@ -203,7 +201,7 @@ def test_requeue_clears_cancel_and_error(conn):
 def test_requeue_moves_only_a_resumable_job(conn):
     j = create_job(conn, "eval", "c", {})
     assert requeue(conn, j) is False  # already queued
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     assert requeue(conn, j) is False and get_job(conn, j)["status"] == "running"
     for status in JOBS_RESUMABLE:
         update_job(conn, j, status=status)
@@ -221,7 +219,7 @@ def test_set_job_setup_and_list_jobs(conn):
     assert get_job(conn, a)["setup"] == {"limit": 5}
     assert [j["id"] for j in list_jobs(conn, collection="c")] == [b, a]
     assert [j["id"] for j in list_jobs(conn, kind="load")] == [a]
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     assert [j["id"] for j in list_jobs(conn, status="running")] == [a]
     assert len(list_jobs(conn, limit=2)) == 2
 

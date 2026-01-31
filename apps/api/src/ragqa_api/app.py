@@ -43,7 +43,6 @@ from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
-ALL = 1_000_000  # list_jobs limit meaning "every job"
 BUSY_STATE = {"load": "loading", "rekey": "rekeying", "eval": "evaluating"}
 STALL_AFTER = timedelta(minutes=10)
 PROBLEM = {
@@ -214,7 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lists = db.get_keyword_lists(state.conn, name)
         available = [m for m in METHOD_NAMES if lists is not None or m not in KEYWORD_METHODS]
         count = state.store.count(name)
-        jobs = db.list_jobs(state.conn, collection=name, limit=ALL)
+        jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
         busy, job = collection_state(jobs, count, lists is not None)
         questions = db.get_questions(state.conn, name)
         return {
@@ -239,7 +238,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 409, f"a {running[0]['kind']} job is running on '{name}'; cancel it first"
             )
-        for job in db.list_jobs(state.conn, collection=name, status="queued", limit=ALL):
+        for job in db.list_jobs(state.conn, collection=name, status="queued", limit=db.ALL):
             if db.request_cancel(state.conn, job["id"]) == "running":  # claimed meanwhile
                 raise HTTPException(
                     409, f"a {job['kind']} job started on '{name}'; it is being cancelled"
@@ -323,22 +322,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/collections/{name}/keyword-lists/{version}")
     def get_version(name: str, version: str) -> dict:
         spec = state.retriever.spec(name)
-        for v in db.list_keyword_versions(state.conn, name):
-            if v["version"] == version:
-                return {
-                    "version": version,
-                    "created_at": v["created_at"],
-                    "active": version == spec.keyword_version,
-                    "lists": asdict(v["lists"]),
-                }
-        raise HTTPException(404, f"no keyword-list version {version!r} on '{name}'")
+        v = db.get_keyword_version(state.conn, name, version)
+        if v is None:
+            raise HTTPException(404, f"no keyword-list version {version!r} on '{name}'")
+        return {
+            "version": version,
+            "created_at": v["created_at"],
+            "active": version == spec.keyword_version,
+            "lists": asdict(v["lists"]),
+        }
 
     @app.put("/collections/{name}/keyword-lists", status_code=202)
     def put_lists(name: str, body: Lists) -> dict:
         """Saves the lists as a version; a queued rekey job switches to it once every
         item is re-keyed (spec §5.5)."""
         spec = state.retriever.spec(name)
-        if db.running_eval(state.conn, name):
+        if db.job_running(state.conn, "eval", name):
             raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
         version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
         job_id = db.create_job(state.conn, "rekey", name, {"version": version})
@@ -396,7 +395,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/eval")
     def list_runs(collection: str | None = None) -> list[dict]:
-        jobs = db.list_jobs(state.conn, kind="eval", collection=collection, limit=ALL)
+        jobs = db.list_jobs(state.conn, kind="eval", collection=collection, limit=db.ALL)
         trusted = {  # the proxy check once per collection, not once per run
             name: state.evaluator.collection_proxy_trusted(name)
             for name in {j["collection"] for j in jobs}
@@ -501,7 +500,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         problems += job_problems(db.newest_jobs(state.conn))
         return {
             "worker": {"alive": alive, "running": running, "error": worker.error},
-            "queue": db.list_jobs(state.conn, status="queued", limit=ALL)[::-1],
+            "queue": db.list_jobs(state.conn, status="queued", limit=db.ALL)[::-1],
             "batches": batches,
             "problems": problems,
         }

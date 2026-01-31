@@ -1,12 +1,12 @@
 import pytest
 
-from ragqa_core.db import claim_next_job, connect, create_job
+from ragqa_core.catalog import CONTROLS
+from ragqa_core.db import claim_next_job_id, connect, create_job
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import NoApiKey
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import (
-    CONTROL_METHODS,
     METHOD_NAMES,
     MethodUnavailable,
     Retriever,
@@ -47,7 +47,7 @@ ITEMS = [
     Item(f"{name}-item", " ".join(t + m + c) + f" notes about {name}", "A", f"{name} expl")
     for name, (t, m, c) in DOMAINS.items()
 ]
-FREE = [m for m in METHOD_NAMES if m not in ("question_only", "iterative", *CONTROL_METHODS)]
+FREE = [m for m in METHOD_NAMES if m not in ("question_only", "iterative", *CONTROLS)]
 
 
 def hit(i: str) -> Hit:
@@ -69,7 +69,7 @@ def build(tmp_path, summarize=False, lists=True, reply=lambda p: "A summary."):
 def test_keyword_methods_refuse_while_rekeying(tmp_path):
     r, conn = build(tmp_path)
     create_job(conn, "rekey", "c", {"version": "v"})
-    claim_next_job(conn)
+    claim_next_job_id(conn)
     with pytest.raises(MethodUnavailable, match="re-keyed"):
         r.retrieve("c", "enzyme kinetics", "kw_individual")
     assert r.retrieve("c", "enzyme kinetics", "hybrid")  # plain methods still answer
@@ -126,7 +126,7 @@ def test_fixed_example_is_the_same_for_every_question(tmp_path):
     assert a == b
 
 
-@pytest.mark.parametrize("method", CONTROL_METHODS)
+@pytest.mark.parametrize("method", CONTROLS)
 def test_controls_keep_their_first_pick_whatever_k(tmp_path, method):
     # mcq answers use only the first hit, so it must not depend on k.
     r, _ = build(tmp_path)
@@ -134,7 +134,7 @@ def test_controls_keep_their_first_pick_whatever_k(tmp_path, method):
     assert r.retrieve("c", "enzyme", method, k=4)[0].id == one
 
 
-@pytest.mark.parametrize("method", CONTROL_METHODS)
+@pytest.mark.parametrize("method", CONTROLS)
 def test_controls_see_items_added_later(tmp_path, method):
     r, _ = build(tmp_path)
     r.retrieve("c", "enzyme", method, k=1)

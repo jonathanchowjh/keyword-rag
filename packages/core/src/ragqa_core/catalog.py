@@ -112,11 +112,12 @@ METRICS: dict[str, dict] = {
     ),
 }
 
-# The TAT-QA scorer gives numbers all-or-nothing, so tables call both "Correct answer".
+# The TAT-QA scorer gives numbers all-or-nothing, so on tables f1 is not "Partly right"
+# for most answers: it is the word overlap, which only text answers can have in part.
 METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "mcq": {},
     "multihop": {},
-    "table": {"em": "Correct answer", "f1": "Correct answer"},
+    "table": {"em": "Exact answer", "f1": "Answer overlap"},
 }
 
 _TABLE_SAYS = (

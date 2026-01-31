@@ -1,6 +1,6 @@
 """The SQLite file: cost ledger, response cache, catalog, questions and jobs.
 
-The jobs table is the work queue: create_job queues, claim_next_job takes the
+The jobs table is the work queue: create_job queues, claim_next_job_id takes the
 oldest queued job by insertion order, and the worker reports through
 update_job and log_job. Cancel is a flag the running job polls.
 
@@ -202,14 +202,26 @@ def list_keyword_versions(conn: Connection, name: str) -> list[dict]:
         " order by created_at desc, rowid desc",
         (name,),
     )
-    return [
-        {
-            "version": r["version"],
-            "created_at": r["created_at"],
-            "lists": KeywordLists(**json.loads(r["lists_json"])),
-        }
-        for r in rows
-    ]
+    return [_keyword_version(r) for r in rows]
+
+
+def get_keyword_version(conn: Connection, name: str, version: str) -> dict | None:
+    row = first(
+        conn.execute(
+            "select version, created_at, lists_json from keyword_lists"
+            " where collection = ? and version = ?",
+            (name, version),
+        )
+    )
+    return _keyword_version(row) if row else None
+
+
+def _keyword_version(row: sqlite3.Row) -> dict:
+    return {
+        "version": row["version"],
+        "created_at": row["created_at"],
+        "lists": KeywordLists(**json.loads(row["lists_json"])),
+    }
 
 
 def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
@@ -296,13 +308,8 @@ def requeue(conn: Connection, job_id: str) -> bool:
         return conn.changes() > 0
 
 
-def claim_next_job(conn: Connection) -> dict | None:
-    """The oldest queued job by insertion, marked running in the same statement."""
-    job_id = claim_next_job_id(conn)
-    return None if job_id is None else get_job(conn, job_id)
-
-
 def claim_next_job_id(conn: Connection) -> str | None:
+    """The oldest queued job by insertion, marked running in the same statement."""
     row = first(
         conn.execute(
             "update jobs set status = 'running', updated_at = ? where status = 'queued'"
@@ -312,6 +319,9 @@ def claim_next_job_id(conn: Connection) -> str | None:
         )
     )
     return row["id"] if row else None
+
+
+ALL = 1_000_000  # list_jobs limit meaning "every job"
 
 
 def list_jobs(
@@ -376,10 +386,6 @@ def interrupt_running(conn: Connection) -> int:
             (now(),),
         )
         return conn.changes()
-
-
-def running_eval(conn: Connection, collection: str) -> bool:
-    return job_running(conn, "eval", collection)
 
 
 def job_running(conn: Connection, kind: str, collection: str) -> bool:

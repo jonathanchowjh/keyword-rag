@@ -541,7 +541,7 @@ class Evaluator:
             "proxy_trusted": trusted,
             "scale": scaling,
             "reference": reference,
-            "gaps": verdict.gaps(per_method, reference, headline, scaling["factor"]),
+            "gaps": verdict.gaps(per_method, reference, scaling["factor"]),
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "usd_total": db.job_spend(self.conn, job_id),
@@ -551,7 +551,7 @@ class Evaluator:
 
     def _done_evals(self, collection: str) -> list[dict]:
         return db.list_jobs(
-            self.conn, kind="eval", collection=collection, status="done", limit=1_000_000
+            self.conn, kind="eval", collection=collection, status="done", limit=db.ALL
         )
 
     def collection_answer(self, name: str) -> dict | None:
