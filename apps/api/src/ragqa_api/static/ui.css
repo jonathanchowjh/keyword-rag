@@ -101,3 +101,10 @@ tr.rule td { border-top:2px dotted var(--muted); color:var(--muted); font-size:1
 main > details { margin:10px 0; } main summary { cursor:pointer; padding:4px 0; }
 .history { list-style:none; padding:0; margin:0; display:grid; gap:6px; font-size:13px; }
 .history button { margin-left:8px; padding:2px 8px; font-size:12px; }
+.word.yes { color:var(--ok); } .word.no { color:var(--bad); } .word.cant_tell { color:var(--fg); }
+.legend { font-size:12px; margin:2px 0 8px; max-width:720px; }
+.axis { position:relative; display:flex; justify-content:space-between; width:220px; font-size:11px;
+  font-weight:normal; color:var(--muted); }
+.axis .zero { position:absolute; left:50%; transform:translateX(-50%); }
+tr.resume-row td { background:var(--card); }
+td.num, td[data-said] { white-space:nowrap; }
