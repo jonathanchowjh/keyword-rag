@@ -2,10 +2,32 @@
 
 ## Unreleased
 
+- In an answering run, the Questions view judges each method only on its answer:
+  a method not answered yet (a run stopped at the cap) is unmeasured, not a
+  disagreement. "What changed since" notes keyword lists only for runs that used
+  a keyword method, and also when the lists were set after a run that had none.
+- A load that makes the keyword lists reports progress while it re-keys (adding
+  is the first half) and can be cancelled then; the old lists stay in force.
+- The Lab's cost per method counts every Claude call that method made: the
+  query summary and iterative hops as well as the answer.
+- A confirmed eval or resume that would spend returns 503 `needs
+  ANTHROPIC_API_KEY` at once when no key is set, as a load does, instead of
+  queueing a run that stops straight away.
+- `POST /collections/{name}/documents` is also refused while a load on the
+  collection is queued or running. Saving keyword lists is refused with 409
+  when the service's dense model differs from the collection's.
+- The worker's error clears after its next clean cycle instead of staying until
+  a restart. The stall warning says how long the job has been quiet ("for N
+  minutes") instead of a server clock time.
+- Runs left `running` by a stopped service from before version tracking are
+  marked untracked when the database opens, so resuming them is refused.
+- Tables name their answer metrics "Exact answer" and "Answer overlap"; both
+  were "Correct answer".
 - `GET /collections/{name}/keyword-lists` (every version, newest first, with
   counts and which is active) and `GET .../keyword-lists/{version}` are new. The
-  Collection page lists them and can load an old version into the editor; saving
-  makes a new version and re-keys as usual.
+  Collection page lists them and can load an old version into the editor. A
+  version is a hash of the lists' content, so saving an old version unchanged
+  reuses its version, moves it to the top of the history and re-keys as usual.
 - Paid methods and the "Have Claude answer" box carry a muted "uses credit" mark
   in the run form and the Lab. A keyword method carries it only on a collection
   with summaries.
@@ -52,7 +74,6 @@
 - Reasoning match is shown on the rescaled scale in each method's own score and
   in every pair, as in the gaps; counts have thousands separators, the Lab shows
   cost to the cent, and the verdict names the metric the collection's type uses.
-
 - Two control methods, `random_example` and `fixed_example`, so a method can
   be checked against an example chosen without looking at the question.
 - Dense queries on Qwen3-Embedding carry the query-side task instruction the

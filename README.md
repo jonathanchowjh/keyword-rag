@@ -5,7 +5,8 @@ kinds of QA, runs the retrieval methods from *Keyword Vectorization for
 Retrieval Augmented Generation on Science Question Answering* (Jonathan Chow,
 2024) next to modern ones, and evaluates them over an HTTP API. Every result
 says how sure it is, and nothing spends Claude credit without showing the
-estimate first.
+estimate first, except the Lab (`/query`), which reports each method's cost
+after the call.
 
 The paper's idea: long questions are noisy to embed, so describe each stored
 item by a few keywords picked from curated lists (topic, method, common
@@ -121,28 +122,29 @@ A collection remembers the dense model it was built with. Changing
 | `POST /collections` | `{name, qa_type: mcq\|multihop\|table, summarize}` |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
-| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a re-key or eval on the collection is queued or running |
+| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running |
 | `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it |
-| `POST /query` | One question, several methods side by side, optionally answered |
-| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}` |
+| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every Claude call it made (query summary, hops, answer) |
+| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no key is set |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since`, what changed after it (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome` (`right` or `wrong`, absent when unmeasured); `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
-| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; 503 when what is left would spend and no key is set |
 | `GET /status` | The worker, the queue, pending Claude batches and the problems that need a person |
 | `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
 | `GET /budget` | This service's spend this month against its cap |
 
-Loads, re-keys and evaluations run one at a time, in the order they were
-queued, on a worker thread inside the service. A job that was running when the
-service stopped comes back `interrupted`; queued jobs stay queued.
+Loads, re-keys and evaluations run one at a time, oldest first, on a worker
+thread inside the service. A resumed run keeps its original place in that
+order, so it runs before jobs queued after it first was. A job that was running
+when the service stopped comes back `interrupted`; queued jobs stay queued.
 
 A method that cannot run inside `/query`, for example a keyword method before
 lists exist, reports its own `error`, and the other methods still return.
@@ -209,8 +211,10 @@ comparable to the papers.
   priced from Claude's reported token usage and written to a ledger. A call
   that would cross the cap is refused before it is sent, and an evaluation
   that hits the cap stops with `stopped_budget` and keeps its rows.
-- **Estimate before spend.** `/eval` and paid loads return the estimate unless
-  `confirm: true` is set.
+- **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`
+  and keyword-list proposals return the estimate unless `confirm: true` is set.
+  The Lab (`/query`) is the exception: it spends at once and shows each
+  method's cost after.
 - **Every response is cached.** A re-run with the same prompts is free, and its
   answers are identical.
 - **Haiku by default, and batches.** Runs of more than 50 calls use the Batch

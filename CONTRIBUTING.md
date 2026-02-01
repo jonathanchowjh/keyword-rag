@@ -59,6 +59,7 @@ import it, and a guard test enforces that.
 packages/core/            Everything that knows retrieval. No FastAPI, no HTTP.
   src/ragqa_core/
     types.py              Dataclasses shared by every module
+    connection.py         Connection: the one SQLite connection, one lock per statement
     db.py                 SQLite: ledger, cache, catalog, questions, jobs
     llm.py                Claude: send, cache, ledger, cap, estimate, batch
     models.py             Models: lazy fastembed dense / judge / BM25 / rerank
@@ -68,8 +69,11 @@ packages/core/            Everything that knows retrieval. No FastAPI, no HTTP.
     indexer.py            Indexer: build and refresh representations
     retriever.py          Retriever + rrf(): the twelve methods
     datasets.py           ScienceQA / MuSiQue / TAT-QA loaders, dev slice
+    loader.py             Loader: the dataset-load job, and its keyword lists
     metrics.py            Recall, EM/F1, similarity, bootstrap, Spearman
+    verdict.py            What a run says: headline, gaps, answer, proxy check
     evaluator.py          Evaluator: estimates, background runs, tables
+    catalog.py            Plain names of methods, metrics and QA types
     settings.py           Settings + load_settings(): every environment variable
     fakes.py              Test doubles (tests only)
   tests/                  test_*.py unit; test_*_int.py integration
@@ -79,7 +83,11 @@ scripts/                  dev-qdrant.sh, gate.sh, image-smoke.sh
 tests/                    Repo-level guards and the smoke fixture
 ```
 
-The worker loop runs on a thread the API starts; routes only queue jobs.
+The worker loop runs on a thread the API starts. Loads, re-keys and
+evaluations are queued as jobs for it. A few routes still work in the request:
+`POST /collections/{name}/documents` indexes its items (and summarises them on
+a summarising collection), and `/query` and a confirmed keyword-list proposal
+call Claude.
 
 `ragqa_core` must never import `fastapi`, `starlette`, `uvicorn`, `ragqa_api`
 or `ragqa_worker`; `ragqa_worker` must never import the web layer. `tests/test_boundaries.py` fails if it does.
@@ -87,7 +95,8 @@ or `ragqa_worker`; `ragqa_worker` must never import the web layer. `tests/test_b
 ## Code style
 
 Light OOP. A class exists only where several functions share state
-(`Claude`, `Models`, `Store`, `Indexer`, `Retriever`, `Evaluator`); everything
+(`Connection`, `Claude`, `Models`, `Store`, `Indexer`, `Retriever`, `Loader`,
+`Evaluator`, `Worker`); everything
 else is a plain function. No interfaces, base classes, inheritance or
 injection seams. A test that needs a seam overrides the method on the
 instance. One class per file, and few files.

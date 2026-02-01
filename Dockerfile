@@ -2,9 +2,9 @@
 
 # ---- build ----------------------------------------------------------------
 # uv resolves from the committed lock, so the image gets exactly the versions
-# the tests ran against. --no-editable installs both workspace packages into
-# the venv itself, which is what lets the runtime stage carry only .venv and
-# not the source tree.
+# the tests ran against. --no-editable installs the three workspace packages
+# (ragqa-core, ragqa-worker, ragqa-api) into the venv itself, which is what lets
+# the runtime stage carry only .venv and not the source tree.
 FROM python:3.12-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
 WORKDIR /repo

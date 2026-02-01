@@ -1,7 +1,9 @@
 """The HTTP API. Thin: every decision lives in ragqa_core; this maps it to HTTP.
 
-Routes never run long work: loads, re-keys and evals are queued as jobs, and
-the worker thread (ragqa_worker), started by the lifespan, runs them in order.
+Loads, re-keys and evals are queued as jobs, and the worker thread
+(ragqa_worker), started by the lifespan, runs them in order. A few routes still
+work in the request: /documents indexes its items, and /query and a confirmed
+proposal call Claude.
 
 Run with `uvicorn --factory ragqa_api.app:create_app`.
 """
