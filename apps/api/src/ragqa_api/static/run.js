@@ -1,39 +1,31 @@
-import { api, catalog, clock, confirmSpend, count, esc, gapBar, head, methodLabel, metricLabel, pct, pill,
-  pts, refreshSpend, shell, verdictText } from "/static/ui.js";
+import { $, BUSY, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
+  confirmSpend, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
+  pill, plural, pts, refreshSpend, shell, short, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
-const BUSY = new Set(["queued", "running"]);
-const RESUMABLE = new Set(["interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed"]);
 const STATE_TEXT = { ahead: "ahead", cant_tell: "can't tell", behind: "behind" };
 
 const parts = location.pathname.split("/");
 const name = decodeURIComponent(parts[2] ?? "");
 const id = decodeURIComponent(parts[4] ?? "");
 const enc = encodeURIComponent(name);
-const $ = (x) => document.getElementById(x);
 
 let cat = null;
 let run = null; // the latest GET /eval/{id}
 let resumeProbe = null; // for a resumable run: {refusal} or {} when it may resume
 let probedStatus = null; // the status resumeProbe was computed for; a new status probes again
 let qaType = null; // the collection's, fetched once, for metric labels
-const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 
 shell(`c/${name}`);
 
-function paint(section, html) {
-  if (painted[section] === html) return false;
-  painted[section] = html;
-  $(section).innerHTML = html;
-  return true;
-}
-
-const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 const metric = (m) => metricLabel(m, qaType, cat);
+const says = (m) => metricSays(m, qaType, cat);
 const method = (m) => methodLabel(m, cat);
 const isControl = (m) => cat.methods[m]?.group === "control";
-const show = (v) => (Array.isArray(v) ? v.join(", ") : v == null || v === "" ? "–" : String(v));
-const range = (m) => (m ? `${pct(m.lo)}–${pct(m.hi)}` : "");
+const show = (v) => (Array.isArray(v) ? v.join(" · ") : v == null || v === "" ? "–" : String(v));
+const busy = () => BUSY.has(run.status);
+// The headline is the reasoning match shown raw: this run has no random example to set 0 by.
+const rawScale = () => run.scale?.unit === "raw";
 
 // -- head and answer ---------------------------------------------------------------------
 
@@ -45,23 +37,34 @@ function headHtml() {
     ? ' · <span class="muted">recorded before settings were tracked</span>'
     : run.since.changes.map((c) => ` · <span class="warn">${esc(c)} changed after this run</span>`).join("");
   const failed = run.error ? `<p class="err">${esc(run.error)}</p>` : "";
+  // A run that has not started has asked no questions yet: "–", not "0".
+  const asked = busy() && !run.question_count ? "– questions" : plural(run.question_count, "question");
   return head({
-    title: `Run ${id.slice(0, 4)}`,
+    title: `Run ${short(id)}`,
     crumb: [{ label: "Collections", href: "/" }, { label: name, href: `/c/${enc}` }, "Runs"],
-    aside: [clock(run.created_at), model, plural(run.question_count, "question"),
-      `$${Number(run.usd_total ?? 0).toFixed(2)}`].map(esc).join(" · ") + ` · ${pill(run.status)}${esc(progress)}${since}`,
+    aside: [clock(run.created_at), model, asked, usd(run.usd_total)].map(esc).join(" · ") +
+      ` · ${pill(run.status)}${esc(progress)}${since}`,
   }) + failed;
 }
 
 function answerHtml() {
+  const lead = "<strong>Do keywords help?</strong>";
+  if (busy()) return `<p class="verdict">${lead} The answer appears when the run finishes.</p>`;
   const a = run.answer;
   if (!a) {
-    const [cand, ref] = cat.answer_pair;
-    return `<p class="verdict"><strong>Do keywords help?</strong> This run does not include ${esc(
-      method(cand))} and ${esc(method(ref))}, so it gives no answer.</p>`;
+    const missing = cat.answer_pair.filter((m) => !run.setup.methods.includes(m));
+    const why = missing.length
+      ? `This run does not include ${missing.map(method).join(" and ")}`
+      : `This run has no results for ${cat.answer_pair.map(method).join(" and ")} to compare`;
+    return `<p class="verdict">${lead} ${esc(why)}, so it gives no answer.</p>`;
   }
-  return `<p class="verdict"><strong>Do keywords help?</strong> ${esc(verdictText({ ...a, proxy_trusted: run.proxy_trusted }, qaType, cat))}, on the same ${esc(
-    plural(run.question_count, "question"))}.</p>`;
+  const notes = verdictNotes({ ...a, proxy_trusted: run.proxy_trusted }, { raw: rawScale() })
+    .map((n) => `${n.charAt(0).toUpperCase()}${n.slice(1)}.`)
+    .join(" ");
+  return `<p class="verdict">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
+    plural(run.question_count, "question"))}.</p>
+    ${notes ? `<p class="muted">${esc(notes)}</p>` : ""}
+    ${legendHtml("Ahead, behind and can't tell in the table below read the same way.")}`;
 }
 
 // -- the gap chart ------------------------------------------------------------------------
@@ -74,60 +77,74 @@ function matchFactor() {
   return Number.isFinite(chance) && chance < 1 ? 100 / (1 - chance) : null;
 }
 
+// One cell of the own-score table: the mean and its range, true minus, "n/a" when missing.
 function ownScore(m, k) {
   const cell = m[k];
-  if (k !== SIM) return `${esc(pct(cell.mean))} <span class="muted">${esc(range(cell))}</span>`;
+  if (!Number.isFinite(cell?.mean)) return '<span class="muted">n/a</span>';
+  const times = (v, f, less = 0) => (Number.isFinite(v) ? (v - less) * f : NaN);
+  if (k !== SIM) {
+    return `${esc(pct(cell.mean))} <span class="muted">${esc(between(times(cell.lo, 100), times(cell.hi, 100)))}</span>`;
+  }
   const f = matchFactor();
   if (f === null) {
-    return `${esc(pct(cell.mean))} <span class="muted">${esc(range(cell))} · no chance level</span>`;
+    return `${esc(pct(cell.mean))} <span class="muted">${esc(between(times(cell.lo, 100), times(cell.hi, 100)))} · ${NO_CHANCE}</span>`;
   }
   const chance = run.methods.random_example[SIM].mean;
-  const at = (v) => Math.round((v - chance) * f);
-  return `${at(cell.mean)} match <span class="muted">${at(cell.lo)}–${at(cell.hi)}</span>`;
+  const at = (v) => times(v, f, chance);
+  return `${esc(num(at(cell.mean)))} match <span class="muted">${esc(between(at(cell.lo), at(cell.hi)))}</span>`;
 }
 
 // The reference's own score; reasoning match is rescaled against the run's random example.
 function referenceScore() {
   const mean = run.methods[run.reference]?.[run.headline]?.mean;
   if (!Number.isFinite(mean)) return "n/a";
-  if (run.scale.unit !== "match") return pct(mean);
+  if (run.scale.unit !== "match") return rawScale() ? `${pct(mean)} (${NO_CHANCE} in this run)` : pct(mean);
   const chance = run.methods.random_example?.[run.headline]?.mean;
-  if (!Number.isFinite(chance)) return `${pct(mean)} (no chance level in this run)`;
-  return `${Math.round((mean - chance) * run.scale.factor)} match`;
+  if (!Number.isFinite(chance)) return `${pct(mean)} (${NO_CHANCE} in this run)`;
+  return `${num((mean - chance) * run.scale.factor)} match`;
 }
 
-function gapRow(g) {
+function gapRow(g, span) {
+  const raw = rawScale() ? ` <span class="muted">${NO_CHANCE}</span>` : "";
   return `<tr data-gap-row><td>${esc(method(g.method))}<code>${esc(g.method)}</code></td>
-    <td>${gapBar(g.lo, g.diff, g.hi, span())}</td><td class="num">${esc(pts(g.diff, g.lo, g.hi))}</td>
+    <td>${gapBar(g.lo, g.diff, g.hi, span)}</td><td class="num">${esc(pts(g.diff, g.lo, g.hi))}${raw}</td>
     <td>${esc(STATE_TEXT[g.state] ?? g.state)}</td></tr>`;
 }
 
-function span() {
-  const biggest = Math.max(0, ...run.gaps.flatMap((g) => [g.lo, g.hi, g.diff].map(Math.abs)).filter(Number.isFinite));
-  return Math.max(10, Math.ceil(biggest / 5) * 5);
-}
-
 function gapsHtml() {
+  if (busy()) return '<p class="muted">The gaps appear when the run finishes.</p>';
+  const ref = method(run.reference);
   if (!run.gaps.length) {
-    return `<p class="muted">No gaps to draw: this run has no ${esc(method(run.reference))} to compare against.</p>`;
+    const why = run.setup.methods.includes(run.reference)
+      ? `no other method has results to set against ${ref}`
+      : `this run has no ${ref} to compare against`;
+    return `<p class="muted">No gaps to draw: ${esc(why)}.</p>`;
   }
+  const span = gapSpan(run.gaps.flatMap((g) => [g.lo, g.hi, g.diff]));
+  const row = (g) => gapRow(g, span);
   const real = run.gaps.filter((g) => !isControl(g.method));
   const controls = run.gaps.filter((g) => isControl(g.method));
   const behind = real.findIndex((g) => g.diff < 0);
   const at = behind < 0 ? real.length : behind;
-  const reference = `<tr data-ref-row><td>${esc(method(run.reference))}<code>${esc(run.reference)}</code>
+  const reference = `<tr data-ref-row><td>${esc(ref)}<code>${esc(run.reference)}</code>
     (reference)</td><td></td><td class="num">${esc(referenceScore())}</td><td></td></tr>`;
-  const rows = [...real.slice(0, at).map(gapRow), reference, ...real.slice(at).map(gapRow)];
+  const rows = [...real.slice(0, at).map(row), reference, ...real.slice(at).map(row)];
   if (controls.length) {
-    rows.push('<tr class="rule"><td colspan="4">chance level</td></tr>', ...controls.map(gapRow));
+    rows.push('<tr class="rule"><td colspan="4">chance level</td></tr>', ...controls.map(row));
   }
-  return `<p>${esc(metric(run.headline))}, compared with ${esc(method(run.reference))}</p>
-    <table><tbody>${rows.join("")}</tbody></table>`;
+  const raw = rawScale() ? ` (shown raw, ${NO_CHANCE})` : "";
+  const meaning = rawScale()
+    ? "This run has no random example, so the score is raw similarity with no chance level to set 0 by."
+    : says(run.headline);
+  return `<p>${esc(metric(run.headline) + raw)}, compared with ${esc(ref)}</p>
+    ${meaning ? `<p class="muted">${esc(meaning)}</p>` : ""}
+    <table><thead><tr><th>Method</th><th>${axisHtml(span)}</th><th class="num">Gap</th><th>Result</th></tr></thead>
+    <tbody>${rows.join("")}</tbody></table>`;
 }
 
 function bestHtml() {
   const b = run.best_of_each;
-  if (!b) return "";
+  if (!b || busy()) return "";
   return `<p>Best keyword method against the best other: ${esc(method(b.candidate))} ${esc(
     pts(b.diff, b.lo, b.hi))} vs ${esc(method(b.reference))}.
     <span class="muted">Picked after the fact, so the gap is likely overstated.</span></p>`;
@@ -139,7 +156,7 @@ function scoresHtml() {
   const names = [...new Set(Object.values(run.methods).flatMap((m) => Object.keys(m)))].filter(
     (k) => k !== "usd" && k !== "n"
   );
-  const heads = names.map((m) => `<th>${esc(metric(m))}</th>`).join("");
+  const heads = names.map((m) => `<th title="${esc(says(m))}">${esc(metric(m))}</th>`).join("");
   const rows = Object.entries(run.methods)
     .map(([m, row]) => {
       const cells = names
@@ -148,7 +165,11 @@ function scoresHtml() {
       return `<tr><td>${esc(method(m))}<code>${esc(m)}</code></td>${cells}</tr>`;
     })
     .join("");
-  return `<table><thead><tr><th>Method</th>${heads}</tr></thead><tbody>${rows}</tbody></table>`;
+  const meanings = names
+    .filter((m) => says(m))
+    .map((m) => `<p class="muted legend">${esc(metric(m))}: ${esc(says(m))}.</p>`)
+    .join("");
+  return `<table><thead><tr><th>Method</th>${heads}</tr></thead><tbody>${rows}</tbody></table>${meanings}`;
 }
 
 function proxyHtml() {
@@ -171,10 +192,10 @@ function pairsHtml() {
     .map((p) => {
       const result = !p.separated ? "can't tell" : p.diff > 0 ? `${method(p.a)} ahead` : `${method(p.b)} ahead`;
       const f = p.metric === SIM ? matchFactor() : null; // null: shown as it is
-      const raw = p.metric === SIM && f === null ? " (no chance level)" : "";
+      const raw = p.metric === SIM && f === null ? ` (${NO_CHANCE})` : "";
       const k = f ?? 100;
       const scaled = (v) => (v == null ? NaN : v * k);
-      return `<tr><td>${esc(metric(p.metric) + raw)}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
+      return `<tr><td title="${esc(says(p.metric))}">${esc(metric(p.metric) + raw)}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
         <td class="num">${esc(pts(scaled(p.diff), scaled(p.lo), scaled(p.hi)))}</td><td>${esc(result)}</td></tr>`;
     })
     .join("");
@@ -185,7 +206,7 @@ function pairsHtml() {
 function setupHtml() {
   const rows = Object.entries(run.setup)
     .map(([k, v]) => {
-      const text = k === "question_ids" ? plural(v.length, "question") : Array.isArray(v) ? v.join(", ") : show(v);
+      const text = k === "question_ids" ? plural(v.length, "question") : show(v);
       return `<tr><td>${esc(k)}</td><td>${esc(text)}</td></tr>`;
     })
     .join("");
@@ -221,17 +242,33 @@ function questionHtml(q, picked) {
     <div class="sides">${columns.join("")}</div></details>`;
 }
 
+// Rows per "where methods disagree" value, kept so Method and Wrong only filter without a refetch.
+const asked = {};
+let asking = 0; // bumped by each load, so only the newest one draws
+const byId = (a, b) => String(a.question_id).localeCompare(String(b.question_id), undefined, { numeric: true });
+
 // The picker names the method whose outcome heads each question and "wrong only" judges.
-async function loadQuestions() {
+function showQuestions() {
   const m = $("q-method").value;
-  if (!m) return;
-  try {
-    const rows = await api(`/eval/${encodeURIComponent(id)}/questions?disagree=${$("q-disagree").checked}`);
-    const shown = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
-    $("questions").innerHTML = shown.length ? shown.map((q) => questionHtml(q, m)).join("") : '<p class="muted">None.</p>';
-  } catch (e) {
-    $("questions").innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  const rows = asked[$("q-disagree").checked];
+  if (!m || !rows) return;
+  const shown = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
+  $("questions").innerHTML = shown.length ? shown.map((q) => questionHtml(q, m)).join("") : '<p class="muted">None.</p>';
+}
+
+async function loadQuestions() {
+  const disagree = $("q-disagree").checked;
+  const mine = ++asking;
+  if (!asked[disagree]) {
+    try {
+      const rows = await api(`/eval/${encodeURIComponent(id)}/questions?disagree=${disagree}`);
+      asked[disagree] = rows.sort(byId);
+    } catch (e) {
+      if (mine === asking) $("questions").innerHTML = `<p class="err">${esc(e.message)}</p>`;
+      return;
+    }
   }
+  if (mine === asking) showQuestions();
 }
 
 function fillMethodPicker() {
@@ -246,16 +283,20 @@ function fillMethodPicker() {
 function actionsHtml() {
   const s = run.status;
   const buttons = [];
-  if (BUSY.has(s)) buttons.push('<button type="button" id="act-cancel">Cancel</button>');
-  if (RESUMABLE.has(s) && resumeProbe?.refusal) {
-    buttons.push(`<span class="warn" id="act-refusal">${esc(resumeProbe.refusal)}</span>`);
-  } else if (RESUMABLE.has(s)) {
-    buttons.push('<button type="button" id="act-resume">Resume</button>');
+  if (BUSY.has(s)) {
+    buttons.push('<button type="button" id="act-cancel">Cancel</button>');
+  } else {
+    if (RESUMABLE.has(s) && resumeProbe?.refusal) {
+      buttons.push(`<span class="warn" id="act-refusal">${esc(resumeProbe.refusal)}</span>`);
+    } else if (RESUMABLE.has(s)) {
+      buttons.push('<button type="button" id="act-resume">Resume</button>');
+    }
+    // Re-run and Delete wait for the run to stop: deleting a queued or running run is refused.
+    buttons.push('<button type="button" id="act-rerun" class="secondary">Re-run</button>');
+    buttons.push('<button type="button" id="act-delete" class="secondary">Delete…</button>');
   }
-  buttons.push('<button type="button" id="act-rerun" class="secondary">Re-run</button>');
-  buttons.push('<button type="button" id="act-delete" class="secondary">Delete…</button>');
   return `<div class="actions">${buttons.join("")}</div>
-    <div id="act-confirm"></div><p id="act-msg" class="err"></p>`;
+    <div id="act-confirm"></div><p id="act-msg" class="err" role="status"></p>`;
 }
 
 const say = (text) => ($("act-msg").textContent = text);
@@ -280,26 +321,6 @@ async function cancel() {
   }
 }
 
-async function resume() {
-  say("");
-  const path = `/jobs/${encodeURIComponent(id)}/resume`;
-  try {
-    const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
-    confirmSpend($("act-confirm"), estimate, async () => {
-      try {
-        await api(path, { method: "POST", body: { confirm: true } });
-        $("act-confirm").innerHTML = "";
-        refreshSpend();
-        await refresh();
-      } catch (e) {
-        say(e.message);
-      }
-    });
-  } catch (e) {
-    say(e.message); // the refusal text
-  }
-}
-
 async function rerun() {
   say("");
   const { collection, split, methods, answer, model, k, rrf_k } = run.setup;
@@ -320,28 +341,22 @@ async function rerun() {
   }
 }
 
-function askDelete() {
-  say("");
-  $("act-confirm").innerHTML = `<p>Delete this run and its results? This cannot be undone.</p>
-    <div class="actions"><button type="button" id="del-yes" class="danger">Yes, delete this run</button>
-    <button type="button" id="del-no" class="secondary">Keep it</button></div>`;
-  $("del-no").addEventListener("click", () => ($("act-confirm").innerHTML = ""));
-  $("del-yes").addEventListener("click", async () => {
-    try {
-      await api(`/eval/${encodeURIComponent(id)}`, { method: "DELETE" });
-      location.href = `/c/${enc}`;
-    } catch (e) {
-      $("act-confirm").innerHTML = "";
-      say(e.message);
-    }
-  });
-}
-
 function bindActions() {
   $("act-cancel")?.addEventListener("click", cancel);
-  $("act-resume")?.addEventListener("click", resume);
-  $("act-rerun").addEventListener("click", rerun);
-  $("act-delete").addEventListener("click", askDelete);
+  $("act-resume")?.addEventListener("click", () => {
+    say("");
+    askResume($("act-confirm"), id, refresh);
+  });
+  $("act-rerun")?.addEventListener("click", rerun);
+  $("act-delete")?.addEventListener("click", () => {
+    say("");
+    askDelete($("act-confirm"), {
+      question: "Delete this run and its results? This cannot be undone.",
+      yes: "Yes, delete this run",
+      path: `/eval/${encodeURIComponent(id)}`,
+      gone: `/c/${enc}`,
+    });
+  });
 }
 
 // -- refresh --------------------------------------------------------------------------------------
@@ -352,6 +367,7 @@ async function refresh() {
   try {
     cat = await catalog();
     run = await api(`/eval/${encodeURIComponent(id)}`);
+    if (BUSY.has(run.status)) for (const k of Object.keys(asked)) delete asked[k]; // rows still coming
     qaType ??= (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
     if (run.status !== probedStatus) resumeProbe = null;
     if (RESUMABLE.has(run.status) && resumeProbe === null) {
@@ -361,7 +377,7 @@ async function refresh() {
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("gaps", gapsHtml());
-    $("note").textContent = run.gaps.length
+    $("note").textContent = run.gaps.length && !busy()
       ? "Leading is not winning: the order above is this run's, and the declared pair is the only comparison the answer rests on."
       : "";
     paint("best", bestHtml());
@@ -378,8 +394,8 @@ async function refresh() {
   if (run && BUSY.has(run.status)) timer = setTimeout(refresh, POLL_MS);
 }
 
-$("q-method").addEventListener("change", loadQuestions);
-$("q-wrong").addEventListener("change", loadQuestions);
+$("q-method").addEventListener("change", showQuestions);
+$("q-wrong").addEventListener("change", showQuestions);
 $("q-disagree").addEventListener("change", loadQuestions);
 $("questions-box").addEventListener("toggle", () => {
   if ($("questions-box").open) loadQuestions();
