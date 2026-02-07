@@ -1,9 +1,10 @@
-import { api, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, head, methodLabel, pct, pill, pts,
-  refreshSpend, shell, verdictText } from "/static/ui.js";
+import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, gapSpan,
+  head, legendHtml, methodLabel, paint, pct, pill, plural, pts, refreshSpend, shell, short, usd, verdictHtml,
+  wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
-const BUSY = new Set(["loading", "rekeying", "evaluating", "queued"]);
+const BUSY_STATES = new Set(["loading", "rekeying", "evaluating", "queued"]); // the collection's own
 const DATASETS = { mcq: "scienceqa", multihop: "musique", table: "tatqa" };
 const GROUPS = [
   ["baseline", "Baseline"],
@@ -17,27 +18,16 @@ const MODELS = ["claude-haiku-5-5", "claude-sonnet-5-5"];
 
 const name = decodeURIComponent(location.pathname.split("/")[2] ?? "");
 const enc = encodeURIComponent(name);
-const $ = (id) => document.getElementById(id);
 
 let cat = null;
 let col = null; // the latest GET /collections/{name}
 let runs = [];
 let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
-const painted = {}; // section id -> html last drawn, so a refresh never rebuilds what has not changed
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
 
 shell(`c/${name}`);
-
-function paint(id, html) {
-  if (painted[id] === html) return false;
-  painted[id] = html;
-  $(id).innerHTML = html;
-  return true;
-}
-
-const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 
 // -- head and answer -------------------------------------------------------------
 
@@ -45,13 +35,13 @@ const plural = (n, noun) => `${count(n)} ${noun}${n === 1 ? "" : "s"}`;
 function staleNotes() {
   const a = col.answer;
   // A run that recorded no versions (migrated) has nothing to compare against: no note.
-  return a ? a.since.changes.map((c) => `${c} changed after run ${a.run_id.slice(0, 4)}`) : [];
+  return a ? a.since.changes.map((c) => `${c} changed after run ${short(a.run_id)}`) : [];
 }
 
 function headHtml() {
   const type = cat.qa_types[col.qa_type];
   const noun = type?.item_noun ?? "item";
-  const lists = col.keyword_lists ? `keyword lists ${col.keyword_version}` : "no keyword lists yet";
+  const lists = col.keyword_lists ? `keyword lists ${short(col.keyword_version)}` : "no keyword lists yet";
   const status = [plural(col.count, noun), plural(col.questions, "question"), lists, col.dense_model]
     .map(esc)
     .join(" · ");
@@ -68,32 +58,40 @@ function headHtml() {
 function answerHtml() {
   const a = col.answer;
   if (!a) return '<p class="muted">No answer yet. Run the keyword methods against Hybrid to get one.</p>';
-  const span = Math.max(10, Math.ceil(Math.max(Math.abs(a.lo), Math.abs(a.hi), Math.abs(a.diff)) / 5) * 5);
-  const label = `${methodLabel(a.candidate, cat)} against ${methodLabel(a.reference, cat)}`;
-  return `<p class="verdict">${esc(verdictText(a, col.qa_type, cat))}</p>
-    <p>${gapBar(a.lo, a.diff, a.hi, span)} <span class="muted">${esc(label)}, ${esc(pts(a.diff, a.lo, a.hi))}</span></p>
-    <p class="muted">From <a href="/c/${encodeURIComponent(name)}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
-      a.run_id.slice(0, 4))}</a> at ${esc(clock(a.at))}${a.answered ? "" : ", retrieval only"} ·
+  const span = gapSpan([a.lo, a.hi, a.diff]);
+  return `<p class="verdict">${verdictHtml(a, col.qa_type, cat)}</p>
+    <div>${gapBar(a.lo, a.diff, a.hi, span)}${axisHtml(span)}</div>
+    ${legendHtml()}
+    <p class="muted">From <a href="/c/${enc}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
+      short(a.run_id))}</a> at ${esc(clock(a.at))}${a.answered ? "" : ", retrieval only"} ·
       run ${esc(a.runs)} on this collection</p>`;
 }
 
 // -- runs --------------------------------------------------------------------------
 
+// What a finished run said about the declared pair: "Yes +6 pts (2–10)", or "–" without it.
+function saidHtml(r) {
+  const a = r.answer_summary;
+  if (!a || BUSY.has(r.status)) return "–";
+  return `${wordHtml(a)} ${esc(pts(a.diff, a.lo, a.hi))}`;
+}
+
 function runsHtml() {
   if (!runs.length) return '<p class="muted">No runs yet.</p>';
   const rows = runs
     .map((r) => {
-      const methods = (r.methods ?? []).map((m) => methodLabel(m, cat)).join(", ");
+      const methods = (r.methods ?? []).map((m) => methodLabel(m, cat)).join(" · ");
       const progress = r.status === "running" ? ` ${pct(r.progress)}` : "";
-      return `<tr><td><a href="/c/${encodeURIComponent(name)}/runs/${encodeURIComponent(r.id)}">${esc(
+      return `<tr data-run="${esc(r.id)}"><td><a href="/c/${enc}/runs/${encodeURIComponent(r.id)}">${esc(
         clock(r.created_at))}</a></td><td>${esc(methods)}</td><td class="num">${esc(r.question_count)}</td>
-        <td>${r.answer ? "Answered" : "Retrieval only"}</td>
-        <td class="num">$${Number(r.usd_total ?? 0).toFixed(2)}</td>
+        <td>${r.answer ? "Answered" : "Retrieval only"}</td><td data-said>${saidHtml(r)}</td>
+        <td class="num">${esc(usd(r.usd_total))}</td>
         <td>${pill(r.status)}${esc(progress)}</td></tr>`;
     })
     .join("");
   return `<table><thead><tr><th>Time</th><th>Methods</th><th>Questions</th><th>Answers</th>
-    <th>Cost</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <th title="The verdict on Keywords per list against Hybrid">Said</th><th>Cost</th><th>Status</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
 }
 
 function runFormHtml() {
@@ -117,7 +115,7 @@ function runFormHtml() {
         <option value="dev">Dev slice (${esc(count(col.dev_questions))})</option>
         <option value="full">All (${esc(count(col.questions))})</option></select></label></div>
     <div class="row"><button type="button" id="rf-estimate">Estimate</button>
-      <span id="rf-confirm"></span><span id="rf-msg" class="err"></span></div></div>`;
+      <span id="rf-confirm"></span><span id="rf-msg" class="err" role="status"></span></div></div>`;
 }
 
 function bindRunForm() {
@@ -175,7 +173,7 @@ function toggleRunForm() {
 
 // A load is offered while nothing is loaded, or the newest load did not finish.
 function needsLoad() {
-  if (BUSY.has(col.state)) return false;
+  if (BUSY_STATES.has(col.state)) return false;
   return col.count === 0 || col.questions === 0 || (loadJob != null && loadJob.status !== "done");
 }
 
@@ -193,7 +191,7 @@ function itemsHtml() {
     <div>${unfinished ? "Finish loading" : "Load"} <code>${esc(dataset)}</code> into this collection.</div>
     <div class="row"><label>Limit (blank for all)<input id="ld-limit" type="number" min="1"></label>
       <button type="button" id="ld-go">${esc(label)}</button>
-      <span id="ld-confirm"></span><span id="ld-msg" class="err"></span></div></div>`;
+      <span id="ld-confirm"></span><span id="ld-msg" class="err" role="status"></span></div></div>`;
 }
 
 function bindLoad() {
@@ -207,14 +205,14 @@ function bindLoad() {
     try {
       const first = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, confirm: false } });
       if (!first.estimate) {
-        $("ld-confirm").textContent = `Queued (job ${first.job_id.slice(0, 4)})`;
+        $("ld-confirm").textContent = `Queued (job ${short(first.job_id)})`;
         await refresh();
         return;
       }
       confirmSpend($("ld-confirm"), first.estimate, async () => {
         try {
           const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, confirm: true } });
-          $("ld-confirm").textContent = `Queued (job ${job.job_id.slice(0, 4)})`;
+          $("ld-confirm").textContent = `Queued (job ${short(job.job_id)})`;
           refreshSpend();
           await refresh();
         } catch (e) {
@@ -265,7 +263,7 @@ function historyHtml() {
     .map((v) => {
       const counts = LIST_KEYS.map(([k]) => `${count(v.counts[k] ?? 0)} ${k}`).join(", ");
       const active = v.active ? ' · <span class="ok">active</span>' : "";
-      return `<li><code>${esc(v.version.slice(0, 6))}</code> ${esc(clock(v.created_at))} · ${esc(counts)}${active}
+      return `<li><code>${esc(short(v.version))}</code> ${esc(clock(v.created_at))} · ${esc(counts)}${active}
         <button type="button" class="secondary" data-version="${esc(v.version)}">Load into editor</button></li>`;
     })
     .join("");
@@ -279,7 +277,7 @@ async function loadVersion(version) {
     const v = await api("/collections/" + enc + "/keyword-lists/" + encodeURIComponent(version));
     fillLists(v.lists);
     listsDirty = true;
-    note(`Loaded version ${esc(version.slice(0, 6))}. Save lists to use it.`);
+    note(`Loaded version ${esc(short(version))}. Save lists to use it.`);
   } catch (e) {
     note(`<span class="err">${esc(e.message)}</span>`);
   }
@@ -307,9 +305,8 @@ async function saveLists() {
     const saved = await api("/collections/" + enc + "/keyword-lists", { method: "PUT", body: readLists() });
     listsDirty = false;
     listsVersion = col.keyword_version ?? null; // keep the edits until the rekey switches version
-    note(`<span class="ok">Saved as version ${esc(saved.version)}: re-keys ${esc(
-      plural(col.count, "item"))}.</span> Job ${esc(
-      saved.job_id.slice(0, 4))} ${pill("queued")}`);
+    note(`<span class="ok">Saved as version ${esc(short(saved.version))}: re-keys ${esc(
+      plural(col.count, "item"))}.</span> Job ${esc(short(saved.job_id))} ${pill("queued")}`);
     await refresh();
   } catch (e) {
     note(`<span class="err">${esc(e.message)}</span>`);
@@ -350,26 +347,17 @@ function syncLists() {
 
 // -- delete ---------------------------------------------------------------------------
 
-function showDelete(asking = false, message = "") {
-  $("delete").innerHTML = asking
-    ? `<p>Delete ${esc(name)}, with its items, questions, lists and runs? This cannot be undone.</p>
-       <div class="actions"><button type="button" id="del-yes" class="danger">Yes, delete ${esc(name)}</button>
-       <button type="button" id="del-no" class="secondary">Keep it</button></div>`
-    : `<div class="actions"><button type="button" id="del-ask" class="secondary">Delete…</button></div>
-       <p class="err">${esc(message)}</p>`;
-  if (asking) {
-    $("del-no").addEventListener("click", () => showDelete());
-    $("del-yes").addEventListener("click", async () => {
-      try {
-        await api("/collections/" + enc, { method: "DELETE" });
-        location.href = "/";
-      } catch (e) {
-        showDelete(false, e.message);
-      }
-    });
-  } else {
-    $("del-ask").addEventListener("click", () => showDelete(true));
-  }
+function buildDelete() {
+  $("delete").innerHTML = `<div class="actions"><button type="button" id="del-ask" class="secondary">Delete…</button></div>
+    <div id="del-confirm"></div>`;
+  $("del-ask").addEventListener("click", () =>
+    askDelete($("del-confirm"), {
+      question: `Delete ${name}, with its items, questions, lists and runs? This cannot be undone.`,
+      yes: `Yes, delete ${name}`,
+      path: `/collections/${enc}`,
+      gone: "/",
+    })
+  );
 }
 
 // -- refresh ----------------------------------------------------------------------------
@@ -397,10 +385,10 @@ async function refresh() {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Collections", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }
-  timer = setTimeout(refresh, col && BUSY.has(col.state) ? FAST_MS : SLOW_MS);
+  timer = setTimeout(refresh, col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS);
 }
 
 $("new-run").addEventListener("click", toggleRunForm);
 buildLists();
-showDelete();
+buildDelete();
 refresh();

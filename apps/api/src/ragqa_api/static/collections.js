@@ -1,5 +1,5 @@
-import { api, catalog, clock, confirmSpend, count, esc, head, pct, pill, refreshSpend, shell, verdictText }
-  from "/static/ui.js";
+import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, pct, pill, plural,
+  refreshSpend, shell, short, verdictHtml } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
 const BENCHMARKS = [
@@ -8,7 +8,6 @@ const BENCHMARKS = [
   { name: "tq", qa_type: "table", summarize: false, dataset: "tatqa" },
 ];
 
-const $ = (id) => document.getElementById(id);
 let cat = null;
 let lastList = "";
 
@@ -23,12 +22,14 @@ $("head").innerHTML = head({
 function rowHtml(c) {
   const type = cat.qa_types[c.qa_type];
   const noun = type?.item_noun ?? "item";
-  const counts = `${count(c.count)} ${noun}${c.count === 1 ? "" : "s"}, ${count(c.questions)} Qs`;
+  const counts = `${plural(c.count, noun)}, ${plural(c.questions, "question")}`;
   const a = c.answer;
+  const pair = cat.answer_pair.map((m) => methodLabel(m, cat)).join(" and ");
   const answer = a
-    ? `${esc(verdictText(a, c.qa_type, cat))}<div class="small">run ${esc(a.run_id.slice(0, 4))} · ${esc(clock(a.at))}${
-        a.answered ? "" : " · retrieval only"}</div>`
-    : '<span class="muted">No run yet</span>';
+    ? `<div title="${esc(LEGEND)}">${verdictHtml(a, c.qa_type, cat)}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
+        clock(a.at))}${a.answered ? "" : " · retrieval only"}</div>`
+    : `<span class="muted">No answer yet</span><div class="small">${esc(
+        c.runs ? `${plural(c.runs, "run")}, none with ${pair}` : `no runs yet: run ${pair} to get one`)}</div>`;
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
   return `<a class="row-link" href="/c/${encodeURIComponent(c.name)}">
     <div><strong>${esc(c.name)}</strong> · ${esc(type?.label ?? c.qa_type)}
@@ -66,10 +67,10 @@ async function showForm() {
   $("form").innerHTML = `<div class="card form">
     <label>Name<input id="f-name" autocomplete="off"></label>
     <label>Type<select id="f-type">${types}</select></label>
-    <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with Claude (costs money)</label>
+    <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with Claude <span class="credit muted">uses credit</span></label>
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
-      <span id="f-msg" class="err"></span></div></div>`;
+      <span id="f-msg" class="err" role="status"></span></div></div>`;
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));
   $("f-create").addEventListener("click", create);
 }
@@ -117,7 +118,7 @@ async function setup() {
         step(`${b.name} created`, "ok");
         const first = await api(`/collections/${b.name}/load`, { method: "POST", body: { dataset: b.dataset } });
         if (first.estimate) paying.push({ b, estimate: first.estimate });
-        else step(`${b.name}: loading ${b.dataset} (queued, job ${first.job_id.slice(0, 4)})`, "ok");
+        else step(`${b.name}: loading ${b.dataset} (queued, job ${short(first.job_id)})`, "ok");
       } catch (e) {
         step(`${b.name}: ${e.message}`, "err");
       }
@@ -145,7 +146,7 @@ function confirmLoads(paying) {
           method: "POST",
           body: { dataset: b.dataset, confirm: true },
         });
-        step(`${b.name}: loading ${b.dataset} (queued, job ${job.job_id.slice(0, 4)})`, "ok");
+        step(`${b.name}: loading ${b.dataset} (queued, job ${short(job.job_id)})`, "ok");
       } catch (e) {
         step(`${b.name}: ${e.message}`, "err");
       }
