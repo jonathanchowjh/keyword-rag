@@ -29,16 +29,16 @@
   <form id="form">
     <div class="row">
       <label>Collection <select id="collection" required></select></label>
-      <label>k <input id="k" type="number" value="3" min="1" max="20" style="width:70px"></label>
-      <label>rrf_k <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
+      <label title="How many items each method retrieves; runs use 5">Items per method (k) <input id="k" type="number" value="5" min="1" max="20" style="width:70px"></label>
+      <label title="When methods merge their rankings, a higher value lets lower-ranked items count for more; 60 is the usual">Merge constant (rrf_k) <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
     </div>
     <label>Question <textarea id="question" required></textarea></label>
     <label>Choices, one per line (multiple choice only) <textarea id="choices" style="min-height:50px"></textarea></label>
-    <div class="methods" id="methods"></div>
+    <fieldset><legend>Methods</legend><div class="methods" id="methods"></div></fieldset>
     <div class="row">
       <label style="flex-direction:row;display:flex;gap:6px;color:var(--fg)"><input id="answer" type="checkbox"> Have Claude answer the question <span class="credit muted">uses credit</span></label>
       <button id="run">Run</button>
-      <span id="status" class="muted"></span>
+      <span id="status" class="muted" role="status"></span>
     </div>
   </form>
 

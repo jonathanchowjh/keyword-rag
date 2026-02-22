@@ -1,6 +1,5 @@
-import { api, catalog, creditMark, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, creditMark, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
 
-const $ = (id) => document.getElementById(id);
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
 shell("lab");
@@ -19,10 +18,13 @@ async function loadCollections() {
   else $("status").textContent = "No collections yet. Create one from the Collections page.";
 }
 
+let asking = 0; // bumped by each pick, so only the newest one draws the method list
+
 async function loadMethods() {
+  const mine = ++asking;
   const name = $("collection").value;
   const detail = await api(`/collections/${encodeURIComponent(name)}`);
-  if ($("collection").value !== name) return; // the choice moved on while this was loading
+  if (mine !== asking) return; // the choice moved on while this was loading
   $("methods").innerHTML = detail.methods_available
     .map(
       (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${creditMark(m, detail.summarize)}</label>`,
@@ -38,7 +40,7 @@ function hitCard(hit) {
     .map((w) => `<span class="chip ${matched.has(w) ? "on" : ""}">${esc(w)}</span>`)
     .join("");
   const gold = hit.answer ? `<span class="muted">example answer ${esc(hit.answer)}</span>` : "";
-  return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>${hit.score.toFixed(2)}</span></div>
+  return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>score ${hit.score.toFixed(2)}</span></div>
     <div>${esc(hit.text.slice(0, 300))}${hit.text.length > 300 ? "…" : ""}</div>
     <div>${chips}</div>${gold}</div>`;
 }

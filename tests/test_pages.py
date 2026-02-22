@@ -1,5 +1,6 @@
 """The console pages, driven in a real browser against the app on fakes."""
 
+import re
 from contextlib import contextmanager
 
 import httpx
@@ -19,7 +20,7 @@ def test_collections_page_shows_the_answer(page, seeded):
     row = page.locator('main a.row-link[href="/c/c"]')
     expect(row).to_be_visible()
     expect(row).to_contain_text("Keywords per list")
-    expect(row).to_contain_text("run " + seeded.run_id[:4])
+    expect(row).to_contain_text("run " + seeded.run_id[:8])
     expect(row).to_contain_text("Ready")
 
 
@@ -85,7 +86,7 @@ def test_a_run_without_recorded_versions_does_not_warn_of_stale_lists(page, seed
     r = httpx.put(seeded.url + "/collections/migrated/keyword-lists", json=lists)
     seeded.wait(r.json()["job_id"])
     page.goto(seeded.url + "/c/migrated")
-    expect(page.get_by_text("run " + run_id[:4]).first).to_be_visible(timeout=15000)
+    expect(page.get_by_text("run " + run_id[:8]).first).to_be_visible(timeout=15000)
     expect(page.get_by_text("changed after run")).to_have_count(0)
 
 
@@ -180,7 +181,7 @@ def test_run_page_questions_open_with_gold_and_answer(page, seeded):
 def test_run_head_says_what_changed_since_the_run(page, seeded):
     run_id = seeded.build("since", run=True)
     page.goto(f"{seeded.url}/c/since/runs/{run_id}")
-    expect(page.locator("#head")).to_contain_text("Run " + run_id[:4])
+    expect(page.locator("#head")).to_contain_text("Run " + run_id[:8])
     expect(page.get_by_text("changed after this run")).to_have_count(0)
     lists = {"topic": ["x", "y"], "method": ["experiment"], "common": ["rate"]}
     r = httpx.put(seeded.url + "/collections/since/keyword-lists", json=lists)
@@ -419,7 +420,7 @@ def test_collection_load_shows_its_estimate_and_queues_only_on_start(page, seede
     expect(page.get_by_text("51 Claude calls")).to_be_visible()
     assert [b.get("confirm") for b in seen] == [False]
     page.get_by_role("button", name="Start").click()
-    expect(page.get_by_text("Queued (job ab12)")).to_be_visible()
+    expect(page.get_by_text("Queued (job ab12cd)")).to_be_visible()
     assert [b.get("confirm") for b in seen] == [False, True]
 
 
@@ -428,7 +429,7 @@ def test_collection_load_that_is_free_queues_at_once(page, seeded):
     seen = route_load(page, "freeload", lambda b: (202, {"job_id": "ee99ff"}))
     page.goto(seeded.url + "/c/freeload")
     page.get_by_role("button", name="Load scienceqa").click()
-    expect(page.get_by_text("Queued (job ee99)")).to_be_visible()
+    expect(page.get_by_text("Queued (job ee99ff)")).to_be_visible()
     assert len(seen) == 1
 
 
@@ -444,8 +445,8 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     expect(page.get_by_role("button", name="Start")).to_have_count(1)
     assert [b.get("confirm") for b in seen["sqa"]] == [None] and len(seen["tq"]) == 1
     page.get_by_role("button", name="Start").click()
-    expect(page.get_by_text("sqa: loading scienceqa (queued, job sqa0)")).to_be_visible()
-    expect(page.get_by_text("tq: loading tatqa (queued, job tq01)")).to_be_visible()
+    expect(page.get_by_text("sqa: loading scienceqa (queued, job sqa01234)")).to_be_visible()
+    expect(page.get_by_text("tq: loading tatqa (queued, job tq012345)")).to_be_visible()
     assert [b.get("confirm") for b in seen["sqa"]] == [None, True]
     assert [b.get("confirm") for b in seen["tq"]] == [None, True]
     assert len(seen["mq"]) == 1  # already queued by its first answer, never posted twice
@@ -494,9 +495,13 @@ def test_free_score_verdict_carries_the_caveat_on_every_page(page, seeded):
     page.goto(seeded.url + "/c/fs")
     expect(page.locator(".verdict")).to_contain_text(CAVEAT)
     page.goto(f"{seeded.url}/c/fs/runs/{run_id}")
-    expect(page.locator(".verdict")).to_contain_text(CAVEAT)
+    # on the run page the caveat is its own sentence under the verdict, not mid-sentence
+    expect(page.locator(".verdict")).to_contain_text("on the same 40 questions.")
+    expect(page.locator("#answer")).to_contain_text(CAVEAT, ignore_case=True)
+    expect(page.locator(".verdict")).not_to_contain_text(CAVEAT, ignore_case=True)
     page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
-    expect(page.locator(".verdict")).not_to_contain_text(CAVEAT)
+    expect(page.locator(".verdict")).to_be_visible()
+    expect(page.locator("#answer")).not_to_contain_text(CAVEAT, ignore_case=True)
 
 
 def test_collection_offers_finish_loading_after_an_interrupted_load(page, seeded):
@@ -713,3 +718,278 @@ def test_sidebar_shows_no_problem_text_when_there_are_none(page, seeded):
     page.goto(seeded.url + "/")
     expect(page.locator("#worker-dot")).to_have_class("dot ok")
     expect(page.locator("#worker-problem")).to_be_empty()
+
+
+# -- console polish, batch E (R58-R60) ---------------------------------------------
+
+
+def test_a_queued_run_waits_for_its_answer_and_offers_only_cancel(page, seeded):
+    with worker_stopped(seeded, "qr") as run_id:
+        page.goto(f"{seeded.url}/c/qr/runs/{run_id}")
+        expect(page.locator("#answer")).to_contain_text("The answer appears when the run finishes")
+        expect(page.locator("#gaps")).to_contain_text("The gaps appear when the run finishes")
+        expect(page.locator("#head")).to_contain_text("– questions")
+        expect(page.locator("#head")).not_to_contain_text("0 questions")
+        expect(page.get_by_text("does not include")).to_have_count(0)
+        expect(page.get_by_role("button", name="Cancel")).to_be_visible()
+        expect(page.get_by_role("button", name="Delete…")).to_have_count(0)
+        expect(page.get_by_role("button", name="Re-run")).to_have_count(0)
+
+
+def test_a_finished_run_names_only_the_method_it_lacks(page, seeded):
+    seeded.build("half")
+    run_id = seeded.run("half", ["hybrid"])
+    page.goto(f"{seeded.url}/c/half/runs/{run_id}")
+    expect(page.locator("#answer")).to_contain_text(
+        "This run does not include Keywords per list, so it gives no answer."
+    )
+    expect(page.locator("#answer")).not_to_contain_text("and Hybrid")
+    expect(page.locator("#gaps")).to_contain_text("no other method has results")
+    expect(page.get_by_role("button", name="Delete…")).to_be_visible()
+
+
+def test_verdicts_explain_the_range_and_their_words(page, seeded):
+    page.goto(seeded.url + "/")
+    cell = page.locator('main a.row-link[href="/c/c"] [title*="spans 0"]')
+    expect(cell).to_have_count(1)
+    expect(cell.locator("strong.word")).to_have_count(1)  # the verdict word has weight
+    page.goto(seeded.url + "/c/c")
+    expect(page.locator("#answer .legend")).to_contain_text("Can't tell: it spans 0")
+    expect(page.locator("#answer .verdict strong.word")).to_have_count(1)
+    expect(page.locator("#answer .axis")).to_contain_text("pts")
+    # the verdict says the names and numbers; nothing under the bar repeats them
+    expect(page.locator("#answer")).not_to_contain_text("against Hybrid")
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#answer .legend")).to_contain_text("spans 0")
+    expect(page.locator("#answer .legend")).to_contain_text("Ahead, behind and can't tell")
+
+
+def test_run_page_says_what_the_metric_means_and_draws_the_axis(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#gaps")).to_contain_text("Share of questions answered correctly")
+    expect(page.locator("#gaps thead th")).to_have_count(4)
+    axis = page.locator("#gaps thead .axis")
+    expect(axis).to_contain_text("−")
+    expect(axis).to_contain_text("pts")
+    page.get_by_text("Each method's own score").click()
+    says = "Share of questions answered correctly"
+    expect(page.locator(f'#scores th[title="{says}"]')).to_have_count(1)
+
+
+def test_raw_reasoning_match_is_marked_no_chance_level(page, seeded):
+    def raw(route):
+        data = route.fetch().json()
+        data["scale"] = {"unit": "raw", "factor": 100}
+        data["headline"] = "solution_sim@1"
+        data["answer"]["metric"] = "solution_sim@1"
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", raw)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#answer")).to_contain_text("no chance level")
+    expect(page.locator("#gaps > p").first).to_contain_text("no chance level")
+    for row in page.locator("[data-gap-row]").all():
+        expect(row).to_contain_text("no chance level")
+
+
+def test_runs_table_says_what_each_run_said(page, seeded):
+    page.goto(seeded.url + "/c/c")
+    said = page.locator("[data-said]").first
+    expect(said).to_have_text(re.compile(r"^(Yes|No|Can't tell) [+−]\d+ pts?"))
+    expect(said.locator("strong.word")).to_have_count(1)
+    page.goto(seeded.url + "/c/vo")
+    expect(page.locator("[data-said]").first).to_have_text("–")
+
+
+def test_money_below_a_cent_never_shows_as_zero(page, seeded):
+    def cheap_rows(route):
+        rows = route.fetch().json()
+        for r in rows:
+            r["usd_total"] = 0.004
+        route.fulfill(json=rows)
+
+    def cheap_run(route):
+        data = route.fetch().json()
+        data["usd_total"] = 0.004
+        route.fulfill(json=data)
+
+    page.route(lambda url: "/eval?collection=c" in url, cheap_rows)
+    page.route(f"**/eval/{seeded.run_id}", cheap_run)
+    page.goto(seeded.url + "/c/c")
+    expect(page.locator("[data-run]").first).to_contain_text("< $0.01")
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#head")).to_contain_text("< $0.01")
+    expect(page.locator("#head")).not_to_contain_text("$0.00")
+
+
+def test_own_scores_use_a_true_minus_and_never_print_nan(page, seeded):
+    sim = "solution_sim@1"
+
+    def scores(route):
+        data = route.fetch().json()
+        data["methods"]["random_example"][sim] = {"mean": 0.5, "lo": 0.45, "hi": 0.55}
+        data["methods"]["hybrid"][sim] = {"mean": 0.3, "lo": 0.25, "hi": 0.35}
+        data["methods"]["kw_individual"]["accuracy"] = {"mean": None, "lo": None, "hi": None}
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", scores)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Each method's own score").click()
+    hybrid = page.locator("#scores tbody tr", has_text="hybrid").first
+    expect(hybrid).to_contain_text("−40 match")  # (0.3 - 0.5) / (1 - 0.5) * 100
+    expect(hybrid).to_contain_text("−50 to −30")
+    kw = page.locator("#scores tbody tr", has_text="kw_individual").first
+    expect(kw).to_contain_text("n/a")
+    expect(page.locator("#scores")).not_to_contain_text("NaN")
+
+
+def test_worker_page_links_jobs_and_problems_to_their_pages(page, seeded):
+    with worker_stopped(seeded, "wl") as run_id:
+
+        def problem(route):
+            data = route.fetch().json()
+            data["problems"].append(f"Eval {run_id[:4]} on wl failed")
+            route.fulfill(json=data)
+
+        page.route("**/status", problem)
+        page.goto(seeded.url + "/worker")
+        queued = page.locator(f"[data-queued-job='{run_id}'] a")
+        expect(queued).to_have_attribute("href", f"/c/wl/runs/{run_id}")
+        expect(queued).to_contain_text("Evaluating wl")
+        expect(page.locator("[data-finished-job] a[href='/c/wl']").first).to_be_visible()  # re-key
+        expect(page.locator("[data-problem] a", has_text="on wl failed")).to_have_attribute(
+            "href", f"/c/wl/runs/{run_id}"
+        )
+        expect(page.locator("#queued thead th")).to_have_count(3)
+        expect(page.locator("#finished thead th")).to_have_count(4)
+        expect(page.locator("#worker-dot")).to_have_attribute("aria-label", "needs attention")
+
+
+def test_worker_resume_estimate_shows_in_the_clicked_row(page, seeded):
+    ok = seeded.build("wrow", run=True)
+    interrupt(seeded, ok)
+    page.goto(seeded.url + "/worker")
+    page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
+    box = page.locator(f"[data-finished-job='{ok}'] + tr[data-resume-row]")
+    expect(box).to_contain_text("Claude call")
+    expect(box.get_by_role("button", name="Start")).to_be_in_viewport()
+    page.wait_for_timeout(5500)  # past one poll: the estimate and its Start stay put
+    expect(box.get_by_role("button", name="Start")).to_be_visible()
+    assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
+
+
+def questions_counter(page, run_id):
+    """Counts GET .../questions per disagree value."""
+    seen = {"true": 0, "false": 0}
+
+    def count(route):
+        seen["true" if "disagree=true" in route.request.url else "false"] += 1
+        route.continue_()
+
+    page.route(f"**/eval/{run_id}/questions*", count)
+    return seen
+
+
+def test_questions_filter_without_refetching_and_sort_naturally(page, seeded):
+    run_id = disagreeing_run(seeded, "qcache")
+    seen = questions_counter(page, run_id)
+    page.goto(f"{seeded.url}/c/qcache/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    summaries = page.locator("#questions details > summary")
+    expect(summaries).to_have_count(40)
+    texts = summaries.all_inner_texts()
+    order = [int(re.search(r"question (\d+)", t).group(1)) for t in texts]
+    assert order == sorted(order)  # q2 before q10
+    page.locator("#q-method").select_option("hybrid")
+    page.get_by_label("Wrong only").check()
+    expect(page.locator("#questions details")).to_have_count(1)
+    page.get_by_label("Wrong only").uncheck()
+    page.get_by_label("Where methods disagree").check()
+    expect(page.locator("#questions details")).to_have_count(1)
+    page.get_by_label("Where methods disagree").uncheck()
+    expect(page.locator("#questions details")).to_have_count(40)
+    assert seen == {"false": 1, "true": 1}
+
+
+def test_a_late_questions_response_does_not_overwrite_a_newer_choice(page, seeded):
+    run_id = disagreeing_run(seeded, "qrace")
+    held = []
+
+    def hold_disagree(route):
+        if "disagree=true" in route.request.url:
+            held.append(route)
+        else:
+            route.continue_()
+
+    page.route(f"**/eval/{run_id}/questions*", hold_disagree)
+    page.goto(f"{seeded.url}/c/qrace/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details")).to_have_count(40)
+    page.get_by_label("Where methods disagree").check()
+    page.wait_for_timeout(300)  # let the held request reach the route
+    page.get_by_label("Where methods disagree").uncheck()
+    expect(page.locator("#questions details")).to_have_count(40)
+    for route in held:
+        route.continue_()
+    page.wait_for_timeout(500)
+    assert held, "the disagree request was never made"
+    expect(page.locator("#questions details")).to_have_count(40)
+
+
+def lab_methods(page):
+    return page.locator("#methods input[type=checkbox]")
+
+
+def test_lab_method_list_follows_the_last_pick_when_responses_race(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "labbare", "qa_type": "mcq"})
+    held = []
+    holding = {"on": False}
+
+    def hold_c(route):
+        if holding["on"]:
+            held.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/collections/c", hold_c)
+    page.goto(seeded.url + "/lab")
+    page.locator("#collection").select_option("c")
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(1)
+    expect(page.locator("fieldset legend", has_text="Methods")).to_be_visible()
+    # A -> B -> A: c's answer is held while the pick moves to labbare, back to c, then labbare.
+    holding["on"] = True
+    page.locator("#collection").select_option("labbare")
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(0)  # no lists
+    page.locator("#collection").select_option("c")
+    page.locator("#collection").select_option("labbare")
+    expect(lab_methods(page).first).to_be_visible()
+    page.wait_for_timeout(300)
+    assert held, "the request for c was never held"
+    for route in held:
+        route.continue_()
+    page.wait_for_timeout(500)
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(0)
+    # and the other way: labbare is picked last but answered first, c's late answer loses
+    holding["on"] = True
+    held.clear()
+    page.locator("#collection").select_option("c")
+    page.locator("#collection").select_option("labbare")
+    page.wait_for_timeout(300)
+    for route in held:
+        route.continue_()
+    page.wait_for_timeout(500)
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(0)
+    # A -> B -> A with A's first answer arriving last: the newest pick of c draws, not the old one
+    held.clear()
+    page.locator("#collection").select_option("c")
+    page.locator("#collection").select_option("labbare")
+    page.locator("#collection").select_option("c")
+    page.wait_for_timeout(300)
+    assert len(held) == 2
+    held[1].continue_()
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(1)
+    holding["on"] = False
+    held[0].continue_()
+    page.wait_for_timeout(500)
+    expect(page.locator("#methods input[value=kw_individual]")).to_have_count(1)
+    expect(page.locator("#collection")).to_have_value("c")
