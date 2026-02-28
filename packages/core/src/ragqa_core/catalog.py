@@ -120,14 +120,14 @@ METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "table": {"em": "Exact answer", "f1": "Answer overlap"},
 }
 
-_TABLE_SAYS = (
-    "Share answered correctly. Numbers are scored all-or-nothing; "
-    "only text answers get partial credit"
-)
 METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "mcq": {},
     "multihop": {},
-    "table": {"em": _TABLE_SAYS, "f1": _TABLE_SAYS},
+    "table": {
+        "em": "Share answered exactly right; numbers are compared at 2 decimal places",
+        "f1": "Share answered right, with partial credit for text answers that overlap the gold "
+        "one; numbers are all-or-nothing",
+    },
 }
 
 QA_TYPES: dict[QaType, dict] = {

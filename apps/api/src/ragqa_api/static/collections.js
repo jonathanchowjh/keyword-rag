@@ -29,7 +29,7 @@ function rowHtml(c) {
     ? `<div title="${esc(LEGEND)}">${verdictHtml(a, c.qa_type, cat)}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
         clock(a.at))}${a.answered ? "" : " · retrieval only"}</div>`
     : `<span class="muted">No answer yet</span><div class="small">${esc(
-        c.runs ? `${plural(c.runs, "run")}, none with ${pair}` : `no runs yet: run ${pair} to get one`)}</div>`;
+        c.runs ? `${plural(c.runs, "run")}, none finished with ${pair}` : `no runs yet: run ${pair} to get one`)}</div>`;
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
   return `<a class="row-link" href="/c/${encodeURIComponent(c.name)}">
     <div><strong>${esc(c.name)}</strong> · ${esc(type?.label ?? c.qa_type)}

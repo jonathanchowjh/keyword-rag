@@ -285,11 +285,13 @@ export function confirmSpend(el, estimate, onStart) {
 
 // Resuming a job: the click asks only for the estimate, or the refusal; spending needs Start.
 // `box` shows the estimate, then any refusal or error; `done` runs once the job is requeued.
-export async function askResume(box, jobId, done) {
+// `current()` says whether this ask is still the one the box is for: a later click wins.
+export async function askResume(box, jobId, done, current = () => true) {
   box.innerHTML = "";
   const path = `/jobs/${encodeURIComponent(jobId)}/resume`;
   try {
     const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
+    if (!current()) return;
     confirmSpend(box, estimate, async () => {
       try {
         await api(path, { method: "POST", body: { confirm: true } });
@@ -301,6 +303,7 @@ export async function askResume(box, jobId, done) {
       }
     });
   } catch (e) {
+    if (!current()) return;
     box.innerHTML = `<p class="warn" role="status" data-refusal>${esc(e.message)}</p>`; // the refusal
   }
 }

@@ -868,12 +868,26 @@ def test_worker_page_links_jobs_and_problems_to_their_pages(page, seeded):
 def test_worker_resume_estimate_shows_in_the_clicked_row(page, seeded):
     ok = seeded.build("wrow", run=True)
     interrupt(seeded, ok)
+    polls = {"n": 0}
+
+    def changing(route):  # each poll changes a finished row, so the table really repaints
+        response = route.fetch()
+        jobs = response.json()
+        polls["n"] += 1
+        for job in jobs:
+            if job["id"] == ok:
+                job["updated_at"] = f"2026-10-27T10:{polls['n'] % 60:02d}:00"
+        route.fulfill(response=response, json=jobs)
+
+    page.route("**/jobs?limit=200", changing)
     page.goto(seeded.url + "/worker")
     page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
     box = page.locator(f"[data-finished-job='{ok}'] + tr[data-resume-row]")
     expect(box).to_contain_text("Claude call")
     expect(box.get_by_role("button", name="Start")).to_be_in_viewport()
-    page.wait_for_timeout(5500)  # past one poll: the estimate and its Start stay put
+    seen = polls["n"]
+    page.wait_for_timeout(5500)  # past a poll that repaints: the estimate and its Start stay put
+    assert polls["n"] > seen
     expect(box.get_by_role("button", name="Start")).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
 
@@ -909,6 +923,35 @@ def test_questions_filter_without_refetching_and_sort_naturally(page, seeded):
     page.get_by_label("Where methods disagree").uncheck()
     expect(page.locator("#questions details")).to_have_count(40)
     assert seen == {"false": 1, "true": 1}
+
+
+def test_questions_on_a_busy_run_refetch_until_it_finishes(page, seeded):
+    run_id = disagreeing_run(seeded, "qbusy")
+    seen = questions_counter(page, run_id)
+    busy = {"on": True}
+
+    def status(route):  # the run reads as running until the test lets it finish
+        response = route.fetch()
+        body = response.json()
+        if busy["on"]:
+            body["status"] = "running"
+        route.fulfill(response=response, json=body)
+
+    page.route(f"**/eval/{run_id}", status)
+    page.goto(f"{seeded.url}/c/qbusy/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details")).to_have_count(40)
+    page.wait_for_timeout(3500)  # past a poll: the filters must still work on a running run
+    page.locator("#q-method").select_option("hybrid")
+    page.get_by_label("Wrong only").check()
+    expect(page.locator("#questions details")).to_have_count(1)
+    assert seen["false"] == 3  # rows still coming: fetched each time, never kept
+    busy["on"] = False  # finishes: the open view reloads once, then filters from what it kept
+    page.wait_for_timeout(3500)  # the next poll sees it done
+    assert seen["false"] == 4
+    page.get_by_label("Wrong only").uncheck()
+    expect(page.locator("#questions details")).to_have_count(40)
+    assert seen["false"] == 4
 
 
 def test_a_late_questions_response_does_not_overwrite_a_newer_choice(page, seeded):

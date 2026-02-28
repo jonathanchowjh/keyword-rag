@@ -25,11 +25,10 @@ function named(job) {
     <code>${esc(short(job.id))}</code>`;
 }
 
-// A problem line is server text; it names a job by "<4 or 8 id characters> on <collection> ", or a
+// A problem line is server text; it names a job by "<8 id characters> on <collection> ", or a
 // collection's lists by "lists on <collection> ". Linked when a known job matches, plain otherwise.
 function problemHref(text) {
-  const names = (j, id) => text.includes(`${id} on ${j.collection} `);
-  const job = jobs.find((j) => names(j, j.id.slice(0, 4)) || names(j, short(j.id)));
+  const job = jobs.find((j) => text.includes(`${short(j.id)} on ${j.collection} `));
   if (job) return target(job);
   const lists = jobs.find((j) => text.includes(`lists on ${j.collection} `));
   return lists ? `/c/${encodeURIComponent(lists.collection)}` : null;
@@ -124,10 +123,15 @@ async function resume(jobId) {
   resumeFor = jobId;
   resumeBox.innerHTML = "";
   await refresh(); // draws the row the box goes in
-  await askResume(resumeBox, jobId, async () => {
-    resumeFor = null;
-    await refresh();
-  });
+  await askResume(
+    resumeBox,
+    jobId,
+    async () => {
+      resumeFor = null;
+      await refresh();
+    },
+    () => resumeFor === jobId
+  );
   resumeBox.scrollIntoView({ block: "nearest" });
 }
 

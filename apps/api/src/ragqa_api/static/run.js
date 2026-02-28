@@ -78,6 +78,13 @@ function matchFactor() {
 }
 
 // One cell of the own-score table: the mean and its range, true minus, "n/a" when missing.
+// What a metric means in this run: without a random example the reasoning match is raw.
+function meaning(m) {
+  return m === SIM && matchFactor() === null
+    ? `raw similarity of the solutions; this run has no random example, so ${NO_CHANCE}`
+    : says(m);
+}
+
 function ownScore(m, k) {
   const cell = m[k];
   if (!Number.isFinite(cell?.mean)) return '<span class="muted">n/a</span>';
@@ -156,7 +163,7 @@ function scoresHtml() {
   const names = [...new Set(Object.values(run.methods).flatMap((m) => Object.keys(m)))].filter(
     (k) => k !== "usd" && k !== "n"
   );
-  const heads = names.map((m) => `<th title="${esc(says(m))}">${esc(metric(m))}</th>`).join("");
+  const heads = names.map((m) => `<th title="${esc(meaning(m))}">${esc(metric(m))}</th>`).join("");
   const rows = Object.entries(run.methods)
     .map(([m, row]) => {
       const cells = names
@@ -166,8 +173,8 @@ function scoresHtml() {
     })
     .join("");
   const meanings = names
-    .filter((m) => says(m))
-    .map((m) => `<p class="muted legend">${esc(metric(m))}: ${esc(says(m))}.</p>`)
+    .filter((m) => meaning(m))
+    .map((m) => `<p class="muted legend">${esc(metric(m))}: ${esc(meaning(m))}.</p>`)
     .join("");
   return `<table><thead><tr><th>Method</th>${heads}</tr></thead><tbody>${rows}</tbody></table>${meanings}`;
 }
@@ -195,7 +202,7 @@ function pairsHtml() {
       const raw = p.metric === SIM && f === null ? ` (${NO_CHANCE})` : "";
       const k = f ?? 100;
       const scaled = (v) => (v == null ? NaN : v * k);
-      return `<tr><td title="${esc(says(p.metric))}">${esc(metric(p.metric) + raw)}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
+      return `<tr><td title="${esc(meaning(p.metric))}">${esc(metric(p.metric) + raw)}</td><td>${esc(method(p.a))} vs ${esc(method(p.b))}</td>
         <td class="num">${esc(pts(scaled(p.diff), scaled(p.lo), scaled(p.hi)))}</td><td>${esc(result)}</td></tr>`;
     })
     .join("");
@@ -242,15 +249,17 @@ function questionHtml(q, picked) {
     <div class="sides">${columns.join("")}</div></details>`;
 }
 
-// Rows per "where methods disagree" value, kept so Method and Wrong only filter without a refetch.
-const asked = {};
+// Rows per "where methods disagree" value, kept once the run has finished so Method and Wrong
+// only filter; a busy run's rows are still coming, so they are fetched each time and not kept.
+const cached = {};
+let showing = null; // the rows drawn now
 let asking = 0; // bumped by each load, so only the newest one draws
 const byId = (a, b) => String(a.question_id).localeCompare(String(b.question_id), undefined, { numeric: true });
 
 // The picker names the method whose outcome heads each question and "wrong only" judges.
 function showQuestions() {
   const m = $("q-method").value;
-  const rows = asked[$("q-disagree").checked];
+  const rows = showing;
   if (!m || !rows) return;
   const shown = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
   $("questions").innerHTML = shown.length ? shown.map((q) => questionHtml(q, m)).join("") : '<p class="muted">None.</p>';
@@ -259,16 +268,21 @@ function showQuestions() {
 async function loadQuestions() {
   const disagree = $("q-disagree").checked;
   const mine = ++asking;
-  if (!asked[disagree]) {
+  const keep = !busy(); // decided when asked: rows fetched while busy are never kept
+  let rows = keep ? cached[disagree] : undefined;
+  if (!rows) {
     try {
-      const rows = await api(`/eval/${encodeURIComponent(id)}/questions?disagree=${disagree}`);
-      asked[disagree] = rows.sort(byId);
+      rows = (await api(`/eval/${encodeURIComponent(id)}/questions?disagree=${disagree}`)).sort(byId);
     } catch (e) {
       if (mine === asking) $("questions").innerHTML = `<p class="err">${esc(e.message)}</p>`;
       return;
     }
+    if (keep) cached[disagree] = rows;
   }
-  if (mine === asking) showQuestions();
+  if (mine === asking) {
+    showing = rows;
+    showQuestions();
+  }
 }
 
 function fillMethodPicker() {
@@ -366,8 +380,10 @@ async function refresh() {
   clearTimeout(timer);
   try {
     cat = await catalog();
+    const was = run?.status;
     run = await api(`/eval/${encodeURIComponent(id)}`);
-    if (BUSY.has(run.status)) for (const k of Object.keys(asked)) delete asked[k]; // rows still coming
+    // Finished while the questions were open: what they show was fetched while rows were coming.
+    if (BUSY.has(was) && !busy() && $("questions-box").open) loadQuestions();
     qaType ??= (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
     if (run.status !== probedStatus) resumeProbe = null;
     if (RESUMABLE.has(run.status) && resumeProbe === null) {
@@ -394,8 +410,8 @@ async function refresh() {
   if (run && BUSY.has(run.status)) timer = setTimeout(refresh, POLL_MS);
 }
 
-$("q-method").addEventListener("change", showQuestions);
-$("q-wrong").addEventListener("change", showQuestions);
+$("q-method").addEventListener("change", loadQuestions);
+$("q-wrong").addEventListener("change", loadQuestions);
 $("q-disagree").addEventListener("change", loadQuestions);
 $("questions-box").addEventListener("toggle", () => {
   if ($("questions-box").open) loadQuestions();

@@ -481,7 +481,7 @@ const out = {
 };
 const labels = {methods: {kw_individual: {label: 'Keywords per list'}, hybrid: {label: 'Hybrid'}},
                 metrics: {accuracy: {label: 'Answered correctly'}, em: {label: 'Exact match'}},
-                metric_labels_by_type: {table: {em: 'Correct answer'}}};
+                metric_labels_by_type: {table: {em: 'Exact answer'}}};
 const ans = (verdict, diff, lo, hi, metric = 'accuracy', qaType = 'mcq') => u.verdictText(
   {candidate: 'kw_individual', reference: 'hybrid', metric, verdict, diff, lo, hi},
   qaType, labels);
@@ -521,7 +521,7 @@ def test_ui_formatting(tmp_path):
     assert got["j"] == "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
     assert got["k"].startswith("No: Keywords per list −7 pts")
     assert got["l"].startswith("Can't tell: Keywords per list +1 pt")
-    assert got["t"] == "Yes: Keywords per list +6 pts (2–10) correct answer vs Hybrid"
+    assert got["t"] == "Yes: Keywords per list +6 pts (2–10) exact answer vs Hybrid"
     assert got["u"].endswith("exact match vs Hybrid")  # no label for this type: the plain one
     assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
         "Re-keying",

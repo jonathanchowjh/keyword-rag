@@ -1,6 +1,6 @@
 import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, paint, pct, pill, plural, pts, refreshSpend, shell, short, usd, verdictHtml,
-  wordHtml } from "/static/ui.js";
+  verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
@@ -73,7 +73,8 @@ function answerHtml() {
 function saidHtml(r) {
   const a = r.answer_summary;
   if (!a || BUSY.has(r.status)) return "–";
-  return `${wordHtml(a)} ${esc(pts(a.diff, a.lo, a.hi))}`;
+  const notes = verdictNotes(a).map((n) => ` · ${n}`).join("");
+  return `${wordHtml(a)} ${esc(pts(a.diff, a.lo, a.hi))}${notes ? `<span class="muted">${esc(notes)}</span>` : ""}`;
 }
 
 function runsHtml() {
@@ -90,7 +91,7 @@ function runsHtml() {
     })
     .join("");
   return `<table><thead><tr><th>Time</th><th>Methods</th><th>Questions</th><th>Answers</th>
-    <th title="The verdict on Keywords per list against Hybrid">Said</th><th>Cost</th><th>Status</th></tr></thead>
+    <th title="${esc(`The verdict on ${cat.answer_pair.map((m) => methodLabel(m, cat)).join(" against ")}`)}">Said</th><th>Cost</th><th>Status</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 

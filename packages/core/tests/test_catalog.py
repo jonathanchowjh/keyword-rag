@@ -36,6 +36,7 @@ def test_qa_types_and_catalog_shape():
         "qa_types",
         "answer_pair",
     }
-    assert "all-or-nothing" in c["metric_says_by_type"]["table"]["em"]
+    says = c["metric_says_by_type"]["table"]
+    assert "partial credit" not in says["em"] and "partial credit" in says["f1"]  # exact is exact
     table = c["metric_labels_by_type"]["table"]
     assert table == {"em": "Exact answer", "f1": "Answer overlap"}  # distinct, as on the page

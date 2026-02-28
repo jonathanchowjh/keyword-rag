@@ -171,5 +171,7 @@ def page(context):
     p.on("response", lambda r: problems.append(f"{r.status} {r.url}") if r.status >= 400 else None)
     p.expected = []  # a test that provokes a 4xx on purpose lists its status here, e.g. "409"
     yield p
+    # A route handler still fetching when the test ends must not fail the next test's setup.
+    p.unroute_all(behavior="ignoreErrors")
     problems = [x for x in problems if not any(e in x for e in p.expected)]
     assert not problems, problems
