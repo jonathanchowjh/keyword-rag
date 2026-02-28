@@ -579,6 +579,7 @@ def test_collection_answer_falls_back_to_the_newest_free_run(env):
     ev.run(newer)
     a = ev.collection_answer("c")
     assert a["run_id"] == newer and a["answered"] is False and a["runs"] == 2
+    assert a["scale"] == ev.table(newer)["scale"]  # for the raw reasoning-match note
 
 
 def test_collection_answer_is_none_when_the_run_lacks_the_pair(env):

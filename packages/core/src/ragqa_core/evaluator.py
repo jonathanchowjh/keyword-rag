@@ -575,6 +575,7 @@ class Evaluator:
             "answered": answered,
             "runs": len(done),
             "proxy_trusted": summary["proxy_trusted"],
+            "scale": summary["scale"],
             "since": changes_since(job["setup"], self.retriever.spec(name)),
             **summary["answer"],
         }

@@ -493,6 +493,8 @@ out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
 out.v = ['rekeying', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
 out.w = [u.count(11656), u.count(0)];
 out.x = [0.004, 0, 0.4141, 12].map(u.usd);
+const sim = {metric: 'solution_sim@1', proxy_trusted: true};
+out.y = [{unit: 'raw'}, {unit: 'match'}].map((scale) => u.verdictNotes({...sim, scale}));
 console.log(JSON.stringify(out));
 """
 
@@ -529,6 +531,8 @@ def test_ui_formatting(tmp_path):
     ]
     assert got["w"] == ["11,656", "0"]
     assert got["x"] == ["< $0.01", "$0.00", "$0.41", "$12.00"]
+    raw, match = got["y"]  # a verdict's own scale marks a raw reasoning match
+    assert len(raw) == 1 and "no chance level" in raw[0] and match == []
 
 
 def test_model_mismatch_on_query_and_eval(client):
@@ -672,8 +676,13 @@ def test_runs_list_and_delete(client):
     assert run["status"] == "done" and run["methods"] == PAIR and run["split"] == "dev"
     assert run["answer"] is False and run["question_count"] == 1 and run["usd_total"] == 0.0
     assert run["model"] == client.app.state.claude.default_model
-    assert run["answer_summary"] == client.get(f"/eval/{done}").json()["answer"]
-    assert run["answer_summary"] is not None
+    detail = client.get(f"/eval/{done}").json()
+    # The verdict carries what its notes need: the proxy check and the headline's scale.
+    assert run["answer_summary"] == {
+        **detail["answer"],
+        "proxy_trusted": detail["proxy_trusted"],
+        "scale": detail["scale"],
+    }
     assert client.get("/eval", params={"collection": "other"}).json() == []
     client.app.state.worker.stop()
     queued = client.post("/eval", json={**EVAL, "confirm": True}).json()["job_id"]
@@ -759,8 +768,8 @@ def test_status_reports_problems(client):
     assert body["problems"] == [
         "The worker thread has stopped; restart the service",
         "Worker error: RuntimeError('x')",
-        f"Load {failed[:4]} on c failed",
-        f"Eval {stopped[:4]} on c stopped at the monthly cap",
+        f"Load {failed[:8]} on c failed",
+        f"Eval {stopped[:8]} on c stopped at the monthly cap",
     ]
 
 
@@ -898,7 +907,7 @@ def test_status_says_partly_rekeyed_only_when_the_rekey_started(client):
     assert problems() == []  # cancelled while queued: no line at all
     failed = db.create_job(conn, "rekey", "c", {})
     db.update_job(conn, failed, status="failed", error="boom")
-    assert problems() == [f"Rekey {failed[:4]} on c failed"]
+    assert problems() == [f"Rekey {failed[:8]} on c failed"]
     started = db.create_job(conn, "rekey", "c", {})
     db.update_job(conn, started, status="failed", progress=0.4)
     assert problems() == [partly]

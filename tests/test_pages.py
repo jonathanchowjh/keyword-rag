@@ -848,7 +848,7 @@ def test_worker_page_links_jobs_and_problems_to_their_pages(page, seeded):
 
         def problem(route):
             data = route.fetch().json()
-            data["problems"].append(f"Eval {run_id[:4]} on wl failed")
+            data["problems"].append(f"Eval {run_id[:8]} on wl failed")
             route.fulfill(json=data)
 
         page.route("**/status", problem)

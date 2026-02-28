@@ -589,7 +589,13 @@ def run_summary(job: dict, summary: dict) -> dict:
         "model": setup.get("model"),
         "question_count": summary["question_count"],
         "usd_total": summary["usd_total"],
-        "answer_summary": summary["answer"],
+        # The verdict with what its notes need: the proxy check and the headline's scale.
+        "answer_summary": summary["answer"]
+        and {
+            **summary["answer"],
+            "proxy_trusted": summary["proxy_trusted"],
+            "scale": summary["scale"],
+        },
     }
 
 
@@ -604,7 +610,7 @@ def job_problems(newest: list[dict]) -> list[str]:
             lines.append(f"Keyword lists on {name} are partly re-keyed; save them again")
         elif job["status"] in PROBLEM:
             lines.append(
-                f"{job['kind'].capitalize()} {job['id'][:4]} on {job['collection']} "
+                f"{job['kind'].capitalize()} {job['id'][:8]} on {job['collection']} "
                 f"{PROBLEM[job['status']]}"
             )
     return lines

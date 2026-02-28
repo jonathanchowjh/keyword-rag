@@ -170,7 +170,7 @@ function freeScore(answer) {
 }
 
 // The caveats on a verdict: a free score nothing has vouched for, a reasoning match shown raw.
-export function verdictNotes(answer, { raw = false } = {}) {
+export function verdictNotes(answer, { raw = answer.scale?.unit === "raw" } = {}) {
   const notes = [];
   if (freeScore(answer)) notes.push(FREE_SCORE_NOTE);
   if (raw) notes.push(`reasoning match shown raw: this run has no random example, so ${NO_CHANCE}`);
