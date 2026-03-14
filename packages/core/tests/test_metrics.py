@@ -8,6 +8,8 @@ from ragqa_core.metrics import (
     cosine,
     paired_diff_ci,
     recall_at,
+    science_correct,
+    science_number,
     separated,
     spearman,
     squad_em_f1,
@@ -97,3 +99,37 @@ def test_spearman():
     assert spearman([1, 2, 3], [3, 2, 1]) == pytest.approx(-1.0)
     assert spearman([1, 1, 2, 3], [1, 1, 2, 3]) == pytest.approx(1.0)
     assert math.isnan(spearman([1, 2], [1, 2]))
+
+
+def test_science_number_reads_the_first_number_in_common_forms():
+    assert science_number("3.2 J") == 3.2
+    assert science_number("-4.1 kJ mol^-1") == -4.1
+    assert science_number("1.2e-3") == 0.0012
+    assert science_number("1.2 × 10^-3 J") == pytest.approx(0.0012)
+    assert science_number("1.2 x 10^{-3}") == pytest.approx(0.0012)
+    assert science_number("≈ 0.25") == 0.25
+    assert science_number("2,500 m") == 2500.0
+    assert science_number("$1.6 \\times 10^{-19}$ C") == pytest.approx(1.6e-19)
+    assert science_number("1.6 × 10⁻¹⁹ C") == pytest.approx(1.6e-19)
+    assert science_number("9.13 \\cdot 10^{-35} J s") == pytest.approx(9.13e-35)
+    assert science_number("−0.5") == -0.5  # Unicode minus
+    assert science_number(".5 mol") == 0.5
+    assert science_number("E_1 = -13.6 eV") == -13.6
+    assert science_number("t_{1/2} = 5.2 s") == 5.2
+    assert science_number("about two") is None
+    assert science_number("CO2") is None
+
+
+def test_science_correct_by_letter_number_or_text():
+    assert science_correct("B", ["B"], has_choices=True)
+    assert not science_correct("C", ["B"], has_choices=True)
+    assert science_correct("3.1", ["3.0"], has_choices=False)  # within 5%
+    assert not science_correct("3.2", ["3.0"], has_choices=False)  # 6.7% off
+    assert science_correct("9.0e-35 J s", ["9.13e-35"], has_choices=False)
+    assert not science_correct("5e-35", ["9.13e-35"], has_choices=False)  # tiny but 45% off
+    assert not science_correct("0", ["9.13e-35"], has_choices=False)
+    assert science_correct("0", ["0"], has_choices=False)
+    assert not science_correct("0.001", ["0"], has_choices=False)  # absolute only when gold is 0
+    assert science_correct("The Mitochondria.", ["mitochondria"], has_choices=False)
+    assert not science_correct("H2O", ["CO2"], has_choices=False)  # text gold, not the number 2
+    assert not science_correct("", ["4.2"], has_choices=False)

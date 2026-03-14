@@ -3,7 +3,9 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-QaType = Literal["mcq", "multihop", "table"]
+QaType = Literal["science", "mcq", "multihop", "table"]
+# The types that retrieve worked examples.
+EXAMPLE_TYPES: tuple[QaType, ...] = ("mcq", "science")
 FACETS = ("topic", "method", "common")
 
 

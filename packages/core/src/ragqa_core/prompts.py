@@ -18,6 +18,8 @@ SUMMARY_TOKENS = 120
 
 METHOD_HINT = {
     "mcq": "experiment or analysis types (e.g. tabular scrutiny, controlled experiment)",
+    "science": "physical laws or solution methods (e.g. conservation of energy, ideal gas law,"
+    " dimensional analysis)",
     "table": "operations (ratio, difference, % change, average, sum, comparison)",
     "multihop": "relation or question types (e.g. birthplace, founding date, membership)",
 }
@@ -25,6 +27,7 @@ METHOD_HINT = {
 # instruction on the query side (Models.query_instruction).
 QUERY_TASK: dict[QaType, str] = {
     "mcq": "Given a science question, retrieve a solved question that needs the same reasoning",
+    "science": "Given a science problem, retrieve a solved problem that needs the same reasoning",
     "multihop": "Given a multi-hop question, retrieve passages with the facts needed to answer it",
     "table": "Given a financial question, retrieve the table and text needed to compute the answer",
 }
@@ -64,6 +67,23 @@ def answer_prompt(
         parts.append(f"Question:\n{question}\nChoices:\n{lines}\n")
         parts.append("Reason step by step, then finish with a line `Answer: <letter>`.")
         return system, "\n".join(parts)
+    if qa_type == "science":
+        parts = []
+        for hit in hits:
+            parts.append(
+                f"Example problem:\n{hit.text}\n"
+                f"Example answer: {hit.answer}\n"
+                f"Example solution:\n{hit.explanation or ''}\n"
+            )
+        parts.append(f"Problem:\n{question}\n")
+        if choices:
+            lines = "\n".join(f"{LETTERS[i]}. {c}" for i, c in enumerate(choices))
+            parts.append(f"Choices:\n{lines}\n")
+            final = "`Answer: <letter>`"
+        else:
+            final = "`Answer: <number in the unit asked, or a short phrase>`"
+        parts.append(f"Reason step by step, then finish with a line {final}.")
+        return "You solve science problems.", "\n".join(parts)
     system = "You answer questions using the passages given."
     passages = "\n".join(f"[{n}] {hit.text}" for n, hit in enumerate(hits, start=1))
     context = f"Passages:\n{passages}\n\n" if hits else ""
@@ -90,9 +110,10 @@ def answer_line(text: str) -> str:
     return found[-1].strip() if found else ""
 
 
-def parse_answer(qa_type: QaType, text: str) -> str:
+def parse_answer(qa_type: QaType, text: str, has_choices: bool = True) -> str:
     answer = answer_line(text)
-    if qa_type != "mcq" or not answer:
+    letters = qa_type == "mcq" or (qa_type == "science" and has_choices)
+    if not letters or not answer:
         return answer
     # A bare letter: "B", "B.", "(c)", "c) sulfate". Lower case only when it is
     # marked as a choice, so the article in "a dog" is not read as A.

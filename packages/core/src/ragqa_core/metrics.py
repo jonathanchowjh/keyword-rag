@@ -14,6 +14,16 @@ import numpy as np
 ARTICLES = re.compile(r"\b(a|an|the)\b")
 SCALE_WORDS = re.compile(r"\b(thousand|million|billion|percent)\b", re.I)
 BOOTSTRAP_DRAWS = 1000
+# The first number in a science answer: "3.2 J", "1.2e-3", "1.2 × 10^-3", "1.6 × 10⁻¹⁹".
+# The lookbehind keeps "E_1" and "t_{1/2}" from being read as the answer.
+NUMBER = re.compile(
+    r"(?<![\w.^{}/])"
+    r"([-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+))"
+    r"(?:[eE]([-+]?\d+))?"
+    r"(?:\s*(?:×|\\times|\\cdot|·|\*|x|X)\s*10\s*"
+    r"(?:\^\s*\{?\s*([-+]?\d+)\s*\}?|([⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)))?"
+)
+SUPERSCRIPT = str.maketrans("⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹", "+-0123456789")
 
 
 def recall_at(hit_ids: list[str], gold_ids: list[str], k: int) -> float:
@@ -50,6 +60,38 @@ def _number(text: str) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
+
+
+def science_number(text: str) -> float | None:
+    match = NUMBER.search(text.replace("−", "-"))
+    if not match:
+        return None
+    mantissa, e_exp, ten_exp, sup_exp = match.groups()
+    exponent = int(e_exp or 0) + int(ten_exp or (sup_exp or "0").translate(SUPERSCRIPT))
+    return float(mantissa.replace(",", "")) * 10.0**exponent
+
+
+def science_correct(pred: str, golds: list[str], has_choices: bool) -> bool:
+    """With choices, the letter must match. Otherwise a numeric gold is matched
+    within 5% (relative to the larger magnitude, like SciBench; absolute only when
+    the gold is 0) and any other gold as SQuAD-normalised text."""
+    if has_choices:
+        return pred.strip().upper() in {g.strip().upper() for g in golds}
+    p = science_number(pred)
+    for gold in golds:
+        gold = gold.strip().replace("−", "-")
+        if NUMBER.fullmatch(gold):
+            g = science_number(gold)
+            if p is None or g is None:
+                continue
+            if g == 0:
+                if abs(p) <= 1e-9:
+                    return True
+            elif math.isclose(p, g, rel_tol=0.05):
+                return True
+        elif normalise_answer(pred) == normalise_answer(gold) != "":
+            return True
+    return False
 
 
 def tatqa_em_f1(pred: str, golds: list[str], scale: str) -> tuple[float, float]:
