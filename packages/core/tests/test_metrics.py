@@ -118,6 +118,8 @@ def test_science_number_reads_the_first_number_in_common_forms():
     assert science_number("t_{1/2} = 5.2 s") == 5.2
     assert science_number("about two") is None
     assert science_number("CO2") is None
+    assert science_number("1e400") is None  # too large to represent
+    assert science_number("1 × 10^500") is None
 
 
 def test_science_correct_by_letter_number_or_text():
@@ -133,3 +135,4 @@ def test_science_correct_by_letter_number_or_text():
     assert science_correct("The Mitochondria.", ["mitochondria"], has_choices=False)
     assert not science_correct("H2O", ["CO2"], has_choices=False)  # text gold, not the number 2
     assert not science_correct("", ["4.2"], has_choices=False)
+    assert not science_correct("1e400", ["3.0"], has_choices=False)

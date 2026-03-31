@@ -68,7 +68,11 @@ def science_number(text: str) -> float | None:
         return None
     mantissa, e_exp, ten_exp, sup_exp = match.groups()
     exponent = int(e_exp or 0) + int(ten_exp or (sup_exp or "0").translate(SUPERSCRIPT))
-    return float(mantissa.replace(",", "")) * 10.0**exponent
+    try:
+        value = float(mantissa.replace(",", "")) * 10.0**exponent
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def science_correct(pred: str, golds: list[str], has_choices: bool) -> bool:
