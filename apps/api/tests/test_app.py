@@ -126,6 +126,15 @@ def test_query_with_answer(client):
     assert result["answer"] == "A" and result["usd"] > 0
 
 
+def test_query_on_a_science_collection_without_choices_returns_free_text(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Answer: 3.1 J") as client:
+        client.post("/collections", json={"name": "sci", "qa_type": "science", "summarize": False})
+        client.post("/collections/sci/documents", json={"items": ITEMS, "confirm": True})
+        body = {"collection": "sci", "question": "enzyme rate?", "methods": ["vector"]}
+        result = client.post("/query", json={**body, "answer": True}).json()["results"]["vector"]
+    assert result["answer"] == "3.1 J"
+
+
 def test_query_usd_counts_every_claude_call_of_the_method(client):
     add_collection(client, summarize=True)
     body = {"collection": "c", "question": "enzyme rate", "methods": ["kw_individual", "hybrid"]}

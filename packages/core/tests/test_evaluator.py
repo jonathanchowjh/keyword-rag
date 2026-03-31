@@ -853,3 +853,49 @@ def test_a_legacy_run_left_running_by_a_stopped_process_is_refused_on_resume(env
     connect(tmp_path / "r.db")  # the restart: its migration, then the lifespan's interrupt
     db.interrupt_running(conn)
     assert ev.resume_refusal(job) == "this run predates version tracking; start a new run"
+
+
+def science_env(conn, ev, name, items, questions):
+    ix = ev.retriever.indexer
+    spec = ix.create(name, "science", False)
+    ix.add(spec, items)
+    ix.set_lists(spec, LISTS)
+    save_questions(conn, name, questions)
+
+
+def test_science_run_scores_free_form_and_choice_questions(env):
+    conn, ev = env
+    ev.claude = fake_claude(conn, lambda p: "Answer: A" if "Choices:" in p else "Answer: 3.1 J")
+    ev.retriever.claude = ev.claude
+    questions = [
+        Question("s-free", "an enzyme problem", None, ["3.0"], [], {"skill": "enzyme"}),
+        Question("s-mc", "a market problem", ["yes", "no"], ["A"], [], {"skill": "market"}),
+    ]
+    science_env(conn, ev, "sci", ITEMS, questions)
+    job = ev.queue("sci", "dev", ["hybrid"], True, None)
+    ev.run(job)
+    rows = run_items(conn, job)
+    assert len(rows) == 2 and all(r["answer"] == {"accuracy": 1.0} for r in rows)
+    assert ev.table(job)["headline"] == "accuracy"
+
+
+def test_science_free_run_without_solutions_headlines_same_skill(env):
+    conn, ev = env
+    items = [Item(f"{t}-item", f"{t} things", "A", None, {"skill": t}) for t in TOPICS]
+    questions = [
+        Question(f"q-{t}", f"a {t} problem", None, ["3"], [], {"skill": t}) for t in TOPICS
+    ]
+    science_env(conn, ev, "sci", items, questions)
+    job = ev.queue("sci", "dev", ["hybrid", "random_example"], False, None)
+    ev.run(job)
+    assert all("solution_sim@1" not in r["retrieval"] for r in run_items(conn, job))
+    assert ev.table(job)["headline"] == "same_skill@1"
+
+
+def test_mcq_scoring_and_headline_unchanged(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], True, None)
+    ev.run(job)
+    rows = run_items(conn, job)
+    assert all(r["answer"] == {"accuracy": 1.0} for r in rows)
+    assert ev.table(job)["headline"] == "accuracy"

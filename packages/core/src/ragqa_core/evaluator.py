@@ -15,6 +15,7 @@ from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
     recall_at,
+    science_correct,
     separated,
     squad_em_f1,
     tatqa_em_f1,
@@ -30,15 +31,17 @@ from ragqa_core.prompts import (
     summary_prompt,
 )
 from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, Retriever
-from ragqa_core.types import CollectionSpec, Hit, QaType, Question
+from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question
 
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
     "mcq": ("solution_sim@1", "same_skill@1"),
+    "science": ("solution_sim@1", "same_skill@1"),
     "multihop": ("recall@2", "recall@5"),
     "table": ("recall@1", "recall@3"),
 }
 ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
     "mcq": ("accuracy",),
+    "science": ("accuracy",),
     "multihop": ("em", "f1"),
     "table": ("em", "f1"),
 }
@@ -46,11 +49,18 @@ ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
 # because the continuous solution similarity is practically never exactly 0.
 MISS_METRIC: dict[QaType, str] = {
     "mcq": "same_skill@1",
+    "science": "same_skill@1",
     "multihop": "recall@2",
     "table": "recall@1",
 }
-PAIR_ANSWER_METRIC: dict[QaType, str] = {"mcq": "accuracy", "multihop": "f1", "table": "f1"}
-ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "multihop": 100, "table": 100}
+PAIR_ANSWER_METRIC: dict[QaType, str] = {
+    "mcq": "accuracy",
+    "science": "accuracy",
+    "multihop": "f1",
+    "table": "f1",
+}
+# Multi-step science working runs long; a reply cut off before its Answer line scores wrong.
+ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "science": 1500, "multihop": 100, "table": 100}
 ESTIMATE_SAMPLE = 5
 
 
@@ -60,7 +70,7 @@ def clean(value: float) -> float | None:
 
 def answer_hits(qa_type: QaType, hits: list[Hit]) -> list[Hit]:
     # The paper's one-shot: the single best example for mcq; passages otherwise.
-    return hits[:1] if qa_type == "mcq" else hits
+    return hits[:1] if qa_type in EXAMPLE_TYPES else hits
 
 
 def untracked(setup: dict) -> bool:
@@ -367,7 +377,7 @@ class Evaluator:
             purpose="answer",
         )
         for q, row, completion in zip(questions, rows, done, strict=True):
-            pred = parse_answer(spec.qa_type, completion.text)
+            pred = parse_answer(spec.qa_type, completion.text, bool(q.choices))
             row.update(
                 {
                     "pred": pred,
@@ -385,7 +395,7 @@ class Evaluator:
     ) -> list[dict]:
         rows = []
         mine = gold = None
-        if spec.qa_type == "mcq":
+        if spec.qa_type in EXAMPLE_TYPES:
             explanations = [hits[0].explanation or "" if hits else "" for hits in all_hits]
             mine = self.models.judge(explanations)
             gold = self.models.judge([q.meta.get("solution", "") for q in questions])
@@ -470,7 +480,7 @@ class Evaluator:
         setup = job["setup"]
         spec = self.retriever.spec(setup["collection"])
         by_method, has_answers = self._rows_by_method(job_id)
-        trusted = proxy_trusted if spec.qa_type == "mcq" and not has_answers else None
+        trusted = proxy_trusted if spec.qa_type in EXAMPLE_TYPES and not has_answers else None
         headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
         return {
             "headline": headline,
@@ -523,9 +533,9 @@ class Evaluator:
                         "separated": separated(lo, hi),
                     }
                 )
-        proxy = self._proxy_for(job_id) if spec.qa_type == "mcq" and has_answers else None
+        proxy = self._proxy_for(job_id) if spec.qa_type in EXAMPLE_TYPES and has_answers else None
         trusted = None
-        if spec.qa_type == "mcq" and not has_answers:
+        if spec.qa_type in EXAMPLE_TYPES and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
         headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
         reference = ANSWER_PAIR[1]
@@ -674,6 +684,8 @@ def avg(values) -> float:
 def score(spec: CollectionSpec, q: Question, pred: str) -> dict:
     if spec.qa_type == "mcq":
         return {"accuracy": float(pred == q.gold_answers[0])}
+    if spec.qa_type == "science":
+        return {"accuracy": float(science_correct(pred, q.gold_answers, bool(q.choices)))}
     if spec.qa_type == "multihop":
         em, f1 = squad_em_f1(pred, q.gold_answers)
     else:

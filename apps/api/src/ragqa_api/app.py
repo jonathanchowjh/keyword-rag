@@ -373,7 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             max_tokens=ANSWER_TOKENS[spec.qa_type],
                             purpose="query",
                         )
-                        out["answer"] = parse_answer(spec.qa_type, done.text)
+                        out["answer"] = parse_answer(spec.qa_type, done.text, bool(body.choices))
                 except PER_METHOD_ERRORS as e:
                     out["error"] = str(e)
             out["usd"] = spent["usd"]

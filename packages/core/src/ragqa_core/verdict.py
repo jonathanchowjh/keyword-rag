@@ -5,7 +5,7 @@ import math
 
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METHODS
 from ragqa_core.metrics import paired_diff_ci, spearman
-from ragqa_core.types import QaType
+from ragqa_core.types import EXAMPLE_TYPES, QaType
 
 PROXY_TRUST = 0.5
 PROXY_MIN_METHODS = 4
@@ -17,8 +17,8 @@ def headline_metric(
     qa_type: QaType, has_answers: bool, proxy_trusted: bool | None, measurable: set[str]
 ) -> str:
     if has_answers:
-        return "accuracy" if qa_type == "mcq" else "f1"
-    if qa_type == "mcq":
+        return "accuracy" if qa_type in EXAMPLE_TYPES else "f1"
+    if qa_type in EXAMPLE_TYPES:
         if proxy_trusted is False or "solution_sim@1" not in measurable:
             return "same_skill@1"
         return "solution_sim@1"

@@ -123,3 +123,8 @@ def test_headline_falls_back_to_same_skill_when_proxy_failed():
     assert headline_metric("mcq", False, False, {"solution_sim@1", "same_skill@1"}) == (
         "same_skill@1"
     )
+
+
+def test_headline_for_science_follows_mcq():
+    assert headline_metric("science", True, None, set()) == "accuracy"
+    assert headline_metric("science", False, None, {"same_skill@1"}) == "same_skill@1"

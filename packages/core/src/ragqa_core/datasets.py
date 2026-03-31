@@ -23,6 +23,10 @@ from ragqa_core.types import Item, QaType, Question
 DATASETS: dict[str, QaType] = {"scienceqa": "mcq", "musique": "multihop", "tatqa": "table"}
 FILTER_NOTES: dict[QaType, str] = {
     "mcq": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
+    "science": (
+        "SciBench physics and chemistry textbook problems (7 sources); "
+        "the solved ones are the worked examples"
+    ),
     "multihop": "MuSiQue, HippoRAG-2 protocol: 1,000 dev questions over 11,656 passages",
     "table": "TAT-QA dev questions over every train/dev/test context",
 }
