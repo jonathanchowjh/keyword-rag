@@ -8,7 +8,6 @@
 
 import hashlib
 import json
-import random
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -71,11 +70,11 @@ def mask_template(text: str) -> str:
 def dev_slice(
     questions: list[Question], n: int = DEV_SLICE, seed: int = DEV_SEED
 ) -> list[Question]:
-    ordered = sorted(questions, key=lambda q: q.id)
-    if len(ordered) <= n:
-        return ordered
-    picked = random.Random(seed).sample(range(len(ordered)), n)
-    return [ordered[i] for i in sorted(picked)]
+    """Keep the n questions whose sha1 of "seed:id" ranks lowest, sorted by id.
+    A question's place does not depend on the others, so adding one moves at
+    most one question out of the slice."""
+    ranked = sorted(questions, key=lambda q: hashlib.sha1(f"{seed}:{q.id}".encode()).hexdigest())
+    return sorted(ranked[:n], key=lambda q: q.id)
 
 
 def load(name: str, cache: Path) -> tuple[list[Item], list[Question]]:

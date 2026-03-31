@@ -78,6 +78,9 @@
   be checked against an example chosen without looking at the question.
 - Dense queries on Qwen3-Embedding carry the query-side task instruction the
   model was trained with; fastembed does not add it. Eval runs record it.
+- The dev slice ranks each question by a hash of its id, so adding a question
+  displaces at most one. New dev runs on an existing collection may use a
+  different 200 than before; runs already recorded keep their question ids.
 
 ## 0.1.0 — 2026-10-23
 

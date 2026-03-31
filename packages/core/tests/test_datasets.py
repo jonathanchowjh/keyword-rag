@@ -111,6 +111,13 @@ def test_dev_slice_is_order_independent():
     assert [x.id for x in dev_slice(qs[:3])] == ["id0", "id1", "id2"]
 
 
+def test_dev_slice_is_stable_when_questions_are_added():
+    qs = [Question(f"id{i}", "q", None, [], [], {}) for i in range(500)]
+    before = {q.id for q in dev_slice(qs)}
+    after = {q.id for q in dev_slice(qs + [Question("new", "q", None, [], [], {})])}
+    assert len(before - after) <= 1  # one new question displaces at most one
+
+
 def test_mask_template():
     a = mask_template("Which is heavier, 5 kg or 7 kg? Ask Maria.")
     assert a == mask_template("Which is heavier, 2 kg or 9 kg? Ask Pedro.")
