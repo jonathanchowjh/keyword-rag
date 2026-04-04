@@ -3,7 +3,8 @@ the counts the README reports."""
 
 import pytest
 
-from ragqa_core.datasets import load_musique, load_scienceqa, load_tatqa
+from ragqa_core.datasets import load_musique, load_scibench, load_scienceqa, load_tatqa
+from ragqa_core.metrics import NUMBER
 
 pytestmark = pytest.mark.integration
 
@@ -34,3 +35,13 @@ def test_scienceqa_filter_leaves_a_dev_slice(cache):
     items, questions = load_scienceqa(cache)
     print(f"\nscienceqa: {len(items)} train examples, {len(questions)} test questions")
     assert len(questions) >= 200 and len(items) >= 200
+
+
+def test_scibench_gold_is_a_number(cache):
+    items, questions = load_scibench(cache)
+    solved = sum(i.explanation is not None for i in items)
+    print(f"\nscibench: {len(items)} items ({solved} solved), {len(questions)} questions")
+    # 493 rows; thermo_sol.json lists one problem twice, which is kept once.
+    assert len(items) + len(questions) == 492
+    assert solved == 76
+    assert all(NUMBER.fullmatch(q.gold_answers[0]) for q in questions)

@@ -1,9 +1,16 @@
-"""The three QA types' datasets, downloaded at runtime and never committed.
+"""The four datasets, downloaded at runtime and never committed.
 
 - ScienceQA (CC BY-SA 4.0): exam multiple choice; train is the example store,
   test the queries. Text-only natural science, grades 7–12, templates deduped.
 - MuSiQue (CC BY 4.0), HippoRAG-2 protocol: 1,000 dev questions, 11,656 passages.
 - TAT-QA (CC BY 4.0): every table+text context pooled; dev questions.
+- SciBench (MIT, xw27/scibench): university physics and chemistry problems with
+  a numeric answer. Fields: problem_text, answer_latex, answer_number, unit,
+  source, problemid, comment, solution. 416 problems, 77 of them solved, across
+  7 sources; 105 units carry a power of ten and 67 are blank. SciBench scores
+  with math.isclose(rel_tol=0.05) (eval/eval_zero.py, equiv) and folds a
+  power-of-ten unit into the gold (eval/post_process.py, remove_not, cal_not),
+  so split_unit does the same. Facts checked 2026-10-27.
 """
 
 import hashlib
@@ -19,7 +26,12 @@ from huggingface_hub import HfApi, hf_hub_download
 from ragqa_core.prompts import LETTERS
 from ragqa_core.types import Item, QaType, Question
 
-DATASETS: dict[str, QaType] = {"scienceqa": "mcq", "musique": "multihop", "tatqa": "table"}
+DATASETS: dict[str, QaType] = {
+    "scienceqa": "mcq",
+    "musique": "multihop",
+    "tatqa": "table",
+    "scibench": "science",
+}
 FILTER_NOTES: dict[QaType, str] = {
     "mcq": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
     "science": (
@@ -35,6 +47,9 @@ TATQA_URL = (
     "https://raw.githubusercontent.com/NExTplusplus/TAT-QA/master/dataset_raw/"
     "tatqa_dataset_{split}.json"
 )
+SCIBENCH_REPO = "xw27/scibench"
+SCIBENCH_SOURCES = ("atkins", "chemmc", "quan", "matter", "fund", "class", "thermo")
+CHEMISTRY = {"atkins", "chemmc", "quan", "matter"}
 GRADES = {f"grade{n}" for n in range(7, 13)}
 SCIENCEQA_COLUMNS = [
     "question",
@@ -52,6 +67,9 @@ DEV_SLICE, DEV_SEED = 200, 472
 
 NUMBER = re.compile(r"\d+(\.\d+)?")
 WORDS = re.compile(r"\S+")
+UNIT_EXPONENT = re.compile(r"^\s*\$?\s*10\s*\^\s*\{?\s*([-+]?\d+)\s*\}?")
+UNIT_WRAPPER = re.compile(r"\\(?:mathrm|text)\s*\{([^{}]*)\}")
+CHAPTER = re.compile(r"^\s*(?:problem|question|[ep])?\s*(\d+)", re.I)
 
 
 def mask_template(text: str) -> str:
@@ -82,6 +100,7 @@ def load(name: str, cache: Path) -> tuple[list[Item], list[Question]]:
         "scienceqa": load_scienceqa,
         "musique": load_musique,
         "tatqa": load_tatqa,
+        "scibench": load_scibench,
     }
     if name not in loaders:
         raise ValueError(f"unknown dataset {name!r}; known: {', '.join(loaders)}")
@@ -243,3 +262,67 @@ def load_tatqa(
         for q in doc["questions"]
     ]
     return list(items.values()), questions
+
+
+# -- SciBench ------------------------------------------------------------------
+
+
+def split_unit(unit: str) -> tuple[int, str]:
+    """The leading power of ten (0 if none) and the rest as plain text:
+    " $10^{-35} \\mathrm{~J} \\mathrm{~s}$" -> (-35, "J s")."""
+    match = UNIT_EXPONENT.match(unit)
+    exponent = int(match.group(1)) if match else 0
+    rest = unit[match.end() :] if match else unit
+    rest = UNIT_WRAPPER.sub(r"\1", rest).replace("\\cdot", "·").replace("$", "").replace("~", " ")
+    return exponent, " ".join(rest.split())
+
+
+def _scibench_files(cache: Path) -> dict[str, Path]:
+    return {
+        name: Path(
+            hf_hub_download(SCIBENCH_REPO, name, repo_type="dataset", cache_dir=cache / "datasets")
+        )
+        for source in SCIBENCH_SOURCES
+        for name in (f"{source}.json", f"{source}_sol.json")
+    }
+
+
+def load_scibench(
+    cache: Path, files: dict[str, Path] | None = None
+) -> tuple[list[Item], list[Question]]:
+    """Every solved problem is a worked example. Of the rest, those whose id
+    hashes even are questions and the others examples without a solution."""
+    files = files or _scibench_files(cache)
+    items: dict[str, Item] = {}
+    questions: dict[str, Question] = {}
+    for source in SCIBENCH_SOURCES:
+        for solved in (True, False):
+            name = f"{source}_sol.json" if solved else f"{source}.json"
+            if name not in files:
+                continue
+            for row in json.loads(files[name].read_text()):
+                digest = hashlib.sha1(f"{source}\n{row['problem_text']}".encode()).hexdigest()[:12]
+                item_id = "sb-" + digest
+                if item_id in items or item_id in questions:
+                    continue
+                exponent, plain = split_unit(row["unit"])
+                gold = format(float(row["answer_number"]) * 10**exponent, ".6g")
+                text = row["problem_text"] + (f"\nGive the answer in {plain}." if plain else "")
+                meta = {
+                    "topic": source,
+                    "subject": "chemistry" if source in CHEMISTRY else "physics",
+                }
+                chapter = CHAPTER.match(row["problemid"])
+                if chapter:
+                    meta["skill"] = f"{source}:{chapter.group(1)}"
+                if solved or int(digest, 16) % 2:
+                    items[item_id] = Item(
+                        item_id,
+                        text,
+                        answer=f"{gold} {plain}".strip(),
+                        explanation=row["solution"] if solved else None,
+                        meta=meta,
+                    )
+                else:
+                    questions[item_id] = Question(item_id, text, None, [gold], [], meta)
+    return list(items.values()), list(questions.values())

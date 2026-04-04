@@ -1,0 +1,32 @@
+[
+ {
+  "problem_text": "The world’s largest ball of string is about 2 m in radius. To the nearest order of magnitude, what is the total length L of the string in the ball?",
+  "answer_latex": "2",
+  "answer_number": "2",
+  "unit": " $10^6$ m",
+  "source": "fund",
+  "problemid": " 1.01",
+  "comment": " ",
+  "solution": ""
+ },
+ {
+  "problem_text": " The charges of an electron and a positron are $-e$ and $+e$. The mass of each is $9.11 \\times 10^{-31} \\mathrm{~kg}$. What is the ratio of the electrical force to the gravitational force between an electron and a positron?\r\n",
+  "answer_latex": " $4.16$",
+  "answer_number": "4.16",
+  "unit": "$10^{42}$",
+  "source": "fund",
+  "problemid": " Question 21.75",
+  "comment": " ",
+  "solution": ""
+ },
+ {
+  "problem_text": "In an orienteering class, you have the goal of moving as far (straight-line distance) from base camp as possible by making three straight-line moves. You may use the following displacements in any order: (a) $\\vec{a}, 2.0 \\mathrm{~km}$ due east (directly toward the east); (b) $\\vec{b}, 2.0 \\mathrm{~km} 30^{\\circ}$ north of east (at an angle of $30^{\\circ}$ toward the north from due east); (c) $\\vec{c}, 1.0 \\mathrm{~km}$ due west. Alternatively, you may substitute either $-\\vec{b}$ for $\\vec{b}$ or $-\\vec{c}$ for $\\vec{c}$. What is the greatest distance you can be from base camp at the end of the third displacement? (We are not concerned about the direction.)",
+  "answer_latex": " 4.8",
+  "answer_number": "4.8",
+  "unit": " m",
+  "source": "fund",
+  "problemid": " 3.01",
+  "comment": " ",
+  "solution": ""
+ }
+]

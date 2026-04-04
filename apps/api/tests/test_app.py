@@ -229,6 +229,15 @@ def test_load_rejects_wrong_qa_type(client):
     assert client.post("/collections/c/load", json={"dataset": "musique"}).status_code == 409
 
 
+def test_load_rejects_the_other_qa_type_for_science_datasets(client):
+    client.post("/collections", json={"name": "c", "qa_type": "mcq"})
+    r = client.post("/collections/c/load", json={"dataset": "scibench"})
+    assert r.status_code == 409 and "dataset scibench is science" in r.json()["detail"]
+    client.post("/collections", json={"name": "s", "qa_type": "science"})
+    r = client.post("/collections/s/load", json={"dataset": "scienceqa"})
+    assert r.status_code == 409 and "dataset scienceqa is mcq" in r.json()["detail"]
+
+
 def test_load_summarize_without_key_503(tmp_path):
     client = make_client(tmp_path, api_key=None)
     client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})

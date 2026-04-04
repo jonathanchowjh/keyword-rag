@@ -8,9 +8,11 @@ from ragqa_core.datasets import (
     DATASETS,
     dev_slice,
     load_musique,
+    load_scibench,
     load_scienceqa,
     load_tatqa,
     mask_template,
+    split_unit,
 )
 from ragqa_core.types import Question
 
@@ -64,7 +66,12 @@ def write_mini_scienceqa(tmp_path: Path) -> dict[str, Path]:
 
 
 def test_datasets_map_to_qa_types():
-    assert DATASETS == {"scienceqa": "mcq", "musique": "multihop", "tatqa": "table"}
+    assert DATASETS == {
+        "scienceqa": "mcq",
+        "musique": "multihop",
+        "tatqa": "table",
+        "scibench": "science",
+    }
 
 
 def test_scienceqa_filters_and_dedupes(tmp_path):
@@ -127,3 +134,88 @@ def test_mask_template():
 def test_tatqa_fixture_is_real_format():
     doc = json.loads((DATA / "tatqa_mini.json").read_text())[0]
     assert {"table", "paragraphs", "questions"} <= set(doc)
+
+
+SCIBENCH = DATA / "scibench_mini"
+
+
+def scibench_files() -> dict[str, Path]:
+    return {p.name: p for p in SCIBENCH.glob("*.json")}
+
+
+def test_split_unit_folds_the_power_of_ten():
+    assert split_unit(" $10^{-35} \\mathrm{~J} \\mathrm{~s}$") == (-35, "J s")
+    assert split_unit(" $10^6$ m") == (6, "m")
+    assert split_unit("$10^{42}$") == (42, "")
+    assert split_unit(" 10^{-5} \\mathrm{~m}") == (-5, "m")
+    assert split_unit(" $\\mathrm{~kJ} \\mathrm{~mol}^{-1}$") == (0, "kJ mol^{-1}")
+    assert split_unit(" ") == (0, "")
+
+
+def test_load_scibench_splits_solved_problems_into_items(tmp_path):
+    items, questions = load_scibench(tmp_path, scibench_files())
+    solved = {r["problem_text"] for s in ("fund", "atkins") for r in read(f"{s}_sol.json")}
+    texts = {r["problem_text"]: r for s in ("fund", "atkins") for r in read(f"{s}.json")}
+    assert len(items) + len(questions) == len(solved) + len(texts)
+    assert sum(i.explanation is not None for i in items) == 2
+    assert not {i.id for i in items} & {q.id for q in questions}
+    assert questions and all(q.choices is None and q.gold_ids == [] for q in questions)
+    for q in questions:
+        row = texts[q.text.split("\nGive the answer in")[0]]
+        exp, plain = split_unit(row["unit"])
+        assert q.gold_answers == [format(float(row["answer_number"]) * 10**exp, ".6g")]
+        assert q.text.endswith(f"\nGive the answer in {plain}.") == bool(plain)
+        assert q.meta["topic"] == row["source"]
+
+
+def read(name: str) -> list[dict]:
+    return json.loads((SCIBENCH / name).read_text())
+
+
+def test_scibench_skill_is_textbook_and_chapter(tmp_path):
+    cases = [
+        ("class", " Problem 3.40", "class:3"),
+        ("atkins", " e1.17(a)(a)", "atkins:1"),
+        ("atkins", "p2.3(a)", "atkins:2"),
+        ("fund", " Question 21.75", "fund:21"),
+        ("chemmc", "D-7", None),
+    ]
+    rows: dict[str, list[dict]] = {}
+    for n, (source, problemid, _) in enumerate(cases):
+        rows.setdefault(source, []).append(
+            {
+                "problem_text": f"problem {n}",
+                "answer_latex": "1",
+                "answer_number": "1",
+                "unit": " ",
+                "source": source,
+                "problemid": problemid,
+                "comment": " ",
+                "solution": "",
+            }
+        )
+    files = {}
+    for source, source_rows in rows.items():
+        files[f"{source}_sol.json"] = tmp_path / f"{source}_sol.json"
+        files[f"{source}_sol.json"].write_text(json.dumps(source_rows))
+    items, _ = load_scibench(tmp_path, files)
+    by_text = {i.text: i for i in items}
+    for n, (_, _, skill) in enumerate(cases):
+        meta = by_text[f"problem {n}"].meta
+        assert meta.get("skill") == skill
+        assert ("skill" in meta) == (skill is not None)
+
+
+def test_scibench_power_of_ten_unit_is_folded_into_the_gold(tmp_path):
+    items, questions = load_scibench(tmp_path, scibench_files())
+    assert "2e+06 m" in {i.answer for i in items}
+    assert ["4.16e+42"] in [q.gold_answers for q in questions]
+
+
+def test_scibench_meta_and_split_are_stable(tmp_path):
+    first = load_scibench(tmp_path, scibench_files())
+    second = load_scibench(tmp_path, scibench_files())
+    assert [q.id for q in first[1]] == [q.id for q in second[1]]
+    assert all(i.id.startswith("sb-") and len(i.id) == 15 for i in first[0])
+    subjects = {i.meta["subject"] for i in first[0]}
+    assert subjects <= {"physics", "chemistry"}

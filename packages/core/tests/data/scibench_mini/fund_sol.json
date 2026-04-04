@@ -1,0 +1,12 @@
+[
+ {
+  "problem_text": "A $2.00 \\mathrm{~kg}$ particle moves along an $x$ axis in one-dimensional motion while a conservative force along that axis acts on it. The potential energy $U(x)$ is 0 when $x = 6.5 \\mathrm{~m} $ and is $7 \\mathrm{~J}$ when $x = 4.5 \\mathrm{~m} $. At $x=6.5 \\mathrm{~m}$, the particle has velocity $\\vec{v}_0=(-4.00 \\mathrm{~m} / \\mathrm{s}) \\hat{\\mathrm{i}}$ Determine the particle's speed at $x_1=4.5 \\mathrm{~m}$.",
+  "answer_latex": "3.0",
+  "answer_number": "3.0",
+  "unit": " m/s",
+  "source": "fund",
+  "problemid": " 8.04",
+  "comment": " ",
+  "solution": "\nAt $x=6.5 \\mathrm{~m}$, the particle has kinetic energy\n$$\n\\begin{aligned}\nK_0 & =\\frac{1}{2} m v_0^2=\\frac{1}{2}(2.00 \\mathrm{~kg})(4.00 \\mathrm{~m} / \\mathrm{s})^2 \\\\\n& =16.0 \\mathrm{~J} .\n\\end{aligned}\n$$\nBecause the potential energy there is $U=0$, the mechanical energy is\n$$\nE_{\\text {mec }}=K_0+U_0=16.0 \\mathrm{~J}+0=16.0 \\mathrm{~J} .\n$$The kinetic energy $K_1$ is the difference between $E_{\\text {mec }}$ and $U_1$ :\n$$\nK_1=E_{\\text {mec }}-U_1=16.0 \\mathrm{~J}-7.0 \\mathrm{~J}=9.0 \\mathrm{~J} .\n$$\nBecause $K_1=\\frac{1}{2} m v_1^2$, we find\n$$\nv_1=3.0 \\mathrm{~m} / \\mathrm{s}\n$$\n\n\n"
+ }
+]
