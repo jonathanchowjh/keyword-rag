@@ -1,6 +1,6 @@
 # rag-qa
 
-A question-answering RAG microservice and test bench. It indexes three common
+A question-answering RAG microservice and test bench. It indexes four common
 kinds of QA, runs the retrieval methods from *Keyword Vectorization for
 Retrieval Augmented Generation on Science Question Answering* (Jonathan Chow,
 2024) next to modern ones, and evaluates them over an HTTP API. Every result
@@ -123,7 +123,7 @@ A collection remembers the dense model it was built with. Changing
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running |
-| `POST /collections/{name}/load` | Load `scienceqa`, `musique` or `tatqa`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
+| `POST /collections/{name}/load` | Load `scienceqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
@@ -188,6 +188,7 @@ All are downloaded at runtime into the `ragqa` volume and never committed.
 
 | QA type | Dataset | Licence | Used as | Free retrieval metric | Paid answer metric |
 |---|---|---|---|---|---|
+| Science problems | SciBench (physics and chemistry textbook problems) | MIT | 77 solved problems as examples; 416 questions. Small, a stand-in until your own corpus is imported | same-skill@1 | accuracy |
 | Exam multiple choice | ScienceQA | CC BY-SA 4.0 | 693 solved train examples; 291 test questions | solution similarity@1, same-skill@1 | accuracy |
 | Multi-hop factual | MuSiQue (HippoRAG-2 protocol) | CC BY 4.0 | 11,656 passages; 1,000 dev questions | recall@2, recall@5 | EM, F1 |
 | Table + text numeric | TAT-QA | CC BY 4.0 | 2,757 contexts; 1,668 dev questions | recall@1, recall@3 | EM, F1 |
@@ -231,7 +232,7 @@ about 20 times as much.
 
 | Route | What it shows |
 |---|---|
-| `/` | Every collection with its answer (does keyword retrieval help?), the run it came from and its state; create a collection or set up the three benchmarks |
+| `/` | Every collection with its answer (does keyword retrieval help?), the run it came from and its state; create a collection or set up the four benchmarks |
 | `/c/{name}` | One collection: the answer with its gap bar, its runs and a form to start one, its items and questions, the three keyword lists (edit, propose, save), delete |
 | `/c/{name}/runs/{id}` | One run |
 | `/lab` | One question, methods side by side |

@@ -6,6 +6,7 @@ const BENCHMARKS = [
   { name: "sqa", qa_type: "mcq", summarize: false, dataset: "scienceqa" },
   { name: "mq", qa_type: "multihop", summarize: false, dataset: "musique" },
   { name: "tq", qa_type: "table", summarize: false, dataset: "tatqa" },
+  { name: "sb", qa_type: "science", summarize: false, dataset: "scibench" },
 ];
 
 let cat = null;
@@ -45,7 +46,7 @@ async function refresh() {
     const html = full.length
       ? `<div class="table"><div class="th"><div>Collection</div><div>Do keywords help?</div>
           <div>Ready?</div></div>${full.map(rowHtml).join("")}</div>`
-      : '<p class="muted">No collections yet. Create one, or set up the three benchmarks.</p>';
+      : '<p class="muted">No collections yet. Create one, or set up the four benchmarks.</p>';
     if (html !== lastList) {
       $("list").innerHTML = html;
       lastList = html;
@@ -89,7 +90,7 @@ async function create() {
   }
 }
 
-// -- the three benchmarks ------------------------------------------------------
+// -- the four benchmarks ------------------------------------------------------
 
 function step(text, cls = "") {
   const li = document.createElement("li");

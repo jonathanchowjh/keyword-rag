@@ -22,6 +22,17 @@ def test_every_metric_the_evaluator_reports_has_a_label():
     assert named <= set(METRICS)
 
 
+def test_science_leads_and_every_type_is_described():
+    from typing import get_args
+
+    from ragqa_core.catalog import METRIC_LABELS_BY_TYPE, METRIC_SAYS_BY_TYPE
+    from ragqa_core.types import QaType
+
+    assert list(catalog()["qa_types"])[0] == "science"
+    for t in get_args(QaType):
+        assert t in QA_TYPES and t in METRIC_LABELS_BY_TYPE and t in METRIC_SAYS_BY_TYPE
+
+
 def test_qa_types_and_catalog_shape():
     assert QA_TYPES["mcq"]["label"] == "Exam multiple choice"
     assert QA_TYPES["table"]["item_noun"] == "table"

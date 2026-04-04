@@ -434,12 +434,12 @@ def test_collection_load_that_is_free_queues_at_once(page, seeded):
 
 
 def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, seeded):
-    for n in ("sqa", "mq", "tq"):
+    for n in ("sqa", "mq", "tq", "sb"):
         assert n not in [c["name"] for c in httpx.get(f"{seeded.url}/collections").json()]
     paying = {"sqa": 0.10, "tq": 0.25}
-    seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq")}
+    seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq", "sb")}
     page.goto(seeded.url + "/")
-    page.get_by_role("button", name="Set up the three benchmark collections").click()
+    page.get_by_role("button", name="Set up the four benchmark collections").click()
     expect(page.get_by_text("5 Claude calls")).to_be_visible()
     expect(page.get_by_text("$0.35")).to_be_visible()
     expect(page.get_by_role("button", name="Start")).to_have_count(1)
@@ -450,6 +450,24 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     assert [b.get("confirm") for b in seen["sqa"]] == [None, True]
     assert [b.get("confirm") for b in seen["tq"]] == [None, True]
     assert len(seen["mq"]) == 1  # already queued by its first answer, never posted twice
+
+
+def test_new_collection_form_defaults_to_science(page, seeded):
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New collection").click()
+    select = page.locator("#f-type")
+    expect(select).to_have_value("science")
+    expect(select.locator("option:checked")).to_contain_text("Science problems")
+
+
+def test_science_collection_offers_scibench_and_runs(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "sci0", "qa_type": "science"})
+    page.goto(seeded.url + "/c/sci0")
+    expect(page.get_by_role("button", name="Load scibench")).to_be_visible()
+    run_id = seeded.build("sci", run=True, qa_type="science")
+    page.goto(f"{seeded.url}/c/sci/runs/{run_id}")
+    page.get_by_text("Each method's own score").click()
+    expect(page.get_by_text("Example tests the same skill").first).to_be_visible()
 
 
 def _reply(paying, name):

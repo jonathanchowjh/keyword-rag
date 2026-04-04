@@ -5,7 +5,7 @@ import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count,
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
 const BUSY_STATES = new Set(["loading", "rekeying", "evaluating", "queued"]); // the collection's own
-const DATASETS = { mcq: "scienceqa", multihop: "musique", table: "tatqa" };
+const DATASETS = { science: "scibench", mcq: "scienceqa", multihop: "musique", table: "tatqa" };
 const GROUPS = [
   ["baseline", "Baseline"],
   ["control", "Controls"],

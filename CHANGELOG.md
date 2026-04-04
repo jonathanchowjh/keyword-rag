@@ -78,6 +78,11 @@
   be checked against an example chosen without looking at the question.
 - Dense queries on Qwen3-Embedding carry the query-side task instruction the
   model was trained with; fastembed does not add it. Eval runs record it.
+- Science problems are a QA type and the console's default: worked examples are
+  retrieved, and an answer is right when the choice matches, a number is within
+  5% of the gold, or a short text matches exactly.
+- SciBench (university physics and chemistry, 416 problems) loads into a science
+  collection, and "Set up the four benchmark collections" creates it as `sb`.
 - The dev slice ranks each question by a hash of its id, so adding a question
   displaces at most one. New dev runs on an existing collection may use a
   different 200 than before; runs already recorded keep their question ids.
