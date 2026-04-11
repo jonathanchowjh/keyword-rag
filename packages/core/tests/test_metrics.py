@@ -120,6 +120,11 @@ def test_science_number_reads_the_first_number_in_common_forms():
     assert science_number("CO2") is None
     assert science_number("1e400") is None  # too large to represent
     assert science_number("1 × 10^500") is None
+    assert science_number("1e" + "9" * 5000) is None  # exponent too long for int()
+    assert science_number("\\boxed{3.1}") == 3.1
+    assert science_number("$\\boxed{3.1}$ m/s") == 3.1
+    assert science_number("\\text{3.1 J}") == 3.1
+    assert science_number("\\boxed{-3.1}") == -3.1
 
 
 def test_science_correct_by_letter_number_or_text():

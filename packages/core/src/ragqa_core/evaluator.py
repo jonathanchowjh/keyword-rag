@@ -404,12 +404,16 @@ class Evaluator:
             if mine is not None and gold is not None:
                 # Only what can be measured: no explanation or solution, no score.
                 metrics = {}
+                # No hits scores 0 only where the question could have been measured.
+                skill = q.meta.get("skill")
                 if not hits:
-                    metrics = {"solution_sim@1": 0.0, "same_skill@1": 0.0}
+                    if q.meta.get("solution"):
+                        metrics["solution_sim@1"] = 0.0
+                    if skill:
+                        metrics["same_skill@1"] = 0.0
                 else:
                     if hits[0].explanation and q.meta.get("solution"):
                         metrics["solution_sim@1"] = cosine(mine[n], gold[n])
-                    skill = q.meta.get("skill")
                     if skill and hits[0].meta.get("skill"):
                         metrics["same_skill@1"] = float(hits[0].meta["skill"] == skill)
             elif spec.qa_type == "multihop":

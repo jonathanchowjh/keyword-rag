@@ -95,6 +95,7 @@ def test_science_prompt_with_and_without_choices():
 
 def test_science_parse_reads_letters_only_with_choices():
     assert parse_answer("science", "work...\nAnswer: (b) sulfate", has_choices=True) == "B"
+    assert parse_answer("science", "work...\nAnswer: (b) sulfate") == "B"  # choices by default
     assert parse_answer("science", "work...\nAnswer: 4.2 J", has_choices=False) == "4.2 J"
     assert parse_answer("science", "no answer line", has_choices=False) == ""
     assert parse_answer("science", "work...\nAnswer: sulfate", has_choices=True) == ""

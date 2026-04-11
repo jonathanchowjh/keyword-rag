@@ -150,6 +150,8 @@ def test_split_unit_folds_the_power_of_ten():
     assert split_unit(" 10^{-5} \\mathrm{~m}") == (-5, "m")
     assert split_unit(" $\\mathrm{~kJ} \\mathrm{~mol}^{-1}$") == (0, "kJ mol^{-1}")
     assert split_unit(" ") == (0, "")
+    assert split_unit(" $^{\\circ} \\mathrm{C}$") == (0, "°C")
+    assert split_unit("$^\\circ$") == (0, "°")
 
 
 def test_load_scibench_splits_solved_problems_into_items(tmp_path):

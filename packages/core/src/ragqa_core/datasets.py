@@ -6,8 +6,8 @@
 - TAT-QA (CC BY 4.0): every table+text context pooled; dev questions.
 - SciBench (MIT, xw27/scibench): university physics and chemistry problems with
   a numeric answer. Fields: problem_text, answer_latex, answer_number, unit,
-  source, problemid, comment, solution. 416 problems, 77 of them solved, across
-  7 sources; 105 units carry a power of ten and 67 are blank. SciBench scores
+  source, problemid, comment, solution. 416 unsolved problems and 76 solved
+  ones, across 7 sources; 105 units carry a power of ten and 67 are blank. SciBench scores
   with math.isclose(rel_tol=0.05) (eval/eval_zero.py, equiv) and folds a
   power-of-ten unit into the gold (eval/post_process.py, remove_not, cal_not),
   so split_unit does the same. Facts checked 2026-10-27.
@@ -68,6 +68,7 @@ DEV_SLICE, DEV_SEED = 200, 472
 NUMBER = re.compile(r"\d+(\.\d+)?")
 WORDS = re.compile(r"\S+")
 UNIT_EXPONENT = re.compile(r"^\s*\$?\s*10\s*\^\s*\{?\s*([-+]?\d+)\s*\}?")
+DEGREE = re.compile(r"\^\s*\{?\s*\\circ\s*\}?\s*")
 UNIT_WRAPPER = re.compile(r"\\(?:mathrm|text)\s*\{([^{}]*)\}")
 CHAPTER = re.compile(r"^\s*(?:problem|question|[ep])?\s*(\d+)", re.I)
 
@@ -273,6 +274,7 @@ def split_unit(unit: str) -> tuple[int, str]:
     match = UNIT_EXPONENT.match(unit)
     exponent = int(match.group(1)) if match else 0
     rest = unit[match.end() :] if match else unit
+    rest = DEGREE.sub("°", rest)
     rest = UNIT_WRAPPER.sub(r"\1", rest).replace("\\cdot", "·").replace("$", "").replace("~", " ")
     return exponent, " ".join(rest.split())
 

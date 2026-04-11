@@ -892,6 +892,21 @@ def test_science_free_run_without_solutions_headlines_same_skill(env):
     assert ev.table(job)["headline"] == "same_skill@1"
 
 
+def test_no_hits_score_zero_only_where_measurable(env):
+    conn, ev = env
+    questions = [
+        Question("q-sol", "a problem", None, ["3"], [], {"skill": "enzyme", "solution": "work"}),
+        Question("q-nosol", "another problem", None, ["3"], [], {"skill": "market"}),
+        Question("q-bare", "a third problem", None, ["3"], [], {}),
+    ]
+    science_env(conn, ev, "sci", ITEMS, questions)
+    spec = ev.retriever.indexer.spec("sci")
+    rows = ev._retrieval_rows(spec, questions, [[], [], []])
+    assert rows[0]["retrieval"] == {"solution_sim@1": 0.0, "same_skill@1": 0.0}
+    assert rows[1]["retrieval"] == {"same_skill@1": 0.0}
+    assert rows[2]["retrieval"] == {}
+
+
 def test_mcq_scoring_and_headline_unchanged(env):
     conn, ev = env
     job = ev.queue("c", "dev", ["hybrid"], True, None)

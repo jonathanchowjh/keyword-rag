@@ -16,8 +16,9 @@ SCALE_WORDS = re.compile(r"\b(thousand|million|billion|percent)\b", re.I)
 BOOTSTRAP_DRAWS = 1000
 # The first number in a science answer: "3.2 J", "1.2e-3", "1.2 × 10^-3", "1.6 × 10⁻¹⁹".
 # The lookbehind keeps "E_1" and "t_{1/2}" from being read as the answer.
+WRAPPER = re.compile(r"\\(?:boxed|text|mathrm)\s*\{")
 NUMBER = re.compile(
-    r"(?<![\w.^{}/])"
+    r"(?<![\w.^{}/+-])"
     r"([-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+))"
     r"(?:[eE]([-+]?\d+))?"
     r"(?:\s*(?:×|\\times|\\cdot|·|\*|x|X)\s*10\s*"
@@ -63,14 +64,14 @@ def _number(text: str) -> float | None:
 
 
 def science_number(text: str) -> float | None:
-    match = NUMBER.search(text.replace("−", "-"))
+    match = NUMBER.search(WRAPPER.sub(" ", text.replace("−", "-")))
     if not match:
         return None
     mantissa, e_exp, ten_exp, sup_exp = match.groups()
-    exponent = int(e_exp or 0) + int(ten_exp or (sup_exp or "0").translate(SUPERSCRIPT))
     try:
+        exponent = int(e_exp or 0) + int(ten_exp or (sup_exp or "0").translate(SUPERSCRIPT))
         value = float(mantissa.replace(",", "")) * 10.0**exponent
-    except OverflowError:
+    except (OverflowError, ValueError):
         return None
     return value if math.isfinite(value) else None
 
