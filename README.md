@@ -72,6 +72,11 @@ poll `GET /jobs/<job_id>`.
 ```sh
 api=http://localhost:8080
 curl -X POST $api/collections -H 'content-type: application/json' \
+  -d '{"name":"sb","qa_type":"science"}'
+curl -X POST $api/collections/sb/load -H 'content-type: application/json' \
+  -d '{"dataset":"scibench"}'
+
+curl -X POST $api/collections -H 'content-type: application/json' \
   -d '{"name":"sqa","qa_type":"mcq","summarize":true}'
 curl -X POST $api/collections/sqa/load -H 'content-type: application/json' \
   -d '{"dataset":"scienceqa"}'                  # returns the cost estimate, if it would spend
@@ -119,7 +124,7 @@ A collection remembers the dense model it was built with. Changing
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Liveness, and whether a key is set |
-| `POST /collections` | `{name, qa_type: mcq\|multihop\|table, summarize}` |
+| `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize}` |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running |
@@ -188,7 +193,7 @@ All are downloaded at runtime into the `ragqa` volume and never committed.
 
 | QA type | Dataset | Licence | Used as | Free retrieval metric | Paid answer metric |
 |---|---|---|---|---|---|
-| Science problems | SciBench (physics and chemistry textbook problems) | MIT | 77 solved problems as examples; 416 questions. Small, a stand-in until your own corpus is imported | same-skill@1 | accuracy |
+| Science problems | SciBench (physics and chemistry textbook problems) | MIT | 273 examples (76 worked solutions) and 219 questions: solved problems are all examples, the 416 unsolved split by a hash of their id. Small, a stand-in until your own corpus is imported | same-skill@1 | accuracy |
 | Exam multiple choice | ScienceQA | CC BY-SA 4.0 | 693 solved train examples; 291 test questions | solution similarity@1, same-skill@1 | accuracy |
 | Multi-hop factual | MuSiQue (HippoRAG-2 protocol) | CC BY 4.0 | 11,656 passages; 1,000 dev questions | recall@2, recall@5 | EM, F1 |
 | Table + text numeric | TAT-QA | CC BY 4.0 | 2,757 contexts; 1,668 dev questions | recall@1, recall@3 | EM, F1 |
@@ -224,9 +229,12 @@ comparable to the papers.
 - **Localhost only.** The port is published on `127.0.0.1`. Opening it wider
   without basic auth would let anyone on the network spend up to the cap.
 
-Rough prices on Haiku 5.5: a one-shot science answer is about $0.0005, and a
-200-question × 10-method evaluation with answers about $1. Sonnet costs
-about 20 times as much.
+Rough prices on Haiku 5.5: a one-shot multiple-choice answer (400 answer tokens
+at most) is about $0.0005, and a 200-question × 10-method evaluation with
+answers about $1. A science answer works the problem out and may use up to
+1,500 answer tokens, so its output alone can reach $0.00075 before the prompt's
+input, so science runs cost more than these figures. Sonnet costs about 20
+times as much.
 
 ## Pages
 
