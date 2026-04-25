@@ -321,3 +321,31 @@ def test_add_sets_source_on_items_and_chunks(env):
     assert store.get("c", ["1"])[0].meta["source"] == "notes"
     assert ix.add(spec, items, "notes")["unchanged"] == 1
     assert ix.add(spec, items, "other")["updated"] == 1
+
+
+def boom(*args, **kwargs):
+    raise RuntimeError("died")
+
+
+def test_an_add_that_dies_after_the_items_is_redone(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    store.upsert_chunks = boom
+    with pytest.raises(RuntimeError):
+        ix.add(spec, ITEMS, "x")
+    del store.upsert_chunks
+    assert ix.add(spec, ITEMS, "x") == {"new": 0, "updated": 3, "unchanged": 0}
+    assert store.search_chunks("c", models.embed(["pea plants"])[0], 1)[0][0] == "3"
+    assert ix.add(spec, ITEMS, "x")["unchanged"] == 3
+
+
+def test_an_add_that_dies_before_the_keywords_is_redone(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.set_lists(spec, LISTS)
+    store.set_keywords = boom
+    with pytest.raises(RuntimeError):
+        ix.add(spec, ITEMS, "x")
+    del store.set_keywords
+    assert ix.add(spec, ITEMS, "x")["unchanged"] == 0
+    assert store.get("c", ["1"])[0].keywords != {}

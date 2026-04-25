@@ -162,6 +162,8 @@ def test_item_hash_covers_content_and_source():
 
 def test_hashes_reads_back_content_hash():
     s, _, items = sourced()
+    assert s.hashes("c", ["a1"]) == {"a1": ""}  # upsert_items alone writes no hash
+    s.set_payloads("c", {"a1": {"content_hash": item_hash(items[0])}})
     assert s.hashes("c", ["a1", "zz"]) == {"a1": item_hash(items[0])}
 
 

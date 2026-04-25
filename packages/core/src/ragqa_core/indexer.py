@@ -127,6 +127,8 @@ class Indexer:
             if lists is not None:
                 keywords, vectors = self.keywords_for(spec, lists, texts, sums)
                 self.store.set_keywords(spec.name, [i.id for i in part], keywords, vectors)
+            # Last, so a batch that died part-way reads as changed and is redone.
+            self.store.set_payloads(spec.name, {i.id: {"content_hash": item_hash(i)} for i in part})
             progress(min(start + BATCH, len(items)) / len(items))
         return counts
 

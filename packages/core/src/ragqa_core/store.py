@@ -154,7 +154,6 @@ class Store:
                     "meta": item.meta,
                     "summary": summary,
                     "keywords": {},
-                    "content_hash": item_hash(item),
                 },
             )
             for item, vec, sp, summary in zip(items, dense, sparse, summaries, strict=True)
