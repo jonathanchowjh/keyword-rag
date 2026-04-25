@@ -34,5 +34,5 @@ def test_server_dense_sparse_and_keywords(store_and_name):
     assert s.search_sparse(name, m.sparse_query(["market"])[0], 1)[0].id == "2"
     s.set_keywords(name, ["1", "2"], [{"topic": ["b"]}, {}], {"kw_topic": m.embed(texts)})
     assert s.search(name, "kw_topic", m.embed(["stock"])[0], 1)[0].id == "2"
-    s.upsert_chunks(name, ["1"], ["enzyme kinetics"], m.embed(["enzyme kinetics"]))
+    s.upsert_chunks(name, ["1"], ["enzyme kinetics"], m.embed(["enzyme kinetics"]), [None])
     assert s.search_chunks(name, m.embed(["enzyme"])[0], 1)[0][0] == "1"

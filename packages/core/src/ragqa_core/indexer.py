@@ -99,7 +99,9 @@ class Indexer:
                 for piece in chunk(item.text):
                     parents.append(item.id)
                     pieces.append(piece)
-            self.store.upsert_chunks(spec.name, parents, pieces, self.models.embed(pieces))
+            self.store.upsert_chunks(
+                spec.name, parents, pieces, self.models.embed(pieces), [None] * len(pieces)
+            )
             if lists is not None:
                 keywords, vectors = self.keywords_for(spec, lists, texts, sums)
                 self.store.set_keywords(spec.name, [i.id for i in part], keywords, vectors)
