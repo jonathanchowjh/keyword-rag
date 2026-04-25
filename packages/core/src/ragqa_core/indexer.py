@@ -8,6 +8,7 @@ import numpy as np
 
 from ragqa_core import db
 from ragqa_core.connection import Connection
+from ragqa_core.datasets import source_for
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, tfidf_terms
 from ragqa_core.llm import Claude
 from ragqa_core.models import Models
@@ -131,6 +132,28 @@ class Indexer:
             self.store.set_payloads(spec.name, {i.id: {"content_hash": item_hash(i)} for i in part})
             progress(min(start + BATCH, len(items)) / len(items))
         return counts
+
+    def backfill(self, name: str, progress: Callable[[float], None] = lambda p: None) -> dict:
+        """Label points that predate sources, in place: no embedding, no Claude."""
+        self.store.ensure_indexes(name)
+        datasets = db.loaded_datasets(self.conn, name)
+        total, done = self.store.count(name), 0
+        source_of: dict[str, str] = {}
+        for hits in self.store.scroll(name):
+            payloads = {}
+            for h in hits:
+                if h.meta.get("source"):
+                    continue
+                source = source_of[h.id] = source_for(h.id, datasets)
+                meta = {**h.meta, "source": source}
+                labelled = Item(h.id, h.text, h.answer, h.explanation, meta)
+                payloads[h.id] = {"meta": meta, "content_hash": item_hash(labelled)}
+            self.store.set_payloads(name, payloads)
+            done += len(hits)
+            progress(done / total)
+        if source_of:
+            self.store.set_chunk_sources(name, source_of)
+        return {"labelled": len(source_of)}
 
     def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
         prompt = propose_prompt([i.text for i in sample], spec.qa_type)

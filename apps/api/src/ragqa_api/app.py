@@ -131,6 +131,12 @@ def check_methods(methods: list[str]) -> None:
 async def lifespan(app: FastAPI):
     """Jobs left running by a stopped process are interrupted; queued ones stay queued."""
     db.interrupt_running(app.state.conn)
+    # Collections whose points predate sources are labelled in place by a queued job.
+    for spec in db.list_collections(app.state.conn):
+        if app.state.store.unsourced(spec.name) > 0 and not db.job_waiting_or_running(
+            app.state.conn, "backfill", spec.name
+        ):
+            db.create_job(app.state.conn, "backfill", spec.name, {})
     app.state.worker.start()
     try:
         yield

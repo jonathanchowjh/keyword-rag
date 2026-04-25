@@ -246,6 +246,15 @@ def create_job(conn: Connection, kind: str, collection: str, setup: dict) -> str
     return job_id
 
 
+def loaded_datasets(conn: Connection, name: str) -> set[str]:
+    """Every dataset a load job of the collection named, whatever its status: a failed load
+    still added items."""
+    rows = conn.execute(
+        "select setup_json from jobs where kind = 'load' and collection = ?", (name,)
+    )
+    return {d for r in rows if (d := json.loads(r["setup_json"]).get("dataset"))}
+
+
 def update_job(
     conn: Connection,
     job_id: str,

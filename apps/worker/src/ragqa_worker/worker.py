@@ -112,6 +112,9 @@ class Worker:
             db.update_job(
                 self.conn, job_id, status="done", progress=1.0, result={"version": version}
             )
+        elif kind == "backfill":
+            result = self.indexer.backfill(job["collection"], progress)
+            db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "eval":
             self.evaluator.run(job_id, check)
         else:

@@ -14,7 +14,7 @@ from ragqa_core import db
 from ragqa_core.fakes import fake_embeddings, fake_replies
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
-from ragqa_core.types import KeywordLists, Question
+from ragqa_core.types import Item, KeywordLists, Question
 
 ITEMS = [
     {
@@ -1126,3 +1126,36 @@ def test_keyword_list_version_404s(client):
     assert client.get("/collections/c/keyword-lists/nope").status_code == 404
     assert client.get("/collections/ghost/keyword-lists").status_code == 404
     assert client.get("/collections/ghost/keyword-lists/x").status_code == 404
+
+
+def write_legacy(app, name="c"):
+    models, store = app.state.models, app.state.store
+    app.state.indexer.create(name, "mcq", False)
+    items = [Item("sqa-1", "enzyme rate", "A", None, {}), Item("note-1", "market price", "B")]
+    texts = [i.text for i in items]
+    store.upsert_items(name, items, models.embed(texts), models.sparse(texts), [None, None])
+    store.upsert_chunks(name, [i.id for i in items], texts, models.embed(texts), [None, None])
+
+
+def backfills(conn):
+    return [j for j in db.list_jobs(conn) if j["kind"] == "backfill"]
+
+
+def test_startup_queues_one_backfill_for_unlabelled_collections(tmp_path):
+    client = make_client(tmp_path)
+    write_legacy(client.app)
+    with client:
+        jobs = backfills(client.app.state.conn)
+        assert len(jobs) == 1
+        assert wait(client, jobs[0]["id"])["status"] == "done"
+        assert client.app.state.store.unsourced("c") == 0
+    with client:
+        assert len(backfills(client.app.state.conn)) == 1
+
+
+def test_labelled_collections_queue_no_backfill(tmp_path):
+    client = make_client(tmp_path)
+    with client:
+        add_collection(client, lists=False)
+    with client:
+        assert backfills(client.app.state.conn) == []

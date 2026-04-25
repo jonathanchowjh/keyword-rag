@@ -332,3 +332,11 @@ def test_job_logs_when_a_model_loads(env, monkeypatch):
     text = log_text(conn, j)
     assert text.index("loading model BAAI/test") < text.index("model BAAI/test ready")
     assert text.count("loading model BAAI/test") == 1  # cached after the first load
+
+
+def test_backfill_job_ends_done(env):
+    w, conn = env
+    j = db.create_job(conn, "backfill", "c", {})
+    w.run_one()
+    job = get_job(conn, j)
+    assert job["status"] == "done" and job["result"] == {"labelled": 0}

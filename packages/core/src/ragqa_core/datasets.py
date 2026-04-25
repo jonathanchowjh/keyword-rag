@@ -32,6 +32,12 @@ DATASETS: dict[str, QaType] = {
     "tatqa": "table",
     "scibench": "science",
 }
+ID_PREFIX: dict[str, str] = {
+    "scienceqa": "sqa-",
+    "musique": "mq-",
+    "tatqa": "tq-",
+    "scibench": "sb-",
+}
 FILTER_NOTES: dict[QaType, str] = {
     "mcq": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
     "science": (
@@ -41,6 +47,16 @@ FILTER_NOTES: dict[QaType, str] = {
     "multihop": "MuSiQue, HippoRAG-2 protocol: 1,000 dev questions over 11,656 passages",
     "table": "TAT-QA dev questions over every train/dev/test context",
 }
+
+
+def source_for(item_id: str, datasets: set[str]) -> str:
+    """The loaded dataset an old, unlabelled item came from, by its id prefix."""
+    for dataset in sorted(datasets):
+        if item_id.startswith(ID_PREFIX.get(dataset, "\0")):
+            return dataset
+    return "upload:unknown"
+
+
 SCIENCEQA_REPO = "derek-thomas/ScienceQA"
 MUSIQUE_REPO = "osunlp/HippoRAG_2"
 TATQA_URL = (

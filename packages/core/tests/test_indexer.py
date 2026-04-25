@@ -5,7 +5,7 @@ from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, list_version
 from ragqa_core.llm import Cancelled
-from ragqa_core.store import Store
+from ragqa_core.store import Store, item_hash
 from ragqa_core.types import CollectionSpec, Item, KeywordLists
 
 LISTS = KeywordLists(
@@ -349,3 +349,42 @@ def test_an_add_that_dies_before_the_keywords_is_redone(env):
     del store.set_keywords
     assert ix.add(spec, ITEMS, "x")["unchanged"] == 0
     assert store.get("c", ["1"])[0].keywords != {}
+
+
+def write_legacy(store, models, items):
+    texts = [i.text for i in items]
+    store.upsert_items("c", items, models.embed(texts), models.sparse(texts), [None] * len(items))
+    store.upsert_chunks("c", [i.id for i in items], texts, models.embed(texts), [None] * len(items))
+
+
+def test_backfill_labels_items_and_chunks(env):
+    conn, store, models, ix, _ = env
+    ix.create("c", "mcq", False)
+    legacy = [
+        Item("sqa-train-1", "enzyme kinetics rate", "A", "Rates.", {"skill": "x"}),
+        Item("note-1", "stock market price", "B", None, {}),
+    ]
+    write_legacy(store, models, legacy)
+    conn.execute(
+        "insert into jobs (id, kind, collection, status, setup_json, created_at, updated_at)"
+        " values ('j', 'load', 'c', 'failed', '{\"dataset\": \"scienceqa\"}', 'n', 'n')"
+    )
+    assert store.unsourced("c") == 2
+    assert ix.backfill("c", lambda p: None) == {"labelled": 2}
+    assert store.unsourced("c") == 0
+    want = {"sqa-train-1": "scienceqa", "note-1": "upload:unknown"}
+    hits = {h.id: h for h in store.get("c", list(want))}
+    assert {i: h.meta["source"] for i, h in hits.items()} == want
+    assert hits["sqa-train-1"].meta["skill"] == "x"
+    labelled = [
+        Item(i.id, i.text, i.answer, i.explanation, {**i.meta, "source": want[i.id]})
+        for i in legacy
+    ]
+    assert store.hashes("c", list(want)) == {i.id: item_hash(i) for i in labelled}
+    assert store.source_counts("c") == {"scienceqa": 1, "upload:unknown": 1}
+    chunk_sources = {
+        r.payload["parent_id"]: r.payload["meta"]["source"]
+        for r in store.client.scroll("c__chunks", limit=100, with_payload=True)[0]
+    }
+    assert chunk_sources == want
+    assert ix.backfill("c", lambda p: None) == {"labelled": 0}

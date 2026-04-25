@@ -12,6 +12,7 @@ from ragqa_core.datasets import (
     load_scienceqa,
     load_tatqa,
     mask_template,
+    source_for,
     split_unit,
 )
 from ragqa_core.types import Question
@@ -221,3 +222,9 @@ def test_scibench_meta_and_split_are_stable(tmp_path):
     assert all(i.id.startswith("sb-") and len(i.id) == 15 for i in first[0])
     subjects = {i.meta["subject"] for i in first[0]}
     assert subjects <= {"physics", "chemistry"}
+
+
+def test_source_for():
+    assert source_for("sqa-train-3", {"scienceqa"}) == "scienceqa"
+    assert source_for("note-1", {"scienceqa"}) == "upload:unknown"
+    assert source_for("mq-x", {"scienceqa"}) == "upload:unknown"
