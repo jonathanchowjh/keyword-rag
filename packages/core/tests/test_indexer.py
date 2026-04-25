@@ -51,7 +51,7 @@ def test_create_rejects_bad_name(env):
 def test_add_without_lists_indexes_text_only(env):
     conn, store, models, ix, calls = env
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     assert store.count("c") == 3 and calls == []
     assert store.get("c", ["1"])[0].keywords == {}
     assert store.search_chunks("c", models.embed(["pea plants"])[0], 1)[0][0] == "3"
@@ -61,14 +61,14 @@ def test_add_reports_progress(env):
     *_, ix, _ = env
     spec = ix.create("c", "mcq", False)
     seen: list[float] = []
-    ix.add(spec, ITEMS, progress=seen.append)
+    ix.add(spec, ITEMS, "x", progress=seen.append)
     assert seen and seen[-1] == 1.0
 
 
 def test_set_lists_assigns_keywords_and_returns_version(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     version = ix.set_lists(spec, LISTS)
     assert version == list_version(LISTS)
     assert get_keyword_lists(conn, "c") == LISTS
@@ -88,14 +88,14 @@ def test_add_after_lists_assigns_keywords(env):
     spec = ix.create("c", "mcq", False)
     ix.set_lists(spec, LISTS)
     spec = ix.spec("c")
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     assert store.get("c", ["2"])[0].keywords["topic"][0] == "market economics"
 
 
 def test_add_with_summarize_calls_claude_once_per_item(env):
     conn, store, models, ix, calls = env
     spec = ix.create("c", "mcq", True)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     assert len(calls) == len(ITEMS)
     assert store.get("c", ["1"])[0].summary == "A summary."
 
@@ -103,19 +103,19 @@ def test_add_with_summarize_calls_claude_once_per_item(env):
 def test_summary_vector_only_when_summarize(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", True)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     assert store.search("c", "kw_summary", models.embed(["A summary."])[0], 3)
     plain = ix.create("p", "mcq", False)
-    ix.add(plain, ITEMS)
+    ix.add(plain, ITEMS, "x")
     ix.set_lists(plain, LISTS)
     assert store.search("p", "kw_summary", models.embed(["A summary."])[0], 3) == []
 
 
 def test_estimate_is_zero_without_summarize(env):
     *_, ix, _ = env
-    assert ix.estimate_add_usd(ix.create("c", "mcq", False), ITEMS) == 0.0
-    assert ix.estimate_add_usd(ix.create("s", "mcq", True), ITEMS) > 0.0
+    assert ix.estimate_add_usd(ix.create("c", "mcq", False), ITEMS, "x") == 0.0
+    assert ix.estimate_add_usd(ix.create("s", "mcq", True), ITEMS, "x") > 0.0
 
 
 def test_add_refuses_model_mismatch(env):
@@ -124,13 +124,13 @@ def test_add_refuses_model_mismatch(env):
     with pytest.raises(
         ModelMismatch, match="built with other/model; service is running fake/dense"
     ):
-        ix.add(spec, ITEMS)
+        ix.add(spec, ITEMS, "x")
 
 
 def test_save_lists_does_not_switch_until_rekey_finishes(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     v1 = ix.set_lists(spec, LISTS)
     v2 = ix.save_lists(spec, OTHER_LISTS)
     assert v2 != v1 and ix.spec("c").keyword_version == v1
@@ -142,7 +142,7 @@ def test_save_lists_does_not_switch_until_rekey_finishes(env):
 def test_rekey_that_fails_leaves_the_old_version(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     v1 = ix.set_lists(spec, LISTS)
     v2 = ix.save_lists(spec, OTHER_LISTS)
 
@@ -160,7 +160,7 @@ def test_rekey_reports_progress_per_batch_and_once_for_an_empty_collection(env):
     seen: list[float] = []
     ix.rekey("c", ix.save_lists(spec, LISTS), seen.append)
     assert seen == [1.0]
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     seen.clear()
     ix.rekey("c", ix.save_lists(spec, OTHER_LISTS), seen.append)
     assert seen == [1.0]
@@ -222,7 +222,7 @@ def test_keywords_for_embeds_in_two_passes(env):
 def test_set_lists_rejects_an_empty_facet_and_keeps_the_old_lists(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     version = ix.set_lists(spec, LISTS)
     with pytest.raises(ValueError, match="'topic' is empty"):
         ix.set_lists(spec, KeywordLists(topic=[], method=LISTS.method, common=LISTS.common))
@@ -248,3 +248,76 @@ def test_propose_lists_rejects_a_reply_without_lists(tmp_path):
     spec = ix.create("c", "mcq", False)
     with pytest.raises(ValueError, match="no usable topic or method"):
         ix.propose_lists(spec, ITEMS)
+
+
+def counting_embed(models):
+    n = [0]
+    real = models.embed
+
+    def embed(texts):
+        n[0] += 1
+        return real(texts)
+
+    models.embed = embed
+    return n
+
+
+def test_add_twice_embeds_nothing_the_second_time(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, ITEMS, "x")
+    n = counting_embed(models)
+    assert ix.add(spec, ITEMS, "x") == {"new": 0, "updated": 0, "unchanged": 3}
+    assert n[0] == 0
+
+
+def test_add_counts_new_updated_unchanged(env):
+    *_, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, ITEMS, "x")
+    again = [Item("1", "edited text", "A", "Rates rise."), *ITEMS[1:], Item("4", "brand new", "D")]
+    assert ix.add(spec, again, "x") == {"new": 1, "updated": 1, "unchanged": 2}
+
+
+def chunk_texts(store, name):
+    points, _ = store.client.scroll(f"{name}__chunks", limit=100, with_payload=True)
+    return [p.payload["text"] for p in points if p.payload["parent_id"] == "long"]
+
+
+def test_shorter_text_leaves_no_stale_chunks(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    words = [f"w{i}" for i in range(260)]
+    ix.add(spec, [Item("long", " ".join(words), "A")], "x")
+    assert len(chunk_texts(store, "c")) > 1
+    ix.add(spec, [Item("long", " ".join(words[:20]), "A")], "x")
+    left = chunk_texts(store, "c")
+    assert len(left) == 1 and "w250" not in left[0]
+
+
+def test_add_summarises_only_changed_items(env):
+    conn, store, models, ix, calls = env
+    spec = ix.create("c", "mcq", True)
+    ix.add(spec, ITEMS, "x")
+    calls.clear()
+    ix.add(spec, [Item("1", "edited", "A"), *ITEMS[1:]], "x")
+    assert len(calls) == 1
+
+
+def test_estimate_add_prices_only_changed(env):
+    *_, ix, _ = env
+    spec = ix.create("c", "mcq", True)
+    ix.add(spec, ITEMS, "x")
+    assert ix.estimate_add_usd(spec, ITEMS, "x") == 0.0
+    assert ix.estimate_add_usd(spec, [Item("1", "edited", "A"), *ITEMS[1:]], "x") > 0.0
+
+
+def test_add_sets_source_on_items_and_chunks(env):
+    conn, store, models, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    items = [Item("1", "plain text", "A")]
+    ix.add(spec, items, "notes")
+    assert items[0].meta == {}
+    assert store.get("c", ["1"])[0].meta["source"] == "notes"
+    assert ix.add(spec, items, "notes")["unchanged"] == 1
+    assert ix.add(spec, items, "other")["updated"] == 1

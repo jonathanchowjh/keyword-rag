@@ -258,10 +258,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         items = [Item(**i.model_dump()) for i in body.items]
-        estimate = state.indexer.estimate_add_usd(spec, items)
+        estimate = state.indexer.estimate_add_usd(spec, items, "hand")
         if estimate > 0 and not body.confirm:
             return {"estimate": {"est_usd": estimate, "items": len(items)}}
-        state.indexer.add(spec, items)
+        state.indexer.add(spec, items, "hand")
         return {"added": len(items)}
 
     @app.post("/collections/{name}/load", status_code=202)
@@ -283,7 +283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # The dataset is read (and cached) to price them.
             items, questions = load_dataset(body.dataset, settings.home)
             items, _ = limited(items, questions, body.limit)
-            estimate = state.indexer.estimate_add_usd(spec, items)
+            estimate = state.indexer.estimate_add_usd(spec, items, body.dataset)
             calls = len(items) if spec.summarize else 0
             if proposes:
                 estimate += state.indexer.estimate_propose_usd(spec, propose_sample(items))

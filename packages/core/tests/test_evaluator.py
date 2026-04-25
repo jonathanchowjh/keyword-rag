@@ -57,7 +57,7 @@ def env(tmp_path):
     claude = fake_claude(conn, lambda p: "Answer: A")
     ix = Indexer(conn, store, models, claude)
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
     retriever = Retriever(conn, store, models, claude, ix)
@@ -658,7 +658,7 @@ def test_headline_falls_back_when_items_have_no_explanations(env):
     conn, ev = env
     ix = ev.retriever.indexer
     spec = ix.create("e", "mcq", False)
-    ix.add(spec, [Item(f"{t}-item", f"{t} things", "A", None, {"skill": t}) for t in TOPICS])
+    ix.add(spec, [Item(f"{t}-item", f"{t} things", "A", None, {"skill": t}) for t in TOPICS], "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "e", QUESTIONS)
     job = ev.queue("e", "dev", ["hybrid", "random_example"], False, None)
@@ -858,7 +858,7 @@ def test_a_legacy_run_left_running_by_a_stopped_process_is_refused_on_resume(env
 def science_env(conn, ev, name, items, questions):
     ix = ev.retriever.indexer
     spec = ix.create(name, "science", False)
-    ix.add(spec, items)
+    ix.add(spec, items, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, name, questions)
 

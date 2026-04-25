@@ -82,7 +82,8 @@ class Loader:
         items, questions = limited(items, questions, job["setup"].get("limit"))
         makes_lists = db.get_keyword_lists(conn, name) is None
         share = 0.5 if makes_lists else 1.0
-        self.indexer.add(spec, items, progress=lambda p: progress(share * p))
+        dataset = job["setup"]["dataset"]
+        counts = self.indexer.add(spec, items, dataset, progress=lambda p: progress(share * p))
         db.save_questions(conn, name, questions)
         source = None
         if makes_lists:
@@ -101,7 +102,8 @@ class Loader:
                 source = None
         fresh = db.get_collection(conn, name)
         return {
-            "added": len(items),
+            "added": counts["new"] + counts["updated"],
+            **counts,
             "questions": len(questions),
             "lists_source": source,
             "keyword_version": fresh.keyword_version if fresh else None,

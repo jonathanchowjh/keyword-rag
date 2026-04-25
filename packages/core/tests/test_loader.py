@@ -99,3 +99,12 @@ def test_load_limit_keeps_gold_passages_and_only_answerable_questions():
     assert [i.id for i in kept] == ["i1", "i4", "i5"]
     assert [q.id for q in answerable] == ["q1", "q3", "mcq"]
     assert limited(items, questions, None) == (items, questions)
+
+
+def test_load_twice_reports_unchanged(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    first = ld.run(job, lambda p: None)
+    assert first["new"] == 3 and first["added"] == 3
+    second = ld.run(job, lambda p: None)
+    assert second["unchanged"] == 3 and second["added"] == 0

@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 
@@ -11,7 +12,7 @@ from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, 
 from ragqa_core.llm import Claude
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
-from ragqa_core.store import Store
+from ragqa_core.store import Store, item_hash
 from ragqa_core.types import FACETS, CollectionSpec, Item, KeywordLists, QaType
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -62,24 +63,44 @@ class Indexer:
     def spec(self, name: str) -> CollectionSpec | None:
         return db.get_collection(self.conn, name)
 
-    def estimate_add_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
+    def sourced(self, items: list[Item], source: str) -> list[Item]:
+        return [replace(i, meta={**i.meta, "source": source}) for i in items]
+
+    def changed(
+        self, spec: CollectionSpec, items: list[Item], source: str
+    ) -> tuple[list[Item], dict[str, int]]:
+        """The sourced items whose stored hash differs, with new/updated/unchanged counts."""
+        items = self.sourced(items, source)
+        stored = self.store.hashes(spec.name, [i.id for i in items])
+        todo = [i for i in items if stored.get(i.id) != item_hash(i)]
+        new = sum(1 for i in todo if i.id not in stored)
+        counts = {"new": new, "updated": len(todo) - new, "unchanged": len(items) - len(todo)}
+        return todo, counts
+
+    def estimate_add_usd(self, spec: CollectionSpec, items: list[Item], source: str) -> float:
         if not spec.summarize:
             return 0.0
-        batch = len(items) > 50
+        todo, _ = self.changed(spec, items, source)
+        batch = len(todo) > 50
         return sum(
             self.claude.estimate_usd(len(summary_prompt(i.text)), SUMMARY_TOKENS, batch=batch)
-            for i in items
+            for i in todo
         )
 
     def add(
         self,
         spec: CollectionSpec,
         items: list[Item],
+        source: str,
         progress: Callable[[float], None] = lambda p: None,
-    ) -> None:
+    ) -> dict[str, int]:
         self.check_model(spec)
+        items, counts = self.changed(spec, items, source)
+        if not items:
+            progress(1.0)
+            return counts
         summaries: list[str | None] = [None] * len(items)
-        if spec.summarize and items:
+        if spec.summarize:
             done = self.claude.complete_many(
                 [summary_prompt(i.text) for i in items],
                 max_tokens=SUMMARY_TOKENS,
@@ -94,18 +115,20 @@ class Indexer:
             self.store.upsert_items(
                 spec.name, part, self.models.embed(texts), self.models.sparse(texts), sums
             )
-            parents, pieces = [], []
+            # An updated item may now have fewer chunks: drop the old ones first.
+            self.store.delete_chunks(spec.name, [i.id for i in part])
+            parents, pieces, sources = [], [], []
             for item in part:
                 for piece in chunk(item.text):
                     parents.append(item.id)
                     pieces.append(piece)
-            self.store.upsert_chunks(
-                spec.name, parents, pieces, self.models.embed(pieces), [None] * len(pieces)
-            )
+                    sources.append(item.meta["source"])
+            self.store.upsert_chunks(spec.name, parents, pieces, self.models.embed(pieces), sources)
             if lists is not None:
                 keywords, vectors = self.keywords_for(spec, lists, texts, sums)
                 self.store.set_keywords(spec.name, [i.id for i in part], keywords, vectors)
             progress(min(start + BATCH, len(items)) / len(items))
+        return counts
 
     def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
         prompt = propose_prompt([i.text for i in sample], spec.qa_type)

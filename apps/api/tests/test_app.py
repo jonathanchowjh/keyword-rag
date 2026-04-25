@@ -332,7 +332,7 @@ def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
     with make_client(tmp_path) as client:
         client.post("/collections", json={"name": "s", "qa_type": "multihop", "summarize": True})
         spec = client.app.state.retriever.spec("s")
-        summaries = client.app.state.indexer.estimate_add_usd(spec, items)
+        summaries = client.app.state.indexer.estimate_add_usd(spec, items, "hand")
         r = client.post("/collections/s/load", json={"dataset": "musique"})
         estimate = r.json()["estimate"]
         assert r.status_code == 200 and estimate["est_usd"] > summaries

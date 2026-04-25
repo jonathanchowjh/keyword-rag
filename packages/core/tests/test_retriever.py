@@ -60,7 +60,7 @@ def build(tmp_path, summarize=False, lists=True, reply=lambda p: "A summary."):
     claude = fake_claude(conn, reply)
     ix = Indexer(conn, store, models, claude)
     spec = ix.create("c", "mcq", summarize)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     if lists:
         ix.set_lists(spec, LISTS)
     return Retriever(conn, store, models, claude, ix), conn
@@ -138,7 +138,7 @@ def test_controls_keep_their_first_pick_whatever_k(tmp_path, method):
 def test_controls_see_items_added_later(tmp_path, method):
     r, _ = build(tmp_path)
     r.retrieve("c", "enzyme", method, k=1)
-    r.indexer.add(r.spec("c"), [Item("late-item", "added after the first query", "B", "late")])
+    r.indexer.add(r.spec("c"), [Item("late-item", "added after the first query", "B", "late")], "x")
     ids = {h.id for h in r.retrieve("c", "enzyme", method, k=10)}
     assert ids == {i.id for i in ITEMS} | {"late-item"}
 

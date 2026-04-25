@@ -41,7 +41,7 @@ def env(tmp_path):
     claude = fake_claude(conn, lambda p: "Answer: A")
     ix = Indexer(conn, store, models, claude)
     spec = ix.create("c", "mcq", False)
-    ix.add(spec, ITEMS)
+    ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
     ev = Evaluator(conn, Retriever(conn, store, models, claude, ix), models, claude)
