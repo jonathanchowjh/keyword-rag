@@ -47,6 +47,9 @@ MAX_HOPS = 3
 HOP_TOKENS = 200
 
 
+Skip = tuple[str, ...]
+
+
 class MethodUnavailable(Exception):
     pass
 
@@ -93,11 +96,11 @@ class Retriever:
         self.models = models
         self.claude = claude
         self.indexer = indexer
-        # Every item id by collection, with the count it was read at: the
+        # Every item id by collection, with the count and skipped sources it was read at: the
         # controls need them per query, and an 11,656-item scroll each time is slow.
-        self._ids: dict[str, tuple[int, list[str]]] = {}
-        self._methods: dict[str, Callable[[CollectionSpec, str, int, int], list[Hit]]] = {
-            "question_only": lambda spec, q, k, rk: [],
+        self._ids: dict[str, tuple[tuple[int, Skip], list[str]]] = {}
+        self._methods: dict[str, Callable[[CollectionSpec, str, int, int, Skip], list[Hit]]] = {
+            "question_only": lambda spec, q, k, rk, skip: [],
             "vector": self._vector,
             "keyword": self._keyword,
             "hybrid": self._hybrid,
@@ -107,8 +110,8 @@ class Retriever:
             "hybrid_rerank": self._hybrid_rerank,
             "kw_hybrid": self._kw_hybrid,
             "iterative": self._iterative,
-            "random_example": lambda spec, q, k, rk: self._control(spec, q, k),
-            "fixed_example": lambda spec, q, k, rk: self._control(spec, FIXED_SEED, k),
+            "random_example": lambda spec, q, k, rk, skip: self._control(spec, q, k, skip),
+            "fixed_example": lambda spec, q, k, rk, skip: self._control(spec, FIXED_SEED, k, skip),
         }
 
     def spec(self, name: str) -> CollectionSpec:
@@ -126,7 +129,8 @@ class Retriever:
         # A query embedded by another model is either a dimension crash or,
         # worse, silently meaningless; refuse it by name instead.
         self.indexer.check_model(spec)
-        return self._methods[method](spec, question, k, rrf_k)
+        skip = tuple(db.disabled_sources(self.conn, collection))
+        return self._methods[method](spec, question, k, rrf_k, skip)
 
     def is_paid(self, spec: CollectionSpec, method: str) -> bool:
         return method == "iterative" or (method in KEYWORD_METHODS and spec.summarize)
@@ -141,9 +145,11 @@ class Retriever:
 
     # -- the paper's methods ---------------------------------------------------
 
-    def _vector(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
+    def _vector(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         parents: dict[str, float] = {}
-        for parent, score in self.store.search_chunks(spec.name, self._dense_query(spec, q), POOL):
+        for parent, score in self.store.search_chunks(
+            spec.name, self._dense_query(spec, q), POOL, skip=skip
+        ):
             parents.setdefault(parent, score)
         top = list(parents)[:k]
         hits = self.store.get(spec.name, top)
@@ -151,28 +157,36 @@ class Retriever:
             h.score = parents[h.id]
         return hits
 
-    def _keyword(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        return self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], k)
+    def _keyword(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
+        return self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], k, skip=skip)
 
-    def _hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        dense = self.store.search(spec.name, "text_dense", self._dense_query(spec, q), POOL)
-        sparse = self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], POOL)
+    def _hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
+        dense = self.store.search(
+            spec.name, "text_dense", self._dense_query(spec, q), POOL, skip=skip
+        )
+        sparse = self.store.search_sparse(
+            spec.name, self.models.sparse_query([q])[0], POOL, skip=skip
+        )
         return rrf([dense, sparse], rrf_k)[:k]
 
-    def _kw_all(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        return self._kw_search(spec, q, ["kw_all"], k, rrf_k)
+    def _kw_all(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
+        return self._kw_search(spec, q, ["kw_all"], k, rrf_k, skip)
 
-    def _kw_individual(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        return self._kw_search(spec, q, ["kw_individual"], k, rrf_k)
+    def _kw_individual(
+        self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip
+    ) -> list[Hit]:
+        return self._kw_search(spec, q, ["kw_individual"], k, rrf_k, skip)
 
-    def _kw_rrf(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
+    def _kw_rrf(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         names = ["kw_topic", "kw_method", "kw_common"] + (["kw_summary"] if spec.summarize else [])
-        return self._kw_search(spec, q, names, k, rrf_k)
+        return self._kw_search(spec, q, names, k, rrf_k, skip)
 
     # -- modern additions ------------------------------------------------------
 
-    def _hybrid_rerank(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
-        pool = self._hybrid(spec, q, POOL, rrf_k)
+    def _hybrid_rerank(
+        self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip
+    ) -> list[Hit]:
+        pool = self._hybrid(spec, q, POOL, rrf_k, skip)
         if not pool:
             return []
         scores = self.models.rerank(q, [h.text for h in pool])
@@ -185,13 +199,13 @@ class Retriever:
             out.append(hit)
         return out
 
-    def _kw_hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
+    def _kw_hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         query_kw, vectors = self._query_keywords(spec, q)
-        keyword_hits = self._kw_rank(spec, ["kw_individual"], vectors, POOL, rrf_k)
-        fused = rrf([keyword_hits, self._hybrid(spec, q, POOL, rrf_k)], rrf_k)[:k]
+        keyword_hits = self._kw_rank(spec, ["kw_individual"], vectors, POOL, rrf_k, skip)
+        fused = rrf([keyword_hits, self._hybrid(spec, q, POOL, rrf_k, skip)], rrf_k)[:k]
         return self._mark(query_kw, fused)
 
-    def _iterative(self, spec: CollectionSpec, q: str, k: int, rrf_k: int) -> list[Hit]:
+    def _iterative(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         """Retrieve, then let Claude name the next query, up to MAX_HOPS calls.
 
         Reading of spec §5: rather than decomposing up front, each hop asks
@@ -200,7 +214,9 @@ class Retriever:
         seen: set[str] = set()
 
         def hop(query: str) -> None:
-            fresh = [h for h in self._hybrid_rerank(spec, query, 2, rrf_k) if h.id not in seen]
+            fresh = [
+                h for h in self._hybrid_rerank(spec, query, 2, rrf_k, skip) if h.id not in seen
+            ]
             seen.update(h.id for h in fresh)
             hops.append(fresh)
 
@@ -222,21 +238,21 @@ class Retriever:
 
     # -- controls ----------------------------------------------------------------
 
-    def _control(self, spec: CollectionSpec, seed: str, k: int) -> list[Hit]:
+    def _control(self, spec: CollectionSpec, seed: str, k: int, skip: Skip) -> list[Hit]:
         """random_example seeds by the question, so each question always gets the
         same draw (and the same cached answer); fixed_example uses one seed for all.
         Against these, a method shows whether choosing the example helped at all."""
-        return self.store.get(spec.name, shuffled(self._all_ids(spec.name), seed)[:k])
+        return self.store.get(spec.name, shuffled(self._all_ids(spec.name, skip), seed)[:k])
 
     def forget(self, name: str) -> None:
         """Drops what is cached for a collection that is gone."""
         self._ids.pop(name, None)
 
-    def _all_ids(self, name: str) -> list[str]:
+    def _all_ids(self, name: str, skip: Skip) -> list[str]:
         count = self.store.count(name)
         cached = self._ids.get(name)
-        if cached is None or cached[0] != count:
-            self._ids[name] = (count, self.store.ids(name))
+        if cached is None or cached[0] != (count, skip):
+            self._ids[name] = ((count, skip), self.store.ids(name, skip=skip))
         return self._ids[name][1]
 
     # -- shared ------------------------------------------------------------------
@@ -261,16 +277,22 @@ class Retriever:
         return keywords[0], {name: vecs[0] for name, vecs in vectors.items()}
 
     def _kw_search(
-        self, spec: CollectionSpec, q: str, names: list[str], k: int, rrf_k: int
+        self, spec: CollectionSpec, q: str, names: list[str], k: int, rrf_k: int, skip: Skip
     ) -> list[Hit]:
         query_kw, vectors = self._query_keywords(spec, q)
-        return self._mark(query_kw, self._kw_rank(spec, names, vectors, k, rrf_k))
+        return self._mark(query_kw, self._kw_rank(spec, names, vectors, k, rrf_k, skip))
 
     def _kw_rank(
-        self, spec: CollectionSpec, names: list[str], vectors: dict, k: int, rrf_k: int
+        self,
+        spec: CollectionSpec,
+        names: list[str],
+        vectors: dict,
+        k: int,
+        rrf_k: int,
+        skip: Skip,
     ) -> list[Hit]:
         limit = k if len(names) == 1 else POOL
-        rankings = [self.store.search(spec.name, n, vectors[n], limit) for n in names]
+        rankings = [self.store.search(spec.name, n, vectors[n], limit, skip=skip) for n in names]
         return rankings[0][:k] if len(names) == 1 else rrf(rankings, rrf_k)[:k]
 
     @staticmethod

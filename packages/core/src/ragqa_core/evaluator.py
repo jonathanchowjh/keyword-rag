@@ -78,7 +78,7 @@ def untracked(setup: dict) -> bool:
     return "keyword_version" not in setup and "question_ids" in setup
 
 
-def changes_since(setup: dict, spec: CollectionSpec) -> dict:
+def changes_since(setup: dict, spec: CollectionSpec, disabled: list[str]) -> dict:
     """What differs between a run's recorded setup and the collection now, in plain terms.
     A migrated run records no versions, so it is untracked rather than unchanged."""
     if untracked(setup):
@@ -94,6 +94,8 @@ def changes_since(setup: dict, spec: CollectionSpec) -> dict:
         changes.append("keyword lists")
     if setup.get("dense_model") is not None and setup["dense_model"] != spec.dense_model:
         changes.append("dense model")
+    if "keyword_version" in setup and setup.get("disabled_sources", []) != disabled:
+        changes.append("sources")
     return {"untracked": False, "changes": changes}
 
 
@@ -245,6 +247,9 @@ class Evaluator:
         Whatever the setup already records wins: an old run keeps its versions,
         and its question ids are the ones it has rows for."""
         ids = self._question_ids(job_id, spec, setup)
+        disabled = db.disabled_sources(self.conn, spec.name)
+        questions = self._run_questions(job_id, spec, {**setup, "question_ids": ids})
+        off = self._gold_off(spec, questions, disabled)
         setup = {
             "dense_model": spec.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
@@ -253,10 +258,22 @@ class Evaluator:
             "seed": DEV_SEED,
             "dataset_filter": FILTER_NOTES[spec.qa_type],
             "question_ids": ids,
+            "disabled_sources": disabled,
+            "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
             **setup,
         }
         db.set_job_setup(self.conn, job_id, setup)
         return setup
+
+    def _gold_off(
+        self, spec: CollectionSpec, questions: list[Question], disabled: list[str]
+    ) -> set[str]:
+        """The gold item ids that sit in a disabled source."""
+        if not disabled:
+            return set()
+        gold = sorted({g for q in questions for g in q.gold_ids})
+        hits = self.retriever.store.get(spec.name, gold)
+        return {h.id for h in hits if h.meta.get("source") in disabled}
 
     def _version_change(self, spec: CollectionSpec, setup: dict) -> str | None:
         """Why the recorded versions no longer hold, or None. A setup that records
@@ -275,6 +292,9 @@ class Evaluator:
         old, new = setup.get("judge_model"), self.models.judge_model
         if old != new:
             return f"the judge model changed since this run ({old} → {new}); start a new run"
+        old, new = setup.get("disabled_sources", []), db.disabled_sources(self.conn, spec.name)
+        if old != new:
+            return f"sources switched since this run ({old} → {new}); start a new run"
         return None
 
     def resume_refusal(self, job_id: str) -> str | None:
@@ -358,7 +378,8 @@ class Evaluator:
                 {"hit_ids": [], "hit_skills": [], "retrieval": {}, "usd": 0.0} for _ in questions
             ]
         else:
-            rows = self._retrieval_rows(spec, questions, all_hits)
+            off = self._gold_off(spec, questions, setup.get("disabled_sources", []))
+            rows = self._retrieval_rows(spec, questions, all_hits, off)
         for q, row in zip(questions, rows, strict=True):
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
@@ -391,7 +412,11 @@ class Evaluator:
         check()
 
     def _retrieval_rows(
-        self, spec: CollectionSpec, questions: list[Question], all_hits: list[list[Hit]]
+        self,
+        spec: CollectionSpec,
+        questions: list[Question],
+        all_hits: list[list[Hit]],
+        off: set[str],
     ) -> list[dict]:
         rows = []
         mine = gold = None
@@ -416,16 +441,11 @@ class Evaluator:
                         metrics["solution_sim@1"] = cosine(mine[n], gold[n])
                     if skill and hits[0].meta.get("skill"):
                         metrics["same_skill@1"] = float(hits[0].meta["skill"] == skill)
-            elif spec.qa_type == "multihop":
-                metrics = {
-                    "recall@2": recall_at(ids, q.gold_ids, 2),
-                    "recall@5": recall_at(ids, q.gold_ids, 5),
-                }
+            elif not q.gold_ids or set(q.gold_ids) <= off:
+                metrics = {}  # nothing to find: absent, never 0
             else:
-                metrics = {
-                    "recall@1": recall_at(ids, q.gold_ids, 1),
-                    "recall@3": recall_at(ids, q.gold_ids, 3),
-                }
+                cuts = (2, 5) if spec.qa_type == "multihop" else (1, 3)
+                metrics = {f"recall@{c}": recall_at(ids, q.gold_ids, c) for c in cuts}
             rows.append(
                 {
                     "hit_ids": ids,
@@ -512,7 +532,12 @@ class Evaluator:
                 values = metric_values(per_q.values(), metric)
                 if values:
                     mean, lo, hi = bootstrap_ci(values)
-                    entry[metric] = {"mean": clean(mean), "lo": clean(lo), "hi": clean(hi)}
+                    entry[metric] = {
+                        "mean": clean(mean),
+                        "lo": clean(lo),
+                        "hi": clean(hi),
+                        "n": len(values),
+                    }
             methods[method] = entry
         pair_metrics = [RETRIEVAL_METRICS[spec.qa_type][0]]
         if has_answers:
@@ -560,7 +585,7 @@ class Evaluator:
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "usd_total": db.job_spend(self.conn, job_id),
             "question_count": self._question_count(setup, by_method),
-            "since": changes_since(setup, spec),
+            "since": changes_since(setup, spec, db.disabled_sources(self.conn, spec.name)),
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
@@ -590,7 +615,9 @@ class Evaluator:
             "runs": len(done),
             "proxy_trusted": summary["proxy_trusted"],
             "scale": summary["scale"],
-            "since": changes_since(job["setup"], self.retriever.spec(name)),
+            "since": changes_since(
+                job["setup"], self.retriever.spec(name), db.disabled_sources(self.conn, name)
+            ),
             **summary["answer"],
         }
 

@@ -43,6 +43,9 @@ create table if not exists keyword_lists (
   collection text not null, version text not null, lists_json text not null,
   created_at text not null, primary key (collection, version)
 );
+create table if not exists disabled_sources (
+    collection text not null, source text not null, primary key (collection, source)
+);
 create table if not exists questions (
   collection text not null, id text not null, json text not null,
   primary key (collection, id)
@@ -423,10 +426,30 @@ def delete_job(conn: Connection, job_id: str) -> None:
     conn.execute("delete from jobs where id = ?", (job_id,))
 
 
+def disabled_sources(conn: Connection, name: str) -> list[str]:
+    rows = conn.execute(
+        "select source from disabled_sources where collection = ? order by source", (name,)
+    )
+    return [row["source"] for row in rows]
+
+
+def set_source_enabled(conn: Connection, name: str, source: str, enabled: bool) -> None:
+    if enabled:
+        conn.execute(
+            "delete from disabled_sources where collection = ? and source = ?", (name, source)
+        )
+    else:
+        conn.execute(
+            "insert or ignore into disabled_sources (collection, source) values (?, ?)",
+            (name, source),
+        )
+
+
 def delete_collection_rows(conn: Connection, name: str) -> None:
     for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])
     conn.execute("delete from questions where collection = ?", (name,))
+    conn.execute("delete from disabled_sources where collection = ?", (name,))
     conn.execute("delete from keyword_lists where collection = ?", (name,))
     conn.execute("delete from collections where name = ?", (name,))
 

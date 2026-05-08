@@ -10,6 +10,7 @@ from ragqa_core.db import (
     create_job,
     delete_collection_rows,
     delete_job,
+    disabled_sources,
     get_collection,
     get_job,
     get_keyword_lists,
@@ -30,6 +31,7 @@ from ragqa_core.db import (
     save_questions,
     set_job_setup,
     set_keyword_version,
+    set_source_enabled,
     update_job,
     upsert_run_item,
 )
@@ -468,3 +470,18 @@ def test_interrupt_running_counts_the_jobs_it_changed(conn):
         update_job(conn, job, status="running")
     assert interrupt_running(conn) == 2
     assert interrupt_running(conn) == 0
+
+
+def test_disabled_sources_round_trip_and_cleared_with_collection(conn):
+    save_collection(conn, SPEC)
+    assert disabled_sources(conn, "arc") == []
+    set_source_enabled(conn, "arc", "b", False)
+    set_source_enabled(conn, "arc", "a", False)
+    set_source_enabled(conn, "arc", "a", False)  # twice is the same as once
+    set_source_enabled(conn, "other", "z", False)
+    assert disabled_sources(conn, "arc") == ["a", "b"]
+    set_source_enabled(conn, "arc", "a", True)
+    assert disabled_sources(conn, "arc") == ["b"]
+    delete_collection_rows(conn, "arc")
+    assert disabled_sources(conn, "arc") == []
+    assert disabled_sources(conn, "other") == ["z"]

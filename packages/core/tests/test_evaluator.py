@@ -829,7 +829,7 @@ def test_since_notes_lists_set_after_a_run_that_had_none(env):
     spec = env[1].retriever.spec("c")
     assert spec.keyword_version is not None
     setup = {**setup_for(["kw_individual"]), "keyword_version": None, "dense_model": "fake/dense"}
-    assert changes_since(setup, spec) == {"untracked": False, "changes": ["keyword lists"]}
+    assert changes_since(setup, spec, []) == {"untracked": False, "changes": ["keyword lists"]}
 
 
 def test_since_has_no_keyword_note_for_a_run_without_keyword_methods(env):
@@ -842,7 +842,7 @@ def test_since_has_no_keyword_note_for_a_run_without_keyword_methods(env):
             "keyword_version": version,
             "dense_model": "fake/dense",
         }
-        assert changes_since(setup, spec) == {"untracked": False, "changes": []}
+        assert changes_since(setup, spec, []) == {"untracked": False, "changes": []}
 
 
 def test_a_legacy_run_left_running_by_a_stopped_process_is_refused_on_resume(env, tmp_path):
@@ -901,7 +901,7 @@ def test_no_hits_score_zero_only_where_measurable(env):
     ]
     science_env(conn, ev, "sci", ITEMS, questions)
     spec = ev.retriever.indexer.spec("sci")
-    rows = ev._retrieval_rows(spec, questions, [[], [], []])
+    rows = ev._retrieval_rows(spec, questions, [[], [], []], set())
     assert rows[0]["retrieval"] == {"solution_sim@1": 0.0, "same_skill@1": 0.0}
     assert rows[1]["retrieval"] == {"same_skill@1": 0.0}
     assert rows[2]["retrieval"] == {}
@@ -914,3 +914,87 @@ def test_mcq_scoring_and_headline_unchanged(env):
     rows = run_items(conn, job)
     assert all(r["answer"] == {"accuracy": 1.0} for r in rows)
     assert ev.table(job)["headline"] == "accuracy"
+
+
+def multihop_env(tmp_path):
+    conn = connect(tmp_path / "m.db")
+    store, models = Store(None, None), fake_models()
+    claude = fake_claude(conn, lambda p: "x")
+    ix = Indexer(conn, store, models, claude)
+    spec = ix.create("c", "multihop", False)
+    ix.add(spec, [Item("g1", "enzyme rate rose", "A")], "x")
+    ix.add(spec, [Item("g2", "market price fell", "B")], "y")
+    save_questions(
+        conn,
+        "c",
+        [
+            Question("q1", "enzyme rate", None, ["A"], ["g1"], {}),
+            Question("q2", "market price", None, ["B"], ["g2"], {}),
+            Question("q3", "volcano lava", None, ["C"], [], {}),
+        ],
+    )
+    return conn, Evaluator(conn, Retriever(conn, store, models, claude, ix), models, claude)
+
+
+def run_multihop(conn, ev, methods=("hybrid",)):
+    job = create_job(conn, "eval", "c", setup_for(list(methods), split="full"))
+    ev.run(job)
+    return job
+
+
+def test_run_records_sources_and_resume_is_refused_after_a_switch(env):
+    from ragqa_core.evaluator import changes_since
+
+    conn, ev = env
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"]))
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["disabled_sources"] == [] and setup["evidence_off"] == 0
+    db.update_job(conn, job, status="stopped_budget")
+    assert ev.resume_refusal(job) is None
+    db.set_source_enabled(conn, "c", "x", False)
+    assert "sources switched" in (ev.resume_refusal(job) or "")
+    spec = ev.retriever.spec("c")
+    assert changes_since(setup, spec, ["x"])["changes"] == ["sources"]
+    assert changes_since(setup, spec, [])["changes"] == []
+
+
+def test_untracked_run_shows_no_source_change(env):
+    from ragqa_core.evaluator import changes_since
+
+    spec = env[1].retriever.spec("c")
+    setup = {**setup_for(["hybrid"]), "question_ids": ["q-enzyme"]}
+    assert changes_since(setup, spec, ["x"]) == {"untracked": True, "changes": []}
+
+
+def test_recall_absent_without_gold(tmp_path):
+    conn, ev = multihop_env(tmp_path)
+    job = run_multihop(conn, ev)
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    assert "recall@2" in rows["q1"]["retrieval"]
+    assert rows["q3"]["retrieval"] == {}
+    assert ev.table(job)["methods"]["hybrid"]["recall@2"]["n"] == 2
+
+
+def test_evidence_off_counts_and_drops_recall(tmp_path):
+    conn, ev = multihop_env(tmp_path)
+    db.set_source_enabled(conn, "c", "y", False)
+    job = run_multihop(conn, ev)
+    setup = get_job(conn, job)["setup"]
+    assert setup["disabled_sources"] == ["y"] and setup["evidence_off"] == 1
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    assert rows["q2"]["retrieval"] == {}
+    assert "g2" not in rows["q2"]["hit_ids"] + rows["q1"]["hit_ids"]
+    assert rows["q1"]["retrieval"]["recall@2"] > 0
+
+
+def test_recall_unchanged_for_questions_with_gold(tmp_path):
+    from ragqa_core.metrics import recall_at
+
+    conn, ev = multihop_env(tmp_path)
+    job = run_multihop(conn, ev)
+    for r in run_items(conn, job):
+        gold = {"q1": ["g1"], "q2": ["g2"]}.get(r["question_id"])
+        if gold:
+            assert r["retrieval"]["recall@2"] == recall_at(r["hit_ids"], gold, 2)
+            assert r["retrieval"]["recall@5"] == recall_at(r["hit_ids"], gold, 5)

@@ -108,3 +108,14 @@ def test_load_twice_reports_unchanged(tmp_path, monkeypatch):
     assert first["new"] == 3 and first["added"] == 3
     second = ld.run(job, lambda p: None)
     assert second["unchanged"] == 3 and second["added"] == 0
+
+
+def test_sample_items_skips_disabled(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    store = Store(None, None)
+    ix = Indexer(conn, store, fake_models(), fake_claude(conn, lambda p: ""))
+    spec = ix.create("m", "multihop", False)
+    ix.add(spec, [Item("a", "enzyme rate", "A")], "one")
+    ix.add(spec, [Item("b", "market price", "B")], "two")
+    assert {i.id for i in loader.sample_items(store, "m")} == {"a", "b"}
+    assert [i.id for i in loader.sample_items(store, "m", skip=("two",))] == ["a"]

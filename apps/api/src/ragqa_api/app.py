@@ -309,7 +309,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(name)
         if not state.claude.api_key:
             raise NoApiKey()
-        sample = sample_items(state.store, name)
+        sample = sample_items(state.store, name, tuple(db.disabled_sources(state.conn, name)))
         if not (body and body.confirm):
             estimate = state.indexer.estimate_propose_usd(spec, sample)
             return JSONResponse({"estimate": {"est_usd": estimate, "calls": 1}}, 200)

@@ -1,7 +1,7 @@
 import pytest
 
 from ragqa_core.catalog import CONTROLS
-from ragqa_core.db import claim_next_job_id, connect, create_job
+from ragqa_core.db import claim_next_job_id, connect, create_job, set_source_enabled
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import NoApiKey
@@ -265,3 +265,34 @@ def test_iterative_keeps_the_best_passage_of_every_hop(tmp_path):
     r.claude = fake_claude(conn, lambda p: next(replies))
     ids = [h.id for h in r.retrieve("c", "enzyme kinetics rate", "iterative", k=3)]
     assert ids == ["enzyme-item", "market-item", "volcano-item"]
+
+
+SKIP_METHODS = [m for m in METHOD_NAMES if m != "question_only"]
+
+
+def build_sources(tmp_path):
+    r, conn = build(tmp_path, lists=False)
+    spec = r.spec("c")
+    r.indexer.add(spec, [Item("a1", "enzyme rate shared words", "A", "e")], "a")
+    r.indexer.add(spec, [Item("a2", "market price shared words", "A", "e")], "a")
+    r.indexer.add(spec, [Item("b1", "enzyme market shared words", "A", "e")], "b")
+    r.indexer.set_lists(spec, LISTS)
+    r.claude = fake_claude(conn, lambda p: '{"done": true}')
+    return r, conn
+
+
+@pytest.mark.parametrize("method", SKIP_METHODS)
+def test_disabled_source_is_never_retrieved(tmp_path, method):
+    r, conn = build_sources(tmp_path)
+    query = "enzyme market rate price shared words"
+    assert method in CONTROLS or "b1" in [h.id for h in r.retrieve("c", query, method, k=10)]
+    set_source_enabled(conn, "c", "b", False)
+    hits = r.retrieve("c", query, method, k=10)
+    assert hits and "b1" not in [h.id for h in hits]
+
+
+def test_controls_refresh_after_a_switch(tmp_path):
+    r, conn = build_sources(tmp_path)
+    assert "b1" in [h.id for h in r.retrieve("c", "enzyme", "random_example", k=3)]
+    set_source_enabled(conn, "c", "b", False)
+    assert "b1" not in [h.id for h in r.retrieve("c", "enzyme", "random_example", k=3)]

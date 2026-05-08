@@ -37,8 +37,8 @@ def limited(
     return kept, [q for q in questions if set(q.gold_ids) <= chosen]
 
 
-def sample_items(store: Store, name: str) -> list[Item]:
-    hits = [h for batch in store.scroll(name) for h in batch]
+def sample_items(store: Store, name: str, skip: tuple[str, ...] = ()) -> list[Item]:
+    hits = [h for batch in store.scroll(name, skip=skip) for h in batch]
     picked = random.Random(472).sample(hits, min(PROPOSE_SAMPLE, len(hits)))
     return [Item(h.id, h.text, h.answer, h.explanation, h.meta) for h in picked]
 
