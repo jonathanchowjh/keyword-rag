@@ -212,3 +212,13 @@ def test_set_payloads_and_set_chunk_sources():
     left, _ = s.client.scroll(chunks_of("c"), limit=10)
     got = {r.payload["parent_id"]: r.payload["meta"]["source"] for r in left if r.payload}
     assert got == {"a1": "q", "a2": "a", "b1": "r"}
+
+
+def test_unsourced_counts_chunks_too():
+    s, m, items = sourced()
+    loose = Item("n1", "no source here", meta={"source": "a"})
+    s.upsert_items("c", [loose], m.embed([loose.text]), m.sparse([loose.text]), [None])
+    s.upsert_chunks("c", ["n1"], [loose.text], m.embed([loose.text]), [None])
+    assert s.unsourced("c") == 1
+    s.set_chunk_sources("c", {"n1": "a"})
+    assert s.unsourced("c") == 0

@@ -139,21 +139,24 @@ class Indexer:
         datasets = db.loaded_datasets(self.conn, name)
         total, done = self.store.count(name), 0
         source_of: dict[str, str] = {}
+        labelled_now = 0
         for hits in self.store.scroll(name):
             payloads = {}
             for h in hits:
                 if h.meta.get("source"):
+                    source_of[h.id] = h.meta["source"]
                     continue
                 source = source_of[h.id] = source_for(h.id, datasets)
                 meta = {**h.meta, "source": source}
                 labelled = Item(h.id, h.text, h.answer, h.explanation, meta)
+                labelled_now += 1
                 payloads[h.id] = {"meta": meta, "content_hash": item_hash(labelled)}
             self.store.set_payloads(name, payloads)
             done += len(hits)
             progress(done / total)
-        if source_of:
-            self.store.set_chunk_sources(name, source_of)
-        return {"labelled": len(source_of)}
+        # Every item, not just this run's: an interrupted run may have labelled items only.
+        self.store.set_chunk_sources(name, source_of)
+        return {"labelled": labelled_now}
 
     def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
         prompt = propose_prompt([i.text for i in sample], spec.qa_type)

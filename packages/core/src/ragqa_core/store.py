@@ -310,8 +310,12 @@ class Store:
         return {str(h.value): h.count for h in facet.hits}
 
     def unsourced(self, name: str) -> int:
+        """Item points and chunk points that carry no source."""
         empty = Filter(must=[IsEmptyCondition(is_empty=PayloadField(key="meta.source"))])
-        return self.client.count(name, count_filter=empty, exact=True).count
+        return sum(
+            self.client.count(c, count_filter=empty, exact=True).count
+            for c in (name, chunks_of(name))
+        )
 
     def field_counts(self, name: str) -> dict[str, int]:
         def filled(key: str) -> int:

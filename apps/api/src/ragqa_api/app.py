@@ -133,6 +133,8 @@ async def lifespan(app: FastAPI):
     db.interrupt_running(app.state.conn)
     # Collections whose points predate sources are labelled in place by a queued job.
     for spec in db.list_collections(app.state.conn):
+        if not app.state.store.client.collection_exists(spec.name):
+            continue
         if app.state.store.unsourced(spec.name) > 0 and not db.job_waiting_or_running(
             app.state.conn, "backfill", spec.name
         ):

@@ -369,7 +369,7 @@ def test_backfill_labels_items_and_chunks(env):
         "insert into jobs (id, kind, collection, status, setup_json, created_at, updated_at)"
         " values ('j', 'load', 'c', 'failed', '{\"dataset\": \"scienceqa\"}', 'n', 'n')"
     )
-    assert store.unsourced("c") == 2
+    assert store.unsourced("c") == 4
     assert ix.backfill("c", lambda p: None) == {"labelled": 2}
     assert store.unsourced("c") == 0
     want = {"sqa-train-1": "scienceqa", "note-1": "upload:unknown"}
@@ -388,3 +388,26 @@ def test_backfill_labels_items_and_chunks(env):
     }
     assert chunk_sources == want
     assert ix.backfill("c", lambda p: None) == {"labelled": 0}
+
+
+def test_backfill_labels_chunks_of_already_labelled_items(env):
+    conn, store, models, ix, _ = env
+    ix.create("c", "mcq", False)
+    write_legacy(store, models, ITEMS)
+    store.set_payloads(
+        "c",
+        {
+            i.id: {
+                "meta": {"source": "hand"},
+                "content_hash": item_hash(
+                    Item(i.id, i.text, i.answer, i.explanation, {"source": "hand"})
+                ),
+            }
+            for i in ITEMS
+        },
+    )
+    assert store.unsourced("c") > 0
+    assert ix.backfill("c", lambda p: None) == {"labelled": 0}
+    assert store.unsourced("c") == 0
+    chunks = store.client.scroll("c__chunks", limit=100, with_payload=True)[0]
+    assert {r.payload["meta"]["source"] for r in chunks} == {"hand"}

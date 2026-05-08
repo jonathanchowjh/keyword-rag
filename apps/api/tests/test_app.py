@@ -14,7 +14,7 @@ from ragqa_core import db
 from ragqa_core.fakes import fake_embeddings, fake_replies
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
-from ragqa_core.types import Item, KeywordLists, Question
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
 ITEMS = [
     {
@@ -1159,3 +1159,11 @@ def test_labelled_collections_queue_no_backfill(tmp_path):
         add_collection(client, lists=False)
     with client:
         assert backfills(client.app.state.conn) == []
+
+
+def test_startup_skips_collections_qdrant_lacks(tmp_path):
+    client = make_client(tmp_path)
+    conn = client.app.state.conn
+    db.save_collection(conn, CollectionSpec("ghost", "mcq", False, "fake/dense", 256, None))
+    with client:
+        assert backfills(conn) == []
