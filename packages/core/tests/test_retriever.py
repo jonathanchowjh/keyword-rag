@@ -296,3 +296,16 @@ def test_controls_refresh_after_a_switch(tmp_path):
     assert "b1" in [h.id for h in r.retrieve("c", "enzyme", "random_example", k=3)]
     set_source_enabled(conn, "c", "b", False)
     assert "b1" not in [h.id for h in r.retrieve("c", "enzyme", "random_example", k=3)]
+
+
+def test_all_ids_returns_the_list_it_fetched_even_if_another_thread_replaces_the_entry(tmp_path):
+    r, _ = build_sources(tmp_path)
+    real = r.store.ids
+
+    def racing(name, *args, **kwargs):
+        ids = real(name, *args, **kwargs)
+        r._ids[name] = ((0, ("other",)), ["someone-elses"])
+        return ids
+
+    r.store.ids = racing
+    assert "someone-elses" not in r._all_ids("c", ("b",))

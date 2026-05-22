@@ -251,9 +251,11 @@ class Retriever:
     def _all_ids(self, name: str, skip: Skip) -> list[str]:
         count = self.store.count(name)
         cached = self._ids.get(name)
-        if cached is None or cached[0] != (count, skip):
-            self._ids[name] = ((count, skip), self.store.ids(name, skip=skip))
-        return self._ids[name][1]
+        if cached is not None and cached[0] == (count, skip):
+            return cached[1]
+        ids = self.store.ids(name, skip=skip)
+        self._ids[name] = ((count, skip), ids)
+        return ids
 
     # -- shared ------------------------------------------------------------------
 
