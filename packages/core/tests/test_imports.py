@@ -223,3 +223,67 @@ def test_leaked_ids():
         Question("other", "What is the boiling point of water at sea level?", None, [], []),
     ]
     assert imports.leaked_ids(qs, items) == {"masked", "inside"}
+
+
+def test_exotic_digit_answers_are_unreadable_not_fatal():
+    choices = ["a", "b"]
+    assert imports.to_letter("²", choices) is None
+    assert imports.to_letter("9" * 5000, choices) is None
+    rows = [
+        {"text": "q1", "choices": "a|b", "answer": "²"},
+        {"text": "q2", "choices": "a|b", "answer": "9" * 5000},
+    ]
+    mapping = imports.guess_mapping(imports.columns(rows), "questions")
+    qs, report = imports.build_questions(rows, mapping, "mcq")
+    assert qs == [] and report["unreadable_answers"] == 2
+
+
+def test_corrupt_zip_is_a_value_error(tmp_path):
+    p = write(tmp_path / "x.zip", "not a zip")
+    with pytest.raises(ValueError, match="could not read x.zip"):
+        imports.read_rows(p, "x.zip")
+
+
+def test_zip_bad_crc_is_a_value_error(tmp_path):
+    p = tmp_path / "x.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("a.txt", "hello world")
+    data = bytearray(p.read_bytes())
+    data[data.index(b"hello world")] ^= 1
+    p.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="could not read x.zip"):
+        imports.read_rows(p, "x.zip")
+
+
+def test_deeply_nested_json_is_a_value_error(tmp_path):
+    p = write(tmp_path / "x.json", "[" * 100000 + "]" * 100000)
+    with pytest.raises(ValueError, match="could not read x.json"):
+        imports.read_rows(p, "x.json")
+
+
+def test_malformed_json_is_a_value_error(tmp_path):
+    p = write(tmp_path / "x.json", "[{")
+    with pytest.raises(ValueError, match="could not read x.json"):
+        imports.read_rows(p, "x.json")
+
+
+def test_deeply_nested_jsonl_line_is_a_reported_bad_line(tmp_path):
+    p = write(tmp_path / "x.jsonl", '{"text": "ok"}\n' + "[" * 100000 + "\n")
+    _, rows, problems = imports.read_rows(p, "x.jsonl")
+    assert len(rows) == 1
+    assert problems == ["line 2 is not a JSON object"]
+
+
+def test_lone_surrogate_text_still_gets_an_id():
+    assert imports.make_id("h-", "a\ud800b").startswith("h-")
+    rows = [{"text": "a\ud800b"}]
+    items, _ = imports.build_items(rows, imports.guess_mapping(["text"], "items"))
+    assert len(items) == 1
+
+
+def test_leak_does_not_match_inside_words():
+    items = ["the quick brown fox jumps over the lazy doge near the river"]
+    q = Question("q", "the quick brown fox jumps over the lazy dog", None, [], [])
+    assert imports.leaked_ids([q], items) == set()
+    q2 = Question("q2", "the quick brown fox jumps over the lazy doge", None, [], [])
+    assert imports.leaked_ids([q2], items) == {"q2"}

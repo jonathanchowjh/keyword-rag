@@ -54,6 +54,21 @@ def read_rows(path: Path, filename: str) -> tuple[str, list[dict], list[str]]:
             f"unsupported file type {Path(filename).suffix or filename!r}; "
             "use JSONL, JSON, CSV, TSV, .txt, .md, or a .zip of .txt/.md"
         )
+    # Untrusted bytes: whatever the parsers raise, the caller sees a ValueError.
+    try:
+        return read_format(path, filename, fmt)
+    except (
+        zipfile.BadZipFile,
+        json.JSONDecodeError,
+        RuntimeError,
+        NotImplementedError,
+        csv.Error,
+        OSError,
+    ) as e:
+        raise ValueError(f"could not read {filename}: {e}") from e
+
+
+def read_format(path: Path, filename: str, fmt: str) -> tuple[str, list[dict], list[str]]:
     if fmt == "zip":
         return (fmt, *read_zip(path))
     if fmt == "text":
@@ -83,7 +98,7 @@ def read_jsonl(path: Path) -> tuple[list[dict], list[str]]:
             continue
         try:
             row = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             row = None
         if isinstance(row, dict):
             rows.append(row)
@@ -166,13 +181,13 @@ def to_letter(answer: str, choices: list[str]) -> str | None:
     for i, c in enumerate(choices):
         if c.strip().lower() == a.lower():
             return LETTERS[i]
-    if a.isdigit() and int(a) < len(choices):
+    if a.isascii() and a.isdigit() and len(a) < 10 and int(a) < len(choices):
         return LETTERS[int(a)]
     return None
 
 
 def make_id(prefix: str, text: str) -> str:
-    return prefix + hashlib.sha1(text.encode()).hexdigest()[:16]
+    return prefix + hashlib.sha1(text.encode(errors="replace")).hexdigest()[:16]
 
 
 def cell(row: dict, mapping: dict, field: str):
@@ -310,10 +325,10 @@ def preview(
 
 
 def leaked_ids(questions: list[Question], texts: list[str]) -> set[str]:
-    joined = "\n".join(" ".join(mask_template(t).split()) for t in texts)
+    joined = "\n".join(" " + " ".join(mask_template(t).split()) + " " for t in texts)
     leaked = set()
     for q in questions:
         key = " ".join(mask_template(q.text).split())
-        if len(key.split()) >= LEAK_MIN_WORDS and key in joined:
+        if len(key.split()) >= LEAK_MIN_WORDS and f" {key} " in joined:
             leaked.add(q.id)
     return leaked
