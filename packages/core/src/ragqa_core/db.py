@@ -463,6 +463,13 @@ def set_source_enabled(conn: Connection, name: str, source: str, enabled: bool) 
         )
 
 
+def delete_source_questions(conn: Connection, name: str, source: str) -> None:
+    conn.execute(
+        "delete from questions where collection = ? and json_extract(json, '$.meta.source') = ?",
+        (name, source),
+    )
+
+
 def delete_collection_rows(conn: Connection, name: str) -> None:
     for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])

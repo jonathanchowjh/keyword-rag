@@ -1016,3 +1016,39 @@ def test_leaked_questions_are_left_out_unless_included(env):
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
     ev.run(job)
     assert get_job(conn, job)["setup"]["leaked_excluded"] == 0
+
+
+def fields(**over):
+    base = {
+        "questions": {"total": 200, "solution": 200, "skill": 200, "gold_ids": 200},
+        "items": {"total": 50, "explanation": 50, "skill": 50},
+    }
+    for group, values in over.items():
+        base[group] = {**base[group], **values}
+    return base
+
+
+def test_measurable_rules():
+    from ragqa_core.evaluator import measurable
+
+    ok = measurable("mcq", fields())
+    assert ok["solution_sim@1"] == {"measurable": True, "note": None}
+    assert ok["same_skill@1"]["measurable"] and ok["accuracy"] == {"measurable": True, "note": None}
+
+    out = measurable("science", fields(questions={"solution": 0}))
+    assert out["solution_sim@1"] == {
+        "measurable": False,
+        "note": "no question has a worked solution",
+    }
+    assert out["same_skill@1"]["measurable"]
+    out = measurable("mcq", fields(items={"explanation": 0, "skill": 0}))
+    assert out["solution_sim@1"]["note"] == "no item has an explanation"
+    assert out["same_skill@1"]["measurable"] is False
+    assert measurable("mcq", fields(questions={"skill": 0}))["same_skill@1"]["note"]
+
+    out = measurable("multihop", fields(questions={"gold_ids": 0}))
+    assert out["recall@2"] == {"measurable": False, "note": "no question names its evidence"}
+    assert out["recall@5"]["measurable"] is False and out["em"]["measurable"]
+    out = measurable("table", fields(questions={"gold_ids": 140}))
+    assert out["recall@1"] == {"measurable": True, "note": "on 140 of 200 questions"}
+    assert measurable("table", fields())["recall@3"] == {"measurable": True, "note": None}

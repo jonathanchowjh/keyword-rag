@@ -78,6 +78,38 @@ def runnable(questions: list[Question], include_leaked: bool) -> list[Question]:
     return questions if include_leaked else [q for q in questions if not q.meta.get("leaked")]
 
 
+def measurable(qa_type: QaType, fields: dict) -> dict[str, dict]:
+    """Which of the type's metrics the collection's data can produce, with a note when it
+    cannot or only in part. `fields` counts questions (total, solution, skill, gold_ids)
+    and items (total, explanation, skill)."""
+    q, i = fields["questions"], fields["items"]
+    out: dict[str, dict] = {m: {"measurable": True, "note": None} for m in ANSWER_METRICS[qa_type]}
+    if qa_type in EXAMPLE_TYPES:
+        needs = {
+            "solution_sim@1": (
+                ("no question has a worked solution", q["solution"]),
+                ("no item has an explanation", i["explanation"]),
+            ),
+            "same_skill@1": (
+                ("no question has a skill", q["skill"]),
+                ("no item has a skill", i["skill"]),
+            ),
+        }
+        for metric, checks in needs.items():
+            note = next((why for why, count in checks if count == 0), None)
+            out[metric] = {"measurable": note is None, "note": note}
+    else:
+        named = q["gold_ids"]
+        for metric in RETRIEVAL_METRICS[qa_type]:
+            if named == 0:
+                out[metric] = {"measurable": False, "note": "no question names its evidence"}
+            else:
+                partial = named < q["total"]
+                note = f"on {named} of {q['total']} questions" if partial else None
+                out[metric] = {"measurable": True, "note": note}
+    return out
+
+
 def untracked(setup: dict) -> bool:
     """A migrated run: it has question ids and recorded no versions."""
     return "keyword_version" not in setup and "question_ids" in setup

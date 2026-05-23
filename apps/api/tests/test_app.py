@@ -1167,3 +1167,306 @@ def test_startup_skips_collections_qdrant_lacks(tmp_path):
     db.save_collection(conn, CollectionSpec("ghost", "mcq", False, "fake/dense", 256, None))
     with client:
         assert backfills(conn) == []
+
+
+# -- uploads, imports, sources, questions ---------------------------------------
+
+
+def jsonl(*rows) -> bytes:
+    return "\n".join(json.dumps(r) for r in rows).encode()
+
+
+NOTES = jsonl(
+    {"id": "n1", "text": "tides follow the moon", "answer": "x"},
+    {"id": "n2", "text": "glaciers carve valleys", "answer": "y"},
+    {"id": "n3", "text": "reefs need warm shallow water", "answer": "z"},
+)
+
+
+def upload(client, body=NOTES, filename="notes.jsonl", kind="items", name="c"):
+    return client.post(
+        f"/collections/{name}/uploads", params={"filename": filename, "kind": kind}, content=body
+    )
+
+
+def do_import(client, up, source_name="notes", kind="items", name="c", **extra):
+    body = {"upload_id": up["upload_id"], "kind": kind, "source_name": source_name, **extra}
+    body["mapping"] = body.get("mapping", up["preview"]["mapping"])
+    return client.post(f"/collections/{name}/imports", json=body)
+
+
+def import_items(client, source_name="notes", body=NOTES, name="c"):
+    up = upload(client, body, name=name).json()
+    r = do_import(client, up, source_name, name=name, confirm=True)
+    assert r.status_code == 202, r.text
+    return wait(client, r.json()["job_id"])
+
+
+def test_upload_jsonl_previews_with_a_guessed_mapping(client):
+    add_collection(client)
+    r = upload(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["filename"] == "notes.jsonl" and len(body["upload_id"]) == 32
+    assert body["preview"]["ready"] and body["preview"]["mapping"]["text"] == "text"
+    assert body["estimate"]["new"] == 3 and body["estimate"]["est_usd"] == 0
+
+
+def test_upload_not_ready_has_no_estimate(client):
+    add_collection(client)
+    body = upload(client, jsonl({"foo": "bar"})).json()
+    assert body["preview"]["ready"] is False and body["estimate"] is None
+
+
+def test_upload_over_limit_is_413(client, monkeypatch):
+    from ragqa_core import imports
+
+    add_collection(client)
+    monkeypatch.setattr(imports, "UPLOAD_LIMIT", 10)
+    assert upload(client).status_code == 413
+    assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
+
+
+def test_upload_unsupported_type_is_422(client):
+    add_collection(client)
+    r = upload(client, b"x", filename="notes.exe")
+    assert r.status_code == 422
+    assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
+
+
+def test_upload_to_an_unknown_collection_is_404(client):
+    assert upload(client, name="nope").status_code == 404
+
+
+def test_import_unknown_upload_is_404(client):
+    add_collection(client)
+    body = {"upload_id": "../x", "kind": "items", "mapping": None, "source_name": "notes"}
+    assert client.post("/collections/c/imports", json=body).status_code == 404
+    body["upload_id"] = "0" * 32
+    assert client.post("/collections/c/imports", json=body).status_code == 404
+
+
+def test_import_rejects_a_bad_source_name_and_mapping(client):
+    add_collection(client)
+    up = upload(client).json()
+    assert do_import(client, up, "../evil").status_code == 422
+    assert do_import(client, up, mapping={"bogus": "text"}).status_code == 422
+    assert do_import(client, up, mapping={"text": 3}).status_code == 422
+
+
+def test_import_estimate_then_confirm_then_reimport_unchanged(client):
+    add_collection(client)
+    up = upload(client).json()
+    r = do_import(client, up)
+    assert r.status_code == 200 and r.json()["estimate"]["new"] == 3
+    assert r.json()["preview"]["ready"]
+    assert client.get("/collections/c").json()["count"] == 3  # nothing yet
+    job = import_items(client)
+    assert job["status"] == "done" and job["setup"]["source"] == "upload:notes"
+    assert job["result"]["new"] == 3
+    detail = client.get("/collections/c").json()
+    assert detail["count"] == 6
+    again = import_items(client)
+    assert again["result"]["new"] == 0 and again["result"]["updated"] == 0
+    assert again["result"]["unchanged"] == 3
+    sources = {s["source"]: s for s in client.get("/collections/c/sources").json()}
+    assert sources["upload:notes"] == {"source": "upload:notes", "items": 3, "enabled": True}
+
+
+def test_import_not_ready_is_422(client):
+    add_collection(client)
+    up = upload(client, jsonl({"foo": "bar"})).json()
+    r = do_import(client, up, confirm=True)
+    assert r.status_code == 422 and "text" in str(r.json()["detail"])
+
+
+def test_import_that_costs_needs_a_key(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        client.post("/collections", json={"name": "c", "qa_type": "mcq", "summarize": True})
+        up = upload(client).json()
+        assert up["estimate"]["est_usd"] > 0
+        assert do_import(client, up, confirm=True).status_code == 503
+
+
+def test_import_questions_with_a_mapping(client):
+    client.post("/collections", json={"name": "sci", "qa_type": "science"})
+    rows = jsonl(
+        {"qid": "a", "ask": "How warm is the lagoon?", "ans": "28 C"},
+        {"qid": "b", "ask": "How deep is the trench?", "ans": "10 km"},
+    )
+    up = upload(client, rows, kind="questions", name="sci").json()
+    assert up["preview"]["ready"] is False and up["preview"]["missing"] == ["text", "answer"]
+    mapping = {"id": "qid", "text": "ask", "answer": "ans"}
+    r = do_import(client, up, "qs", kind="questions", name="sci", mapping=mapping)
+    assert r.status_code == 200 and r.json()["preview"]["ready"]
+    r = do_import(client, up, "qs", kind="questions", name="sci", mapping=mapping, confirm=True)
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    est = client.post("/eval", json={"collection": "sci", "methods": ["vector"]}).json()
+    assert est["estimate"]["questions"] == 2
+    page = client.get("/collections/sci/questions").json()
+    assert page["total"] == 2 and page["questions"][0]["source"] == "upload:qs"
+
+
+def test_sources_list_switch_and_query_skips_disabled(client):
+    add_collection(client)
+    import_items(client)
+    sources = client.get("/collections/c/sources").json()
+    assert [s["source"] for s in sources] == ["hand", "upload:notes"]
+    r = client.patch("/collections/c/sources/upload:notes", json={"enabled": False})
+    assert r.status_code == 200 and r.json() == {
+        "source": "upload:notes",
+        "items": 3,
+        "enabled": False,
+    }
+    for method in ("hybrid", "random_example"):
+        body = {"collection": "c", "question": "tides moon", "methods": [method], "k": 10}
+        hits = client.post("/query", json=body).json()["results"][method]["hits"]
+        assert hits and not {h["id"] for h in hits} & {"n1", "n2", "n3"}
+    assert client.get("/collections/c/sources").json()[1]["enabled"] is False
+    client.patch("/collections/c/sources/upload:notes", json={"enabled": True})
+    assert client.get("/collections/c/sources").json()[1]["enabled"] is True
+
+
+def test_unknown_source_is_404(client):
+    add_collection(client)
+    assert client.patch("/collections/c/sources/nope", json={"enabled": False}).status_code == 404
+    assert client.delete("/collections/c/sources/nope").status_code == 404
+
+
+def test_switch_refused_while_eval_running(client):
+    add_collection(client)
+    import_items(client)
+    job_id = db.create_job(client.app.state.conn, "eval", "c", {})
+    db.update_job(client.app.state.conn, job_id, status="running")
+    r = client.patch("/collections/c/sources/upload:notes", json={"enabled": False})
+    assert r.status_code == 409 and "eval is running" in r.json()["detail"]
+
+
+def test_switch_refused_while_backfill_pending(client):
+    add_collection(client)
+    import_items(client)
+    db.create_job(client.app.state.conn, "backfill", "c", {})
+    r = client.patch("/collections/c/sources/upload:notes", json={"enabled": False})
+    assert r.status_code == 409 and "still being labelled" in r.json()["detail"]
+
+
+def test_last_source_cannot_be_switched_off(client):
+    add_collection(client)
+    only = client.get("/collections/c/sources").json()
+    assert [s["source"] for s in only] == ["hand"]
+    r = client.patch("/collections/c/sources/hand", json={"enabled": False})
+    assert r.status_code == 409 and "at least one source" in r.json()["detail"]
+
+
+def test_delete_source_removes_items_chunks_and_questions(client):
+    add_collection(client)
+    import_items(client)
+    qs = jsonl(
+        {"id": "uq", "text": "do tides follow the moon?", "choices": ["yes", "no"], "answer": "A"}
+    )
+    up = upload(client, qs, kind="questions").json()
+    r = do_import(client, up, "notes", kind="questions", confirm=True)  # the same source
+    wait(client, r.json()["job_id"])
+    store = client.app.state.store
+    assert store.count("c") == 6
+    assert client.delete("/collections/c/sources/upload:notes").status_code == 204
+    assert store.count("c") == 3 and "upload:notes" not in store.source_counts("c")
+    ids = [q.id for q in db.get_questions(client.app.state.conn, "c")]
+    assert ids == ["q1"]
+    assert [s["source"] for s in client.get("/collections/c/sources").json()] == ["hand"]
+
+
+def test_delete_source_refused_while_a_job_is_queued(client):
+    add_collection(client)
+    import_items(client)
+    db.create_job(client.app.state.conn, "rekey", "c", {})
+    assert client.delete("/collections/c/sources/upload:notes").status_code == 409
+
+
+def test_disabled_source_without_items_still_lists(client):
+    add_collection(client)
+    db.set_source_enabled(client.app.state.conn, "c", "gone", False)
+    sources = client.get("/collections/c/sources").json()
+    assert {"source": "gone", "items": 0, "enabled": False} in sources
+
+
+def test_questions_list_and_include_leaked(client):
+    add_collection(client)
+    rows = jsonl(
+        {
+            "id": "u1",
+            "text": "tides follow the moon",
+            "choices": ["x", "y"],
+            "answer": "A",
+            "gold_ids": ["n1"],
+        },
+        {
+            "id": "u2",
+            "text": "an unrelated question entirely",
+            "choices": ["x", "y"],
+            "answer": "B",
+        },
+    )
+    import_items(client)
+    up = upload(client, rows, kind="questions").json()
+    r = do_import(client, up, "qs", kind="questions", confirm=True)
+    wait(client, r.json()["job_id"])
+    # mark one by hand: the leak check itself is covered in the core tests
+    conn = client.app.state.conn
+    qs = {q.id: q for q in db.get_questions(conn, "c")}
+    db.save_questions(conn, "c", [replace(qs["u1"], meta={**qs["u1"].meta, "leaked": True})])
+    page = client.get("/collections/c/questions").json()
+    assert page["total"] == 3 and page["leaked"] == 1 and page["include_leaked"] is False
+    row = next(q for q in page["questions"] if q["id"] == "u1")
+    assert row["leaked"] is True and row["source"] == "upload:qs" and row["has_gold"] is True
+    assert row["has_solution"] is False
+    other = next(q for q in page["questions"] if q["id"] == "u2")
+    assert other["has_gold"] is False and other["leaked"] is False
+    only = client.get("/collections/c/questions", params={"leaked": True}).json()
+    assert [q["id"] for q in only["questions"]] == ["u1"]
+    paged = client.get("/collections/c/questions", params={"limit": 1, "offset": 1}).json()
+    assert len(paged["questions"]) == 1 and paged["total"] == 3
+    assert client.get("/collections/c").json()["questions"] == 2
+    r = client.patch("/collections/c/questions/leaked", json={"include": True})
+    assert r.json() == {"include_leaked": True}
+    detail = client.get("/collections/c").json()
+    assert detail["questions"] == 3 and detail["leaked"] == 1 and detail["include_leaked"]
+
+
+def test_collection_reports_fields_and_measurable(client):
+    client.post("/collections", json={"name": "sci", "qa_type": "science"})
+    client.post("/collections/sci/documents", json={"items": ITEMS, "confirm": True})
+    plain = Question("p1", "enzyme rate", None, ["3 J"], [], {})
+    db.save_questions(client.app.state.conn, "sci", [plain])
+    detail = client.get("/collections/sci").json()
+    assert detail["fields"] == {
+        "questions": {"total": 1, "solution": 0, "skill": 0, "gold_ids": 0},
+        "items": {"total": 3, "explanation": 3, "skill": 3},
+    }
+    m = detail["measurable"]
+    assert m["solution_sim@1"] == {"measurable": False, "note": "no question has a worked solution"}
+    assert m["accuracy"]["measurable"] is True
+    assert detail["sources"] == [{"source": "hand", "items": 3, "enabled": True}]
+    assert detail["unlabelled"] == 0 and detail["leaked"] == 0
+
+
+def test_documents_over_20_items_queue_an_import(client):
+    add_collection(client, questions=False)
+    many = [
+        {"id": f"m{i}", "text": f"note number {i} about reefs", "answer": "a"} for i in range(21)
+    ]
+    r = client.post("/collections/c/documents", json={"items": many})
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["kind"] == "import" and job["status"] == "done"
+    assert job["setup"]["source"] == "hand" and job["result"]["new"] == 21
+    assert client.get("/collections/c").json()["count"] == 24
+
+
+def test_documents_over_20_items_estimate_first(tmp_path):
+    with make_client(tmp_path) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+        r = client.post("/collections/s/documents", json={"items": many})
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] > 0
+        assert client.get("/collections/s").json()["count"] == 0

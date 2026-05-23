@@ -1,6 +1,6 @@
 """The HTTP API. Thin: every decision lives in ragqa_core; this maps it to HTTP.
 
-Loads, re-keys and evals are queued as jobs, and the worker thread
+Loads, imports, re-keys and evals are queued as jobs, and the worker thread
 (ragqa_worker), started by the lifespan, runs them in order. A few routes still
 work in the request: /documents indexes its items, and /query and a confirmed
 proposal call Claude.
@@ -9,22 +9,26 @@ Run with `uvicorn --factory ragqa_api.app:create_app`.
 """
 
 import base64
+import json
 import secrets
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from anyio import from_thread
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ragqa_core import db
+from ragqa_core import db, imports
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
-from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
+from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, runnable
+from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
 from ragqa_core.loader import Loader, sample_items
@@ -44,7 +48,15 @@ from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
 PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
-BUSY_STATE = {"load": "loading", "rekey": "rekeying", "eval": "evaluating"}
+BUSY_STATE = {
+    "load": "loading",
+    "rekey": "rekeying",
+    "eval": "evaluating",
+    "import": "importing",
+    "backfill": "labelling",
+}
+DOCUMENT_FIELDS = ("id", "text", "answer", "explanation", "meta")
+SYNC_ITEMS = 20  # more items than this are imported by the worker
 STALL_AFTER = timedelta(minutes=10)
 PROBLEM = {
     "failed": "failed",
@@ -72,6 +84,22 @@ class ItemIn(BaseModel):
 class Documents(BaseModel):
     items: list[ItemIn]
     confirm: bool = False
+
+
+class ImportRequest(BaseModel):
+    upload_id: str
+    kind: Literal["items", "questions"]
+    mapping: dict[str, str | None] | None = None
+    source_name: str
+    confirm: bool = False
+
+
+class SourceSwitch(BaseModel):
+    enabled: bool
+
+
+class LeakedSwitch(BaseModel):
+    include: bool
 
 
 class LoadRequest(BaseModel):
@@ -118,6 +146,27 @@ class ResumeRequest(BaseModel):
 
 def spec_json(spec: CollectionSpec) -> dict:
     return asdict(spec)
+
+
+def check_mapping(kind: str, mapping: dict | None) -> None:
+    unknown = [k for k in mapping or {} if k not in FIELDS[kind]]
+    if unknown:
+        raise HTTPException(422, f"unknown fields {unknown}; known: {list(FIELDS[kind])}")
+
+
+def body_chunks(request: Request):
+    """The request body, chunk by chunk, for a plain (threaded) route."""
+    stream = request.stream().__aiter__()
+
+    async def next_chunk() -> bytes:
+        return await stream.__anext__()
+
+    while True:
+        try:
+            chunk = from_thread.run(next_chunk)
+        except StopAsyncIteration:
+            return
+        yield chunk
 
 
 def check_methods(methods: list[str]) -> None:
@@ -194,11 +243,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_exception_handler(UnknownCollection, error(404))
     app.add_exception_handler(ValueError, error(422))
+    app.add_exception_handler(TooLarge, error(413))
     app.add_exception_handler(UnknownModel, error(422))
     for exc in (MethodUnavailable, ModelMismatch, ListsBusy):
         app.add_exception_handler(exc, error(409))
     app.add_exception_handler(BudgetExceeded, error(402))
     app.add_exception_handler(NoApiKey, error(503))
+
+    # -- helpers ---------------------------------------------------------------
+
+    def source_rows(name: str) -> list[dict]:
+        counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
+        return [
+            {"source": s, "items": counts.get(s, 0), "enabled": s not in disabled}
+            for s in sorted(set(counts) | set(disabled))
+        ]
+
+    def open_upload(name: str, upload_id: str) -> tuple[Path, dict]:
+        try:
+            return imports.open_upload(state.settings.home, name, upload_id)
+        except KeyError:
+            raise HTTPException(404, f"no upload {upload_id!r} on '{name}'") from None
+
+    def preview_upload(
+        spec: CollectionSpec, path: Path, filename: str, kind: str, mapping: dict | None
+    ) -> dict:
+        """The preview; a file that cannot be read is removed along with its upload."""
+        known = set(state.store.ids(spec.name)) if kind == "questions" else None
+        try:
+            return imports.preview(path, filename, kind, spec.qa_type, mapping, known)
+        except ValueError:
+            shutil.rmtree(path.parent, ignore_errors=True)
+            raise
+
+    def estimate_upload(spec: CollectionSpec, upload_id: str, kind: str, shown: dict, source: str):
+        """What importing would do; None until the mapping is complete."""
+        if not shown["ready"]:
+            return None
+        setup = {
+            "upload_id": upload_id,
+            "kind": kind,
+            "mapping": shown["mapping"],
+            "source": source,
+        }
+        return state.loader.estimate_import(spec, setup)
+
+    def leaked_count(name: str) -> int:
+        return sum(1 for q in db.get_questions(state.conn, name) if q.meta.get("leaked"))
+
+    def field_report(name: str, questions: list) -> dict:
+        have = state.store.field_counts(name)
+        return {
+            "questions": {
+                "total": len(questions),
+                "solution": sum(1 for q in questions if q.meta.get("solution")),
+                "skill": sum(1 for q in questions if q.meta.get("skill")),
+                "gold_ids": sum(1 for q in questions if q.gold_ids),
+            },
+            "items": {"total": state.store.count(name), **have},
+        }
 
     # -- routes ----------------------------------------------------------------
 
@@ -224,7 +327,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
         busy, job = collection_state(jobs, count, lists is not None)
-        questions = db.get_questions(state.conn, name)
+        questions = runnable(
+            db.get_questions(state.conn, name), db.get_include_leaked(state.conn, name)
+        )
+        fields = field_report(name, questions)
         return {
             **spec_json(spec),
             "count": count,
@@ -237,6 +343,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "dev_questions": len(dev_slice(questions)),
             "answer": state.evaluator.collection_answer(name),
             "runs": sum(1 for j in jobs if j["kind"] == "eval"),
+            "sources": source_rows(name),
+            "unlabelled": state.store.unsourced(name),
+            "leaked": leaked_count(name),
+            "include_leaked": db.get_include_leaked(state.conn, name),
+            "fields": fields,
+            "measurable": measurable(spec.qa_type, fields),
         }
 
     @app.delete("/collections/{name}", status_code=204)
@@ -257,19 +369,151 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.delete_collection_rows(state.conn, name)
         return Response(status_code=204)
 
-    @app.post("/collections/{name}/documents")
-    def add_documents(name: str, body: Documents) -> dict:
+    @app.post("/collections/{name}/documents", status_code=202)
+    def add_documents(name: str, body: Documents):
         spec = state.retriever.spec(name)
         # An item added now would be keyed under mixed lists, miss a version or skew a run.
         for kind in ("load", "rekey", "eval"):
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+        if len(body.items) > SYNC_ITEMS:
+            return queue_documents(spec, body)
         items = [Item(**i.model_dump()) for i in body.items]
         estimate = state.indexer.estimate_add_usd(spec, items, "hand")
         if estimate > 0 and not body.confirm:
-            return {"estimate": {"est_usd": estimate, "items": len(items)}}
+            return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
         state.indexer.add(spec, items, "hand")
-        return {"added": len(items)}
+        return JSONResponse({"added": len(items)}, 200)
+
+    def queue_documents(spec: CollectionSpec, body: Documents):
+        """Many items are written as an upload and imported by the worker, as source 'hand'."""
+        rows = [json.dumps(i.model_dump()).encode() + b"\n" for i in body.items]
+        upload_id = imports.save_upload(state.settings.home, spec.name, "documents.jsonl", rows)
+        mapping = {f: (f if f in DOCUMENT_FIELDS else None) for f in FIELDS["items"]}
+        setup = {"upload_id": upload_id, "kind": "items", "mapping": mapping, "source": "hand"}
+        estimate = state.loader.estimate_import(spec, setup)
+        if estimate["est_usd"] > 0 and not body.confirm:
+            shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
+            return JSONResponse({"estimate": estimate}, 200)
+        return {"job_id": db.create_job(state.conn, "import", spec.name, setup)}
+
+    @app.post("/collections/{name}/uploads")
+    def add_upload(name: str, request: Request, filename: str, kind: Literal["items", "questions"]):
+        """The raw file as the body; answers with a preview under a guessed mapping."""
+        spec = state.retriever.spec(name)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
+            raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
+        upload_id = imports.save_upload(state.settings.home, name, filename, body_chunks(request))
+        path, _ = open_upload(name, upload_id)
+        shown = preview_upload(spec, path, filename, kind, None)
+        stem = Path(filename).stem
+        source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
+        return {
+            "upload_id": upload_id,
+            "filename": filename,
+            "preview": shown,
+            "estimate": estimate_upload(spec, upload_id, kind, shown, source),
+        }
+
+    @app.post("/collections/{name}/imports", status_code=202)
+    def start_import(name: str, body: ImportRequest):
+        spec = state.retriever.spec(name)
+        path, meta = open_upload(name, body.upload_id)
+        if not SOURCE_NAME.match(body.source_name):
+            raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
+        check_mapping(body.kind, body.mapping)
+        shown = preview_upload(spec, path, meta["filename"], body.kind, body.mapping)
+        source = "upload:" + body.source_name
+        estimate = estimate_upload(spec, body.upload_id, body.kind, shown, source)
+        if not body.confirm:
+            return JSONResponse({"preview": shown, "estimate": estimate}, 200)
+        if estimate is None:
+            why = (
+                f"map these fields first: {shown['missing']}"
+                if shown["missing"]
+                else "no usable rows"
+            )
+            raise HTTPException(422, why)
+        if estimate["est_usd"] > 0 and not state.claude.api_key:
+            raise NoApiKey()
+        setup = {
+            "upload_id": body.upload_id,
+            "kind": body.kind,
+            "mapping": shown["mapping"],
+            "source": source,
+        }
+        return {"job_id": db.create_job(state.conn, "import", name, setup)}
+
+    @app.get("/collections/{name}/sources")
+    def list_sources(name: str) -> list[dict]:
+        state.retriever.spec(name)
+        return source_rows(name)
+
+    def known_source(name: str, source: str) -> dict:
+        state.retriever.spec(name)
+        row = next((r for r in source_rows(name) if r["source"] == source), None)
+        if row is None:
+            raise HTTPException(404, f"no source {source!r} on '{name}'")
+        return row
+
+    @app.patch("/collections/{name}/sources/{source}")
+    def switch_source(name: str, source: str, body: SourceSwitch) -> dict:
+        row = known_source(name, source)
+        if db.job_running(state.conn, "eval", name):
+            raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
+        if db.job_waiting_or_running(state.conn, "backfill", name):
+            raise HTTPException(409, "sources are still being labelled; try again shortly")
+        if not body.enabled and row["enabled"]:
+            others = [r for r in source_rows(name) if r["enabled"] and r["source"] != source]
+            if not others:
+                raise HTTPException(409, "at least one source must stay on")
+        db.set_source_enabled(state.conn, name, source, body.enabled)
+        return {**row, "enabled": body.enabled}
+
+    @app.delete("/collections/{name}/sources/{source}", status_code=204)
+    def delete_source(name: str, source: str) -> Response:
+        known_source(name, source)
+        for status in ("running", "queued"):
+            busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
+            if busy:
+                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        state.store.delete_source(name, source)
+        db.delete_source_questions(state.conn, name, source)
+        db.set_source_enabled(state.conn, name, source, True)
+        state.retriever.forget(name)
+        return Response(status_code=204)
+
+    @app.get("/collections/{name}/questions")
+    def list_questions(
+        name: str, leaked: bool | None = None, limit: int = 50, offset: int = 0
+    ) -> dict:
+        state.retriever.spec(name)
+        everything = db.get_questions(state.conn, name)
+        shown = [q for q in everything if leaked is None or bool(q.meta.get("leaked")) == leaked]
+        page = shown[max(offset, 0) : max(offset, 0) + max(limit, 0)]
+        return {
+            "total": len(shown),
+            "leaked": sum(1 for q in everything if q.meta.get("leaked")),
+            "include_leaked": db.get_include_leaked(state.conn, name),
+            "questions": [
+                {
+                    "id": q.id,
+                    "text": q.text,
+                    "source": q.meta.get("source"),
+                    "leaked": bool(q.meta.get("leaked")),
+                    "has_gold": bool(q.gold_ids),
+                    "has_solution": bool(q.meta.get("solution")),
+                }
+                for q in page
+            ],
+        }
+
+    @app.patch("/collections/{name}/questions/leaked")
+    def switch_leaked(name: str, body: LeakedSwitch) -> dict:
+        state.retriever.spec(name)
+        db.set_include_leaked(state.conn, name, body.include)
+        return {"include_leaked": body.include}
 
     @app.post("/collections/{name}/load", status_code=202)
     def load(name: str, body: LoadRequest):
