@@ -73,6 +73,11 @@ def answer_hits(qa_type: QaType, hits: list[Hit]) -> list[Hit]:
     return hits[:1] if qa_type in EXAMPLE_TYPES else hits
 
 
+def runnable(questions: list[Question], include_leaked: bool) -> list[Question]:
+    """The questions a run may ask: leaked ones (also in the corpus) only when included."""
+    return questions if include_leaked else [q for q in questions if not q.meta.get("leaked")]
+
+
 def untracked(setup: dict) -> bool:
     """A migrated run: it has question ids and recorded no versions."""
     return "keyword_version" not in setup and "question_ids" in setup
@@ -109,7 +114,9 @@ class Evaluator:
         self.claude = claude
 
     def _questions(self, spec: CollectionSpec, split: str) -> list[Question]:
-        questions = db.get_questions(self.conn, spec.name)
+        questions = runnable(
+            db.get_questions(self.conn, spec.name), db.get_include_leaked(self.conn, spec.name)
+        )
         return dev_slice(questions) if split == "dev" else questions
 
     def _question_ids(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[str]:
@@ -250,6 +257,12 @@ class Evaluator:
         disabled = db.disabled_sources(self.conn, spec.name)
         questions = self._run_questions(job_id, spec, {**setup, "question_ids": ids})
         off = self._gold_off(spec, questions, disabled)
+        include = db.get_include_leaked(self.conn, spec.name)
+        leaked = (
+            0
+            if include
+            else sum(1 for q in db.get_questions(self.conn, spec.name) if q.meta.get("leaked"))
+        )
         setup = {
             "dense_model": spec.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
@@ -259,6 +272,7 @@ class Evaluator:
             "dataset_filter": FILTER_NOTES[spec.qa_type],
             "question_ids": ids,
             "disabled_sources": disabled,
+            "leaked_excluded": leaked,
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
             **setup,
         }

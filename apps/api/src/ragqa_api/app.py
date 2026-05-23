@@ -24,11 +24,10 @@ from pydantic import BaseModel, Field
 from ragqa_core import db
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
-from ragqa_core.datasets import load as load_dataset
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
-from ragqa_core.loader import Loader, limited, propose_sample, sample_items
+from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import answer_prompt, parse_answer
 from ragqa_core.retriever import (
@@ -288,17 +287,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # What the loader spends on: summaries, and a Claude proposal when there are no lists.
         proposes = bool(state.claude.api_key) and db.get_keyword_lists(state.conn, name) is None
         if (spec.summarize or proposes) and not body.confirm:
-            # The dataset is read (and cached) to price them.
-            items, questions = load_dataset(body.dataset, settings.home)
-            items, _ = limited(items, questions, body.limit)
-            estimate = state.indexer.estimate_add_usd(spec, items, body.dataset)
-            calls = len(items) if spec.summarize else 0
-            if proposes:
-                estimate += state.indexer.estimate_propose_usd(spec, propose_sample(items))
-                calls += 1
-            return JSONResponse(
-                {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
-            )
+            estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
+            return JSONResponse({"estimate": estimate}, 200)
         job_id = db.create_job(
             state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
         )

@@ -293,7 +293,7 @@ def three_items(monkeypatch):
 
     items = [Item(d["id"], d["text"] + " shared words", d["answer"]) for d in ITEMS]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
-    monkeypatch.setattr("ragqa_api.app.load_dataset", lambda name, cache: (items, []))
+    monkeypatch.setattr("ragqa_core.loader.load_dataset", lambda name, cache: (items, []))
     return items
 
 

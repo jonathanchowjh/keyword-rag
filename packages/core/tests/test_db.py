@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from ragqa_core import db
 from ragqa_core.db import (
     JOBS_RESUMABLE,
     claim_next_job_id,
@@ -485,3 +486,32 @@ def test_disabled_sources_round_trip_and_cleared_with_collection(conn):
     delete_collection_rows(conn, "arc")
     assert disabled_sources(conn, "arc") == []
     assert disabled_sources(conn, "other") == ["z"]
+
+
+def test_include_leaked_defaults_false_and_survives_migration(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table collections (
+          name text primary key, qa_type text not null, summarize integer not null,
+          dense_model text not null, dense_dim integer not null, keyword_version text,
+          created_at text not null
+        );
+        insert into collections values ('old', 'mcq', 0, 'm', 64, null, 't');
+        """
+    )
+    old.commit()
+    old.close()
+    conn = connect(path)
+    assert db.get_include_leaked(conn, "old") is False
+    assert get_collection(conn, "old").name == "old"
+    db.set_include_leaked(conn, "old", True)
+    save_collection(conn, CollectionSpec("new", "mcq", False, "m", 64))
+    assert db.get_include_leaked(conn, "new") is False
+    save_collection(
+        conn, CollectionSpec("old", "mcq", True, "m", 64)
+    )  # a re-save keeps nothing odd
+    assert [c.name for c in list_collections(conn)] == ["new", "old"]

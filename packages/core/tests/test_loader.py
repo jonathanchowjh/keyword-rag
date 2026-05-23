@@ -1,13 +1,13 @@
 import pytest
 
 from ragqa_core import loader
-from ragqa_core.db import connect, create_job, get_job
+from ragqa_core.db import connect, create_job, get_job, get_questions
 from ragqa_core.fakes import fake_claude, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.llm import Cancelled
 from ragqa_core.loader import Loader
 from ragqa_core.store import Store
-from ragqa_core.types import Item, Question
+from ragqa_core.types import Item, KeywordLists, Question
 
 
 def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
@@ -119,3 +119,98 @@ def test_sample_items_skips_disabled(tmp_path):
     ix.add(spec, [Item("b", "market price", "B")], "two")
     assert {i.id for i in loader.sample_items(store, "m")} == {"a", "b"}
     assert [i.id for i in loader.sample_items(store, "m", skip=("two",))] == ["a"]
+
+
+def upload(tmp_path, name, rows):
+    import json
+
+    from ragqa_core import imports
+
+    data = "\n".join(json.dumps(r) for r in rows).encode()
+    return imports.save_upload(tmp_path, "m", name, [data])
+
+
+def import_job(conn, tmp_path, kind, rows, mapping, source="upload:notes", name="m"):
+    upload_id = upload(tmp_path, "rows.jsonl", rows)
+    setup = {"upload_id": upload_id, "kind": kind, "mapping": mapping, "source": source}
+    return get_job(conn, create_job(conn, "import", name, setup))
+
+
+ITEM_MAP = {"id": "id", "text": "text"}
+ITEM_ROWS = [{"id": f"n{i}", "text": f"note number {i} about topic {i}"} for i in range(4)]
+
+
+def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
+    calls: list[str] = []
+    conn = connect(tmp_path / "r.db")
+    claude = fake_claude(conn, lambda p: calls.append(p) or "A summary.")
+    ix = Indexer(conn, Store(None, None), fake_models(), claude)
+    spec = ix.create("m", "multihop", True)
+    ix.set_lists(spec, KeywordLists(topic=["note"], method=["topic"], common=["number"]))
+    ld = Loader(conn, ix, claude, tmp_path)
+    first = ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
+    assert len(calls) == 4 and first["new"] == 4
+    calls.clear()
+    again = ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
+    assert calls == [] and again["unchanged"] == 4 and again["new"] == 0
+    assert ix.store.get("m", ["n0"])[0].meta["source"] == "upload:notes"
+
+
+def test_import_items_without_lists_makes_tfidf_lists(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    assert ix.spec("m").keyword_version is None
+    ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
+    assert ix.spec("m").keyword_version is not None
+
+
+LONG = "the enzyme rate rose sharply after the temperature was raised"
+
+
+def test_import_questions_marks_leaked(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    ld.run_import(
+        import_job(conn, tmp_path, "items", [{"id": "i1", "text": LONG + " in the lab"}], ITEM_MAP),
+        lambda p: None,
+    )
+    rows = [
+        {"id": "q1", "text": LONG, "answer": "x"},
+        {"id": "q2", "text": "an unrelated question that appears nowhere", "answer": "y"},
+    ]
+    mapping = {"id": "id", "text": "text", "answer": "answer"}
+    job = import_job(conn, tmp_path, "questions", rows, mapping, source="upload:qs")
+    result = ld.run_import(job, lambda p: None)
+    assert result["leaked"] == 1 and result["new"] == 2
+    got = {q.id: q for q in get_questions(conn, "m")}
+    assert got["q1"].meta["leaked"] is True and "leaked" not in got["q2"].meta
+    assert got["q1"].meta["source"] == "upload:qs"
+    again = ld.run_import(job, lambda p: None)
+    assert again["unchanged"] == 2 and again["leaked"] == 1
+
+
+def test_dataset_load_never_marks_builtin_questions(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ld.claude.api_key = None
+    items = [Item("a", LONG + " in the lab", "A")]
+    questions = [Question("q1", LONG, None, ["x"], ["a"], {})]
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
+    result = ld.run(job, lambda p: None)
+    assert result["leaked"] == 0
+    assert "leaked" not in get_questions(conn, "m")[0].meta
+
+
+def test_estimates_count_only_changed_items(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "r.db")
+    claude = fake_claude(conn, lambda p: "A summary.")
+    ix = Indexer(conn, Store(None, None), fake_models(), claude)
+    spec = ix.create("m", "multihop", True)
+    ld = Loader(conn, ix, claude, tmp_path)
+    items = [Item("a", "enzyme rate", "A"), Item("b", "market price", "B")]
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
+    assert ld.estimate_load(spec, "musique", None)["calls"] == 3  # two summaries and a proposal
+    ix.add(spec, items[:1], "musique")
+    assert ld.estimate_load(spec, "musique", None)["calls"] == 2  # one summary and a proposal
+    job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP)
+    est = ld.estimate_import(spec, job["setup"])
+    assert est["new"] == 4 and est["skipped"] == 0 and est["calls"] == 5 and est["est_usd"] > 0

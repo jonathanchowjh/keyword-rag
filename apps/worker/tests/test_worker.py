@@ -340,3 +340,23 @@ def test_backfill_job_ends_done(env):
     w.run_one()
     job = get_job(conn, j)
     assert job["status"] == "done" and job["result"] == {"labelled": 0}
+
+
+def test_import_job_runs_and_is_done(env):
+    import json
+
+    from ragqa_core import imports
+
+    w, conn = env
+    row = {"id": "n1", "text": "a fresh note about tides"}
+    upload_id = imports.save_upload(w.loader.home, "c", "n.jsonl", [json.dumps(row).encode()])
+    setup = {
+        "upload_id": upload_id,
+        "kind": "items",
+        "mapping": {"id": "id", "text": "text"},
+        "source": "upload:notes",
+    }
+    j = db.create_job(conn, "import", "c", setup)
+    w.run_one()
+    job = get_job(conn, j)
+    assert job["status"] == "done" and job["result"]["new"] == 1

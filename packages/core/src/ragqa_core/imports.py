@@ -4,11 +4,15 @@ import csv
 import hashlib
 import json
 import re
+import shutil
+import uuid
 import zipfile
 import zlib
+from collections.abc import Iterable
 from pathlib import Path
 
 from ragqa_core.datasets import mask_template
+from ragqa_core.db import now
 from ragqa_core.prompts import LETTERS
 from ragqa_core.types import Item, QaType, Question
 
@@ -46,6 +50,45 @@ SYNONYMS = {
     "meta": ("meta",),
 }
 TEXT_SUFFIXES = (".txt", ".md")
+
+
+class TooLarge(Exception):
+    pass
+
+
+def save_upload(home: Path, collection: str, filename: str, chunks: Iterable[bytes]) -> str:
+    """Write the chunks to home/uploads/<id>/file with a meta.json beside it; past
+    UPLOAD_LIMIT nothing is kept. Only the generated id forms a path: filenames are data."""
+    upload_id = uuid.uuid4().hex
+    folder = home / "uploads" / upload_id
+    folder.mkdir(parents=True)
+    try:
+        size = 0
+        with (folder / "file").open("wb") as f:
+            for chunk in chunks:
+                size += len(chunk)
+                if size > UPLOAD_LIMIT:
+                    raise TooLarge(f"the file is over {UPLOAD_LIMIT} bytes")
+                f.write(chunk)
+        meta = {"collection": collection, "filename": filename, "size": size, "created_at": now()}
+        (folder / "meta.json").write_text(json.dumps(meta))
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return upload_id
+
+
+def open_upload(home: Path, collection: str, upload_id: str) -> tuple[Path, dict]:
+    if not UPLOAD_ID.match(upload_id):
+        raise KeyError(upload_id)
+    folder = home / "uploads" / upload_id
+    try:
+        meta = json.loads((folder / "meta.json").read_text())
+    except (OSError, ValueError) as e:
+        raise KeyError(upload_id) from e
+    if meta.get("collection") != collection:
+        raise KeyError(upload_id)
+    return folder / "file", meta
 
 
 def read_rows(path: Path, filename: str) -> tuple[str, list[dict], list[str]]:

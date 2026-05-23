@@ -37,7 +37,7 @@ create table if not exists cache (
 create table if not exists collections (
   name text primary key, qa_type text not null, summarize integer not null,
   dense_model text not null, dense_dim integer not null, keyword_version text,
-  created_at text not null
+  created_at text not null, include_leaked integer not null default 0
 );
 create table if not exists keyword_lists (
   collection text not null, version text not null, lists_json text not null,
@@ -88,6 +88,9 @@ def connect(path: Path) -> Connection:
         conn.execute("alter table jobs add column cancel_requested integer not null default 0")
     if "log_json" not in columns:
         conn.execute("alter table jobs add column log_json text")
+    columns = {row["name"] for row in conn.execute("pragma table_info(collections)")}
+    if "include_leaked" not in columns:
+        conn.execute("alter table collections add column include_leaked integer not null default 0")
     _migrate_run_items(conn)
     return conn
 
@@ -137,7 +140,13 @@ def _migrate_run_items(conn: Connection) -> None:
 
 def save_collection(conn: Connection, spec: CollectionSpec) -> None:
     conn.execute(
-        "insert or replace into collections values (?, ?, ?, ?, ?, ?, ?)",
+        "insert into collections"
+        " (name, qa_type, summarize, dense_model, dense_dim, keyword_version, created_at)"
+        " values (?, ?, ?, ?, ?, ?, ?)"
+        " on conflict(name) do update set qa_type = excluded.qa_type,"
+        " summarize = excluded.summarize, dense_model = excluded.dense_model,"
+        " dense_dim = excluded.dense_dim, keyword_version = excluded.keyword_version,"
+        " created_at = excluded.created_at",
         (
             spec.name,
             spec.qa_type,
@@ -164,6 +173,15 @@ def _spec(row: sqlite3.Row) -> CollectionSpec:
 def get_collection(conn: Connection, name: str) -> CollectionSpec | None:
     row = first(conn.execute("select * from collections where name = ?", (name,)))
     return _spec(row) if row else None
+
+
+def get_include_leaked(conn: Connection, name: str) -> bool:
+    row = first(conn.execute("select include_leaked from collections where name = ?", (name,)))
+    return bool(row["include_leaked"]) if row else False
+
+
+def set_include_leaked(conn: Connection, name: str, include: bool) -> None:
+    conn.execute("update collections set include_leaked = ? where name = ?", (int(include), name))
 
 
 def list_collections(conn: Connection) -> list[CollectionSpec]:

@@ -106,6 +106,9 @@ class Worker:
         if kind == "load":
             result = self.loader.run(job, progress)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
+        elif kind == "import":
+            result = self.loader.run_import(job, progress)
+            db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "rekey":
             version = job["setup"]["version"]
             self.indexer.rekey(job["collection"], version, progress)

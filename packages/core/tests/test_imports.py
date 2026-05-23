@@ -316,3 +316,21 @@ def test_truncated_deflate_stream_is_a_value_error(tmp_path):
     p.write_bytes(bytes(data))
     with pytest.raises(ValueError, match="could not read x.zip"):
         imports.read_rows(p, "x.zip")
+
+
+def test_upload_ids_cannot_escape(tmp_path):
+    other = imports.save_upload(tmp_path, "other", "a.txt", [b"hello"])
+    mine = imports.save_upload(tmp_path, "c", "a.txt", [b"hel", b"lo"])
+    path, meta = imports.open_upload(tmp_path, "c", mine)
+    assert path.read_bytes() == b"hello"
+    assert meta["collection"] == "c" and meta["filename"] == "a.txt" and meta["size"] == 5
+    for bad in ("../x", other, "0" * 32, ""):
+        with pytest.raises(KeyError):
+            imports.open_upload(tmp_path, "c", bad)
+
+
+def test_save_upload_over_limit_leaves_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(imports, "UPLOAD_LIMIT", 10)
+    with pytest.raises(imports.TooLarge):
+        imports.save_upload(tmp_path, "c", "a.txt", [b"123456", b"7890123"])
+    assert list((tmp_path / "uploads").iterdir()) == []

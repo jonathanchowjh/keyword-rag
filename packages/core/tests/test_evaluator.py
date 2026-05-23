@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from ragqa_core import db
@@ -998,3 +1000,19 @@ def test_recall_unchanged_for_questions_with_gold(tmp_path):
         if gold:
             assert r["retrieval"]["recall@2"] == recall_at(r["hit_ids"], gold, 2)
             assert r["retrieval"]["recall@5"] == recall_at(r["hit_ids"], gold, 5)
+
+
+def test_leaked_questions_are_left_out_unless_included(env):
+    conn, ev = env
+    leaked = replace(QUESTIONS[0], meta={**QUESTIONS[0].meta, "leaked": True})
+    save_questions(conn, "c", [leaked])
+    assert ev.estimate("c", "full", ["hybrid"], False, None)["questions"] == 4
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["leaked_excluded"] == 1 and len(setup["question_ids"]) == 4
+    db.set_include_leaked(conn, "c", True)
+    assert ev.estimate("c", "full", ["hybrid"], False, None)["questions"] == 5
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
+    ev.run(job)
+    assert get_job(conn, job)["setup"]["leaked_excluded"] == 0
