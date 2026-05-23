@@ -287,3 +287,32 @@ def test_leak_does_not_match_inside_words():
     assert imports.leaked_ids([q], items) == set()
     q2 = Question("q2", "the quick brown fox jumps over the lazy doge", None, [], [])
     assert imports.leaked_ids([q2], items) == {"q2"}
+
+
+def deflated_zip(path: Path) -> bytes:
+    text = " ".join(f"word{i * 7919 % 1013}" for i in range(2000))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.txt", text)
+    return path.read_bytes()
+
+
+def test_corrupt_deflate_stream_is_a_value_error(tmp_path):
+    p = tmp_path / "x.zip"
+    data = bytearray(deflated_zip(p))
+    start = 30 + len("a.txt") + 100
+    data[start : start + 20] = b"\xff" * 20
+    p.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="could not read x.zip"):
+        imports.read_rows(p, "x.zip")
+
+
+def test_truncated_deflate_stream_is_a_value_error(tmp_path):
+    p = tmp_path / "x.zip"
+    data = bytearray(deflated_zip(p))
+    # shorten the compressed size in the central directory so the stream ends early
+    cd = data.index(b"PK\x01\x02")
+    size = int.from_bytes(data[cd + 20 : cd + 24], "little")
+    data[cd + 20 : cd + 24] = (size // 2).to_bytes(4, "little")
+    p.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="could not read x.zip"):
+        imports.read_rows(p, "x.zip")

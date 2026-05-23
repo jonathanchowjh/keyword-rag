@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import zipfile
+import zlib
 from pathlib import Path
 
 from ragqa_core.datasets import mask_template
@@ -64,6 +65,8 @@ def read_rows(path: Path, filename: str) -> tuple[str, list[dict], list[str]]:
         NotImplementedError,
         csv.Error,
         OSError,
+        EOFError,
+        zlib.error,
     ) as e:
         raise ValueError(f"could not read {filename}: {e}") from e
 
