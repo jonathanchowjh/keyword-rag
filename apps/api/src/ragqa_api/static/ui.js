@@ -23,12 +23,7 @@ export function paint(id, html) {
 
 // -- data ---------------------------------------------------------------------
 
-export async function api(path, { method = "GET", body } = {}) {
-  const init = { method };
-  if (body !== undefined) {
-    init.headers = { "content-type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
+async function send(path, init) {
   const response = await fetch(path, init);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -36,6 +31,20 @@ export async function api(path, { method = "GET", body } = {}) {
     throw new Error(typeof detail === "string" ? detail : response.statusText || "request failed");
   }
   return data;
+}
+
+export function api(path, { method = "GET", body } = {}) {
+  const init = { method };
+  if (body !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  return send(path, init);
+}
+
+// POSTs a File as the raw body, for the upload endpoints.
+export function upload(path, file) {
+  return send(path, { method: "POST", body: file });
 }
 
 let catalogPromise = null;
@@ -245,7 +254,7 @@ export function gapBar(lo, diff, hi, span) {
 
 export function pill(state) {
   const kind =
-    { ready: "ok", done: "ok", loading: "run", rekeying: "run", evaluating: "run", running: "run",
+    { ready: "ok", done: "ok", loading: "run", rekeying: "run", evaluating: "run", importing: "run", labelling: "run", running: "run",
       busy: "run", queued: "idle", failed: "bad", interrupted: "bad", stopped_budget: "bad",
       stopped_no_key: "bad", cancelled: "idle" }[state] ?? "idle";
   const text = String(state ?? "").replace(/_/g, " ").replace("rekeying", "re-keying");

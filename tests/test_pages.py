@@ -1,5 +1,6 @@
 """The console pages, driven in a real browser against the app on fakes."""
 
+import json
 import re
 from contextlib import contextmanager
 
@@ -9,6 +10,7 @@ from playwright.sync_api import expect
 
 from ragqa_core import db
 from ragqa_core.fakes import fake_replies
+from ragqa_core.types import Question
 
 pytestmark = pytest.mark.pages
 
@@ -49,7 +51,7 @@ def test_collection_page_sections_in_order(page, seeded):
 def test_collection_page_shows_verdict_gap_bar_and_runs(page, seeded):
     page.goto(seeded.url + "/c/c")
     expect(page.locator("main svg[role=img]").first).to_be_visible()
-    expect(page.locator("main table tbody tr")).to_have_count(1)
+    expect(page.locator("#runs tbody tr")).to_have_count(1)
     expect(page.get_by_text("run 1 on this collection", exact=False)).to_be_visible()
 
 
@@ -109,14 +111,14 @@ def test_propose_shows_its_estimate_first(page, seeded):
 def test_new_run_estimates_then_starts(page, seeded):
     seeded.build("runs", run=True)
     page.goto(seeded.url + "/c/runs")
-    expect(page.locator("main table tbody tr")).to_have_count(1)
+    expect(page.locator("#runs tbody tr")).to_have_count(1)
     page.get_by_role("button", name="New run").click()
     expect(page.get_by_label("kw_individual")).to_be_checked()
     expect(page.get_by_label("random_example")).to_be_checked()
     page.get_by_role("button", name="Estimate").click()
     expect(page.get_by_text("Claude calls", exact=False)).to_be_visible()
     page.get_by_role("button", name="Start").click()
-    expect(page.locator("main table tbody tr")).to_have_count(2)
+    expect(page.locator("#runs tbody tr")).to_have_count(2)
 
 
 def test_delete_asks_inline_first(page, seeded):
@@ -530,14 +532,15 @@ def test_collection_offers_finish_loading_after_an_interrupted_load(page, seeded
     expect(page.get_by_role("button", name="Finish loading")).to_be_visible()
 
 
-def test_collection_without_questions_offers_finish_loading(page, seeded):
+def test_collection_without_questions_is_not_offered_the_benchmark(page, seeded):
     httpx.post(f"{seeded.url}/collections", json={"name": "noq", "qa_type": "mcq"})
     r = httpx.post(
         f"{seeded.url}/collections/noq/documents", json={"items": ITEMS_ONE, "confirm": True}
     )
     assert r.status_code == 200, r.text
     page.goto(seeded.url + "/c/noq")
-    expect(page.get_by_role("button", name="Finish loading")).to_be_visible()
+    # holding items, a collection with no questions is not offered the benchmark again
+    expect(page.get_by_role("button", name="Finish loading")).to_have_count(0)
     page.goto(seeded.url + "/c/c")
     expect(page.get_by_role("button", name="Finish loading")).to_have_count(0)
 
@@ -1054,3 +1057,154 @@ def test_lab_method_list_follows_the_last_pick_when_responses_race(page, seeded)
     page.wait_for_timeout(500)
     expect(page.locator("#methods input[value=kw_individual]")).to_have_count(1)
     expect(page.locator("#collection")).to_have_value("c")
+
+
+# -- your own corpus ---------------------------------------------------------------------------
+
+
+def jobs_done(seeded, name):
+    for j in httpx.get(f"{seeded.url}/jobs", params={"collection": name, "kind": "import"}).json():
+        assert seeded.wait(j["id"])["status"] == "done"
+
+
+def upload_and_preview(page, kind, path):
+    page.locator(f"#imp-{kind}-file").set_input_files(str(path))
+    page.locator(f"#imp-{kind}-go").click()
+
+
+def sources(seeded, name):
+    return httpx.get(f"{seeded.url}/collections/{name}/sources").json()
+
+
+def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "imp", "qa_type": "science"})
+    r = httpx.post(
+        f"{seeded.url}/collections/imp/documents", json={"items": ITEMS_ONE, "confirm": True}
+    )
+    assert r.status_code == 200, r.text
+    rows = [{"id": f"n{i}", "text": f"note {i} about <b>reefs</b>"} for i in range(3)]
+    notes = tmp_path / "notes.jsonl"
+    notes.write_text("\n".join(json.dumps(x) for x in rows))
+    page.goto(seeded.url + "/c/imp")
+    expect(page.locator("#imp-items-source")).to_have_value("")
+    page.locator("#imp-items-file").set_input_files(str(notes))
+    expect(page.locator("#imp-items-source")).to_have_value("notes")
+    page.locator("#imp-items-go").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text("3 rows")
+    expect(preview.locator("table tbody tr")).to_have_count(3)
+    expect(preview.locator("b")).to_have_count(0)  # file text is escaped
+    page.locator("#imp-items-import").click()
+    # no keyword lists yet, so the import pays to make them: it asks before it queues
+    page.locator("#imp-items-confirm").get_by_role("button", name="Start").click()
+    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
+    jobs_done(seeded, "imp")
+    page.reload()
+    row = page.locator("#sources tbody tr", has_text="upload:notes")
+    expect(row).to_contain_text("3")
+    box = row.get_by_role("checkbox")
+    expect(box).to_be_checked()
+    box.uncheck()
+    expect(box).not_to_be_checked()
+    got = {s["source"]: s["enabled"] for s in sources(seeded, "imp")}
+    assert got["upload:notes"] is False
+    # the last source on cannot be switched off, and the API's words show
+    page.expected = ["409"]
+    page.locator("#sources tbody tr", has_text="hand").get_by_role("checkbox").uncheck()
+    expect(page.locator("#sources-msg")).to_contain_text("at least one source must stay on")
+    # delete asks first, with the question in the brief's words
+    page.locator("#sources tbody tr", has_text="upload:notes").get_by_role("button").click()
+    expect(page.locator("#sources-confirm")).to_contain_text(
+        "Delete source upload:notes: its 3 items and the questions imported with it?"
+    )
+    page.get_by_role("button", name="Yes, delete upload:notes").click()
+    expect(page.locator("#sources tbody tr", has_text="upload:notes")).to_have_count(0)
+
+
+def test_import_questions_shows_leaked_and_include(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "qimp", "qa_type": "mcq"})
+    item = {
+        "id": "tide",
+        "text": "the tides of the ocean follow the moon every single day",
+        "answer": "A",
+        "explanation": "",
+        "meta": {},
+    }
+    r = httpx.post(
+        f"{seeded.url}/collections/qimp/documents", json={"items": [item], "confirm": True}
+    )
+    assert r.status_code == 200, r.text
+    rows = [
+        {
+            "id": "u1",
+            "text": "tides of the ocean follow the moon",
+            "choices": ["x", "y"],
+            "answer": "A",
+        },
+        {"id": "u2", "text": "an unrelated one", "choices": ["x", "y"], "answer": "B"},
+    ]
+    qs = tmp_path / "qs.jsonl"
+    qs.write_text("\n".join(json.dumps(x) for x in rows))
+    page.goto(seeded.url + "/c/qimp")
+    upload_and_preview(page, "questions", qs)
+    expect(page.locator("#imp-questions-preview")).to_contain_text("2 rows")
+    page.locator("#imp-questions-import").click()
+    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
+    jobs_done(seeded, "qimp")
+    page.reload()
+    asked = page.locator("#asked")
+    expect(asked).to_contain_text("1 question")
+    expect(asked).to_contain_text(
+        "1 question appears among the items (leaked) and is left out of runs"
+    )
+    expect(asked).to_contain_text("Worked solutions: 0 of 1")
+    expect(asked).to_contain_text("Evidence ids: —")
+    page.get_by_label("Include them anyway").check()
+    expect(asked).to_contain_text("2 questions")
+    assert httpx.get(f"{seeded.url}/collections/qimp").json()["include_leaked"] is True
+
+
+def test_own_science_collection_offers_import_and_benchmark(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "own", "qa_type": "science"})
+    page.goto(seeded.url + "/c/own")
+    expect(page.locator("#imp-items-file")).to_be_visible()
+    expect(page.locator("#imp-questions-file")).to_be_visible()
+    expect(page.get_by_text("Or load the built-in benchmark, scibench")).to_be_visible()
+    expect(page.get_by_role("button", name="Load scibench")).to_be_visible()
+    notes = tmp_path / "own notes!.csv"
+    notes.write_text("text\nfirst thing about reefs\nsecond thing about tides\n")
+    page.locator("#imp-items-file").set_input_files(str(notes))
+    expect(page.locator("#imp-items-source")).to_have_value("own notes-")
+    page.locator("#imp-items-go").click()
+    page.locator("#imp-items-import").click()
+    # no keyword lists yet, so the import pays to make them: it asks before it queues
+    page.locator("#imp-items-confirm").get_by_role("button", name="Start").click()
+    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
+    jobs_done(seeded, "own")
+    page.reload()
+    expect(page.locator("#imp-items-file")).to_be_visible()
+    expect(page.get_by_text("built-in benchmark")).to_have_count(0)
+    expect(page.get_by_role("button", name="Load scibench")).to_have_count(0)
+
+
+def test_run_form_lists_what_is_not_measurable(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "nm", "qa_type": "science"})
+    plain = {"id": "p", "text": "enzyme rate", "answer": "3 J", "explanation": "", "meta": {}}
+    r = httpx.post(
+        f"{seeded.url}/collections/nm/documents", json={"items": [plain], "confirm": True}
+    )
+    assert r.status_code == 200, r.text
+    db.save_questions(
+        seeded.app.state.conn,  # type: ignore[attr-defined]
+        "nm",
+        [Question("p1", "enzyme rate", None, ["3 J"], [], {})],
+    )
+    page.goto(seeded.url + "/c/nm")
+    page.get_by_role("button", name="New run").click()
+    form = page.locator("#run-form")
+    expect(form).to_contain_text("This run will measure:")
+    expect(form).to_contain_text("Not measurable here:")
+    expect(form).to_contain_text("(no question has a worked solution)")
+    page.goto(seeded.url + "/c/c")
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("#run-form")).to_contain_text("This run will measure:")
