@@ -254,9 +254,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def source_rows(name: str) -> list[dict]:
         counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
+        asked = db.question_sources(state.conn, name)
         return [
-            {"source": s, "items": counts.get(s, 0), "enabled": s not in disabled}
-            for s in sorted(set(counts) | set(disabled))
+            {
+                "source": s,
+                "items": counts.get(s, 0),
+                "questions": asked.get(s, 0),
+                "enabled": s not in disabled,
+            }
+            for s in sorted(set(counts) | set(disabled) | set(asked))
         ]
 
     def open_upload(name: str, upload_id: str) -> tuple[Path, dict]:
@@ -392,8 +398,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mapping = {f: (f if f in DOCUMENT_FIELDS else None) for f in FIELDS["items"]}
         setup = {"upload_id": upload_id, "kind": "items", "mapping": mapping, "source": "hand"}
         estimate = state.loader.estimate_import(spec, setup)
-        if estimate["est_usd"] > 0 and not body.confirm:
+        if estimate["est_usd"] > 0 and (not body.confirm or not state.claude.api_key):
             shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
+            if body.confirm:
+                raise NoApiKey()
             return JSONResponse({"estimate": estimate}, 200)
         return {"job_id": db.create_job(state.conn, "import", spec.name, setup)}
 
@@ -465,8 +473,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if db.job_waiting_or_running(state.conn, "backfill", name):
             raise HTTPException(409, "sources are still being labelled; try again shortly")
         if not body.enabled and row["enabled"]:
-            others = [r for r in source_rows(name) if r["enabled"] and r["source"] != source]
-            if not others:
+            others = [
+                r
+                for r in source_rows(name)
+                if r["enabled"] and r["items"] > 0 and r["source"] != source
+            ]
+            if row["items"] > 0 and not others:
                 raise HTTPException(409, "at least one source must stay on")
         db.set_source_enabled(state.conn, name, source, body.enabled)
         return {**row, "enabled": body.enabled}

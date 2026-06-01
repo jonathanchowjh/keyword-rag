@@ -1270,7 +1270,12 @@ def test_import_estimate_then_confirm_then_reimport_unchanged(client):
     assert again["result"]["new"] == 0 and again["result"]["updated"] == 0
     assert again["result"]["unchanged"] == 3
     sources = {s["source"]: s for s in client.get("/collections/c/sources").json()}
-    assert sources["upload:notes"] == {"source": "upload:notes", "items": 3, "enabled": True}
+    assert sources["upload:notes"] == {
+        "source": "upload:notes",
+        "items": 3,
+        "questions": 0,
+        "enabled": True,
+    }
 
 
 def test_import_not_ready_is_422(client):
@@ -1316,6 +1321,7 @@ def test_sources_list_switch_and_query_skips_disabled(client):
     assert r.status_code == 200 and r.json() == {
         "source": "upload:notes",
         "items": 3,
+        "questions": 0,
         "enabled": False,
     }
     for method in ("hybrid", "random_example"):
@@ -1387,7 +1393,7 @@ def test_disabled_source_without_items_still_lists(client):
     add_collection(client)
     db.set_source_enabled(client.app.state.conn, "c", "gone", False)
     sources = client.get("/collections/c/sources").json()
-    assert {"source": "gone", "items": 0, "enabled": False} in sources
+    assert {"source": "gone", "items": 0, "questions": 0, "enabled": False} in sources
 
 
 def test_questions_list_and_include_leaked(client):
@@ -1446,7 +1452,7 @@ def test_collection_reports_fields_and_measurable(client):
     m = detail["measurable"]
     assert m["solution_sim@1"] == {"measurable": False, "note": "no question has a worked solution"}
     assert m["accuracy"]["measurable"] is True
-    assert detail["sources"] == [{"source": "hand", "items": 3, "enabled": True}]
+    assert detail["sources"] == [{"source": "hand", "items": 3, "questions": 0, "enabled": True}]
     assert detail["unlabelled"] == 0 and detail["leaked"] == 0
 
 
@@ -1470,3 +1476,39 @@ def test_documents_over_20_items_estimate_first(tmp_path):
         r = client.post("/collections/s/documents", json={"items": many})
         assert r.status_code == 200 and r.json()["estimate"]["est_usd"] > 0
         assert client.get("/collections/s").json()["count"] == 0
+
+
+def import_questions_only(client):
+    rows = jsonl({"id": "uq", "text": "do tides follow?", "choices": ["yes", "no"], "answer": "A"})
+    up = upload(client, rows, kind="questions").json()
+    r = do_import(client, up, "qs", kind="questions", confirm=True)
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+
+
+def test_question_only_source_is_listed_and_deleted(client):
+    add_collection(client)
+    import_questions_only(client)
+    row = {"source": "upload:qs", "items": 0, "questions": 1, "enabled": True}
+    assert row in client.get("/collections/c/sources").json()
+    assert row in client.get("/collections/c").json()["sources"]
+    assert client.delete("/collections/c/sources/upload:qs").status_code == 204
+    assert [q.id for q in db.get_questions(client.app.state.conn, "c")] == ["q1"]
+    assert all(s["source"] != "upload:qs" for s in client.get("/collections/c/sources").json())
+
+
+def test_switching_a_question_only_source_is_not_the_last_item_source(client):
+    add_collection(client)
+    import_questions_only(client)
+    r = client.patch("/collections/c/sources/upload:qs", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    r = client.patch("/collections/c/sources/hand", json={"enabled": False})
+    assert r.status_code == 409
+
+
+def test_queued_documents_need_a_key_when_they_cost(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+        r = client.post("/collections/s/documents", json={"items": many, "confirm": True})
+        assert r.status_code == 503
+        assert db.list_jobs(client.app.state.conn, collection="s", limit=db.ALL) == []

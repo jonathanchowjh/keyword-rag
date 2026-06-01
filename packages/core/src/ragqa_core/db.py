@@ -463,6 +463,16 @@ def set_source_enabled(conn: Connection, name: str, source: str, enabled: bool) 
         )
 
 
+def question_sources(conn: Connection, name: str) -> dict[str, int]:
+    """How many of the collection's questions carry each meta.source."""
+    rows = conn.execute(
+        "select json_extract(json, '$.meta.source') as source, count(*) as n from questions"
+        " where collection = ? and source is not null group by source",
+        (name,),
+    )
+    return {row["source"]: row["n"] for row in rows}
+
+
 def delete_source_questions(conn: Connection, name: str, source: str) -> None:
     conn.execute(
         "delete from questions where collection = ? and json_extract(json, '$.meta.source') = ?",
