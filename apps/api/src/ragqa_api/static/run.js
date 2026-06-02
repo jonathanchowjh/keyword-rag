@@ -422,6 +422,8 @@ async function refresh() {
     paint("setup", setupHtml());
     fillMethodPicker();
     if (paint("actions", actionsHtml())) bindActions();
+    // Opened before the run arrived: it could not load then, so it loads now.
+    if (was === undefined && $("questions-box").open) loadQuestions();
   } catch (e) {
     $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Collections", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
@@ -433,6 +435,6 @@ $("q-method").addEventListener("change", loadQuestions);
 $("q-wrong").addEventListener("change", loadQuestions);
 $("q-disagree").addEventListener("change", loadQuestions);
 $("questions-box").addEventListener("toggle", () => {
-  if ($("questions-box").open) loadQuestions();
+  if ($("questions-box").open && run) loadQuestions();
 });
 refresh();
