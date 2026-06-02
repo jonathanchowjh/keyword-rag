@@ -294,12 +294,6 @@ function bindSources() {
 
 // -- importing a file ---------------------------------------------------------------------
 
-// What each kind must map before it can import; the API refuses the rest.
-function requiredFields(kind) {
-  if (kind === "items") return ["text"];
-  return col.qa_type === "mcq" ? ["text", "choices", "answer"] : ["text", "answer"];
-}
-
 // The file's name as a source name: other characters become "-", at most 64 long.
 function sourceFor(file) {
   return file.name.replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64) || "upload";
@@ -315,6 +309,9 @@ function buildImport(kind) {
     <div id="imp-${kind}-preview"></div></div>`;
   $(`imp-${kind}-file`).addEventListener("change", (e) => {
     const file = e.target.files[0];
+    uploads[kind] = null; // the old preview belongs to the old file
+    $(`imp-${kind}-preview`).innerHTML = "";
+    $(`imp-${kind}-msg`).textContent = "";
     if (file) $(`imp-${kind}-source`).value = sourceFor(file);
   });
   $(`imp-${kind}-go`).addEventListener("click", () => uploadFile(kind));
@@ -380,13 +377,12 @@ function previewHtml(kind, p, estimate) {
     ? `<div class="scroll"><table><thead><tr>${p.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
         <tbody>${p.sample.map((row) => `<tr>${p.columns.map((c) => `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
     : "";
-  const required = requiredFields(kind);
-  const selects = Object.keys(p.mapping)
+    const selects = Object.keys(p.mapping)
     .map((field) => {
       const options = ['<option value="">(none)</option>']
         .concat(p.columns.map((c) => `<option value="${esc(c)}"${p.mapping[field] === c ? " selected" : ""}>${esc(c)}</option>`))
         .join("");
-      const star = required.includes(field) ? " (required)" : "";
+      const star = p.required.includes(field) ? " (required)" : "";
       return `<label>${esc(field)}${star}<select data-field="${esc(field)}">${options}</select></label>`;
     })
     .join("");

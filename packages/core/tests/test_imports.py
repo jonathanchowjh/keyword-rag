@@ -334,3 +334,11 @@ def test_save_upload_over_limit_leaves_nothing(tmp_path, monkeypatch):
     with pytest.raises(imports.TooLarge):
         imports.save_upload(tmp_path, "c", "a.txt", [b"123456", b"7890123"])
     assert list((tmp_path / "uploads").iterdir()) == []
+
+
+def test_preview_names_the_required_fields(tmp_path):
+    p = write(tmp_path / "a.csv", "text,answer\nq,A\n")
+    assert imports.preview(p, "a.csv", "items", "mcq")["required"] == ["text"]
+    shown = imports.preview(p, "a.csv", "questions", "mcq")
+    assert shown["required"] == ["text", "choices", "answer"]
+    assert imports.preview(p, "a.csv", "questions", "science")["required"] == ["text", "answer"]

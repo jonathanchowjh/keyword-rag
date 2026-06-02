@@ -1200,11 +1200,40 @@ def test_run_form_lists_what_is_not_measurable(page, seeded):
         [Question("p1", "enzyme rate", None, ["3 J"], [], {})],
     )
     page.goto(seeded.url + "/c/nm")
+    expect(page.locator("#runs")).not_to_be_empty()  # the page has loaded its collection
     page.get_by_role("button", name="New run").click()
     form = page.locator("#run-form")
     expect(form).to_contain_text("This run will measure:")
     expect(form).to_contain_text("Not measurable here:")
     expect(form).to_contain_text("(no question has a worked solution)")
     page.goto(seeded.url + "/c/c")
+    expect(page.locator("#runs")).not_to_be_empty()  # the page has loaded its collection
     page.get_by_role("button", name="New run").click()
     expect(page.locator("#run-form")).to_contain_text("This run will measure:")
+
+
+def test_a_new_file_clears_the_old_preview(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "swap", "qa_type": "science"})
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text(json.dumps({"id": "a1", "text": "first file text"}))
+    b.write_text(json.dumps({"id": "b1", "text": "second file text"}))
+    page.goto(seeded.url + "/c/swap")
+    upload_and_preview(page, "items", a)
+    expect(page.locator("#imp-items-import")).to_be_visible()
+    page.locator("#imp-items-file").set_input_files(str(b))
+    expect(page.locator("#imp-items-preview")).to_be_empty()
+    expect(page.locator("#imp-items-import")).to_have_count(0)
+    page.locator("#imp-items-go").click()
+    expect(page.locator("#imp-items-preview")).to_contain_text("second file text")
+    expect(page.locator("#imp-items-import")).to_be_visible()
+
+
+def test_items_without_a_text_column_cannot_be_imported(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "notext", "qa_type": "science"})
+    f = tmp_path / "t.csv"
+    f.write_text("title,answer\nreefs,3\n")
+    page.goto(seeded.url + "/c/notext")
+    upload_and_preview(page, "items", f)
+    expect(page.locator("#imp-items-preview")).to_contain_text("Map these fields first")
+    expect(page.locator("#imp-items-import")).to_be_disabled()
+    expect(page.get_by_text("text (required)")).to_be_visible()

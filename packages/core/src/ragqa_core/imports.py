@@ -363,6 +363,7 @@ def preview(
         "columns": cols,
         "mapping": mapping,
         "missing": missing,
+        "required": list(required(kind, qa_type)),
         "sample": sample,
         "problems": problems,
         "usable": usable,
