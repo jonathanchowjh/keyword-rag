@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Your own corpus: upload JSONL, JSON, CSV, TSV, text, Markdown or a zip of
+  them as items or questions, with a preview, a field mapping and an estimate
+  before anything is queued. Each import is a source (`upload:<name>`) that can
+  be switched off for retrieval or deleted with its items, chunks and
+  questions. Re-importing updates by content hash instead of duplicating.
+- A leakage check flags imported questions whose text is in the items; runs
+  leave them out unless included, and the Run page says how many.
+- Partial gold: recall is measured only on questions that name their evidence,
+  and the Run page reads "on n of N questions". It also lists the sources
+  switched off and the evidence switched off. "What changed since" reports
+  sources.
+- A load that died resumes by content hash: "Finish loading" embeds only what
+  is missing. Stale chunks of a changed item are removed.
+- Existing collections are labelled with their sources in place on first start.
 - In an answering run, the Questions view judges each method only on its answer:
   a method not answered yet (a run stopped at the cap) is unmeasured, not a
   disagreement. "What changed since" notes keyword lists only for runs that used

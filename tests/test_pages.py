@@ -1237,3 +1237,48 @@ def test_items_without_a_text_column_cannot_be_imported(page, seeded, tmp_path):
     expect(page.locator("#imp-items-preview")).to_contain_text("Map these fields first")
     expect(page.locator("#imp-items-import")).to_be_disabled()
     expect(page.get_by_text("text (required)")).to_be_visible()
+
+
+def test_run_page_shows_partial_gold(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "pg", "qa_type": "multihop"})
+    items = [
+        {"id": f"d{i}", "text": f"passage {i} about {t}", "meta": {}}
+        for i, t in enumerate(["reefs", "tides", "volcanoes", "enzymes"])
+    ]
+    r = httpx.post(f"{seeded.url}/collections/pg/documents", json={"items": items, "confirm": True})
+    assert r.status_code == 200, r.text
+    jobs_done(seeded, "pg")
+    db.save_questions(
+        seeded.app.state.conn,  # type: ignore[attr-defined]
+        "pg",
+        [
+            Question("q0", "what about reefs", None, ["x"], ["d0"], {}),
+            Question("q1", "what about tides", None, ["x"], ["d1"], {}),
+            Question("q2", "what about volcanoes", None, ["x"], [], {}),
+            Question("q3", "what about enzymes", None, ["x"], [], {}),
+        ],
+    )
+    body = {"collection": "pg", "methods": ["hybrid"], "answer": False, "confirm": True}
+    r = httpx.post(f"{seeded.url}/eval", json=body)
+    assert r.status_code == 202, r.text
+    assert seeded.wait(r.json()["job_id"])["status"] == "done"
+    page.goto(f"{seeded.url}/c/pg/runs/{r.json()['job_id']}")
+    page.get_by_text("Each method's own score").click()
+    expect(page.locator("#scores tbody tr", has_text="hybrid")).to_contain_text(
+        "on 2 of 4 questions"
+    )
+
+
+def test_run_page_lists_what_the_run_left_out(page, seeded):
+    def left_out(route):
+        data = route.fetch().json()
+        data["setup"].update(disabled_sources=["upload:notes"], evidence_off=2, leaked_excluded=3)
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", left_out)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Setup this ran with").click()
+    left = page.locator("#setup")
+    expect(left).to_contain_text("Retrieval left out: upload:notes")
+    expect(left).to_contain_text("2 questions' evidence is switched off")
+    expect(left).to_contain_text("3 leaked questions left out")

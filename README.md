@@ -24,6 +24,7 @@ and where.
 - [First run](#first-run)
 - [Configuration](#configuration)
 - [Endpoints](#endpoints)
+- [Your own corpus](#your-own-corpus)
 - [Retrieval methods](#retrieval-methods)
 - [Datasets](#datasets)
 - [Cost safety](#cost-safety)
@@ -127,7 +128,14 @@ A collection remembers the dense model it was built with. Changing
 | `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize}` |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
-| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running |
+| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}` |
+| `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
+| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no key is set |
+| `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
+| `PATCH /collections/{name}/sources/{source}` | `{enabled}`: switch a source on or off for retrieval. 409 while an eval runs, or to switch off the last item source |
+| `DELETE /collections/{name}/sources/{source}` | Remove a source's items, chunks and imported questions; 409 while a job is queued or running on the collection |
+| `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
+| `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
 | `POST /collections/{name}/load` | Load `scienceqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
@@ -153,6 +161,48 @@ when the service stopped comes back `interrupted`; queued jobs stay queued.
 
 A method that cannot run inside `/query`, for example a keyword method before
 lists exist, reports its own `error`, and the other methods still return.
+
+## Your own corpus
+
+Any collection takes your own items (what is retrieved) and your own questions
+(what is asked). On the collection page choose a file, check the preview, fix
+the field mapping if the guess is wrong, and import. Nothing is queued, and
+nothing is spent, until you confirm the estimate.
+
+- **Formats:** JSONL, a JSON array, CSV, TSV, plain text (`.txt`), Markdown
+  (`.md`), or a `.zip` of `.txt` and `.md` files. Text and Markdown files become
+  one item each.
+- **Mapping:** items need `text`; `id`, `answer`, `explanation`, `skill` and
+  `topic` are optional. Questions need `text` and may carry `choices`,
+  `answer`, `gold_ids` (the items that hold the evidence), `solution`, `skill`
+  and `scale`. Common column names are matched for you; the preview lists
+  what is still unmapped.
+- **Sources:** every import is a source named `upload:<name>`. Switch a source
+  off and retrieval ignores it (the last item source must stay on); a run
+  records which were off, and resuming a run after a switch is refused.
+  Deleting a source removes its items, chunks and imported questions.
+- **Re-import updates:** items are matched by a hash of their content, so
+  importing the same file again reports "N new, N updated, N unchanged" and
+  adds no duplicates. A load that died is finished with "Finish loading",
+  which embeds only what is missing.
+- **Leaked questions:** an imported question whose text also appears in the
+  items is flagged as leaked, and is left out of runs unless you include it.
+  The Run page says how many were left out.
+- **Partial gold:** recall is measured only on questions that name their
+  evidence (`gold_ids`). A recall cell reads "on n of N questions" when some
+  questions have none. A question with no evidence is still asked, but it
+  does not count toward recall.
+- **Existing collections** are labelled with their sources in place on first
+  start (a `labelling` job); nothing is re-embedded.
+
+```bash
+curl -X POST "http://localhost:8080/collections/notes/uploads?filename=notes.jsonl&kind=items" \
+  --data-binary @notes.jsonl
+# {"upload_id": "...", "preview": {...}, "estimate": {...}}
+curl -X POST http://localhost:8080/collections/notes/imports \
+  -H 'content-type: application/json' \
+  -d '{"upload_id": "...", "kind": "items", "mapping": {"text": "body"}, "source_name": "notes", "confirm": true}'
+```
 
 ## Retrieval methods
 

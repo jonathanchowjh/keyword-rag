@@ -88,6 +88,12 @@ function meaning(m) {
 function ownScore(m, k) {
   const cell = m[k];
   if (!Number.isFinite(cell?.mean)) return '<span class="muted">n/a</span>';
+  // A metric measured on fewer questions than the run says so; the rest could not be measured.
+  const part = cell.n < run.question_count ? ` <span class="muted">on ${cell.n} of ${run.question_count} questions</span>` : "";
+  return scoreText(cell, k) + part;
+}
+
+function scoreText(cell, k) {
   const times = (v, f, less = 0) => (Number.isFinite(v) ? (v - less) * f : NaN);
   if (k !== SIM) {
     return `${esc(pct(cell.mean))} <span class="muted">${esc(between(times(cell.lo, 100), times(cell.hi, 100)))}</span>`;
@@ -210,14 +216,27 @@ function pairsHtml() {
     <tbody>${rows}</tbody></table>`;
 }
 
+// What the run left out; setups recorded before these fields lack them.
+const LEFT_OUT = ["disabled_sources", "evidence_off", "leaked_excluded"];
+
+function leftOutHtml() {
+  const s = run.setup;
+  const notes = [];
+  if (s.disabled_sources?.length) notes.push(`Retrieval left out: ${s.disabled_sources.join(", ")}`);
+  if (s.evidence_off > 0) notes.push(`${plural(s.evidence_off, "question")}' evidence is switched off`);
+  if (s.leaked_excluded > 0) notes.push(`${plural(s.leaked_excluded, "leaked question")} left out`);
+  return notes.map((n) => `<p class="warn">${esc(n)}</p>`).join("");
+}
+
 function setupHtml() {
   const rows = Object.entries(run.setup)
+    .filter(([k]) => !LEFT_OUT.includes(k))
     .map(([k, v]) => {
       const text = k === "question_ids" ? plural(v.length, "question") : show(v);
       return `<tr><td>${esc(k)}</td><td>${esc(text)}</td></tr>`;
     })
     .join("");
-  return `<table><tbody>${rows}</tbody></table>`;
+  return `${leftOutHtml()}<table><tbody>${rows}</tbody></table>`;
 }
 
 // -- questions --------------------------------------------------------------------------------
