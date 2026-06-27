@@ -1512,3 +1512,73 @@ def test_queued_documents_need_a_key_when_they_cost(tmp_path):
         r = client.post("/collections/s/documents", json={"items": many, "confirm": True})
         assert r.status_code == 503
         assert db.list_jobs(client.app.state.conn, collection="s", limit=db.ALL) == []
+
+
+def test_startup_ensures_the_source_indexes_of_every_existing_collection(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    store = client.app.state.store
+    store.create("old", 256)
+    db.save_collection(client.app.state.conn, CollectionSpec("old", "mcq", False, "f", 256, None))
+    db.save_collection(client.app.state.conn, CollectionSpec("ghost", "mcq", False, "f", 256, None))
+    seen = []
+    monkeypatch.setattr(store, "ensure_indexes", seen.append)
+    with client:
+        assert seen == ["old"]
+
+
+def test_preview_warns_when_ids_would_move_from_another_source(client):
+    add_collection(client)
+    import_items(client)
+    up = upload(client, filename="again.jsonl").json()
+    warning = "3 items already belong to upload:notes and would move to this source"
+    assert warning in up["preview"]["problems"]
+    same = do_import(client, up, "notes").json()["preview"]["problems"]
+    assert not [p for p in same if "already belong" in p]
+    other = do_import(client, up, "other").json()["preview"]["problems"]
+    assert warning in other
+
+
+def test_preview_warns_when_question_ids_would_move_from_another_source(client):
+    add_collection(client)
+    import_questions_only(client)
+    rows = jsonl({"id": "uq", "text": "do tides follow?", "choices": ["yes", "no"], "answer": "A"})
+    up = upload(client, rows, kind="questions").json()
+    shown = do_import(client, up, "elsewhere", kind="questions").json()["preview"]
+    assert (
+        "1 question already belongs to upload:qs and would move to this source" in shown["problems"]
+    )
+
+
+def test_documents_are_refused_while_an_import_or_backfill_is_queued_or_running(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    body = {"items": ITEMS[:1], "confirm": True}
+    for kind in ("import", "backfill"):
+        for status in ("queued", "running"):
+            job = db.create_job(conn, kind, "c", {})
+            db.update_job(conn, job, status=status)
+            r = client.post("/collections/c/documents", json=body)
+            assert r.status_code == 409 and f"a {kind} job" in r.json()["detail"], (kind, status)
+            db.update_job(conn, job, status="done")
+
+
+def test_deleting_a_source_cannot_leave_every_item_source_off(client):
+    add_collection(client)
+    import_items(client)
+    assert client.patch("/collections/c/sources/hand", json={"enabled": False}).status_code == 200
+    r = client.delete("/collections/c/sources/upload:notes")
+    assert r.status_code == 409 and "at least one source must stay on" in r.json()["detail"]
+    assert client.get("/collections/c").json()["count"] == 6
+    client.patch("/collections/c/sources/hand", json={"enabled": True})
+    assert client.delete("/collections/c/sources/upload:notes").status_code == 204
+
+
+def test_deleting_a_collection_removes_its_uploads(client):
+    add_collection(client)
+    add_collection(client, name="keep", questions=False, lists=False)
+    gone = upload(client).json()["upload_id"]
+    kept = upload(client, name="keep").json()["upload_id"]
+    assert client.delete("/collections/c").status_code == 204
+    uploads = client.app.state.settings.home / "uploads"
+    assert not (uploads / gone).exists() and (uploads / kept).exists()

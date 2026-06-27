@@ -183,6 +183,7 @@ async def lifespan(app: FastAPI):
     for spec in db.list_collections(app.state.conn):
         if not app.state.store.client.collection_exists(spec.name):
             continue
+        app.state.store.ensure_indexes(spec.name)  # collections older than the indexes lack them
         if app.state.store.unsourced(spec.name) > 0 and not db.job_waiting_or_running(
             app.state.conn, "backfill", spec.name
         ):
@@ -272,12 +273,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"no upload {upload_id!r} on '{name}'") from None
 
     def preview_upload(
-        spec: CollectionSpec, path: Path, filename: str, kind: str, mapping: dict | None
+        spec: CollectionSpec,
+        path: Path,
+        filename: str,
+        kind: str,
+        mapping: dict | None,
+        source: str,
     ) -> dict:
         """The preview; a file that cannot be read is removed along with its upload."""
         known = set(state.store.ids(spec.name)) if kind == "questions" else None
+
+        def owner_of(ids: list[str]) -> dict[str, str | None]:
+            if kind == "items":
+                return state.store.sources_of(spec.name, ids)
+            asked = {q.id: q.meta.get("source") for q in db.get_questions(state.conn, spec.name)}
+            return {i: asked[i] for i in ids if i in asked}
+
         try:
-            return imports.preview(path, filename, kind, spec.qa_type, mapping, known)
+            return imports.preview(
+                path, filename, kind, spec.qa_type, mapping, known, source, owner_of
+            )
         except ValueError:
             shutil.rmtree(path.parent, ignore_errors=True)
             raise
@@ -373,13 +388,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.store.drop(name)
         state.retriever.forget(name)
         db.delete_collection_rows(state.conn, name)
+        imports.delete_uploads(state.settings.home, name)
         return Response(status_code=204)
 
     @app.post("/collections/{name}/documents", status_code=202)
     def add_documents(name: str, body: Documents):
         spec = state.retriever.spec(name)
         # An item added now would be keyed under mixed lists, miss a version or skew a run.
-        for kind in ("load", "rekey", "eval"):
+        for kind in ("load", "rekey", "eval", "import", "backfill"):
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         if len(body.items) > SYNC_ITEMS:
@@ -414,9 +430,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
         upload_id = imports.save_upload(state.settings.home, name, filename, body_chunks(request))
         path, _ = open_upload(name, upload_id)
-        shown = preview_upload(spec, path, filename, kind, None)
         stem = Path(filename).stem
         source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
+        shown = preview_upload(spec, path, filename, kind, None, source)
         return {
             "upload_id": upload_id,
             "filename": filename,
@@ -431,8 +447,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not SOURCE_NAME.match(body.source_name):
             raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
         check_mapping(body.kind, body.mapping)
-        shown = preview_upload(spec, path, meta["filename"], body.kind, body.mapping)
         source = "upload:" + body.source_name
+        shown = preview_upload(spec, path, meta["filename"], body.kind, body.mapping, source)
         estimate = estimate_upload(spec, body.upload_id, body.kind, shown, source)
         if not body.confirm:
             return JSONResponse({"preview": shown, "estimate": estimate}, 200)
@@ -490,6 +506,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
             if busy:
                 raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        left = [r for r in source_rows(name) if r["source"] != source and r["items"] > 0]
+        if left and not any(r["enabled"] for r in left):
+            raise HTTPException(409, "at least one source must stay on")
         state.store.delete_source(name, source)
         db.delete_source_questions(state.conn, name, source)
         db.set_source_enabled(state.conn, name, source, True)

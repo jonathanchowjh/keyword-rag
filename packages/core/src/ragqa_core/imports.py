@@ -8,7 +8,8 @@ import shutil
 import uuid
 import zipfile
 import zlib
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ragqa_core.datasets import mask_template
@@ -20,7 +21,7 @@ UPLOAD_LIMIT = 200 * 1024 * 1024
 ZIP_LIMIT = 500 * 1024 * 1024  # total uncompressed size
 ZIP_MEMBERS = 20_000
 LEAK_MIN_WORDS = 6
-UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+UPLOAD_ID = re.compile(r"[0-9a-f]{32}")
 SOURCE_NAME = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 
 FORMATS = {
@@ -79,7 +80,7 @@ def save_upload(home: Path, collection: str, filename: str, chunks: Iterable[byt
 
 
 def open_upload(home: Path, collection: str, upload_id: str) -> tuple[Path, dict]:
-    if not UPLOAD_ID.match(upload_id):
+    if not UPLOAD_ID.fullmatch(upload_id):
         raise KeyError(upload_id)
     folder = home / "uploads" / upload_id
     try:
@@ -89,6 +90,17 @@ def open_upload(home: Path, collection: str, upload_id: str) -> tuple[Path, dict
     if meta.get("collection") != collection:
         raise KeyError(upload_id)
     return folder / "file", meta
+
+
+def delete_uploads(home: Path, collection: str) -> None:
+    """Remove every upload folder whose meta.json names the collection."""
+    for folder in (home / "uploads").glob("*"):
+        try:
+            named = json.loads((folder / "meta.json").read_text()).get("collection")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if named == collection:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def read_rows(path: Path, filename: str) -> tuple[str, list[dict], list[str]]:
@@ -294,7 +306,7 @@ def build_questions(
     questions: dict[str, Question] = {}
     for row in rows:
         text = cell_text(row, mapping, "text")
-        answer = cell_text(row, mapping, "answer")
+        answer = cell_text(row, mapping, "answer")  # for the empty check and the letter
         choices = split_list(cell(row, mapping, "choices")) or None
         if not text:
             report["no_text"] += 1
@@ -312,7 +324,7 @@ def build_questions(
                 continue
             gold = [letter]
         else:
-            gold = split_list(answer)
+            gold = split_list(cell(row, mapping, "answer"))
         id_ = cell_text(row, mapping, "id") or make_id("q-", text)
         if id_ in questions:
             report["duplicate_ids"] += 1
@@ -330,7 +342,10 @@ def preview(
     qa_type: QaType,
     mapping: dict | None = None,
     known_ids: set[str] | None = None,
+    source: str | None = None,
+    owner_of: Callable[[list[str]], dict[str, str | None]] | None = None,
 ) -> dict:
+    """owner_of names the source each id already has, to warn of ids that would move."""
     fmt, rows, problems = read_rows(path, filename)
     cols = columns(rows)
     mapping = mapping or guess_mapping(cols, kind)
@@ -351,6 +366,14 @@ def preview(
                 problems.append(f"{report['no_choices']} rows have no choices and will be skipped")
             if report["unreadable_answers"]:
                 problems.append(f"{report['unreadable_answers']} answers match no choice")
+        if owner_of and source:
+            moving = Counter(
+                o for o in owner_of([b.id for b in built]).values() if o and o != source
+            )
+            noun = "question" if kind == "questions" else "item"
+            for other, n in moving.items():
+                what = f"{n} {noun}s already belong" if n != 1 else f"{n} {noun} already belongs"
+                problems.append(f"{what} to {other} and would move to this source")
         usable = len(built)
         if report["no_text"]:
             problems.append(f"{report['no_text']} rows have no text and will be skipped")

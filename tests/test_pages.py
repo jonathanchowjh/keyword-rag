@@ -1269,6 +1269,44 @@ def test_run_page_shows_partial_gold(page, seeded):
     )
 
 
+def test_a_new_source_name_gets_its_own_estimate_before_import_is_allowed(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "ren", "qa_type": "science"})
+    notes = tmp_path / "notes.csv"
+    notes.write_text("text\nfirst thing about reefs\nsecond thing about tides\n")
+    page.goto(seeded.url + "/c/ren")
+    page.locator("#imp-items-file").set_input_files(str(notes))
+    page.locator("#imp-items-go").click()
+    expect(page.locator("#imp-items-import")).to_be_enabled()
+    held = []
+    page.route("**/collections/ren/imports", lambda route: held.append(route))
+    page.locator("#imp-items-source").fill("renamed")
+    expect(page.locator("#imp-items-import")).to_be_disabled()
+    for _ in range(50):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert len(held) == 1
+    sent = json.loads(held[0].request.post_data)
+    assert sent["source_name"] == "renamed" and sent["confirm"] is False
+    data = held[0].fetch().json()
+    data["estimate"]["calls"] = 7
+    held[0].fulfill(json=data)
+    expect(page.locator("#imp-items-import")).to_be_enabled()
+    expect(page.locator("#imp-items-preview")).to_contain_text("7 Claude calls")
+
+
+def test_run_page_says_one_question_s_evidence_in_the_singular(page, seeded):
+    def left_out(route):
+        data = route.fetch().json()
+        data["setup"].update(evidence_off=1)
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{seeded.run_id}", left_out)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Setup this ran with").click()
+    expect(page.locator("#setup")).to_contain_text("1 question's evidence is switched off")
+
+
 def test_run_page_lists_what_the_run_left_out(page, seeded):
     def left_out(route):
         data = route.fetch().json()

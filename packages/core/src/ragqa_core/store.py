@@ -309,6 +309,20 @@ class Store:
         facet = self.client.facet(name, key="meta.source", limit=10_000, exact=True)
         return {str(h.value): h.count for h in facet.hits}
 
+    def sources_of(self, name: str, ids: list[str]) -> dict[str, str | None]:
+        """The source each existing item among the ids carries (None if unlabelled)."""
+        out: dict[str, str | None] = {}
+        for start in range(0, len(ids), 1024):
+            records = self.client.retrieve(
+                name,
+                [point_id(name, i) for i in ids[start : start + 1024]],
+                with_payload=["item_id", "meta.source"],
+            )
+            for r in records:
+                p = r.payload or {}
+                out[p["item_id"]] = (p.get("meta") or {}).get("source")
+        return out
+
     def unsourced(self, name: str) -> int:
         """Item points and chunk points that carry no source."""
         empty = Filter(must=[IsEmptyCondition(is_empty=PayloadField(key="meta.source"))])
@@ -330,6 +344,7 @@ class Store:
             self.client.delete(collection, points_selector=FilterSelector(filter=by_source))
 
     def set_payloads(self, name: str, payloads: dict[str, dict]) -> None:
+        """Set the given payload keys on each item, by item id; other keys stay."""
         self.send_payloads(name, [(point_id(name, i), p) for i, p in payloads.items()])
 
     def set_chunk_sources(self, name: str, source_of: dict[str, str]) -> None:

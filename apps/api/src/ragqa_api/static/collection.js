@@ -27,6 +27,7 @@ let loadJob = null; // the newest load job, or null
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
 const uploads = { items: null, questions: null }; // per kind: the upload being previewed, or null
+const previewing = { items: 0, questions: 0 }; // per kind: the newest preview request, so an older answer is ignored
 
 shell(`c/${name}`);
 
@@ -310,11 +311,16 @@ function buildImport(kind) {
   $(`imp-${kind}-file`).addEventListener("change", (e) => {
     const file = e.target.files[0];
     uploads[kind] = null; // the old preview belongs to the old file
+    previewing[kind]++; // and no answer still on its way may paint it back
     $(`imp-${kind}-preview`).innerHTML = "";
     $(`imp-${kind}-msg`).textContent = "";
     if (file) $(`imp-${kind}-source`).value = sourceFor(file);
   });
   $(`imp-${kind}-go`).addEventListener("click", () => uploadFile(kind));
+  // The estimate is priced under the source name, so a new name needs a new estimate.
+  $(`imp-${kind}-source`).addEventListener("input", () => {
+    if (uploads[kind]) previewAgain(kind);
+  });
   $(`imp-${kind}-preview`).addEventListener("change", (e) => {
     if (e.target.closest("select[data-field]")) previewAgain(kind);
   });
@@ -360,12 +366,14 @@ function importBody(kind, confirm) {
 
 async function previewAgain(kind) {
   const msg = $(`imp-${kind}-msg`);
+  const ticket = ++previewing[kind];
   msg.textContent = "";
+  $(`imp-${kind}-import`)?.setAttribute("disabled", ""); // until the fresh estimate is in
   try {
     const got = await api(`/collections/${enc}/imports`, { method: "POST", body: importBody(kind, false) });
-    showPreview(kind, got.preview, got.estimate);
+    if (ticket === previewing[kind]) showPreview(kind, got.preview, got.estimate);
   } catch (e) {
-    msg.textContent = e.message;
+    if (ticket === previewing[kind]) msg.textContent = e.message;
   }
 }
 
@@ -377,7 +385,7 @@ function previewHtml(kind, p, estimate) {
     ? `<div class="scroll"><table><thead><tr>${p.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
         <tbody>${p.sample.map((row) => `<tr>${p.columns.map((c) => `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
     : "";
-    const selects = Object.keys(p.mapping)
+  const selects = Object.keys(p.mapping)
     .map((field) => {
       const options = ['<option value="">(none)</option>']
         .concat(p.columns.map((c) => `<option value="${esc(c)}"${p.mapping[field] === c ? " selected" : ""}>${esc(c)}</option>`))

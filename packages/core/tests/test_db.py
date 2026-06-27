@@ -511,7 +511,6 @@ def test_include_leaked_defaults_false_and_survives_migration(tmp_path):
     db.set_include_leaked(conn, "old", True)
     save_collection(conn, CollectionSpec("new", "mcq", False, "m", 64))
     assert db.get_include_leaked(conn, "new") is False
-    save_collection(
-        conn, CollectionSpec("old", "mcq", True, "m", 64)
-    )  # a re-save keeps nothing odd
+    save_collection(conn, CollectionSpec("old", "mcq", True, "m", 64))
+    assert db.get_include_leaked(conn, "old") is True  # a re-save keeps the switch
     assert [c.name for c in list_collections(conn)] == ["new", "old"]

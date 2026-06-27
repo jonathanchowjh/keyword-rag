@@ -173,18 +173,18 @@ nothing is spent, until you confirm the estimate.
   (`.md`), or a `.zip` of `.txt` and `.md` files. Text and Markdown files become
   one item each.
 - **Mapping:** items need `text`; `id`, `answer`, `explanation`, `skill` and
-  `topic` are optional. Questions need `text` and may carry `choices`,
-  `answer`, `gold_ids` (the items that hold the evidence), `solution`, `skill`
-  and `scale`. Common column names are matched for you; the preview lists
-  what is still unmapped.
+  `topic` are optional. Questions need `text` and `answer` (and `choices` for
+  multiple choice), and may carry `gold_ids` (the items that hold the
+  evidence), `solution`, `skill` and `scale`. Common column names are matched
+  for you; the preview lists what is still unmapped.
 - **Sources:** every import is a source named `upload:<name>`. Switch a source
   off and retrieval ignores it (the last item source must stay on); a run
   records which were off, and resuming a run after a switch is refused.
   Deleting a source removes its items, chunks and imported questions.
-- **Re-import updates:** items are matched by a hash of their content, so
-  importing the same file again reports "N new, N updated, N unchanged" and
-  adds no duplicates. A load that died is finished with "Finish loading",
-  which embeds only what is missing.
+- **Re-import updates:** items are matched by id (the hash of their content
+  only decides whether one changed), so importing the same file again reports
+  "N new, N updated, N unchanged" and adds no duplicates. A load that died is
+  finished with "Finish loading", which embeds only what is missing.
 - **Leaked questions:** an imported question whose text also appears in the
   items is flagged as leaked, and is left out of runs unless you include it.
   The Run page says how many were left out.
@@ -193,7 +193,7 @@ nothing is spent, until you confirm the estimate.
   questions have none. A question with no evidence is still asked, but it
   does not count toward recall.
 - **Existing collections** are labelled with their sources in place on first
-  start (a `labelling` job); nothing is re-embedded.
+  start (the `backfill` job, shown as "labelling"); nothing is re-embedded.
 
 ```bash
 curl -X POST "http://localhost:8080/collections/notes/uploads?filename=notes.jsonl&kind=items" \

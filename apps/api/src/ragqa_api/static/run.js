@@ -223,7 +223,7 @@ function leftOutHtml() {
   const s = run.setup;
   const notes = [];
   if (s.disabled_sources?.length) notes.push(`Retrieval left out: ${s.disabled_sources.join(", ")}`);
-  if (s.evidence_off > 0) notes.push(`${plural(s.evidence_off, "question")}' evidence is switched off`);
+  if (s.evidence_off > 0) notes.push(`${plural(s.evidence_off, "question")}${s.evidence_off === 1 ? "'s" : "'"} evidence is switched off`);
   if (s.leaked_excluded > 0) notes.push(`${plural(s.leaked_excluded, "leaked question")} left out`);
   return notes.map((n) => `<p class="warn">${esc(n)}</p>`).join("");
 }

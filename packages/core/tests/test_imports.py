@@ -120,6 +120,16 @@ def test_science_question_without_choices_keeps_its_number():
     assert report["rows"] == 1
 
 
+def test_a_list_answer_keeps_each_string_as_gold():
+    rows = [
+        {"text": "Who wrote Hamlet?", "answer": ["Shakespeare", "William Shakespeare"]},
+        {"text": "Who wrote Emma?", "answer": "Austen|Jane Austen"},
+    ]
+    qs, _ = imports.build_questions(rows, {"text": "text", "answer": "answer"}, "science")
+    assert qs[0].gold_answers == ["Shakespeare", "William Shakespeare"]
+    assert qs[1].gold_answers == ["Austen", "Jane Austen"]
+
+
 def test_mcq_answers_to_letters():
     choices = ["Chloride", "Sulfate", "Nitrate"]
     assert imports.to_letter("b", choices) == "B"
@@ -203,6 +213,26 @@ def test_preview_counts_unknown_gold_ids(tmp_path):
     p = write(tmp_path / "a.csv", "text,answer,gold_ids\nq1,1,i1|i2\nq2,2,i3\n")
     out = imports.preview(p, "a.csv", "questions", "multihop", known_ids={"i1"})
     assert "2 gold ids name no item in this collection" in out["problems"]
+
+
+def test_preview_warns_about_ids_that_belong_to_another_source(tmp_path):
+    p = write(tmp_path / "a.csv", "id,text\na,one\nb,two\nc,three\n")
+    owners = {"a": "upload:old", "b": "upload:old", "c": "upload:mine", "z": "hand"}
+    out = imports.preview(
+        p,
+        "a.csv",
+        "items",
+        "mcq",
+        source="upload:mine",
+        owner_of=lambda ids: {i: owners[i] for i in ids if i in owners},
+    )
+    assert "2 items already belong to upload:old and would move to this source" in out["problems"]
+    assert len(out["problems"]) == 1
+    p = write(tmp_path / "b.csv", "id,text,answer\na,one,1\n")
+    out = imports.preview(
+        p, "b.csv", "questions", "science", source="x", owner_of=lambda ids: {"a": "hand"}
+    )
+    assert "1 question already belongs to hand and would move to this source" in out["problems"]
 
 
 def test_leaked_ids():
