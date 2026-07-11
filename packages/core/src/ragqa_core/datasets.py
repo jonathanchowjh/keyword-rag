@@ -1,7 +1,9 @@
-"""The four datasets, downloaded at runtime and never committed.
+"""The five datasets, downloaded at runtime and never committed.
 
 - ScienceQA (CC BY-SA 4.0): exam multiple choice; train is the example store,
   test the queries. Text-only natural science, grades 7–12, templates deduped.
+- GPQA (CC BY 4.0, gated): hard exam multiple choice with expert explanations;
+  Diamond is the queries, the rest of Extended the example store.
 - MuSiQue (CC BY 4.0), HippoRAG-2 protocol: 1,000 dev questions, 11,656 passages.
 - TAT-QA (CC BY 4.0): every table+text context pooled; dev questions.
 - SciBench (MIT, xw27/scibench): university physics and chemistry problems with
@@ -13,8 +15,10 @@
   so split_unit does the same. Facts checked 2026-10-27.
 """
 
+import csv
 import hashlib
 import json
+import random
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -22,30 +26,34 @@ from pathlib import Path
 import httpx
 import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.errors import GatedRepoError
 
 from ragqa_core.prompts import LETTERS
 from ragqa_core.types import Item, QaType, Question
 
 DATASETS: dict[str, QaType] = {
     "scienceqa": "mcq",
+    "gpqa": "mcq",
     "musique": "multihop",
     "tatqa": "table",
     "scibench": "science",
 }
 ID_PREFIX: dict[str, str] = {
     "scienceqa": "sqa-",
+    "gpqa": "gpqa-",
     "musique": "mq-",
     "tatqa": "tq-",
     "scibench": "sb-",
 }
-FILTER_NOTES: dict[QaType, str] = {
-    "mcq": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
-    "science": (
+FILTER_NOTES: dict[str, str] = {
+    "scienceqa": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
+    "gpqa": "GPQA Diamond questions over the rest of GPQA Extended, choices shuffled per record",
+    "scibench": (
         "SciBench physics and chemistry textbook problems (7 sources); "
         "the solved ones are the worked examples"
     ),
-    "multihop": "MuSiQue, HippoRAG-2 protocol: 1,000 dev questions over 11,656 passages",
-    "table": "TAT-QA dev questions over every train/dev/test context",
+    "musique": "MuSiQue, HippoRAG-2 protocol: 1,000 dev questions over 11,656 passages",
+    "tatqa": "TAT-QA dev questions over every train/dev/test context",
 }
 
 
@@ -58,6 +66,18 @@ def source_for(item_id: str, datasets: set[str]) -> str:
 
 
 SCIENCEQA_REPO = "derek-thomas/ScienceQA"
+GPQA_REPO = "Idavidrein/gpqa"
+GPQA_COLUMNS = (
+    "Record ID",
+    "Question",
+    "Correct Answer",
+    "Incorrect Answer 1",
+    "Incorrect Answer 2",
+    "Incorrect Answer 3",
+    "Explanation",
+    "Subdomain",
+    "High-level domain",
+)
 MUSIQUE_REPO = "osunlp/HippoRAG_2"
 TATQA_URL = (
     "https://raw.githubusercontent.com/NExTplusplus/TAT-QA/master/dataset_raw/"
@@ -115,6 +135,7 @@ def dev_slice(
 def load(name: str, cache: Path) -> tuple[list[Item], list[Question]]:
     loaders: dict[str, Callable[[Path], tuple[list[Item], list[Question]]]] = {
         "scienceqa": load_scienceqa,
+        "gpqa": load_gpqa,
         "musique": load_musique,
         "tatqa": load_tatqa,
         "scibench": load_scibench,
@@ -188,6 +209,91 @@ def load_scienceqa(
         )
         for n, row in _scienceqa_rows(files["test"])
     ]
+    return items, questions
+
+
+# -- GPQA ----------------------------------------------------------------------
+
+
+def _gpqa_files(cache: Path) -> dict[str, Path]:
+    try:
+        return {
+            split: Path(
+                hf_hub_download(
+                    GPQA_REPO,
+                    f"gpqa_{split}.csv",
+                    repo_type="dataset",
+                    cache_dir=cache / "datasets",
+                )
+            )
+            for split in ("extended", "diamond")
+        }
+    except GatedRepoError as e:
+        raise RuntimeError(
+            f"GPQA is gated: accept its terms at https://huggingface.co/datasets/{GPQA_REPO}"
+            " and set HF_TOKEN to a token from that account"
+        ) from e
+
+
+def _gpqa_rows(path: Path) -> list[dict]:
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        missing = [c for c in GPQA_COLUMNS if c not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path.name} lacks columns {missing}; has {reader.fieldnames}")
+        # Without an explanation a row is no chain-of-thought example and has no
+        # solution to score solution similarity against.
+        return [r for r in reader if r["Question"].strip() and r["Explanation"].strip()]
+
+
+def _gpqa_choices(row: dict) -> tuple[list[str], str]:
+    """The four answers in an order seeded by the record, and the correct letter:
+    the same on every load, and not always A."""
+    choices = [row["Correct Answer"]] + [row[f"Incorrect Answer {n}"] for n in (1, 2, 3)]
+    choices = [c.strip() for c in choices]
+    correct = choices[0]
+    random.Random(row["Record ID"]).shuffle(choices)
+    return choices, LETTERS[choices.index(correct)]
+
+
+def load_gpqa(
+    cache: Path, files: dict[str, Path] | None = None
+) -> tuple[list[Item], list[Question]]:
+    files = files or _gpqa_files(cache)
+    diamond = _gpqa_rows(files["diamond"])
+    held_out = {r["Record ID"] for r in diamond}
+    items = []
+    for row in _gpqa_rows(files["extended"]):
+        if row["Record ID"] in held_out:
+            continue
+        choices, letter = _gpqa_choices(row)
+        listed = "; ".join(f"{LETTERS[i]}. {c}" for i, c in enumerate(choices))
+        items.append(
+            Item(
+                id=f"gpqa-{row['Record ID']}",
+                text=row["Question"].strip() + "\nChoices: " + listed,
+                answer=letter,
+                explanation=row["Explanation"].strip(),
+                meta={"skill": row["Subdomain"], "topic": row["High-level domain"]},
+            )
+        )
+    questions = []
+    for row in diamond:
+        choices, letter = _gpqa_choices(row)
+        questions.append(
+            Question(
+                id=f"gpqa-{row['Record ID']}",
+                text=row["Question"].strip(),
+                choices=choices,
+                gold_answers=[letter],
+                gold_ids=[],
+                meta={
+                    "skill": row["Subdomain"],
+                    "topic": row["High-level domain"],
+                    "solution": row["Explanation"].strip(),
+                },
+            )
+        )
     return items, questions
 
 

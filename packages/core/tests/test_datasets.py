@@ -1,12 +1,18 @@
+import csv
 import json
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from ragqa_core.datasets import (
     DATASETS,
+    FILTER_NOTES,
+    GPQA_COLUMNS,
+    ID_PREFIX,
     dev_slice,
+    load_gpqa,
     load_musique,
     load_scibench,
     load_scienceqa,
@@ -69,10 +75,15 @@ def write_mini_scienceqa(tmp_path: Path) -> dict[str, Path]:
 def test_datasets_map_to_qa_types():
     assert DATASETS == {
         "scienceqa": "mcq",
+        "gpqa": "mcq",
         "musique": "multihop",
         "tatqa": "table",
         "scibench": "science",
     }
+
+
+def test_every_dataset_has_an_id_prefix_and_a_filter_note():
+    assert set(ID_PREFIX) == set(FILTER_NOTES) == set(DATASETS)
 
 
 def test_scienceqa_filters_and_dedupes(tmp_path):
@@ -87,6 +98,78 @@ def test_scienceqa_filters_and_dedupes(tmp_path):
     q = questions[0]
     assert q.gold_answers == ["B"] and q.gold_ids == [] and q.choices == ["friction", "gravity"]
     assert q.meta == {"skill": "s1", "topic": "physics", "solution": "Because."}
+
+
+def gpqa_row(rid: str, subdomain: str = "Organic Chemistry", explanation: str = "Because.") -> dict:
+    # Invented rows in GPQA's column layout: the real ones may not be published.
+    return {
+        **{c: "" for c in GPQA_COLUMNS},
+        "Record ID": rid,
+        "Question": f"Question {rid} about a reaction?",
+        "Correct Answer": f"right {rid}",
+        "Incorrect Answer 1": "wrong 1",
+        "Incorrect Answer 2": "wrong 2",
+        "Incorrect Answer 3": "wrong 3",
+        "Explanation": explanation,
+        "Subdomain": subdomain,
+        "High-level domain": "Chemistry",
+        "Writer's Difficulty Estimate": "hard",
+    }
+
+
+def write_gpqa(tmp_path: Path, name: str, rows: list[dict]) -> Path:
+    path = tmp_path / f"gpqa_{name}.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def gpqa_files(tmp_path: Path) -> dict[str, Path]:
+    extended = [gpqa_row(f"rec{n}") for n in range(6)] + [gpqa_row("noexpl", explanation=" ")]
+    diamond = [gpqa_row("rec1", "Quantum Mechanics"), gpqa_row("rec4")]
+    return {
+        "extended": write_gpqa(tmp_path, "extended", extended),
+        "diamond": write_gpqa(tmp_path, "diamond", diamond),
+    }
+
+
+def test_gpqa_holds_diamond_out_of_the_example_store(tmp_path):
+    items, questions = load_gpqa(tmp_path, gpqa_files(tmp_path))
+    assert [i.id for i in items] == ["gpqa-rec0", "gpqa-rec2", "gpqa-rec3", "gpqa-rec5"]
+    assert [q.id for q in questions] == ["gpqa-rec1", "gpqa-rec4"]
+    q = questions[0]
+    assert q.meta == {
+        "skill": "Quantum Mechanics",
+        "topic": "Chemistry",
+        "solution": "Because.",
+    }
+    assert items[0].meta == {"skill": "Organic Chemistry", "topic": "Chemistry"}
+    assert items[0].explanation == "Because." and "Choices: A. " in items[0].text
+
+
+def test_gpqa_gold_letter_names_the_correct_answer_in_a_stable_order(tmp_path):
+    files = gpqa_files(tmp_path)
+    items, questions = load_gpqa(tmp_path, files)
+    for q in questions:
+        assert q.choices[ord(q.gold_answers[0]) - ord("A")] == f"right {q.id[5:]}"
+    for item in items:
+        assert f"{item.answer}. right {item.id[5:]}" in item.text
+    again, _ = load_gpqa(tmp_path, files)
+    assert [i.text for i in again] == [i.text for i in items]
+    # Seeded per record, not left with the correct answer always first.
+    assert len({i.answer for i in items} | {q.gold_answers[0] for q in questions}) > 1
+
+
+def test_gpqa_names_a_missing_column(tmp_path):
+    row = {k: v for k, v in gpqa_row("rec0").items() if k != "Subdomain"}
+    files = {
+        "extended": write_gpqa(tmp_path, "extended", [row]),
+        "diamond": write_gpqa(tmp_path, "diamond", [row]),
+    }
+    with pytest.raises(ValueError, match="lacks columns \\['Subdomain'\\]"):
+        load_gpqa(tmp_path, files)
 
 
 def test_musique_gold_ids_point_into_corpus(tmp_path):
@@ -228,3 +311,4 @@ def test_source_for():
     assert source_for("sqa-train-3", {"scienceqa"}) == "scienceqa"
     assert source_for("note-1", {"scienceqa"}) == "upload:unknown"
     assert source_for("mq-x", {"scienceqa"}) == "upload:unknown"
+    assert source_for("gpqa-rec1", {"gpqa", "scienceqa"}) == "gpqa"

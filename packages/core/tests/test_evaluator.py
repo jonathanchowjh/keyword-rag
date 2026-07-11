@@ -152,6 +152,7 @@ def test_setup_records_full_configuration(env):
     assert {"dense_model", "judge_model", "keyword_version", "rrf_k", "k", "seed"} <= set(setup)
     assert {"dataset_filter", "collection", "split", "methods"} <= set(setup)
     assert setup["keyword_version"] and setup["seed"] == 472
+    assert setup["dataset_filter"] == "items you added or imported"
 
 
 def test_items_wrong_only(env):

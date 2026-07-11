@@ -22,6 +22,7 @@ from ragqa_core.db import (
     job_spend,
     list_collections,
     list_jobs,
+    loaded_datasets,
     log_job,
     newest_jobs,
     request_cancel,
@@ -88,6 +89,16 @@ def test_job_round_trip(tmp_path):
     assert row["status"] == "queued" and row["progress"] == 0.5
     assert row["setup"] == {"dataset": "scienceqa"} and row["result"] == {"added": 3}
     assert get_job(conn, "missing") is None
+
+
+def test_loaded_datasets_names_every_load_once(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    for dataset, status in (("gpqa", "done"), ("scienceqa", "failed"), ("gpqa", "done")):
+        update_job(conn, create_job(conn, "load", "arc", {"dataset": dataset}), status=status)
+    create_job(conn, "load", "other", {"dataset": "tatqa"})
+    # A failed load still added items.
+    assert loaded_datasets(conn, "arc") == {"gpqa", "scienceqa"}
+    assert loaded_datasets(conn, "empty") == set()
 
 
 def test_run_items_filter_by_method(tmp_path):

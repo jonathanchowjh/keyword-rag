@@ -101,6 +101,11 @@
 - The dev slice ranks each question by a hash of its id, so adding a question
   displaces at most one. New dev runs on an existing collection may use a
   different 200 than before; runs already recorded keep their question ids.
+- GPQA as a second, harder exam dataset (`"dataset": "gpqa"`): Diamond's
+  questions over the rest of Extended, which carries expert explanations.
+  Gated: needs `HF_TOKEN` after accepting its terms.
+- A run's `dataset_filter` names the datasets its collection actually loaded,
+  not a note picked by QA type.
 
 ## 0.1.0 — 2026-10-23
 

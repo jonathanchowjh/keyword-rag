@@ -85,6 +85,11 @@ curl -X POST $api/collections/sqa/load -H 'content-type: application/json' \
   -d '{"dataset":"scienceqa","confirm":true}'   # starts the job
 
 curl -X POST $api/collections -H 'content-type: application/json' \
+  -d '{"name":"gpqa","qa_type":"mcq"}'          # needs HF_TOKEN, see Datasets
+curl -X POST $api/collections/gpqa/load -H 'content-type: application/json' \
+  -d '{"dataset":"gpqa"}'
+
+curl -X POST $api/collections -H 'content-type: application/json' \
   -d '{"name":"mq","qa_type":"multihop"}'
 curl -X POST $api/collections/mq/load -H 'content-type: application/json' \
   -d '{"dataset":"musique"}'
@@ -113,6 +118,7 @@ Environment variables, read at start. `compose.yaml` passes `.env` through.
 | `RAGQA_JUDGE_MODEL` | A different model, used only to score solution similarity. Default `BAAI/bge-small-en-v1.5`. |
 | `RAGQA_RERANK_MODEL` | Cross-encoder for `hybrid_rerank`. Default `BAAI/bge-reranker-v2-m3-int8`. |
 | `RAGQA_QDRANT_URL` | Set by compose. Unset means in-process Qdrant (tests only). |
+| `HF_TOKEN` | Hugging Face read token, only to load GPQA (gated). Read by `huggingface_hub`. |
 | `RAGQA_HOME` | State directory. `/home/app/.ragqa` in the image. |
 | `PORT` | Listen port. `8080`. |
 
@@ -136,7 +142,7 @@ A collection remembers the dense model it was built with. Changing
 | `DELETE /collections/{name}/sources/{source}` | Remove a source's items, chunks and imported questions; 409 while a job is queued or running on the collection |
 | `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
 | `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
-| `POST /collections/{name}/load` | Load `scienceqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
+| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
@@ -245,6 +251,7 @@ All are downloaded at runtime into the `ragqa` volume and never committed.
 |---|---|---|---|---|---|
 | Science problems | SciBench (physics and chemistry textbook problems) | MIT | 273 examples (76 worked solutions) and 219 questions: solved problems are all examples, the 416 unsolved split by a hash of their id. Small, a stand-in until your own corpus is imported | same-skill@1 | accuracy |
 | Exam multiple choice | ScienceQA | CC BY-SA 4.0 | 693 solved train examples; 291 test questions | solution similarity@1, same-skill@1 | accuracy |
+| Exam multiple choice, hard | GPQA (gated) | CC BY 4.0 | GPQA Extended minus Diamond as examples; Diamond's 198 as questions | solution similarity@1, same-subdomain@1 | accuracy |
 | Multi-hop factual | MuSiQue (HippoRAG-2 protocol) | CC BY 4.0 | 11,656 passages; 1,000 dev questions | recall@2, recall@5 | EM, F1 |
 | Table + text numeric | TAT-QA | CC BY 4.0 | 2,757 contexts; 1,668 dev questions | recall@1, recall@3 | EM, F1 |
 
@@ -253,6 +260,19 @@ item per near-duplicate template. Its human-written solutions serve as the
 paper's chain-of-thought examples. TAT-QA answers use simplified scoring:
 numbers are compared at 2 decimal places after stripping `$`, `,`, `%` and
 scale words, and text is scored like SQuAD.
+
+ScienceQA turned out too easy to separate methods on: plain vector search
+finds a same-skill example for 84% of test questions (a random one, 11%),
+and its templated solutions put every content method near 0.91 solution
+similarity. GPQA is the harder stand-in for the paper's ACT data: expert
+questions with a written explanation each. Diamond is held out of the
+example store by record, so no question retrieves itself; choices are
+shuffled with a seed per record. "Same skill" there means same subdomain.
+
+GPQA is gated. Accept its terms on
+[its Hugging Face page](https://huggingface.co/datasets/Idavidrein/gpqa) and
+set `HF_TOKEN` to a read token from that account. The terms ask that examples
+are not shown online, so keep Lab and Board screenshots of it private.
 
 MuSiQue recall can be set beside published HippoRAG-2 numbers, but only as
 **gain over our own dense baseline**: their baseline is NV-Embed-v2, ours a

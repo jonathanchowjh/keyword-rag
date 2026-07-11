@@ -301,7 +301,10 @@ class Evaluator:
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
             "seed": DEV_SEED,
-            "dataset_filter": FILTER_NOTES[spec.qa_type],
+            "dataset_filter": "; ".join(
+                FILTER_NOTES[d] for d in sorted(db.loaded_datasets(self.conn, spec.name))
+            )
+            or "items you added or imported",
             "question_ids": ids,
             "disabled_sources": disabled,
             "leaked_excluded": leaked,
