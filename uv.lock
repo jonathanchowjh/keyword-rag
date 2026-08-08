@@ -4,11 +4,17 @@ requires-python = "==3.12.*"
 
 [manifest]
 members = [
+    "aiconnect",
     "ragqa",
     "ragqa-api",
     "ragqa-core",
     "ragqa-worker",
 ]
+
+[[package]]
+name = "aiconnect"
+version = "0.1.0"
+source = { editable = "packages/aiconnect" }
 
 [[package]]
 name = "annotated-doc"
@@ -804,6 +810,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiconnect" },
     { name = "httpx" },
     { name = "playwright" },
     { name = "pyright" },
@@ -819,6 +826,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiconnect", editable = "packages/aiconnect" },
     { name = "httpx", specifier = "==0.28.*" },
     { name = "playwright", specifier = "==1.64.*" },
     { name = "pyright", specifier = "==1.1.414" },

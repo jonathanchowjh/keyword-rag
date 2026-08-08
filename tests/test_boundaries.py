@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE_SRC = ROOT / "packages/core/src"
 API_SRC = ROOT / "apps/api/src"
 WORKER_SRC = ROOT / "apps/worker/src"
+AICONNECT_SRC = ROOT / "packages/aiconnect/src"
 WEB_LAYER = {"fastapi", "starlette", "uvicorn", "ragqa_api"}
 
 
@@ -48,6 +49,16 @@ def test_core_never_imports_the_web_layer():
 
 def test_worker_never_imports_the_web_layer():
     assert forbidden_imports(WORKER_SRC) == []
+
+
+def test_aiconnect_imports_nothing_from_ragqa_or_web():
+    found = []
+    for path in sorted(AICONNECT_SRC.rglob("*.py")):
+        for name in imported_modules(path):
+            top = name.split(".")[0]
+            if top.startswith("ragqa_") or top in WEB_LAYER:
+                found.append(f"{path.relative_to(ROOT)}: {name}")
+    assert found == []
 
 
 def test_core_never_imports_the_worker():

@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 
 [tool.uv.workspace]
-members = ["packages/core", "apps/api", "apps/worker"]
+members = ["packages/aiconnect", "packages/core", "apps/api", "apps/worker"]
 
 [tool.uv]
 package = false
@@ -17,6 +17,7 @@ dev = [
   "ruff==0.17.*",
   "pyright==1.1.414",
   "httpx==0.28.*",
+  "aiconnect",
   "ragqa-core",
   "ragqa-api",
   "ragqa-worker",
@@ -25,6 +26,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+aiconnect = { workspace = true }
 ragqa-core = { workspace = true }
 ragqa-api = { workspace = true }
 ragqa-worker = { workspace = true }
@@ -34,7 +36,7 @@ markers = [
   "integration: needs Docker or model downloads",
   "pages: drives a real browser against the console (Playwright)",
 ]
-testpaths = ["tests", "packages/core/tests", "apps/api/tests", "apps/worker/tests"]
+testpaths = ["tests", "packages/aiconnect/tests", "packages/core/tests", "apps/api/tests", "apps/worker/tests"]
 addopts = "--import-mode=importlib"
 
 [tool.ruff]
@@ -46,9 +48,9 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["packages/core/src", "apps/api/src", "apps/worker/src"]
+include = ["packages/aiconnect/src", "packages/core/src", "apps/api/src", "apps/worker/src"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff.lint.isort]
-known-first-party = ["ragqa_core", "ragqa_api", "ragqa_worker"]
+known-first-party = ["aiconnect", "ragqa_core", "ragqa_api", "ragqa_worker"]
