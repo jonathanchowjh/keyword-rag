@@ -11,6 +11,7 @@ from aiconnect.ai import (
     UnknownModel,
     UnknownPrice,
 )
+from aiconnect.types import Completion
 
 __all__ = [
     "AI",
@@ -22,4 +23,5 @@ __all__ = [
     "ProviderError",
     "UnknownModel",
     "UnknownPrice",
+    "Completion",
 ]

@@ -3,7 +3,9 @@ name = "aiconnect"
 version = "0.1.0"
 description = "Stored AI provider connections, models, roles and a spend cap, behind one class."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "anthropic==2.1.*",
+]
 
 [build-system]
 requires = ["hatchling"]

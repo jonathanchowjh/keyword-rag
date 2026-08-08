@@ -15,6 +15,12 @@ members = [
 name = "aiconnect"
 version = "0.1.0"
 source = { editable = "packages/aiconnect" }
+dependencies = [
+    { name = "anthropic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "anthropic", specifier = "==2.1.*" }]
 
 [[package]]
 name = "annotated-doc"
