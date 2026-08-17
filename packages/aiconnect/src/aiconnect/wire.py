@@ -5,6 +5,8 @@ entry sends one request at a time.
 """
 
 import math
+from typing import Any
+from urllib.parse import urlparse
 
 import anthropic
 import openai
@@ -89,9 +91,13 @@ def openai_send(
 ) -> tuple[str, int, int]:
     messages = [{"role": "system", "content": system}] if system else []
     messages.append({"role": "user", "content": prompt})
+    # Hosted OpenAI models reject max_tokens; other servers know only that one.
+    # An unset base_url is the SDK default, which is OpenAI's host.
+    hosted = urlparse(str(client.base_url)).hostname == "api.openai.com"
+    limit: dict[str, Any] = {"max_completion_tokens" if hosted else "max_tokens": max_tokens}
     response = client.chat.completions.create(
         model=model_id,
-        max_tokens=max_tokens,
+        **limit,
         messages=messages,  # type: ignore[arg-type]
     )
     text = response.choices[0].message.content or ""

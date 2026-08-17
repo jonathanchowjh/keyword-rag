@@ -8,7 +8,7 @@ from aiconnect.fakes import fake_ai
 from aiconnect.wire import openai_client, openai_send
 
 
-def fake_client(usage=(12, 3), text="hi"):
+def fake_client(usage=(12, 3), text="hi", base_url="http://localhost:11434/v1/"):
     """A chat.completions client that records the arguments it was called with."""
     seen = {}
 
@@ -21,6 +21,7 @@ def fake_client(usage=(12, 3), text="hi"):
         return SimpleNamespace(choices=[choice], usage=counts)
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    client.base_url = base_url  # type: ignore[attr-defined]
     client.seen = seen  # type: ignore[attr-defined]
     return client
 
@@ -40,6 +41,26 @@ def test_openai_send_omits_empty_system():
     openai_send(client, "m", "", "q", 50)
     assert client.seen["messages"] == [{"role": "user", "content": "q"}]
     assert client.seen["max_tokens"] == 50 and client.seen["model"] == "m"
+
+
+def test_openai_send_hosted_uses_max_completion_tokens():
+    client = fake_client(base_url="https://api.openai.com/v1/")
+    openai_send(client, "m", "", "q", 50)
+    assert client.seen["max_completion_tokens"] == 50 and "max_tokens" not in client.seen
+
+
+def test_openai_client_without_base_url_is_the_hosted_default():
+    client = openai_client(None, "k")
+    assert "api.openai.com" in str(client.base_url)
+    fake = fake_client(base_url=client.base_url)
+    openai_send(fake, "m", "", "q", 9)
+    assert fake.seen["max_completion_tokens"] == 9
+
+
+def test_openai_send_local_host_uses_max_tokens():
+    client = fake_client(base_url="http://localhost:11434/v1/")
+    openai_send(client, "m", "", "q", 50)
+    assert client.seen["max_tokens"] == 50 and "max_completion_tokens" not in client.seen
 
 
 def test_openai_send_keeps_system_first():
