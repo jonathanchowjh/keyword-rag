@@ -26,7 +26,7 @@ from typing import Any
 
 from aiconnect.presets import KINDS, PRESETS
 from aiconnect.types import Completion
-from aiconnect.wire import BATCH, CLIENT, SEND
+from aiconnect.wire import BATCH, CLIENT, LIST_MODELS, SEND, estimate_tokens
 
 KEEP: Any = object()  # update_*: leave this field as it is
 DEFAULT_CAP_USD = 20.0
@@ -102,11 +102,6 @@ def mask(key: str | None) -> str | None:
 def check_price(value: float | None) -> None:
     if value is not None and value < 0:
         raise ValueError("a price cannot be negative")
-
-
-def estimate_tokens(chars: int) -> int:
-    # ~4 characters a token, +30% for the newer tokenizer.
-    return math.ceil(chars / 4 * 1.3)
 
 
 def cache_key(model_id: str, system: str, prompt: str, max_tokens: int) -> str:
@@ -197,6 +192,8 @@ class AI:
             for role, ref in self.roles().items():
                 if ref and self.split(ref)[0] == id:
                     raise Conflict(f"connection {id} is used by {role}")
+            if self.batch_pending(id):
+                raise Conflict(f"connection {id} has a batch still pending")
             self.sql("delete from ai_models where connection_id = ?", (id,))
             self.sql("delete from ai_connections where id = ?", (id,))
 
@@ -258,6 +255,8 @@ class AI:
         for value in (price_in, price_out):
             if value is not KEEP:
                 check_price(value)
+        if None in (price_in, price_out) and self.batch_pending(connection_id, model_id):
+            raise Conflict(f"{connection_id}/{model_id} has a batch still pending")
         for field, value in (
             ("label", label),
             ("price_in", price_in),
@@ -269,6 +268,69 @@ class AI:
                     f"update ai_models set {field} = ? where connection_id = ? and model_id = ?",
                     (value, connection_id, model_id),
                 )
+
+    def batch_pending(self, connection_id: str, model_id: str | None = None) -> bool:
+        """A submitted batch still needs its connection and prices to be collected.
+        Rows from before connections have no connection id; they match by model."""
+        for row in self.pending_batches():
+            if row["connection_id"] == connection_id or (
+                row["connection_id"] is None and self.resolve(row["model"])[0] == connection_id
+            ):
+                if model_id is None or row["model"] == model_id:
+                    return True
+        return False
+
+    def fetch_models(self, connection_id: str) -> list[str]:
+        """Adds the connection's models that are not stored yet and returns their ids.
+        A local server's models cost nothing; others have no price until one is entered."""
+        connection = self._connection(connection_id)
+        known = {m["model_id"] for m in self.models() if m["connection_id"] == connection_id}
+        added = [m for m in dict.fromkeys(self._list_models(connection)) if m not in known]
+        for model_id in added:
+            price = 0 if connection["local"] else None
+            self.add_model(connection_id, model_id, price_in=price, price_out=price)
+        return added
+
+    def test_connection(self, connection_id: str) -> dict:
+        """One tiny paid call, ledgered under purpose "test". Failures are reported, not raised."""
+        self.need_connection(connection_id)
+        model_id = next(
+            (
+                m["model_id"]
+                for m in self.models()
+                if m["connection_id"] == connection_id
+                and m["enabled"]
+                and m["price_in"] is not None
+                and m["price_out"] is not None
+            ),
+            None,
+        )
+        if model_id is None:
+            has_models = any(m["connection_id"] == connection_id for m in self.models())
+            error = (
+                "no enabled model has a price; add a price to one"
+                if has_models
+                else "no model yet; fetch the list or add one"
+            )
+            return {"ok": False, "model": None, "usd": 0.0, "error": error}
+        if not self.usable(connection_id, model_id):
+            return {
+                "ok": False,
+                "model": model_id,
+                "usd": 0.0,
+                "error": "the connection has no key",
+            }
+        try:
+            done = self.complete(
+                "Reply with OK.",
+                model=f"{connection_id}/{model_id}",
+                max_tokens=8,
+                purpose="test",
+                cache=False,
+            )
+        except (ProviderError, BudgetExceeded) as e:
+            return {"ok": False, "model": model_id, "usd": 0.0, "error": str(e)}
+        return {"ok": True, "model": model_id, "usd": done.usd, "error": None}
 
     def models(self) -> list[dict]:
         return [
@@ -523,9 +585,10 @@ class AI:
                 else:
                     # Recorded one by one, so a failure part-way keeps what was paid for.
                     for key, p in misses.items():
-                        text, tokens_in, tokens_out = self._send(
-                            connection, model_id, system, p, max_tokens
-                        )
+                        with provider_errors(connection):
+                            text, tokens_in, tokens_out = self._send(
+                                connection, model_id, system, p, max_tokens
+                            )
                         results[key] = self._record(
                             key,
                             connection_id,
@@ -535,6 +598,7 @@ class AI:
                             tokens_out,
                             False,
                             purpose,
+                            rates=rates,
                         )
             finally:
                 with self._lock:
@@ -564,10 +628,14 @@ class AI:
         batch: bool,
         purpose: str,
         job_id: str | None | object = CURRENT_JOB,
+        rates: tuple[float, float] | None = None,
     ) -> Completion:
+        """rates: the price the call was checked at, so a sent call is always ledgered."""
         if job_id is CURRENT_JOB:
             job_id = getattr(self._job, "job_id", None)
-        usd = usd_for(self.need_rates(connection_id, model_id), tokens_in, tokens_out, batch)
+        usd = usd_for(
+            rates or self.need_rates(connection_id, model_id), tokens_in, tokens_out, batch
+        )
         self.sql(
             "insert or replace into ai_cache values (?, ?, ?, ?)",
             (key, text, tokens_in, tokens_out),
@@ -761,12 +829,16 @@ class AI:
             )
         return self._clients[key]
 
+    def _list_models(self, connection: dict) -> list[str]:
+        with provider_errors(connection):
+            return LIST_MODELS[connection["kind"]](self._client(connection))
+
     def _send(
         self, connection: dict, model_id: str, system: str, prompt: str, max_tokens: int
     ) -> tuple[str, int, int]:
-        with provider_errors(connection):
-            send = SEND[connection["kind"]]
-            return send(self._client(connection), model_id, system, prompt, max_tokens)
+        return SEND[connection["kind"]](
+            self._client(connection), model_id, system, prompt, max_tokens
+        )
 
     def _submit_batch(self, connection: dict, requests: list[dict]) -> str:
         with provider_errors(connection):

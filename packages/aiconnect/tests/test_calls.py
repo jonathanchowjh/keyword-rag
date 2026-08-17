@@ -128,7 +128,7 @@ def test_realtime_failure_keeps_completed_calls(tmp_path):
         return "ok"
 
     c = fake_ai(tmp_path / "ai.db", reply)
-    with pytest.raises(RuntimeError, match="overloaded"):
+    with pytest.raises(ProviderError, match="overloaded"):
         c.complete_many(["p0", "p1", "p2", "p3"], purpose="t")
     assert ledger_rows(c) == 2 and cache_rows(c) == 2
 

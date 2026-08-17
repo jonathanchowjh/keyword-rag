@@ -4,7 +4,15 @@ CLIENT, SEND and BATCH are looked up by connection kind. A kind with no BATCH
 entry sends one request at a time.
 """
 
+import math
+
 import anthropic
+import openai
+
+
+def estimate_tokens(chars: int) -> int:
+    # ~4 characters a token, +30% for the newer tokenizer.
+    return math.ceil(chars / 4 * 1.3)
 
 
 def anthropic_client(base_url: str | None, api_key: str | None) -> anthropic.Anthropic:
@@ -67,8 +75,38 @@ def anthropic_cancel_batch(client: anthropic.Anthropic, batch_id: str) -> None:
     client.messages.batches.cancel(batch_id)
 
 
-CLIENT = {"anthropic": anthropic_client}
-SEND = {"anthropic": anthropic_send}
+def anthropic_list_models(client: anthropic.Anthropic) -> list[str]:
+    return [m.id for m in client.models.list(limit=1000)]
+
+
+def openai_client(base_url: str | None, api_key: str | None) -> openai.OpenAI:
+    # A local server needs no key, but the SDK refuses to start without one.
+    return openai.OpenAI(base_url=base_url, api_key=api_key or "unused")
+
+
+def openai_send(
+    client: openai.OpenAI, model_id: str, system: str, prompt: str, max_tokens: int
+) -> tuple[str, int, int]:
+    messages = [{"role": "system", "content": system}] if system else []
+    messages.append({"role": "user", "content": prompt})
+    response = client.chat.completions.create(
+        model=model_id,
+        max_tokens=max_tokens,
+        messages=messages,  # type: ignore[arg-type]
+    )
+    text = response.choices[0].message.content or ""
+    if response.usage is None:  # some servers report no usage
+        return text, estimate_tokens(len(system) + len(prompt)), estimate_tokens(len(text))
+    return text, response.usage.prompt_tokens, response.usage.completion_tokens
+
+
+def openai_list_models(client: openai.OpenAI) -> list[str]:
+    return [m.id for m in client.models.list()]
+
+
+CLIENT = {"anthropic": anthropic_client, "openai": openai_client}
+SEND = {"anthropic": anthropic_send, "openai": openai_send}
+LIST_MODELS = {"anthropic": anthropic_list_models, "openai": openai_list_models}
 BATCH = {
     "anthropic": {
         "submit": anthropic_submit_batch,
