@@ -24,13 +24,13 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from aiconnect.ai import AI, BudgetExceeded, NoConnection, UnknownModel
 from ragqa_core import db, imports
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, runnable
 from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
-from ragqa_core.llm import BudgetExceeded, Claude, NoApiKey, UnknownModel
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import answer_prompt, parse_answer
@@ -47,7 +47,7 @@ from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
 from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
-PER_METHOD_ERRORS = (MethodUnavailable, NoApiKey, BudgetExceeded, ModelMismatch)
+PER_METHOD_ERRORS = (MethodUnavailable, NoConnection, BudgetExceeded, ModelMismatch)
 BUSY_STATE = {
     "load": "loading",
     "rekey": "rekeying",
@@ -210,12 +210,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.rerank_model,
         settings.home / "models",
     )
-    state.claude = Claude(state.conn, settings.api_key, settings.cap_usd, settings.model)
-    state.indexer = Indexer(state.conn, state.store, state.models, state.claude)
-    state.retriever = Retriever(state.conn, state.store, state.models, state.claude, state.indexer)
-    state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.claude)
-    state.loader = Loader(state.conn, state.indexer, state.claude, settings.home)
-    state.worker = Worker(state.conn, state.claude, state.indexer, state.loader, state.evaluator)
+    # The AI's tables share the file; the old ledger, cache and batches move into them once.
+    state.ai = AI(settings.home / "ragqa.db")
+    db.move_ai_tables(state.conn)
+    state.ai.apply_env(api_key=settings.api_key, model=settings.model, cap_usd=settings.cap_usd)
+    state.indexer = Indexer(state.conn, state.store, state.models, state.ai)
+    state.retriever = Retriever(state.conn, state.store, state.models, state.ai, state.indexer)
+    state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
+    state.loader = Loader(state.conn, state.indexer, state.ai, settings.home)
+    state.worker = Worker(state.conn, state.ai, state.indexer, state.loader, state.evaluator)
 
     # -- auth ------------------------------------------------------------------
 
@@ -249,9 +252,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for exc in (MethodUnavailable, ModelMismatch, ListsBusy):
         app.add_exception_handler(exc, error(409))
     app.add_exception_handler(BudgetExceeded, error(402))
-    app.add_exception_handler(NoApiKey, error(503))
+
+    def no_connection(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, NoConnection)
+        return JSONResponse({"detail": no_ai(exc.role)}, 503)
+
+    app.add_exception_handler(NoConnection, no_connection)
 
     # -- helpers ---------------------------------------------------------------
+
+    def need_ai(role: str) -> None:
+        """Refuse at once a request that would spend on a job with no usable model."""
+        if not state.ai.ready(role):
+            raise NoConnection(role)
 
     def source_rows(name: str) -> list[dict]:
         counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
@@ -328,7 +341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "api_key": bool(state.claude.api_key)}
+        return {"ok": True, "api_key": state.ai.ready("answer")}
 
     @app.post("/collections", status_code=201)
     def create_collection(body: NewCollection) -> dict:
@@ -414,10 +427,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mapping = {f: (f if f in DOCUMENT_FIELDS else None) for f in FIELDS["items"]}
         setup = {"upload_id": upload_id, "kind": "items", "mapping": mapping, "source": "hand"}
         estimate = state.loader.estimate_import(spec, setup)
-        if estimate["est_usd"] > 0 and (not body.confirm or not state.claude.api_key):
+        # Only summaries can be unpaid-for here: a proposal is priced only when it can be made.
+        ready = not spec.summarize or state.ai.ready("summary")
+        if estimate["est_usd"] > 0 and (not body.confirm or not ready):
             shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
             if body.confirm:
-                raise NoApiKey()
+                raise NoConnection("summary")
             return JSONResponse({"estimate": estimate}, 200)
         return {"job_id": db.create_job(state.conn, "import", spec.name, setup)}
 
@@ -459,8 +474,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else "no usable rows"
             )
             raise HTTPException(422, why)
-        if estimate["est_usd"] > 0 and not state.claude.api_key:
-            raise NoApiKey()
+        if estimate["est_usd"] > 0 and spec.summarize:
+            need_ai("summary")
         setup = {
             "upload_id": body.upload_id,
             "kind": body.kind,
@@ -557,10 +572,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"dataset {body.dataset} is {DATASETS[body.dataset]};"
                 f" collection '{name}' is {spec.qa_type}",
             )
-        if spec.summarize and not state.claude.api_key:
-            raise NoApiKey()
-        # What the loader spends on: summaries, and a Claude proposal when there are no lists.
-        proposes = bool(state.claude.api_key) and db.get_keyword_lists(state.conn, name) is None
+        if spec.summarize:
+            need_ai("summary")
+        # What the loader spends on: summaries, and a proposal when there are no lists.
+        proposes = state.ai.ready("keywords") and db.get_keyword_lists(state.conn, name) is None
         if (spec.summarize or proposes) and not body.confirm:
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
             return JSONResponse({"estimate": estimate}, 200)
@@ -572,8 +587,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/keyword-lists/propose")
     def propose(name: str, body: ProposeRequest | None = None):
         spec = state.retriever.spec(name)
-        if not state.claude.api_key:
-            raise NoApiKey()
+        need_ai("keywords")
         sample = sample_items(state.store, name, tuple(db.disabled_sources(state.conn, name)))
         if not (body and body.confirm):
             estimate = state.indexer.estimate_propose_usd(spec, sample)
@@ -626,7 +640,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for method in body.methods:
             out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None}
             # Every call the method makes: query summaries, hops and the answer.
-            with state.claude.tally() as spent:
+            with state.ai.tally() as spent:
                 try:
                     hits = state.retriever.retrieve(
                         body.collection, body.question, method, body.k, body.rrf_k
@@ -639,8 +653,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             body.choices,
                             answer_hits(spec.qa_type, hits),
                         )
-                        done = state.claude.complete(
+                        done = state.ai.complete(
                             user,
+                            role="answer",
                             system=system,
                             model=body.model,
                             max_tokens=ANSWER_TOKENS[spec.qa_type],
@@ -648,7 +663,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         )
                         out["answer"] = parse_answer(spec.qa_type, done.text, bool(body.choices))
                 except PER_METHOD_ERRORS as e:
-                    out["error"] = str(e)
+                    out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
             out["usd"] = spent["usd"]
             results[method] = out
         return {"results": results}
@@ -661,8 +676,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
-        if estimate["est_usd"] > 0 and not state.claude.api_key:  # it would stop at once
-            raise NoApiKey()
+        if estimate["est_usd"] > 0:  # without a model it would stop at once
+            need_ai("answer" if body.answer else "query")
         job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
@@ -754,8 +769,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, refusal)
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
-        if not state.claude.api_key and state.evaluator.estimate_resume(job_id)["est_usd"] > 0:
-            raise NoApiKey()
+        row = db.get_job(state.conn, job_id)
+        role = "answer" if row and row["setup"]["answer"] else "query"
+        if not state.ai.ready(role) and state.evaluator.estimate_resume(job_id)["est_usd"] > 0:
+            raise NoConnection(role)
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
@@ -764,7 +781,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def status() -> dict:
         worker, alive = state.worker, state.worker.alive()
         running = next(iter(db.list_jobs(state.conn, status="running", limit=1)), None)
-        batches = db.pending_batches(state.conn)
+        batches = state.ai.pending_batches()
         problems = []
         if not alive:
             problems.append("The worker thread has stopped; restart the service")
@@ -788,8 +805,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def budget() -> dict:
         return {
             "month": datetime.now(UTC).strftime("%Y-%m"),
-            "spent_usd": state.claude.month_spend(),
-            "cap_usd": state.claude.cap_usd,
+            "spent_usd": state.ai.month_spend(),
+            "cap_usd": state.ai.cap_usd,
             "note": "This service's own spend; the Console shows the credit balance.",
         }
 
@@ -887,6 +904,10 @@ def job_problems(newest: list[dict]) -> list[str]:
                 f"{PROBLEM[job['status']]}"
             )
     return lines
+
+
+def no_ai(role: str) -> str:
+    return f"no AI model is set up for the '{role}' job; choose one on the Settings page"
 
 
 def stalled(job: dict | None, batches: list[dict], at: datetime) -> str | None:

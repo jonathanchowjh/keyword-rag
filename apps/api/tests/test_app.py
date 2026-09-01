@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from ragqa_api.app import create_app
 from ragqa_core import db
-from ragqa_core.fakes import fake_embeddings, fake_replies
+from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
@@ -53,16 +53,25 @@ PAIR = ["kw_individual", "hybrid"]
 
 
 def settings(tmp_path: Path, **overrides):
-    base = load_settings({"ANTHROPIC_API_KEY": "test"})
+    base = load_settings({})
     fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
     return replace(base, home=tmp_path, **{**fake, **overrides})
 
 
-def make_client(tmp_path, reply=lambda p: "Answer: A", **overrides) -> TestClient:
-    """Not started: enter it (`with`) for the lifespan, which runs the worker."""
+def make_client(
+    tmp_path,
+    reply=lambda p: "Answer: A",
+    api_key: str | None = "test",
+    cap_usd: float = 20.0,
+    **overrides,
+) -> TestClient:
+    """Not started: enter it (`with`) for the lifespan, which runs the worker. The key is
+    stored, not from the environment, so a test can clear it; with none, models are still
+    set up and priced, so estimates work and spending is refused."""
     app = create_app(settings(tmp_path, **overrides))
     fake_embeddings(app.state.models)
-    fake_replies(app.state.claude, reply)
+    fake_ai(app.state.conn, reply, api_key, cap_usd)  # stored in the app's file
+    fake_replies(app.state.ai, reply)
     app.state.worker.idle_seconds = 0.01
     return TestClient(app)
 
@@ -176,11 +185,11 @@ def test_query_reports_unavailable_method_per_method(client):
 
 def test_query_without_key_keeps_free_methods(client):
     add_collection(client, summarize=True)
-    client.app.state.claude.api_key = None
+    client.app.state.ai.update_connection("anthropic", api_key=None)
     body = {"collection": "c", "question": "enzyme", "methods": ["keyword", "kw_individual"]}
     r = client.post("/query", json=body).json()
     assert r["results"]["keyword"]["hits"]
-    assert r["results"]["kw_individual"]["error"] == "needs ANTHROPIC_API_KEY"
+    assert "'query' job" in r["results"]["kw_individual"]["error"]
 
 
 def test_query_unknown_method_422(client):
@@ -238,11 +247,37 @@ def test_load_rejects_the_other_qa_type_for_science_datasets(client):
     assert r.status_code == 409 and "dataset scienceqa is mcq" in r.json()["detail"]
 
 
+def test_env_key_becomes_anthropic_connection(tmp_path):
+    app = create_app(settings(tmp_path, api_key="sk-env-key-123456"))
+    assert app.state.ai.connections()[0]["id"] == "anthropic"
+    assert app.state.ai.connections()[0]["from_env"] == ["api_key"]
+    assert app.state.ai.ready("answer")
+
+
+SPENDING = {
+    "answer": lambda c: c.post("/eval", json={**EVAL, "answer": True, "confirm": True}),
+    "summary": lambda c: c.post("/collections/s/load", json={"dataset": "scienceqa"}),
+    "keywords": lambda c: c.post("/collections/c/keyword-lists/propose"),
+}
+
+
+@pytest.mark.parametrize("role", SPENDING)
+def test_no_key_spending_request_is_503(tmp_path, role):
+    with make_client(tmp_path, api_key=None) as client:
+        add_collection(client, lists=role != "keywords")
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        client.app.state.worker.stop()
+        r = SPENDING[role](client)
+        assert r.status_code == 503, r.text
+        assert f"'{role}'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+
+
 def test_load_summarize_without_key_503(tmp_path):
     client = make_client(tmp_path, api_key=None)
     client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
     r = client.post("/collections/s/load", json={"dataset": "scienceqa"})
-    assert r.status_code == 503 and r.json()["detail"] == "needs ANTHROPIC_API_KEY"
+    assert r.status_code == 503 and "'summary' job" in r.json()["detail"]
 
 
 def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
@@ -278,12 +313,12 @@ def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeyp
         r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done", job
-        assert job["result"]["lists_source"] == "tfidf (claude proposal unusable)"
+        assert job["result"]["lists_source"] == "tfidf (ai proposal unusable)"
         assert client.get("/collections/m").json()["keyword_lists"]["topic"]
 
 
 def ledger_purposes(client):
-    rows = client.app.state.conn.execute("select purpose from ledger")
+    rows = client.app.state.conn.execute("select purpose from ai_ledger")
     return [r["purpose"] for r in rows]
 
 
@@ -310,7 +345,7 @@ def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
         r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
         assert r.status_code == 202 and set(r.json()) == {"job_id"}
         job = wait(client, r.json()["job_id"])
-        assert job["result"]["lists_source"] == "claude"
+        assert job["result"]["lists_source"] == "ai"
         assert ledger_purposes(client) == ["propose"]
 
 
@@ -348,7 +383,7 @@ def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
 
 def test_propose_lists(client):
     add_collection(client, lists=False)
-    fake_replies(client.app.state.claude, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
+    fake_replies(client.app.state.ai, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
     url = "/collections/c/keyword-lists/propose"
     spent = client.get("/budget").json()["spent_usd"]
     r = client.post(url)
@@ -361,7 +396,7 @@ def test_propose_lists(client):
 
 def test_propose_lists_needs_a_key(client):
     add_collection(client, lists=False)
-    client.app.state.claude.api_key = ""
+    client.app.state.ai.update_connection("anthropic", api_key=None)
     assert client.post("/collections/c/keyword-lists/propose").status_code == 503
 
 
@@ -576,10 +611,21 @@ def test_confirmed_paid_eval_without_a_key_is_503_and_queues_nothing(tmp_path):
         client.app.state.worker.stop()
         body = {**EVAL, "answer": True, "confirm": True}
         r = client.post("/eval", json=body)
-        assert r.status_code == 503 and r.json()["detail"] == "needs ANTHROPIC_API_KEY"
+        assert r.status_code == 503 and "'answer' job" in r.json()["detail"]
         assert client.get("/eval").json() == []
         free = client.post("/eval", json={**EVAL, "confirm": True})  # nothing to pay for
         assert free.status_code == 202
+
+
+def test_free_eval_queues_with_no_ai_set_up(tmp_path):
+    app = create_app(settings(tmp_path))  # no connection and no model at all
+    fake_embeddings(app.state.models)
+    with TestClient(app) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        r = client.post("/eval", json={**EVAL, "confirm": True})
+        assert r.status_code == 202, r.text
+        assert db.get_job(app.state.conn, r.json()["job_id"])["setup"]["model"] is None
 
 
 def test_confirmed_paid_resume_without_a_key_is_503(tmp_path):
@@ -693,7 +739,7 @@ def test_runs_list_and_delete(client):
     }
     assert run["status"] == "done" and run["methods"] == PAIR and run["split"] == "dev"
     assert run["answer"] is False and run["question_count"] == 1 and run["usd_total"] == 0.0
-    assert run["model"] == client.app.state.claude.default_model
+    assert run["model"] == client.app.state.ai.model_for("answer")
     detail = client.get(f"/eval/{done}").json()
     # The verdict carries what its notes need: the proxy check and the headline's scale.
     assert run["answer_summary"] == {
@@ -763,8 +809,8 @@ def test_status_reports_problems(client):
     running = db.create_job(conn, "load", "d", {})
     set_running(conn, running, 0.25)
     conn.execute(
-        "insert into pending_batches (id, model, purpose, created_at, usd, job_id)"
-        " values ('b1', 'm', 'answer', 't', 0.5, ?)",
+        "insert into ai_batches (id, model, purpose, created_at, usd, job_id, connection_id)"
+        " values ('b1', 'm', 'answer', 't', 0.5, ?, 'anthropic')",
         (queued["job_id"],),
     )
     worker.error = "RuntimeError('x')"
@@ -781,6 +827,7 @@ def test_status_reports_problems(client):
             "created_at": "t",
             "usd": 0.5,
             "job_id": queued["job_id"],
+            "connection_id": "anthropic",
         }
     ]
     assert body["problems"] == [
@@ -843,10 +890,10 @@ def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):
         )
         line = f"Load {job[:8]} on c has made no progress for {minutes} minutes"
         assert (line in client.get("/status").json()["problems"]) is stalled
-    # Waiting on a Claude batch can take hours: not a stall.
+    # Waiting on an AI batch can take hours: not a stall.
     conn.execute(
-        "insert into pending_batches (id, model, purpose, created_at, usd, job_id)"
-        " values ('b1', 'm', 'answer', 't', 0.5, ?)",
+        "insert into ai_batches (id, model, purpose, created_at, usd, job_id, connection_id)"
+        " values ('b1', 'm', 'answer', 't', 0.5, ?, 'anthropic')",
         (job,),
     )
     assert client.get("/status").json()["problems"] == []

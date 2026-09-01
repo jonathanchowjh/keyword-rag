@@ -1,10 +1,10 @@
 import pytest
 
+from aiconnect.ai import Cancelled
 from ragqa_core import loader
 from ragqa_core.db import connect, create_job, get_job, get_questions
-from ragqa_core.fakes import fake_claude, fake_models
+from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.llm import Cancelled
 from ragqa_core.loader import Loader
 from ragqa_core.store import Store
 from ragqa_core.types import Item, KeywordLists, Question
@@ -12,7 +12,7 @@ from ragqa_core.types import Item, KeywordLists, Question
 
 def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
     conn = connect(tmp_path / "r.db")
-    ix = Indexer(conn, Store(None, None), fake_models(), fake_claude(conn, reply))
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, reply))
     ix.create("m", "multihop", False)
     items = [
         Item("a", "enzyme rate rose shared words", "A"),
@@ -22,12 +22,12 @@ def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
     questions = [Question("q1", "enzyme rate", None, ["x"], ["a"], {})]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
     job_id = create_job(conn, "load", "m", {"dataset": "musique", "limit": None})
-    return conn, ix, Loader(conn, ix, ix.claude, tmp_path), get_job(conn, job_id)
+    return conn, ix, Loader(conn, ix, ix.ai, tmp_path), get_job(conn, job_id)
 
 
 def test_loader_runs_a_load_job(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     seen: list[float] = []
     result = ld.run(job, seen.append)
     assert result["added"] == 3 and result["questions"] == 1
@@ -38,7 +38,7 @@ def test_loader_runs_a_load_job(tmp_path, monkeypatch):
 
 def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     real = ix.store.scroll
     ix.store.scroll = lambda name: real(name, batch=1)  # one item per re-keyed step
     seen: list[float] = []
@@ -47,7 +47,7 @@ def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, 
     assert any(0.5 < p < 1.0 for p in seen)  # the re-key reports its own steps
 
     conn, ix, ld, job = build(tmp_path / "again", monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     ix.store.scroll = lambda name: real(name, batch=1)
 
     def progress(p):
@@ -61,7 +61,7 @@ def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, 
 
 def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     ld.run(job, lambda p: None)
     version = ix.spec("m").keyword_version
     seen: list[float] = []
@@ -71,7 +71,7 @@ def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_pat
 
 def test_loader_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    assert ld.run(job, lambda p: None)["lists_source"] == "tfidf (claude proposal unusable)"
+    assert ld.run(job, lambda p: None)["lists_source"] == "tfidf (ai proposal unusable)"
 
 
 def test_loader_propagates_cancelled_from_check(tmp_path, monkeypatch):
@@ -103,7 +103,7 @@ def test_load_limit_keeps_gold_passages_and_only_answerable_questions():
 
 def test_load_twice_reports_unchanged(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     first = ld.run(job, lambda p: None)
     assert first["new"] == 3 and first["added"] == 3
     second = ld.run(job, lambda p: None)
@@ -113,7 +113,7 @@ def test_load_twice_reports_unchanged(tmp_path, monkeypatch):
 def test_sample_items_skips_disabled(tmp_path):
     conn = connect(tmp_path / "r.db")
     store = Store(None, None)
-    ix = Indexer(conn, store, fake_models(), fake_claude(conn, lambda p: ""))
+    ix = Indexer(conn, store, fake_models(), fake_ai(conn, lambda p: ""))
     spec = ix.create("m", "multihop", False)
     ix.add(spec, [Item("a", "enzyme rate", "A")], "one")
     ix.add(spec, [Item("b", "market price", "B")], "two")
@@ -143,11 +143,11 @@ ITEM_ROWS = [{"id": f"n{i}", "text": f"note number {i} about topic {i}"} for i i
 def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
     calls: list[str] = []
     conn = connect(tmp_path / "r.db")
-    claude = fake_claude(conn, lambda p: calls.append(p) or "A summary.")
-    ix = Indexer(conn, Store(None, None), fake_models(), claude)
+    ai = fake_ai(conn, lambda p: calls.append(p) or "A summary.")
+    ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("m", "multihop", True)
     ix.set_lists(spec, KeywordLists(topic=["note"], method=["topic"], common=["number"]))
-    ld = Loader(conn, ix, claude, tmp_path)
+    ld = Loader(conn, ix, ai, tmp_path)
     first = ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
     assert len(calls) == 4 and first["new"] == 4
     calls.clear()
@@ -158,7 +158,7 @@ def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
 
 def test_import_items_without_lists_makes_tfidf_lists(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     assert ix.spec("m").keyword_version is None
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
     assert ix.spec("m").keyword_version is not None
@@ -169,7 +169,7 @@ LONG = "the enzyme rate rose sharply after the temperature was raised"
 
 def test_import_questions_marks_leaked(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     ld.run_import(
         import_job(conn, tmp_path, "items", [{"id": "i1", "text": LONG + " in the lab"}], ITEM_MAP),
         lambda p: None,
@@ -191,7 +191,7 @@ def test_import_questions_marks_leaked(tmp_path, monkeypatch):
 
 def test_dataset_load_never_marks_builtin_questions(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.claude.api_key = None
+    ld.ai.update_connection("anthropic", api_key=None)
     items = [Item("a", LONG + " in the lab", "A")]
     questions = [Question("q1", LONG, None, ["x"], ["a"], {})]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
@@ -202,10 +202,10 @@ def test_dataset_load_never_marks_builtin_questions(tmp_path, monkeypatch):
 
 def test_estimates_count_only_changed_items(tmp_path, monkeypatch):
     conn = connect(tmp_path / "r.db")
-    claude = fake_claude(conn, lambda p: "A summary.")
-    ix = Indexer(conn, Store(None, None), fake_models(), claude)
+    ai = fake_ai(conn, lambda p: "A summary.")
+    ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("m", "multihop", True)
-    ld = Loader(conn, ix, claude, tmp_path)
+    ld = Loader(conn, ix, ai, tmp_path)
     items = [Item("a", "enzyme rate", "A"), Item("b", "market price", "B")]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     assert ld.estimate_load(spec, "musique", None)["calls"] == 3  # two summaries and a proposal

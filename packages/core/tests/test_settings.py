@@ -7,8 +7,7 @@ from ragqa_core.settings import load_settings
 
 def test_defaults():
     s = load_settings({})
-    assert s.cap_usd == 20.0 and s.model == "claude-haiku-5-5" and s.port == 8080
-    assert s.api_key is None and s.qdrant_url is None
+    assert s.port == 8080 and s.qdrant_url is None
     assert s.home == Path("~/.ragqa").expanduser()
     assert s.dense_model == "Qwen/Qwen3-Embedding-0.6B-Q"
     assert s.judge_model == "BAAI/bge-small-en-v1.5"
@@ -46,7 +45,15 @@ def test_empty_strings_are_unset():
     assert s.api_key is None and s.qdrant_url is None
 
 
-@pytest.mark.parametrize("cap", ["-1", "lots"])
-def test_bad_cap(cap):
+def test_unset_ai_settings_are_none():
+    # Unset, the values stored through the Settings page stand.
+    s = load_settings({})
+    assert (s.api_key, s.model, s.cap_usd) == (None, None, None)
+    s = load_settings({"ANTHROPIC_API_KEY": "", "RAGQA_MODEL": "", "RAGQA_MONTHLY_CAP_USD": ""})
+    assert (s.api_key, s.model, s.cap_usd) == (None, None, None)
+
+
+@pytest.mark.parametrize("cap", ["-1", "x"])
+def test_set_cap_still_validated(cap):
     with pytest.raises(ValueError):
         load_settings({"RAGQA_MONTHLY_CAP_USD": cap})

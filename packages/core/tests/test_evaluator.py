@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from aiconnect.ai import Cancelled
 from ragqa_core import db
 from ragqa_core.db import (
     connect,
@@ -13,9 +14,8 @@ from ragqa_core.db import (
     save_questions,
 )
 from ragqa_core.evaluator import Evaluator
-from ragqa_core.fakes import fake_claude, fake_models
+from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.llm import Cancelled
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
 from ragqa_core.types import Item, KeywordLists, Question
@@ -56,14 +56,14 @@ def setup_for(methods, answer=False, model=None, split="dev"):
 def env(tmp_path):
     conn = connect(tmp_path / "r.db")
     store, models = Store(None, None), fake_models()
-    claude = fake_claude(conn, lambda p: "Answer: A")
-    ix = Indexer(conn, store, models, claude)
+    ai = fake_ai(conn, lambda p: "Answer: A")
+    ix = Indexer(conn, store, models, ai)
     spec = ix.create("c", "mcq", False)
     ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
-    retriever = Retriever(conn, store, models, claude, ix)
-    return conn, Evaluator(conn, retriever, models, claude)
+    retriever = Retriever(conn, store, models, ai, ix)
+    return conn, Evaluator(conn, retriever, models, ai)
 
 
 def test_estimate_counts_calls(env):
@@ -120,7 +120,7 @@ def test_run_without_answers_has_no_answer_metrics(env):
 
 def test_run_stops_on_budget_and_keeps_rows(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "Answer: A", cap_usd=1e-9)
+    ev.ai = fake_ai(conn, lambda p: "Answer: A", cap_usd=1e-9)
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True))
     ev.run(job)
     assert get_job(conn, job)["status"] == "stopped_budget"
@@ -130,7 +130,7 @@ def test_run_stops_on_budget_and_keeps_rows(env):
 
 def test_run_stops_without_key(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "Answer: A", api_key=None)
+    ev.ai = fake_ai(conn, lambda p: "Answer: A", api_key=None)
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True))
     ev.run(job)
     assert get_job(conn, job)["status"] == "stopped_no_key"
@@ -157,14 +157,14 @@ def test_setup_records_full_configuration(env):
 
 def test_items_wrong_only(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "Answer: B")
+    ev.ai = fake_ai(conn, lambda p: "Answer: B")
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True))
     ev.run(job)
     wrong = ev.items(job, "hybrid", wrong_only=True)
     assert len(wrong) == 5 and wrong[0]["question"] and wrong[0]["gold_answers"] == ["A"]
     assert wrong[0]["pred"] == "B"
     # Same prompts would be served "B" from the cache; another model is another key.
-    ev.claude = fake_claude(conn, lambda p: "Answer: A")
+    ev.ai = fake_ai(conn, lambda p: "Answer: A")
     right = create_job(
         conn, "eval", "c", setup_for(["hybrid"], answer=True, model="claude-sonnet-5-5")
     )
@@ -206,7 +206,7 @@ def test_estimate_matches_how_calls_are_sent(env):
     # 65 questions per method: each method's answers exceed 50, so each is a batch.
     job = create_job(conn, "eval", "c", setup_for(methods, answer=True, split="full"))
     ev.run(job)
-    modes = {r["batch"] for r in conn.execute("select batch from ledger where purpose='answer'")}
+    modes = {r["batch"] for r in conn.execute("select batch from ai_ledger where purpose='answer'")}
     assert modes == {1} and small["calls"] == 65 * 6
 
 
@@ -225,7 +225,7 @@ def test_estimate_does_not_halve_for_runs_whose_methods_stay_under_50(env):
 
 def test_rows_keep_the_raw_answer_line(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "thinking\nAnswer: The answer is A")
+    ev.ai = fake_ai(conn, lambda p: "thinking\nAnswer: The answer is A")
     job = create_job(
         conn, "eval", "c", setup_for(["hybrid"], answer=True, model="claude-sonnet-5-5")
     )
@@ -266,7 +266,7 @@ def test_queue_stores_only_the_request(env):
         "split": "dev",
         "methods": ["hybrid"],
         "answer": True,
-        "model": ev.claude.default_model,
+        "model": ev.ai.model_for("answer"),
         "k": 3,
         "rrf_k": 10,
     }
@@ -310,7 +310,7 @@ def test_resume_redoes_only_incomplete_rows(env):
     assert get_job(conn, job)["status"] == "cancelled"
     assert ev.estimate_resume(job)["calls"] == 5  # vector's 5 answers only
     sent, judged = [], []
-    complete_many, judge = ev.claude.complete_many, ev.models.judge
+    complete_many, judge = ev.ai.complete_many, ev.models.judge
 
     def counting_complete_many(prompts, **kw):
         sent.append(len(prompts))
@@ -320,7 +320,7 @@ def test_resume_redoes_only_incomplete_rows(env):
         judged.append(len(texts))
         return judge(texts)
 
-    ev.claude.complete_many = counting_complete_many
+    ev.ai.complete_many = counting_complete_many
     ev.models.judge = counting_judge
     requeue(conn, job)
     ev.run(job)
@@ -335,13 +335,13 @@ def test_resume_of_a_complete_run_estimates_zero(env):  # Review focus 2
     ev.run(job)
     assert ev.estimate_resume(job) == {"questions": 0, "calls": 0, "est_usd": 0.0}
     rows = run_items(conn, job)
-    ledger = conn.execute("select count(*) from ledger")[0][0]
+    ledger = conn.execute("select count(*) from ai_ledger")[0][0]
     db.update_job(conn, job, status="interrupted")
     requeue(conn, job)
     ev.run(job)
     assert get_job(conn, job)["status"] == "done"
     assert run_items(conn, job) == rows
-    assert conn.execute("select count(*) from ledger")[0][0] == ledger
+    assert conn.execute("select count(*) from ai_ledger")[0][0] == ledger
 
 
 def test_resume_estimate_of_a_run_that_never_started_is_the_full_estimate(env):
@@ -440,7 +440,7 @@ def test_legacy_question_only_zeros_are_cleared_on_connect(env, tmp_path):
 
 def test_question_only_answers_are_scored(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "Answer: B")
+    ev.ai = fake_ai(conn, lambda p: "Answer: B")
     job = ev.queue("c", "dev", ["question_only"], True, None)
     ev.run(job)
     assert get_job(conn, job)["status"] == "done"
@@ -479,7 +479,7 @@ def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
     old = ev.retriever.spec("c").keyword_version
     new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
     rows = run_items(conn, job)
-    ledger = conn.execute("select count(*) from ledger")[0][0]
+    ledger = conn.execute("select count(*) from ai_ledger")[0][0]
     requeue(conn, job)  # as if the re-key was queued after the resume was accepted
     ev.run(job)
     after = get_job(conn, job)
@@ -488,7 +488,7 @@ def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
         f"keyword lists changed since this run ({old} → {new}); start a new run"
     )
     assert run_items(conn, job) == rows
-    assert conn.execute("select count(*) from ledger")[0][0] == ledger
+    assert conn.execute("select count(*) from ai_ledger")[0][0] == ledger
 
 
 def test_resume_refused_when_judge_model_changed(env):
@@ -868,8 +868,8 @@ def science_env(conn, ev, name, items, questions):
 
 def test_science_run_scores_free_form_and_choice_questions(env):
     conn, ev = env
-    ev.claude = fake_claude(conn, lambda p: "Answer: A" if "Choices:" in p else "Answer: 3.1 J")
-    ev.retriever.claude = ev.claude
+    ev.ai = fake_ai(conn, lambda p: "Answer: A" if "Choices:" in p else "Answer: 3.1 J")
+    ev.retriever.ai = ev.ai
     questions = [
         Question("s-free", "an enzyme problem", None, ["3.0"], [], {"skill": "enzyme"}),
         Question("s-mc", "a market problem", ["yes", "no"], ["A"], [], {"skill": "market"}),
@@ -922,8 +922,8 @@ def test_mcq_scoring_and_headline_unchanged(env):
 def multihop_env(tmp_path):
     conn = connect(tmp_path / "m.db")
     store, models = Store(None, None), fake_models()
-    claude = fake_claude(conn, lambda p: "x")
-    ix = Indexer(conn, store, models, claude)
+    ai = fake_ai(conn, lambda p: "x")
+    ix = Indexer(conn, store, models, ai)
     spec = ix.create("c", "multihop", False)
     ix.add(spec, [Item("g1", "enzyme rate rose", "A")], "x")
     ix.add(spec, [Item("g2", "market price fell", "B")], "y")
@@ -936,7 +936,7 @@ def multihop_env(tmp_path):
             Question("q3", "volcano lava", None, ["C"], [], {}),
         ],
     )
-    return conn, Evaluator(conn, Retriever(conn, store, models, claude, ix), models, claude)
+    return conn, Evaluator(conn, Retriever(conn, store, models, ai, ix), models, ai)
 
 
 def run_multihop(conn, ev, methods=("hybrid",)):

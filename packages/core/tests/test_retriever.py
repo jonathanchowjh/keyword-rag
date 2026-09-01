@@ -1,10 +1,10 @@
 import pytest
 
+from aiconnect.ai import NoConnection
 from ragqa_core.catalog import CONTROLS
 from ragqa_core.db import claim_next_job_id, connect, create_job, set_source_enabled
-from ragqa_core.fakes import fake_claude, fake_models
+from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.llm import NoApiKey
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import (
     METHOD_NAMES,
@@ -57,13 +57,13 @@ def hit(i: str) -> Hit:
 def build(tmp_path, summarize=False, lists=True, reply=lambda p: "A summary."):
     conn = connect(tmp_path / "r.db")
     store, models = Store(None, None), fake_models()
-    claude = fake_claude(conn, reply)
-    ix = Indexer(conn, store, models, claude)
+    ai = fake_ai(conn, reply)
+    ix = Indexer(conn, store, models, ai)
     spec = ix.create("c", "mcq", summarize)
     ix.add(spec, ITEMS, "x")
     if lists:
         ix.set_lists(spec, LISTS)
-    return Retriever(conn, store, models, claude, ix), conn
+    return Retriever(conn, store, models, ai, ix), conn
 
 
 def test_keyword_methods_refuse_while_rekeying(tmp_path):
@@ -188,8 +188,8 @@ def test_summarize_collection_summarises_the_query(tmp_path):
 
 def test_summarize_query_without_key_raises(tmp_path):
     r, _ = build(tmp_path, summarize=True)
-    r.claude.api_key = None
-    with pytest.raises(NoApiKey):
+    r.ai.update_connection("anthropic", api_key=None)
+    with pytest.raises(NoConnection):
         r.retrieve("c", "a brand new question", "kw_individual")
     assert r.retrieve("c", "enzyme", "keyword", k=1)[0].id == "enzyme-item"
 
@@ -208,18 +208,18 @@ def test_prepare_summarises_all_queries_in_one_call(tmp_path):
 def test_iterative_stops_when_done(tmp_path):
     replies = iter(['{"done": false, "next_query": "market price demand"}', '{"done": true}'])
     r, conn = build(tmp_path)
-    r.claude = fake_claude(conn, lambda p: next(replies))
+    r.ai = fake_ai(conn, lambda p: next(replies))
     ids = [h.id for h in r.retrieve("c", "enzyme kinetics rate", "iterative", k=4)]
     assert "enzyme-item" in ids and "market-item" in ids
 
 
 def test_iterative_makes_at_most_three_calls(tmp_path):
     r, conn = build(tmp_path)
-    claude = fake_claude(conn, lambda p: '{"done": false, "next_query": "market"}')
+    ai = fake_ai(conn, lambda p: '{"done": false, "next_query": "market"}')
     calls: list[str] = []
-    real = claude.complete
-    claude.complete = lambda prompt, **kw: calls.append(prompt) or real(prompt, **kw)
-    r.claude = claude
+    real = ai.complete
+    ai.complete = lambda prompt, **kw: calls.append(prompt) or real(prompt, **kw)
+    r.ai = ai
     r.retrieve("c", "enzyme", "iterative", k=4)
     assert len(calls) == 3
 
@@ -262,7 +262,7 @@ def test_iterative_keeps_the_best_passage_of_every_hop(tmp_path):
         ]
     )
     r, conn = build(tmp_path)
-    r.claude = fake_claude(conn, lambda p: next(replies))
+    r.ai = fake_ai(conn, lambda p: next(replies))
     ids = [h.id for h in r.retrieve("c", "enzyme kinetics rate", "iterative", k=3)]
     assert ids == ["enzyme-item", "market-item", "volcano-item"]
 
@@ -277,7 +277,7 @@ def build_sources(tmp_path):
     r.indexer.add(spec, [Item("a2", "market price shared words", "A", "e")], "a")
     r.indexer.add(spec, [Item("b1", "enzyme market shared words", "A", "e")], "b")
     r.indexer.set_lists(spec, LISTS)
-    r.claude = fake_claude(conn, lambda p: '{"done": true}')
+    r.ai = fake_ai(conn, lambda p: '{"done": true}')
     return r, conn
 
 

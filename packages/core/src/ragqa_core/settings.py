@@ -8,9 +8,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
+    # None when unset: the values stored through the Settings page stand.
     api_key: str | None
-    cap_usd: float
-    model: str
+    cap_usd: float | None
+    model: str | None
     qdrant_url: str | None
     home: Path
     username: str | None
@@ -26,17 +27,19 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         value = env.get(name, "")
         return value if value else default
 
-    raw_cap = get("RAGQA_MONTHLY_CAP_USD", "20")
-    try:
-        cap = float(raw_cap or "")
-    except ValueError:
-        raise ValueError(f"RAGQA_MONTHLY_CAP_USD must be a number, got {raw_cap!r}") from None
-    if cap < 0:
-        raise ValueError(f"RAGQA_MONTHLY_CAP_USD must not be negative, got {cap}")
+    raw_cap = get("RAGQA_MONTHLY_CAP_USD")
+    cap = None
+    if raw_cap is not None:
+        try:
+            cap = float(raw_cap)
+        except ValueError:
+            raise ValueError(f"RAGQA_MONTHLY_CAP_USD must be a number, got {raw_cap!r}") from None
+        if cap < 0:
+            raise ValueError(f"RAGQA_MONTHLY_CAP_USD must not be negative, got {cap}")
     return Settings(
         api_key=get("ANTHROPIC_API_KEY"),
         cap_usd=cap,
-        model=get("RAGQA_MODEL", "claude-haiku-5-5") or "claude-haiku-5-5",
+        model=get("RAGQA_MODEL"),
         qdrant_url=get("RAGQA_QDRANT_URL"),
         home=Path(get("RAGQA_HOME", "~/.ragqa") or "~/.ragqa").expanduser(),
         username=get("RAGQA_USERNAME"),

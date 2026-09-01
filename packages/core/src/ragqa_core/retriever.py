@@ -10,11 +10,11 @@ from collections.abc import Callable
 
 import numpy as np
 
+from aiconnect.ai import AI
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import matched
-from ragqa_core.llm import Claude
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
     QUERY_TASK,
@@ -88,13 +88,13 @@ class Retriever:
         conn: Connection,
         store: Store,
         models: Models,
-        claude: Claude,
+        ai: AI,
         indexer: Indexer,
     ) -> None:
         self.conn = conn
         self.store = store
         self.models = models
-        self.claude = claude
+        self.ai = ai
         self.indexer = indexer
         # Every item id by collection, with the count and skipped sources it was read at: the
         # controls need them per query, and an 11,656-item scroll each time is slow.
@@ -137,8 +137,9 @@ class Retriever:
 
     def prepare(self, spec: CollectionSpec, questions: list[str]) -> None:
         if spec.summarize and questions:
-            self.claude.complete_many(
+            self.ai.complete_many(
                 [summary_prompt(q) for q in questions],
+                role="query",
                 max_tokens=SUMMARY_TOKENS,
                 purpose="query_summary",
             )
@@ -224,7 +225,9 @@ class Retriever:
         for _ in range(MAX_HOPS):
             hop(query)
             found = [h.text for hits in hops for h in hits]
-            reply = self.claude.complete(hop_prompt(q, found), max_tokens=HOP_TOKENS, purpose="hop")
+            reply = self.ai.complete(
+                hop_prompt(q, found), role="query", max_tokens=HOP_TOKENS, purpose="hop"
+            )
             step = parse_json(reply.text)
             query = str(step.get("next_query") or "").strip()
             if step.get("done") or not query:
@@ -272,8 +275,8 @@ class Retriever:
             raise MethodUnavailable(f"keyword lists not set for collection '{spec.name}'")
         summary = None
         if spec.summarize:
-            summary = self.claude.complete(
-                summary_prompt(q), max_tokens=SUMMARY_TOKENS, purpose="query_summary"
+            summary = self.ai.complete(
+                summary_prompt(q), role="query", max_tokens=SUMMARY_TOKENS, purpose="query_summary"
             ).text.strip()
         keywords, vectors = self.indexer.keywords_for(spec, lists, [q], [summary])
         return keywords[0], {name: vecs[0] for name, vecs in vectors.items()}

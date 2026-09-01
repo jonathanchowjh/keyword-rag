@@ -5,12 +5,12 @@ from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from aiconnect.ai import AI
 from ragqa_core import db, imports
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import tfidf_terms
-from ragqa_core.llm import Claude
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
@@ -68,10 +68,10 @@ def without_leaked(q: Question) -> Question:
 
 
 class Loader:
-    def __init__(self, conn: Connection, indexer: Indexer, claude: Claude, home: Path):
+    def __init__(self, conn: Connection, indexer: Indexer, ai: AI, home: Path):
         self.conn = conn
         self.indexer = indexer
-        self.claude = claude
+        self.ai = ai
         self.home = home
 
     def run(self, job: dict, progress: Callable[[float], None]) -> dict:
@@ -106,14 +106,14 @@ class Loader:
     def _make_lists(
         self, spec: CollectionSpec, items: list[Item], progress: Callable[[float], None]
     ) -> str | None:
-        """Give the collection lists, from Claude when there is a key, else its own top terms."""
+        """Give the collection lists, proposed by the AI when it can, else its own top terms."""
         sample = propose_sample(items)
         lists, source = None, "tfidf"
-        if self.claude.api_key:
+        if self.ai.ready("keywords"):
             try:
-                lists, source = self.indexer.propose_lists(spec, sample), "claude"
+                lists, source = self.indexer.propose_lists(spec, sample), "ai"
             except ValueError:
-                source = "tfidf (claude proposal unusable)"
+                source = "tfidf (ai proposal unusable)"
         if lists is None:
             lists = tfidf_lists([i.text for i in items])
         if lists is None:
@@ -131,7 +131,7 @@ class Loader:
         todo, _ = self.indexer.changed(spec, items, source)
         estimate = self.indexer.estimate_add_usd(spec, items, source)
         calls = len(todo) if spec.summarize else 0
-        if self.claude.api_key and db.get_keyword_lists(self.conn, spec.name) is None:
+        if self.ai.ready("keywords") and db.get_keyword_lists(self.conn, spec.name) is None:
             estimate += self.indexer.estimate_propose_usd(spec, propose_sample(items))
             calls += 1
         return {"est_usd": estimate, "items": len(items), "calls": calls}

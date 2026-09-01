@@ -134,7 +134,7 @@ def seeded(tmp_path_factory):
     fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
     app = create_app(replace(base, home=home, **fake))
     fake_embeddings(app.state.models)
-    fake_replies(app.state.claude, lambda p: "Answer: A")
+    fake_replies(app.state.ai, lambda p: "Answer: A")
     app.state.worker.idle_seconds = 0.01
     port = free_port()
     url = f"http://127.0.0.1:{port}"

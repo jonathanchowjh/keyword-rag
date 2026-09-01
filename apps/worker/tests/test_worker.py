@@ -2,12 +2,12 @@ import time
 
 import pytest
 
+from aiconnect.ai import BudgetExceeded, NoConnection
 from ragqa_core import db
 from ragqa_core.db import connect, get_job, save_questions
 from ragqa_core.evaluator import Evaluator
-from ragqa_core.fakes import fake_claude, fake_models
+from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.llm import BudgetExceeded, NoApiKey
 from ragqa_core.loader import Loader
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
@@ -38,14 +38,14 @@ OTHER_LISTS = KeywordLists(topic=TOPICS[:3], method=["survey"], common=["things"
 def env(tmp_path):
     conn = connect(tmp_path / "r.db")
     store, models = Store(None, None), fake_models()
-    claude = fake_claude(conn, lambda p: "Answer: A")
-    ix = Indexer(conn, store, models, claude)
+    ai = fake_ai(conn, lambda p: "Answer: A")
+    ix = Indexer(conn, store, models, ai)
     spec = ix.create("c", "mcq", False)
     ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
-    ev = Evaluator(conn, Retriever(conn, store, models, claude, ix), models, claude)
-    w = Worker(conn, claude, ix, Loader(conn, ix, claude, tmp_path), ev, idle_seconds=0.01)
+    ev = Evaluator(conn, Retriever(conn, store, models, ai, ix), models, ai)
+    w = Worker(conn, ai, ix, Loader(conn, ix, ai, tmp_path), ev, idle_seconds=0.01)
     w.other_version = ix.save_lists(spec, OTHER_LISTS)
     return w, conn
 
@@ -129,7 +129,7 @@ def test_progress_logs_each_ten_percent_step_once(env):
     ("exc", "status"),
     [
         (BudgetExceeded("cap"), "stopped_budget"),
-        (NoApiKey(), "stopped_no_key"),
+        (NoConnection("answer"), "stopped_no_key"),
         (RuntimeError("boom"), "failed"),
     ],
 )
@@ -200,7 +200,7 @@ def test_loop_collects_pending_when_idle_and_survives_errors(env):
         calls.append(1)
         raise RuntimeError("collect failed")
 
-    w.claude.collect_pending = collect
+    w.ai.collect_pending = collect
     w.start()
     assert wait_for(lambda: len(calls) >= 2)
     assert w.alive() and w.error == repr(RuntimeError("collect failed"))
@@ -239,7 +239,7 @@ def test_an_error_clears_after_the_next_clean_cycle(env):
         if state["n"] == 1:
             raise RuntimeError("network blip")
 
-    w.claude.collect_pending = collect
+    w.ai.collect_pending = collect
     w.cycle()
     assert w.error == repr(RuntimeError("network blip"))
     w.cycle()
@@ -308,7 +308,7 @@ def test_load_job_logs_progress_steps(env, monkeypatch):
     items = [Item(f"i{n}", f"text {n}", "A") for n in range(indexer.BATCH * 2 + 22)]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     j = db.create_job(conn, "load", "c", {"dataset": "x", "limit": None})
-    w.claude.api_key = None
+    w.ai.update_connection("anthropic", api_key=None)
     w.run_one()
     assert get_job(conn, j)["status"] == "done"
     text = log_text(conn, j)

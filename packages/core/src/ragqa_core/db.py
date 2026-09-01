@@ -1,4 +1,6 @@
-"""The SQLite file: cost ledger, response cache, catalog, questions and jobs.
+"""The SQLite file: catalog, questions and jobs. The AI connections, ledger,
+response cache and pending batches live in the same file, in aiconnect's ai_*
+tables, through the AI class's own connection.
 
 The jobs table is the work queue: create_job queues, claim_next_job_id takes the
 oldest queued job by insertion order, and the worker reports through
@@ -10,8 +12,8 @@ runs each statement under one lock and returns its rows as a list.
 
 The lock covers one statement. log_job, request_cancel, delete_job,
 delete_collection_rows and the migration in connect are several statements and
-are not atomic; log_job also reads then writes, so it assumes a single writer
-(the worker).
+are not atomic (move_ai_tables is one transaction); log_job also reads then
+writes, so it assumes a single writer (the worker).
 """
 
 import json
@@ -25,15 +27,6 @@ from ragqa_core.connection import Connection
 from ragqa_core.types import CollectionSpec, KeywordLists, Question
 
 SCHEMA = """
-create table if not exists ledger (
-  at text not null, model text not null, input_tokens integer not null,
-  output_tokens integer not null, usd real not null, batch integer not null,
-  purpose text not null, job_id text
-);
-create table if not exists cache (
-  key text primary key, text text not null, input_tokens integer not null,
-  output_tokens integer not null
-);
 create table if not exists collections (
   name text primary key, qa_type text not null, summarize integer not null,
   dense_model text not null, dense_dim integer not null, keyword_version text,
@@ -56,10 +49,6 @@ create table if not exists jobs (
   result_json text, error text, created_at text not null, updated_at text not null,
   cancel_requested integer not null default 0, log_json text
 );
-create table if not exists pending_batches (
-  id text primary key, model text not null, purpose text not null, created_at text not null,
-  usd real not null default 0, job_id text
-);
 create table if not exists run_items (
   job_id text not null, method text not null, question_id text not null,
   row_json text not null, complete integer not null default 0
@@ -80,9 +69,6 @@ def connect(path: Path) -> Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = Connection(path)
     conn.executescript(SCHEMA)
-    columns = {row["name"] for row in conn.execute("pragma table_info(pending_batches)")}
-    if "usd" not in columns:  # a 0.1.0 database
-        conn.execute("alter table pending_batches add column usd real not null default 0")
     columns = {row["name"] for row in conn.execute("pragma table_info(jobs)")}
     if "cancel_requested" not in columns:  # before jobs were a queue
         conn.execute("alter table jobs add column cancel_requested integer not null default 0")
@@ -95,12 +81,48 @@ def connect(path: Path) -> Connection:
     return conn
 
 
+def move_ai_tables(conn: Connection) -> None:
+    """Move the ledger, cache and pending batches from before AI connections into the
+    ai_* tables AI(path) made, as the 'anthropic' connection's, in one transaction:
+    this month's spend still counts and a cached prompt is never paid for twice.
+    Once moved, the old tables are gone and this does nothing."""
+    with conn.lock:
+        conn.execute("begin immediate")
+        try:
+            if conn.execute("select 1 from sqlite_master where type = 'table' and name = 'ledger'"):
+                # A 0.1.0 database has no batch estimate; one from before the queue, no job ids.
+                for table, column, kind in (
+                    ("ledger", "job_id", "text"),
+                    ("pending_batches", "job_id", "text"),
+                    ("pending_batches", "usd", "real not null default 0"),
+                ):
+                    columns = {r["name"] for r in conn.execute(f"pragma table_info({table})")}
+                    if column not in columns:
+                        conn.execute(f"alter table {table} add column {column} {kind}")
+                conn.execute(
+                    "insert into ai_ledger (at, model, input_tokens, output_tokens, usd, batch,"
+                    " purpose, job_id, connection_id) select at, model, input_tokens,"
+                    " output_tokens, usd, batch, purpose, job_id, 'anthropic' from ledger"
+                )
+                conn.execute(
+                    "insert or ignore into ai_cache (key, text, input_tokens, output_tokens)"
+                    " select key, text, input_tokens, output_tokens from cache"
+                )
+                conn.execute(
+                    "insert or ignore into ai_batches (id, model, purpose, created_at, usd,"
+                    " job_id, connection_id) select id, model, purpose, created_at, usd, job_id,"
+                    " 'anthropic' from pending_batches"
+                )
+                for table in ("ledger", "cache", "pending_batches"):
+                    conn.execute(f"drop table {table}")
+            conn.execute("commit")
+        except BaseException:
+            conn.execute("rollback")
+            raise
+
+
 def _migrate_run_items(conn: Connection) -> None:
-    """Make run_items resumable and let ledger rows name their job. Idempotent."""
-    for table in ("ledger", "pending_batches"):
-        columns = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
-        if "job_id" not in columns:
-            conn.execute(f"alter table {table} add column job_id text")
+    """Make run_items resumable. Idempotent."""
     columns = {row["name"] for row in conn.execute("pragma table_info(run_items)")}
     if "complete" not in columns:
         conn.execute("alter table run_items add column complete integer not null default 0")
@@ -521,16 +543,6 @@ def run_item_question_ids(conn: Connection, job_id: str) -> list[str]:
         (job_id,),
     )
     return [r["question_id"] for r in rows]
-
-
-def job_spend(conn: Connection, job_id: str) -> float:
-    rows = conn.execute("select sum(usd) as usd from ledger where job_id = ?", (job_id,))
-    return rows[0]["usd"] or 0.0  # an aggregate always has one row
-
-
-def pending_batches(conn: Connection) -> list[dict]:
-    """Claude batches submitted and not yet collected, oldest first."""
-    return [dict(r) for r in conn.execute("select * from pending_batches order by rowid")]
 
 
 def run_items(conn: Connection, job_id: str, method: str | None = None) -> list[dict]:

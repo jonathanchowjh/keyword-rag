@@ -1,17 +1,20 @@
 [project]
 name = "ragqa-core"
 version = "0.1.0"
-description = "Retrieval, keyword vectorisation, Claude cost control and evaluation for rag-qa."
+description = "Retrieval, keyword vectorisation and evaluation for rag-qa."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "aiconnect",
   "fastembed==0.9.*",
   "qdrant-client==1.20.*",
-  "anthropic==2.1.*",
   "numpy==2.5.*",
   "pyarrow==26.*",
   "huggingface-hub",
   "httpx==0.28.*",
 ]
+
+[tool.uv.sources]
+aiconnect = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -1,11 +1,10 @@
 """Test doubles: real objects with their outward-facing methods overridden.
 
 Only tests import this module (tests/test_boundaries.py enforces it). Nothing
-here calls Claude or downloads a model.
+here calls an AI provider or downloads a model.
 """
 
 import hashlib
-import math
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -14,15 +13,12 @@ from pathlib import Path
 import numpy as np
 from qdrant_client.models import SparseVector
 
+from aiconnect import fakes
+from aiconnect.ai import AI
 from ragqa_core.connection import Connection
-from ragqa_core.llm import Claude
 from ragqa_core.models import Models, normalise
 
 WORD = re.compile(r"[a-z0-9]+")
-# The fake Batch API's server side: batches outlive the fake that submitted
-# them, as real ones outlive a restarted process.
-BATCHES: dict[str, dict[str, tuple[str, int, int]]] = {}
-CANCELLED: set[str] = set()
 
 
 def fake_models(dim: int = 256) -> Models:
@@ -68,36 +64,17 @@ def fake_embeddings(models: Models, dim: int = 256) -> Models:
     return models
 
 
-def fake_claude(
+def fake_ai(
     conn: Connection,
     reply: Callable[[str], str],
     api_key: str | None = "test",
     cap_usd: float = 20.0,
-) -> Claude:
-    return fake_replies(Claude(conn, api_key, cap_usd, "claude-haiku-5-5"), reply)
+) -> AI:
+    """An AI on conn's file, with a priced connection and a default model, that answers
+    every prompt with reply(prompt). A second one on the same file shares its tables."""
+    return fakes.fake_ai(conn.path, reply, api_key=api_key, cap_usd=cap_usd)
 
 
-def fake_replies(claude: Claude, reply: Callable[[str], str]) -> Claude:
-    """Patches `claude` in place to answer every prompt with reply(prompt)."""
-
-    def send(model: str, system: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
-        text = reply(prompt)
-        return text, math.ceil(len(prompt) / 4), math.ceil(len(text) / 4)
-
-    def submit_batch(requests: list[dict]) -> str:
-        batch_id = f"fake-batch-{len(BATCHES)}"
-        BATCHES[batch_id] = {
-            r["custom_id"]: send(r["model"], r["system"], r["prompt"], 0) for r in requests
-        }
-        return batch_id
-
-    def batch_results(batch_id: str) -> dict[str, tuple[str, int, int] | None]:
-        # A reply of "FAIL" stands for an errored or expired batch entry.
-        return {k: None if v[0] == "FAIL" else v for k, v in BATCHES[batch_id].items()}
-
-    claude._cancel_batch = CANCELLED.add  # type: ignore[method-assign]
-    claude._send = send  # type: ignore[method-assign]
-    claude._submit_batch = submit_batch  # type: ignore[method-assign]
-    claude._batch_done = lambda batch_id: True  # type: ignore[method-assign]
-    claude._batch_results = batch_results  # type: ignore[method-assign]
-    return claude
+def fake_replies(ai: AI, reply: Callable[[str], str]) -> AI:
+    """Patches `ai` in place to answer every prompt with reply(prompt)."""
+    return fakes.fake_replies(ai, reply)

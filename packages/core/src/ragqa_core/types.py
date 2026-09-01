@@ -59,12 +59,3 @@ class Hit:
     explanation: str | None
     meta: dict
     summary: str | None = None
-
-
-@dataclass
-class Completion:
-    text: str
-    usd: float
-    cached: bool
-    input_tokens: int
-    output_tokens: int

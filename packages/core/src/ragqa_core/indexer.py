@@ -6,11 +6,11 @@ from dataclasses import replace
 
 import numpy as np
 
+from aiconnect.ai import AI
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import source_for
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, tfidf_terms
-from ragqa_core.llm import Claude
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
 from ragqa_core.store import Store, item_hash
@@ -42,11 +42,11 @@ def dedupe(words: list[str]) -> list[str]:
 
 
 class Indexer:
-    def __init__(self, conn: Connection, store: Store, models: Models, claude: Claude):
+    def __init__(self, conn: Connection, store: Store, models: Models, ai: AI):
         self.conn = conn
         self.store = store
         self.models = models
-        self.claude = claude
+        self.ai = ai
         # Keyword-list embeddings by list version: they change only when the
         # lists do, and re-embedding ~565 keywords per query dominated eval time.
         self._list_vectors: dict[str, tuple[dict[str, np.ndarray], list[str], np.ndarray]] = {}
@@ -84,7 +84,9 @@ class Indexer:
         todo, _ = self.changed(spec, items, source)
         batch = len(todo) > 50
         return sum(
-            self.claude.estimate_usd(len(summary_prompt(i.text)), SUMMARY_TOKENS, batch=batch)
+            self.ai.estimate_usd(
+                len(summary_prompt(i.text)), SUMMARY_TOKENS, role="summary", batch=batch
+            )
             for i in todo
         )
 
@@ -102,8 +104,9 @@ class Indexer:
             return counts
         summaries: list[str | None] = [None] * len(items)
         if spec.summarize:
-            done = self.claude.complete_many(
+            done = self.ai.complete_many(
                 [summary_prompt(i.text) for i in items],
+                role="summary",
                 max_tokens=SUMMARY_TOKENS,
                 purpose="summary",
             )
@@ -160,11 +163,12 @@ class Indexer:
 
     def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
         prompt = propose_prompt([i.text for i in sample], spec.qa_type)
-        return self.claude.estimate_usd(len(prompt), 2000)
+        return self.ai.estimate_usd(len(prompt), 2000, role="keywords")
 
     def propose_lists(self, spec: CollectionSpec, sample: list[Item]) -> KeywordLists:
-        reply = self.claude.complete(
+        reply = self.ai.complete(
             propose_prompt([i.text for i in sample], spec.qa_type),
+            role="keywords",
             max_tokens=2000,
             purpose="propose",
         )

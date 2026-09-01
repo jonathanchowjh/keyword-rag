@@ -13,6 +13,7 @@ class Connection:
     """
 
     def __init__(self, path: Path):
+        self.path = path
         self.raw = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.raw.row_factory = sqlite3.Row
         self.lock = threading.RLock()

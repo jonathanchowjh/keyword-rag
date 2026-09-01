@@ -1,4 +1,7 @@
+import hashlib
 import json
+import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
@@ -19,11 +22,11 @@ from ragqa_core.db import (
     interrupt_running,
     is_cancel_requested,
     job_running,
-    job_spend,
     list_collections,
     list_jobs,
     loaded_datasets,
     log_job,
+    move_ai_tables,
     newest_jobs,
     request_cancel,
     requeue,
@@ -37,6 +40,7 @@ from ragqa_core.db import (
     update_job,
     upsert_run_item,
 )
+from ragqa_core.fakes import fake_ai
 from ragqa_core.types import CollectionSpec, KeywordLists, Question
 
 SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
@@ -115,19 +119,109 @@ def test_connect_is_idempotent(tmp_path):
     connect(tmp_path / "r.db")
 
 
-def test_connect_adds_the_batch_estimate_to_a_0_1_0_database(tmp_path):
-    import sqlite3
+# The ledger, cache and pending_batches DDL as it was before AI connections (main d80f1b9).
+PRE_PHASE1_AI_TABLES = """
+create table ledger (
+  at text not null, model text not null, input_tokens integer not null,
+  output_tokens integer not null, usd real not null, batch integer not null,
+  purpose text not null, job_id text
+);
+create table cache (
+  key text primary key, text text not null, input_tokens integer not null,
+  output_tokens integer not null
+);
+create table pending_batches (
+  id text primary key, model text not null, purpose text not null, created_at text not null,
+  usd real not null default 0, job_id text
+);
+"""
 
-    old = sqlite3.connect(tmp_path / "r.db")
+
+def old_cache_key(model: str, system: str, prompt: str, max_tokens: int) -> str:
+    """The cache key the old Claude class wrote, spelled out so a change to it shows here."""
+    return hashlib.sha256(json.dumps([model, system, prompt, max_tokens]).encode()).hexdigest()
+
+
+def make_pre_phase1_db(path):
+    """A database written before AI connections: this month's $1.50 ledger row, a cached
+    answer to "hello" and one batch still pending ($0.20)."""
+    old = sqlite3.connect(path)
+    old.executescript(PRE_PHASE1_AI_TABLES)
+    at = datetime.now(UTC).isoformat(timespec="seconds")
     old.execute(
-        "create table pending_batches (id text primary key, model text not null,"
-        " purpose text not null, created_at text not null)"
+        "insert into ledger values (?, 'claude-haiku-5-5', 10, 10, 1.5, 0, 'answer', 'j1')",
+        (at,),
     )
-    old.execute("insert into pending_batches values ('b', 'm', 'p', 'now')")
+    old.execute(
+        "insert into cache values (?, 'cached hello', 3, 2)",
+        (old_cache_key("claude-haiku-5-5", "", "hello", 1024),),
+    )
+    old.execute(
+        "insert into pending_batches values ('b1', 'claude-haiku-5-5', 'answer', ?, 0.2, 'j1')",
+        (at,),
+    )
     old.commit()
     old.close()
-    row = connect(tmp_path / "r.db").execute("select usd from pending_batches")[0]
-    assert row["usd"] == 0
+
+
+def table_exists(conn, name: str) -> bool:
+    return bool(
+        conn.execute("select 1 from sqlite_master where type = 'table' and name = ?", (name,))
+    )
+
+
+def test_upgrade_moves_spend_cache_and_batches(tmp_path):
+    path = tmp_path / "ragqa.db"
+    make_pre_phase1_db(path)
+    conn = connect(path)
+    ai = fake_ai(conn, lambda p: pytest.fail("cached prompt was re-sent"))
+    move_ai_tables(conn)
+    assert ai.month_spend() == pytest.approx(1.5)
+    assert ai.job_spend("j1") == pytest.approx(1.5)
+    done = ai.complete("hello", purpose="t")
+    assert done.cached is True and done.text == "cached hello" and done.usd == 0
+    assert [b["connection_id"] for b in ai.pending_batches()] == ["anthropic"]
+    assert ai.pending_batches()[0]["usd"] == pytest.approx(0.2)
+    assert not table_exists(conn, "ledger")
+    assert not table_exists(conn, "cache") and not table_exists(conn, "pending_batches")
+    move_ai_tables(conn)  # second run: no-op
+    assert ai.month_spend() == pytest.approx(1.5)
+    assert len(ai.pending_batches()) == 1
+
+
+def test_upgrade_of_a_new_database_does_nothing(tmp_path):
+    conn = connect(tmp_path / "ragqa.db")
+    ai = fake_ai(conn, lambda p: "x")
+    move_ai_tables(conn)
+    assert ai.month_spend() == 0 and ai.pending_batches() == []
+    assert not table_exists(conn, "ledger")
+
+
+def test_upgrade_carries_rows_from_before_job_ids(tmp_path):
+    """A 0.1.0 database: no job_id on the ledger or batches, and no batch estimate."""
+    path = tmp_path / "ragqa.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table ledger (at text not null, model text not null,
+          input_tokens integer not null, output_tokens integer not null,
+          usd real not null, batch integer not null, purpose text not null);
+        create table cache (key text primary key, text text not null,
+          input_tokens integer not null, output_tokens integer not null);
+        create table pending_batches (id text primary key, model text not null,
+          purpose text not null, created_at text not null);
+        insert into ledger values ('t', 'm', 1, 1, 0.5, 0, 'p');
+        insert into pending_batches values ('b', 'm', 'p', 'now');
+        """
+    )
+    old.commit()
+    old.close()
+    conn = connect(path)
+    ai = fake_ai(conn, lambda p: "x")
+    move_ai_tables(conn)
+    row = conn.execute("select job_id, connection_id from ai_ledger")[0]
+    assert tuple(row) == (None, "anthropic")
+    assert ai.pending_batches()[0]["usd"] == 0 and ai.pending_batches()[0]["job_id"] is None
 
 
 @pytest.fixture
@@ -279,8 +373,6 @@ def test_delete_collection_rows_removes_its_jobs_and_rows(conn):
 
 
 def test_connect_adds_queue_columns_to_an_older_jobs_table(tmp_path):
-    import sqlite3
-
     old = sqlite3.connect(tmp_path / "r.db")
     old.execute(
         "create table jobs (id text primary key, kind text not null, collection text not null,"
@@ -311,24 +403,15 @@ def test_upsert_run_item_never_duplicates(conn):
 
 
 def test_migration_dedupes_and_backfills(tmp_path):
-    import sqlite3
-
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
     old.executescript(
         """
-        create table ledger (at text not null, model text not null,
-          input_tokens integer not null, output_tokens integer not null,
-          usd real not null, batch integer not null, purpose text not null);
-        create table pending_batches (id text primary key, model text not null,
-          purpose text not null, created_at text not null, usd real not null default 0);
         create table jobs (id text primary key, kind text not null, collection text not null,
           status text not null, progress real not null default 0, setup_json text not null,
           result_json text, error text, created_at text not null, updated_at text not null);
         create table run_items (job_id text not null, method text not null,
           question_id text not null, row_json text not null);
-        insert into ledger values ('t', 'm', 1, 1, 0.5, 0, 'p');
-        insert into pending_batches values ('b', 'm', 'p', 't', 0.1);
         insert into jobs values ('j1', 'eval', 'c', 'done', 1, '{"answer": false}',
           null, null, 't', 't');
         insert into jobs values ('j2', 'eval', 'c', 'done', 1, '{"answer": true}',
@@ -351,8 +434,6 @@ def test_migration_dedupes_and_backfills(tmp_path):
     assert rows[("j2", "q3")]["complete"] == 0
     assert get_job(conn, "j1")["setup"] == {"answer": False, "question_ids": ["q1"]}
     assert get_job(conn, "j2")["setup"]["question_ids"] == ["q2", "q3"]
-    assert conn.execute("select job_id from ledger")[0]["job_id"] is None
-    assert conn.execute("select job_id from pending_batches")[0]["job_id"] is None
 
     before = [tuple(r) for r in conn.execute("select * from run_items order by rowid")]
     setups = [get_job(conn, j)["setup"] for j in ("j1", "j2")]
@@ -363,8 +444,6 @@ def test_migration_dedupes_and_backfills(tmp_path):
 
 
 def test_migration_marks_complete_by_the_answer_key_not_the_word(tmp_path):
-    import sqlite3
-
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
     old.executescript(
@@ -405,17 +484,6 @@ def test_question_ids_backfill_skips_only_queued_evals(tmp_path):
     assert "question_ids" not in get_job(again, jobs["queued"])["setup"]
     assert get_job(again, jobs["running"])["setup"]["question_ids"] == ["q1"]
     assert get_job(again, jobs["interrupted"])["setup"]["question_ids"] == ["q1"]
-
-
-def test_job_spend_sums_ledger_rows_for_the_job(conn):
-    for job_id, usd in (("j", 0.25), ("j", 0.5), (None, 4.0), ("other", 8.0)):
-        conn.execute(
-            "insert into ledger (at, model, input_tokens, output_tokens, usd, batch, purpose,"
-            " job_id) values ('t', 'm', 1, 1, ?, 0, 'p', ?)",
-            (usd, job_id),
-        )
-    assert job_spend(conn, "j") == 0.75
-    assert job_spend(conn, "none") == 0.0
 
 
 def test_one_connection_is_safe_from_many_threads(conn):
@@ -500,8 +568,6 @@ def test_disabled_sources_round_trip_and_cleared_with_collection(conn):
 
 
 def test_include_leaked_defaults_false_and_survives_migration(tmp_path):
-    import sqlite3
-
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
     old.executescript(

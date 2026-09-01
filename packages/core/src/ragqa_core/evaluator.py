@@ -6,11 +6,11 @@ import math
 from collections.abc import Callable
 from typing import Literal
 
+from aiconnect.ai import AI, BATCH_THRESHOLD, BudgetExceeded, Cancelled, NoConnection
 from ragqa_core import db, verdict
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
-from ragqa_core.llm import BATCH_THRESHOLD, BudgetExceeded, Cancelled, Claude, NoApiKey
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
@@ -137,13 +137,11 @@ def changes_since(setup: dict, spec: CollectionSpec, disabled: list[str]) -> dic
 
 
 class Evaluator:
-    def __init__(
-        self, conn: Connection, retriever: Retriever, models: Models, claude: Claude
-    ) -> None:
+    def __init__(self, conn: Connection, retriever: Retriever, models: Models, ai: AI) -> None:
         self.conn = conn
         self.retriever = retriever
         self.models = models
-        self.claude = claude
+        self.ai = ai
 
     def _questions(self, spec: CollectionSpec, split: str) -> list[Question]:
         questions = runnable(
@@ -215,33 +213,35 @@ class Evaluator:
         model: str | None,
         sample: list[Question],
     ) -> dict:
-        # (calls, avg prompt chars, output tokens, batched?, model) — each part
+        # (calls, avg prompt chars, output tokens, batched?, role, model) — each part
         # priced the way it is sent: one complete_many per part, batched only
         # above 50 calls; iterative hops are single real-time calls. Summaries and
-        # hops run on the default model (None); only answers use the requested one.
-        parts: list[tuple[int, float, int, bool, str | None]] = []
+        # hops run on the query job's model; only answers use the requested one.
+        parts: list[tuple[int, float, int, bool, str, str | None]] = []
         summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
         if spec.summarize and summaries:
             chars = avg(len(summary_prompt(q.text)) for q in sample)
-            parts.append((summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, None))
+            parts.append(
+                (summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, "query", None)
+            )
         hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
         parts.extend(
-            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, None)
+            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, "query", None)
             for m, n in n_by_method.items()
             if m == "iterative"
         )
         if answer and any(n_by_method.values()):
             chars = self._answer_chars(spec, sample)
             parts.extend(
-                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, model)
+                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, "answer", model)
                 for n in n_by_method.values()
             )
         calls = sum(part[0] for part in parts)
         if calls == 0:
             return {"calls": 0, "est_usd": 0.0}
         usd = sum(
-            c * self.claude.estimate_usd(int(chars), out, model=m, batch=batch)
-            for c, chars, out, batch, m in parts
+            c * self.ai.estimate_usd(int(chars), out, role=role, model=m, batch=batch)
+            for c, chars, out, batch, role, m in parts
         )
         return {"calls": calls, "est_usd": usd}
 
@@ -274,7 +274,8 @@ class Evaluator:
             "split": split,
             "methods": methods,
             "answer": answer,
-            "model": model or self.claude.default_model,
+            # None when no AI is set up: a retrieval-only run needs none.
+            "model": model or self.ai.role_model("answer"),
             "k": k,
             "rrf_k": rrf_k,
         }
@@ -393,7 +394,7 @@ class Evaluator:
             db.update_job(self.conn, job_id, status="cancelled")
         except BudgetExceeded as e:
             db.update_job(self.conn, job_id, status="stopped_budget", error=str(e))
-        except NoApiKey as e:
+        except NoConnection as e:
             db.update_job(self.conn, job_id, status="stopped_no_key", error=str(e))
         except Exception as e:  # recorded on the job; the thread must not die silently
             db.update_job(self.conn, job_id, status="failed", error=repr(e))
@@ -439,8 +440,9 @@ class Evaluator:
             answer_prompt(spec.qa_type, q.text, q.choices, answer_hits(spec.qa_type, hits))
             for q, hits in zip(questions, all_hits, strict=True)
         ]
-        done = self.claude.complete_many(
+        done = self.ai.complete_many(
             [user for _, user in prompts],
+            role="answer",
             system=prompts[0][0] if prompts else "",
             model=setup["model"],
             max_tokens=ANSWER_TOKENS[spec.qa_type],
@@ -560,7 +562,7 @@ class Evaluator:
             "scale": scaling,
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
             "proxy_trusted": trusted,
-            "usd_total": db.job_spend(self.conn, job_id),
+            "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
         }
 
@@ -632,7 +634,7 @@ class Evaluator:
             "gaps": verdict.gaps(per_method, reference, scaling["factor"]),
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
-            "usd_total": db.job_spend(self.conn, job_id),
+            "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
             "since": changes_since(setup, spec, db.disabled_sources(self.conn, spec.name)),
         }

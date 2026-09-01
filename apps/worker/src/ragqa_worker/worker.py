@@ -1,10 +1,10 @@
 import threading
 
+from aiconnect.ai import AI, BudgetExceeded, Cancelled, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.indexer import Indexer
-from ragqa_core.llm import BudgetExceeded, Cancelled, Claude, NoApiKey
 from ragqa_core.loader import Loader
 
 
@@ -14,14 +14,14 @@ class Worker:
     def __init__(
         self,
         conn: Connection,
-        claude: Claude,
+        ai: AI,
         indexer: Indexer,
         loader: Loader,
         evaluator: Evaluator,
         idle_seconds: float = 0.5,
     ):
         self.conn = conn
-        self.claude = claude
+        self.ai = ai
         self.indexer = indexer
         self.loader = loader
         self.evaluator = evaluator
@@ -63,7 +63,7 @@ class Worker:
                 step["last"] = pct
                 log(f"progress {pct}%")
 
-        with self.claude.for_job(job_id, check, log), self.indexer.models.for_job(log):
+        with self.ai.for_job(job_id, check, log), self.indexer.models.for_job(log):
             reason = "job ended without a final status"
             try:
                 log("started")
@@ -85,7 +85,7 @@ class Worker:
             db.update_job(conn, job_id, status="cancelled")
         elif isinstance(e, BudgetExceeded):
             db.update_job(conn, job_id, status="stopped_budget", error=str(e))
-        elif isinstance(e, NoApiKey):
+        elif isinstance(e, NoConnection):
             db.update_job(conn, job_id, status="stopped_no_key")
         else:
             db.update_job(conn, job_id, status="failed", error=repr(e))
@@ -133,7 +133,7 @@ class Worker:
         try:
             if self.run_one() is None:
                 try:
-                    self.claude.collect_pending()
+                    self.ai.collect_pending()
                 except Exception as e:
                     self._failed(e)
                 self._stop.wait(self.idle_seconds)

@@ -889,7 +889,7 @@ name = "ragqa-core"
 version = "0.1.0"
 source = { editable = "packages/core" }
 dependencies = [
-    { name = "anthropic" },
+    { name = "aiconnect" },
     { name = "fastembed" },
     { name = "httpx" },
     { name = "huggingface-hub" },
@@ -900,7 +900,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = "==2.1.*" },
+    { name = "aiconnect", editable = "packages/aiconnect" },
     { name = "fastembed", specifier = "==0.9.*" },
     { name = "httpx", specifier = "==0.28.*" },
     { name = "huggingface-hub" },

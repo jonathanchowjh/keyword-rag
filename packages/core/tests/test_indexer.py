@@ -1,10 +1,10 @@
 import pytest
 
+from aiconnect.ai import Cancelled
 from ragqa_core.db import connect, get_keyword_lists
-from ragqa_core.fakes import fake_claude, fake_models
+from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, list_version
-from ragqa_core.llm import Cancelled
 from ragqa_core.store import Store, item_hash
 from ragqa_core.types import CollectionSpec, Item, KeywordLists
 
@@ -30,8 +30,8 @@ def env(tmp_path):
     conn = connect(tmp_path / "r.db")
     store, models = Store(None, None), fake_models()
     calls: list[str] = []
-    claude = fake_claude(conn, lambda p: calls.append(p) or "A summary.")
-    ix = Indexer(conn, store, models, claude)
+    ai = fake_ai(conn, lambda p: calls.append(p) or "A summary.")
+    ix = Indexer(conn, store, models, ai)
     return conn, store, models, ix, calls
 
 
@@ -175,10 +175,8 @@ def test_rekey_rejects_an_unknown_version(env):
 
 def test_propose_lists_uses_claude_json_and_tfidf(tmp_path):
     conn = connect(tmp_path / "r.db")
-    claude = fake_claude(
-        conn, lambda p: '{"topic": ["genetics", "genetics"], "method": ["titration"]}'
-    )
-    ix = Indexer(conn, Store(None, None), fake_models(), claude)
+    ai = fake_ai(conn, lambda p: '{"topic": ["genetics", "genetics"], "method": ["titration"]}')
+    ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("c", "mcq", False)
     lists = ix.propose_lists(spec, ITEMS + [Item("4", "enzyme rate genetics")])
     assert lists.topic == ["genetics"] and lists.method == ["titration"]
@@ -244,7 +242,7 @@ def test_set_lists_saves_nothing_if_the_lists_cannot_be_embedded(env):
 
 def test_propose_lists_rejects_a_reply_without_lists(tmp_path):
     conn = connect(tmp_path / "r.db")
-    ix = Indexer(conn, Store(None, None), fake_models(), fake_claude(conn, lambda p: "Sorry,"))
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, lambda p: "Sorry,"))
     spec = ix.create("c", "mcq", False)
     with pytest.raises(ValueError, match="no usable topic or method"):
         ix.propose_lists(spec, ITEMS)
