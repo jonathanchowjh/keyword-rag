@@ -93,6 +93,20 @@ def test_negative_cap_and_price_are_value_errors(tmp_path):
         ai.add_model("a", "m", price_in=-0.1)
 
 
+def test_nan_inf_and_empty_label_are_value_errors(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("a", "openai", "A")
+    ai.add_model("a", "m")
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            ai.set_cap(bad)
+        with pytest.raises(ValueError):
+            ai.update_model("a", "m", price_in=bad)
+    with pytest.raises(ValueError):
+        ai.update_connection("a", label="")
+    assert ai.connections()[0]["label"] == "A"
+
+
 def test_env_values_win_and_are_read_only(tmp_path):
     ai = AI(tmp_path / "ai.db")
     ai.apply_env(api_key="k-1234567890ab", model="claude-sonnet-5-5", cap_usd=5.0)

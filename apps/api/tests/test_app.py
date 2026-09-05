@@ -106,11 +106,11 @@ def client(tmp_path):
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"ok": True, "api_key": True}
+    assert client.get("/health").json() == {"ok": True, "ai": True}
 
 
 def test_health_reports_missing_key(tmp_path):
-    assert make_client(tmp_path, api_key=None).get("/health").json()["api_key"] is False
+    assert make_client(tmp_path, api_key=None).get("/health").json()["ai"] is False
 
 
 def test_create_add_query_flow(client):
@@ -1718,3 +1718,116 @@ def test_deleting_a_collection_removes_its_uploads(client):
     assert client.delete("/collections/c").status_code == 204
     uploads = client.app.state.settings.home / "uploads"
     assert not (uploads / gone).exists() and (uploads / kept).exists()
+
+
+# -- /ai settings ---------------------------------------------------------------
+
+
+def test_ai_settings_round_trip(client):
+    ai = client.app.state.ai
+    ai._list_models = lambda connection: ["llama3.1", "qwen2"]  # type: ignore[method-assign]
+    r = client.post("/ai/connections", json={"preset": "ollama", "id": "local"})
+    assert r.status_code == 201, r.text
+    assert client.post("/ai/connections/local/models/fetch").json() == {
+        "added": ["llama3.1", "qwen2"]
+    }
+    assert client.put("/ai/roles/answer", json={"model": "local/llama3.1"}).status_code == 200
+    body = client.get("/ai").json()
+    local = next(c for c in body["connections"] if c["id"] == "local")
+    assert local["kind"] == "openai" and local["local"] and local["label"] == "Ollama (local)"
+    assert {m["ref"]: m["price_in"] for m in body["models"] if m["connection_id"] == "local"} == {
+        "local/llama3.1": 0,
+        "local/qwen2": 0,
+    }
+    assert body["roles"]["answer"] == "local/llama3.1"
+    assert body["known_roles"] == ["default", "answer", "summary", "keywords", "query"]
+    assert body["budget"] == {"cap_usd": 20.0, "spent_usd": 0.0, "from_env": False}
+    assert {"id": "ollama", "label": "Ollama (local)", "kind": "openai"}.items() <= next(
+        p for p in body["presets"] if p["id"] == "ollama"
+    ).items()
+    assert client.put("/ai/budget", json={"cap_usd": 7.5}).status_code == 200
+    assert client.get("/ai").json()["budget"]["cap_usd"] == 7.5
+    r = client.post("/ai/connections/local/models", json={"model_id": "x", "price_in": 1})
+    assert r.status_code == 200, r.text
+    r = client.patch("/ai/connections/local", json={"label": "Mine", "api_key": "abc"})
+    assert r.status_code == 200 and client.get("/ai").json()["connections"][1]["label"] == "Mine"
+    assert client.put("/ai/roles/answer", json={"model": None}).status_code == 200
+    assert client.delete("/ai/connections/local").status_code == 204
+
+
+def test_ai_validation_errors_are_422(client):
+    r = client.post("/ai/connections", json={"id": "x"})  # no preset, no kind
+    assert r.status_code == 422
+    assert client.post("/ai/connections", json={"preset": "nope", "id": "x"}).status_code == 422
+    client.post("/ai/connections", json={"preset": "openai", "id": "oa"})
+    assert client.patch("/ai/connections/oa", json={"label": ""}).status_code == 422
+    r = client.post("/ai/connections/oa/models", json={"model_id": "m", "price_in": -1})
+    assert r.status_code == 422
+    assert client.put("/ai/models/oa/ghost", json={"enabled": False}).status_code == 422
+    client.post("/ai/connections/oa/models", json={"model_id": "m"})
+    assert client.put("/ai/models/oa/m", json={"enabled": None}).status_code == 422
+    assert client.post("/ai/connections", json={"preset": "openai", "id": "oa"}).status_code == 409
+
+
+def test_key_never_leaves_the_server(client):
+    client.post(
+        "/ai/connections", json={"preset": "openai", "id": "oa", "api_key": "sk-proj-SECRET123456"}
+    )
+    for path in ("/ai", "/status", "/health", "/budget"):
+        assert "SECRET" not in client.get(path).text
+    assert "SECRET" not in client.post("/ai/connections/oa/test").text
+
+
+def test_price_route_accepts_slash_in_model_id(client):
+    client.post("/ai/connections", json={"preset": "openrouter", "id": "or"})
+    client.post("/ai/connections/or/models", json={"model_id": "meta-llama/llama-3.1-8b"})
+    r = client.put(
+        "/ai/models/or/meta-llama/llama-3.1-8b", json={"price_in": 0.02, "price_out": 0.05}
+    )
+    assert r.status_code == 200, r.text
+    model = next(m for m in client.get("/ai").json()["models"] if m["ref"].startswith("or/"))
+    assert model["model_id"] == "meta-llama/llama-3.1-8b"
+    assert (model["price_in"], model["price_out"]) == (0.02, 0.05)
+
+
+def test_delete_connection_in_use_is_409_naming_role(client):
+    r = client.delete("/ai/connections/anthropic")
+    assert r.status_code == 409 and "default" in r.json()["detail"]
+
+
+def test_env_locked_key_is_409(tmp_path):
+    app = create_app(settings(tmp_path, api_key="sk-env-key-123456", cap_usd=5.0))
+    client = TestClient(app)
+    r = client.patch("/ai/connections/anthropic", json={"api_key": "other"})
+    assert r.status_code == 409 and "environment" in r.json()["detail"]
+    assert client.put("/ai/budget", json={"cap_usd": 9}).status_code == 409
+    assert client.get("/ai").json()["budget"]["from_env"] is True
+
+
+def test_unknown_role_is_422(client):
+    r = client.put("/ai/roles/nonsense", json={"model": None})
+    assert r.status_code == 422 and "known" in r.json()["detail"]
+    r = client.put("/ai/roles/answer", json={"model": "anthropic/ghost"})
+    assert r.status_code == 422
+
+
+def test_unreachable_provider_is_502(client):
+    add_collection(client)
+
+    def down(*args, **kwargs):
+        raise ConnectionError("connection refused")
+
+    client.app.state.ai._send = down
+    r = client.post(
+        "/query",
+        json={"collection": "c", "question": "enzyme rate", "methods": ["hybrid"], "answer": True},
+    )
+    assert r.status_code == 502, r.text
+
+
+def test_role_with_disabled_model_is_503_naming_job(client):
+    add_collection(client)
+    client.put("/ai/models/anthropic/claude-haiku-5-5", json={"enabled": False})
+    r = client.post("/eval", json={**EVAL, "answer": True, "confirm": True})
+    assert r.status_code == 503, r.text
+    assert "'answer'" in r.json()["detail"] and "Settings" in r.json()["detail"]

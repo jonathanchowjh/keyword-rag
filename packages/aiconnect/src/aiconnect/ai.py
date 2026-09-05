@@ -100,8 +100,8 @@ def mask(key: str | None) -> str | None:
 
 
 def check_price(value: float | None) -> None:
-    if value is not None and value < 0:
-        raise ValueError("a price cannot be negative")
+    if value is not None and not (math.isfinite(value) and value >= 0):
+        raise ValueError("a price must be a number that is not negative")
 
 
 def cache_key(model_id: str, system: str, prompt: str, max_tokens: int) -> str:
@@ -179,6 +179,8 @@ class AI:
 
     def update_connection(self, id: str, *, label=KEEP, base_url=KEEP, api_key=KEEP) -> None:
         self.need_connection(id)
+        if label is not KEEP and not label:
+            raise ValueError("a connection needs a label")
         for field, value in (("label", label), ("base_url", base_url), ("api_key", api_key)):
             if value is KEEP:
                 continue
@@ -408,8 +410,8 @@ class AI:
         self.store_cap(usd)
 
     def store_cap(self, usd: float) -> None:
-        if usd < 0:
-            raise ValueError("the cap cannot be negative")
+        if not (math.isfinite(usd) and usd >= 0):
+            raise ValueError("the cap must be a number that is not negative")
         self.sql("insert or replace into ai_settings values ('cap_usd', ?)", (str(float(usd)),))
 
     # environment

@@ -24,7 +24,16 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from aiconnect.ai import AI, BudgetExceeded, NoConnection, UnknownModel
+from aiconnect.ai import (
+    AI,
+    BudgetExceeded,
+    Conflict,
+    NoConnection,
+    ProviderError,
+    UnknownModel,
+    UnknownPrice,
+)
+from aiconnect.presets import PRESETS
 from ragqa_core import db, imports
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
@@ -64,6 +73,7 @@ PROBLEM = {
     "stopped_budget": "stopped at the monthly cap",
     "stopped_no_key": "stopped: needs ANTHROPIC_API_KEY",
 }
+KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
 
 
@@ -142,6 +152,43 @@ class EvalRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     confirm: bool = False
+
+
+class NewConnection(BaseModel):
+    preset: str | None = None
+    id: str
+    label: str | None = None
+    kind: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class ConnectionEdit(BaseModel):
+    label: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class NewModel(BaseModel):
+    model_id: str
+    label: str | None = None
+    price_in: float | None = None
+    price_out: float | None = None
+
+
+class ModelEdit(BaseModel):
+    label: str | None = None
+    price_in: float | None = None
+    price_out: float | None = None
+    enabled: bool | None = None
+
+
+class RoleSet(BaseModel):
+    model: str | None
+
+
+class BudgetSet(BaseModel):
+    cap_usd: float
 
 
 def spec_json(spec: CollectionSpec) -> dict:
@@ -248,9 +295,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(UnknownCollection, error(404))
     app.add_exception_handler(ValueError, error(422))
     app.add_exception_handler(TooLarge, error(413))
-    app.add_exception_handler(UnknownModel, error(422))
-    for exc in (MethodUnavailable, ModelMismatch, ListsBusy):
+    for exc in (UnknownModel, UnknownPrice):
+        app.add_exception_handler(exc, error(422))
+    for exc in (MethodUnavailable, ModelMismatch, ListsBusy, Conflict):
         app.add_exception_handler(exc, error(409))
+    app.add_exception_handler(ProviderError, error(502))
     app.add_exception_handler(BudgetExceeded, error(402))
 
     def no_connection(request: Request, exc: Exception) -> JSONResponse:
@@ -341,7 +390,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "api_key": state.ai.ready("answer")}
+        return {"ok": True, "ai": state.ai.ready("answer")}
 
     @app.post("/collections", status_code=201)
     def create_collection(body: NewCollection) -> dict:
@@ -821,6 +870,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "cap_usd": state.ai.cap_usd,
             "note": "This service's own spend; the Console shows the credit balance.",
         }
+
+    # -- AI settings ------------------------------------------------------------
+
+    @app.get("/ai")
+    def get_ai() -> dict:
+        return {
+            "connections": state.ai.connections(),
+            "models": state.ai.models(),
+            "roles": state.ai.roles(),
+            "known_roles": KNOWN_ROLES,
+            "budget": {
+                "cap_usd": state.ai.cap_usd,
+                "spent_usd": state.ai.month_spend(),
+                "from_env": state.ai.env_cap,
+            },
+            "presets": [
+                {k: p[k] for k in ("label", "kind", "base_url", "local")} | {"id": id}
+                for id, p in PRESETS.items()
+            ],
+        }
+
+    @app.post("/ai/connections", status_code=201)
+    def add_connection(body: NewConnection) -> dict:
+        if body.preset is not None and body.preset not in PRESETS:
+            raise HTTPException(422, f"unknown preset {body.preset!r}; known: {list(PRESETS)}")
+        preset = PRESETS.get(body.preset or "", {})
+        kind = body.kind or preset.get("kind")
+        if not kind:
+            raise HTTPException(422, "give a preset or a kind")
+        state.ai.add_connection(
+            body.id,
+            kind,
+            body.label or preset.get("label") or body.id,
+            base_url=body.base_url or preset.get("base_url"),
+            api_key=body.api_key,
+            local=preset.get("local", False),
+        )
+        for model_id, (label, price_in, price_out) in preset.get("models", {}).items():
+            state.ai.add_model(
+                body.id, model_id, label=label, price_in=price_in, price_out=price_out
+            )
+        return {"id": body.id}
+
+    @app.patch("/ai/connections/{id}")
+    def edit_connection(id: str, body: ConnectionEdit) -> dict:
+        state.ai.update_connection(id, **body.model_dump(exclude_unset=True))
+        return {"id": id}
+
+    @app.delete("/ai/connections/{id}", status_code=204)
+    def remove_connection(id: str) -> Response:
+        state.ai.remove_connection(id)
+        return Response(status_code=204)
+
+    @app.post("/ai/connections/{id}/test")
+    def test_connection(id: str) -> dict:
+        return state.ai.test_connection(id)
+
+    @app.post("/ai/connections/{id}/models/fetch")
+    def fetch_models(id: str) -> dict:
+        return {"added": state.ai.fetch_models(id)}
+
+    @app.post("/ai/connections/{id}/models")
+    def add_model(id: str, body: NewModel) -> dict:
+        state.ai.add_model(
+            id, body.model_id, label=body.label, price_in=body.price_in, price_out=body.price_out
+        )
+        return {"ref": f"{id}/{body.model_id}"}
+
+    @app.put("/ai/models/{connection_id}/{model_id:path}")
+    def edit_model(connection_id: str, model_id: str, body: ModelEdit) -> dict:
+        changes = body.model_dump(exclude_unset=True)
+        if any(changes.get(f, 1) is None for f in ("label", "enabled")):
+            raise HTTPException(422, "label and enabled cannot be null")
+        state.ai.update_model(connection_id, model_id, **changes)
+        return {"ref": f"{connection_id}/{model_id}"}
+
+    @app.put("/ai/roles/{role}")
+    def set_role(role: str, body: RoleSet) -> dict:
+        if role not in KNOWN_ROLES:
+            raise HTTPException(422, f"unknown role {role!r}; known: {KNOWN_ROLES}")
+        state.ai.set_role(role, body.model)
+        return {"role": role, "model": state.ai.roles().get(role)}
+
+    @app.put("/ai/budget")
+    def set_budget(body: BudgetSet) -> dict:
+        state.ai.set_cap(body.cap_usd)
+        return {"cap_usd": state.ai.cap_usd}
 
     # -- pages: plain HTML plus the shared ui.js, served from /static (behind the same auth) --
 
