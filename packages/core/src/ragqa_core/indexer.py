@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from aiconnect.ai import AI
+from aiconnect.ai import AI, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import source_for
@@ -78,17 +78,23 @@ class Indexer:
         counts = {"new": new, "updated": len(todo) - new, "unchanged": len(items) - len(todo)}
         return todo, counts
 
-    def estimate_add_usd(self, spec: CollectionSpec, items: list[Item], source: str) -> float:
+    def estimate_add_usd(
+        self, spec: CollectionSpec, items: list[Item], source: str
+    ) -> float | None:
+        """None when the summary job has no model to price it with; adding is then refused."""
         if not spec.summarize:
             return 0.0
         todo, _ = self.changed(spec, items, source)
         batch = len(todo) > 50
-        return sum(
-            self.ai.estimate_usd(
-                len(summary_prompt(i.text)), SUMMARY_TOKENS, role="summary", batch=batch
+        try:
+            return sum(
+                self.ai.estimate_usd(
+                    len(summary_prompt(i.text)), SUMMARY_TOKENS, role="summary", batch=batch
+                )
+                for i in todo
             )
-            for i in todo
-        )
+        except NoConnection:
+            return None
 
     def add(
         self,

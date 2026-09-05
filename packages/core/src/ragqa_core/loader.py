@@ -132,7 +132,8 @@ class Loader:
         estimate = self.indexer.estimate_add_usd(spec, items, source)
         calls = len(todo) if spec.summarize else 0
         if self.ai.ready("keywords") and db.get_keyword_lists(self.conn, spec.name) is None:
-            estimate += self.indexer.estimate_propose_usd(spec, propose_sample(items))
+            propose = self.indexer.estimate_propose_usd(spec, propose_sample(items))
+            estimate = None if estimate is None else estimate + propose
             calls += 1
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 

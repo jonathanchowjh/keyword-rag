@@ -238,12 +238,17 @@ class Evaluator:
             )
         calls = sum(part[0] for part in parts)
         if calls == 0:
-            return {"calls": 0, "est_usd": 0.0}
-        usd = sum(
-            c * self.ai.estimate_usd(int(chars), out, role=role, model=m, batch=batch)
-            for c, chars, out, batch, role, m in parts
-        )
-        return {"calls": calls, "est_usd": usd}
+            return {"calls": 0, "est_usd": 0.0, "roles": []}
+        # Every job the run spends on, so a confirm can be refused before any is unusable.
+        roles = list(dict.fromkeys(part[4] for part in parts if part[0]))
+        try:
+            usd = sum(
+                c * self.ai.estimate_usd(int(chars), out, role=role, model=m, batch=batch)
+                for c, chars, out, batch, role, m in parts
+            )
+        except NoConnection:
+            return {"calls": calls, "est_usd": None, "roles": roles}  # a job has no model
+        return {"calls": calls, "est_usd": usd, "roles": roles}
 
     def _answer_chars(self, spec: CollectionSpec, sample: list[Question]) -> float:
         sizes = []

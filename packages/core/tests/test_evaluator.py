@@ -75,7 +75,7 @@ def test_estimate_counts_calls(env):
 def test_estimate_free_retrieval_is_zero(env):
     _, ev = env
     est = ev.estimate("c", "dev", ["hybrid"], answer=False, model=None)
-    assert est == {"questions": 5, "calls": 0, "est_usd": 0.0}
+    assert est == {"questions": 5, "calls": 0, "est_usd": 0.0, "roles": []}
 
 
 def test_estimate_counts_iterative_hops(env):
@@ -333,7 +333,7 @@ def test_resume_of_a_complete_run_estimates_zero(env):  # Review focus 2
     conn, ev = env
     job = ev.queue("c", "dev", ["hybrid"], True, None)
     ev.run(job)
-    assert ev.estimate_resume(job) == {"questions": 0, "calls": 0, "est_usd": 0.0}
+    assert ev.estimate_resume(job) == {"questions": 0, "calls": 0, "est_usd": 0.0, "roles": []}
     rows = run_items(conn, job)
     ledger = conn.execute("select count(*) from ai_ledger")[0][0]
     db.update_job(conn, job, status="interrupted")

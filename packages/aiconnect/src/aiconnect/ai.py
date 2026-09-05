@@ -803,6 +803,8 @@ class AI:
     ) -> float:
         connection_id, model_id = self.resolve(model or self.model_for(role))
         rates = self.need_rates(connection_id, model_id)
+        # Only a kind with a Batch API sends batches; the others pay full price.
+        batch = batch and self.need_connection(connection_id)["kind"] in BATCH
         return usd_for(rates, estimate_tokens(prompt_chars), math.ceil(output_tokens * 1.3), batch)
 
     def month_spend(self) -> float:

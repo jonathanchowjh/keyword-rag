@@ -546,6 +546,12 @@ out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
 out.v = ['rekeying', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
 out.w = [u.count(11656), u.count(0)];
 out.x = [0.004, 0, 0.4141, 12].map(u.usd);
+const box = () => ({innerHTML: '', querySelector: () => ({addEventListener() {}})});
+out.z = [{est_usd: null, calls: 3}, {est_usd: 0.4141, calls: 1}].map((estimate) => {
+  const el = box();
+  u.confirmSpend(el, estimate, () => {});
+  return el.innerHTML;
+});
 const sim = {metric: 'solution_sim@1', proxy_trusted: true};
 out.y = [{unit: 'raw'}, {unit: 'match'}].map((scale) => u.verdictNotes({...sim, scale}));
 console.log(JSON.stringify(out));
@@ -584,6 +590,8 @@ def test_ui_formatting(tmp_path):
     ]
     assert got["w"] == ["11,656", "0"]
     assert got["x"] == ["< $0.01", "$0.00", "$0.41", "$12.00"]
+    unpriced, priced = got["z"]  # no model to price with: unknown, not $0.00
+    assert "cost unknown" in unpriced and "$0.00" not in unpriced and "≈ $0.41" in priced
     raw, match = got["y"]  # a verdict's own scale marks a raw reasoning match
     assert len(raw) == 1 and "no chance level" in raw[0] and match == []
 
@@ -617,15 +625,96 @@ def test_confirmed_paid_eval_without_a_key_is_503_and_queues_nothing(tmp_path):
         assert free.status_code == 202
 
 
-def test_free_eval_queues_with_no_ai_set_up(tmp_path):
-    app = create_app(settings(tmp_path))  # no connection and no model at all
+def bare_client(tmp_path) -> TestClient:
+    """A fresh install: no connection, no model and no job set up at all."""
+    app = create_app(settings(tmp_path))
     fake_embeddings(app.state.models)
-    with TestClient(app) as client:
+    app.state.worker.idle_seconds = 0.01
+    return TestClient(app)
+
+
+def uploads_left(tmp_path) -> list[str]:
+    return sorted(p.name for p in (tmp_path / "uploads").glob("*"))
+
+
+def test_free_eval_queues_with_no_ai_set_up(tmp_path):
+    with bare_client(tmp_path) as client:
         add_collection(client)
         client.app.state.worker.stop()
         r = client.post("/eval", json={**EVAL, "confirm": True})
         assert r.status_code == 202, r.text
-        assert db.get_job(app.state.conn, r.json()["job_id"])["setup"]["model"] is None
+        assert db.get_job(client.app.state.conn, r.json()["job_id"])["setup"]["model"] is None
+
+
+def test_paid_eval_with_no_ai_estimates_unpriced_and_refuses_the_confirm(tmp_path):
+    with bare_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        r = client.post("/eval", json={**EVAL, "answer": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["estimate"]["est_usd"] is None and r.json()["estimate"]["calls"] == 1
+        r = client.post("/eval", json={**EVAL, "answer": True, "confirm": True})
+        assert r.status_code == 503 and "'answer' job" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+
+
+def test_summarising_previews_work_with_no_ai_and_leave_no_upload(tmp_path):
+    with bare_client(tmp_path) as client:
+        client.post("/collections", json={"name": "c", "qa_type": "mcq", "summarize": True})
+        up = upload(client)
+        assert up.status_code == 200, up.text
+        assert up.json()["estimate"]["est_usd"] is None and up.json()["estimate"]["calls"] == 3
+        r = do_import(client, up.json(), confirm=True)
+        assert r.status_code == 503 and "'summary' job" in r.json()["detail"]
+        assert uploads_left(tmp_path) == [up.json()["upload_id"]]  # kept for a retry
+        few = {"items": ITEMS}
+        r = client.post("/collections/c/documents", json=few)
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] is None
+        r = client.post("/collections/c/documents", json={**few, "confirm": True})
+        assert r.status_code == 503 and "'summary' job" in r.json()["detail"]
+        many = {"items": [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]}
+        r = client.post("/collections/c/documents", json=many)
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] is None
+        r = client.post("/collections/c/documents", json={**many, "confirm": True})
+        assert r.status_code == 503 and "'summary' job" in r.json()["detail"]
+        assert uploads_left(tmp_path) == [up.json()["upload_id"]]
+        assert client.get("/collections/c").json()["count"] == 0
+        assert db.list_jobs(client.app.state.conn, collection="c", limit=db.ALL) == []
+
+
+def test_a_failed_upload_estimate_leaves_no_upload(tmp_path):
+    with make_client(tmp_path) as client:
+        client.post("/collections", json={"name": "c", "qa_type": "mcq", "summarize": True})
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("estimate failed")
+
+        client.app.state.loader.estimate_import = broken
+        with pytest.raises(RuntimeError):
+            upload(client)
+        many = {"items": [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]}
+        with pytest.raises(RuntimeError):
+            client.post("/collections/c/documents", json=many)
+        assert uploads_left(tmp_path) == []
+
+
+def test_eval_and_resume_check_the_query_job_too(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client, summarize=True)
+        ai = client.app.state.ai
+        ai.set_role("query", "anthropic/claude-sonnet-5-5")
+        ai.update_model("anthropic", "claude-sonnet-5-5", enabled=False)
+        client.app.state.worker.stop()
+        body = {**EVAL, "methods": ["kw_individual"], "answer": True, "confirm": True}
+        r = client.post("/eval", json=body)
+        assert r.status_code == 503 and "'query' job" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+        conn = client.app.state.conn
+        job = client.app.state.evaluator.queue("c", "dev", ["kw_individual"], True, None)
+        db.update_job(conn, job, status="stopped_no_key")
+        r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
+        assert r.status_code == 503 and "'query' job" in r.json()["detail"]
+        assert db.get_job(conn, job)["status"] == "stopped_no_key"
 
 
 def test_confirmed_paid_resume_without_a_key_is_503(tmp_path):

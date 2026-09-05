@@ -121,6 +121,15 @@ def test_estimate(tmp_path):
     assert c.estimate_usd(4000, 400, batch=True) == pytest.approx(full / 2)
 
 
+def test_estimate_has_no_batch_discount_where_batches_do_not_exist(tmp_path):
+    c = fake_ai(tmp_path / "ai.db", lambda p: "")
+    c.add_connection("oa", "openai", "OpenAI-compatible", api_key="k")
+    c.add_model("oa", "m", price_in=0.10, price_out=0.50)
+    full = c.estimate_usd(4000, 400, model="oa/m")
+    assert full > 0 and c.estimate_usd(4000, 400, model="oa/m", batch=True) == pytest.approx(full)
+    assert c.estimate_usd(4000, 400, batch=True) == pytest.approx(c.estimate_usd(4000, 400) / 2)
+
+
 def test_realtime_failure_keeps_completed_calls(tmp_path):
     def reply(p):
         if p == "p2":

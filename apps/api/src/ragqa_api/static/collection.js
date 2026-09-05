@@ -1,5 +1,5 @@
 import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, gapSpan,
-  head, legendHtml, methodLabel, metricLabel, paint, pct, pill, plural, pts, refreshSpend, shell, short, usd, verdictHtml,
+  head, legendHtml, methodLabel, metricLabel, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
   upload, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
@@ -395,7 +395,7 @@ function previewHtml(kind, p, estimate) {
     })
     .join("");
   const cost = estimate
-    ? `<span class="muted">${esc(usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "Claude call"))}</span>`
+    ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "Claude call"))}</span>`
     : "";
   const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
   return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}

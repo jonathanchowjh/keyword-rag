@@ -155,6 +155,8 @@ export function count(n) {
 }
 
 // Money: two decimals, "< $0.01" below a cent, so a paid run never shows $0.00.
+export const UNPRICED = "cost unknown: no AI model is set up";
+
 export function usd(x) {
   const v = Number(x ?? 0);
   return v > 0 && v < 0.01 ? "< $0.01" : `$${v.toFixed(2)}`;
@@ -278,7 +280,8 @@ export function confirmSpend(el, estimate, onStart) {
   const money = usd(estimate.est_usd);
   const calls = Number(estimate.calls ?? 0);
   const what = calls === 1 ? "1 Claude call" : `${calls} Claude calls`;
-  const cost = money.startsWith("<") ? money : `≈ ${money}`;
+  // No price when a job has no AI model set up: Start then gets the reason from the API.
+  const cost = estimate.est_usd == null ? UNPRICED : money.startsWith("<") ? money : `≈ ${money}`;
   el.innerHTML = `<span class="confirm">${cost} · ${esc(what)} ·
     <button type="button">Start</button></span>`;
   const button = el.querySelector("button");

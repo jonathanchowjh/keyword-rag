@@ -415,7 +415,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return queue_documents(spec, body)
         items = [Item(**i.model_dump()) for i in body.items]
         estimate = state.indexer.estimate_add_usd(spec, items, "hand")
-        if estimate > 0 and not body.confirm:
+        if estimate != 0 and not body.confirm:  # None: no model to price it, so not free
             return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
         state.indexer.add(spec, items, "hand")
         return JSONResponse({"added": len(items)}, 200)
@@ -426,15 +426,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         upload_id = imports.save_upload(state.settings.home, spec.name, "documents.jsonl", rows)
         mapping = {f: (f if f in DOCUMENT_FIELDS else None) for f in FIELDS["items"]}
         setup = {"upload_id": upload_id, "kind": "items", "mapping": mapping, "source": "hand"}
-        estimate = state.loader.estimate_import(spec, setup)
-        # Only summaries can be unpaid-for here: a proposal is priced only when it can be made.
-        ready = not spec.summarize or state.ai.ready("summary")
-        if estimate["est_usd"] > 0 and (not body.confirm or not ready):
-            shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
-            if body.confirm:
-                raise NoConnection("summary")
-            return JSONResponse({"estimate": estimate}, 200)
-        return {"job_id": db.create_job(state.conn, "import", spec.name, setup)}
+        queued = False
+        try:  # the upload is the job's input: without a job it goes, whatever stopped it
+            estimate = state.loader.estimate_import(spec, setup)
+            # Only summaries can be unpaid-for: a proposal is priced only when it can be made.
+            ready = not spec.summarize or state.ai.ready("summary")
+            if estimate["est_usd"] != 0 and (not body.confirm or not ready):
+                if body.confirm:
+                    raise NoConnection("summary")
+                return JSONResponse({"estimate": estimate}, 200)
+            job_id = db.create_job(state.conn, "import", spec.name, setup)
+            queued = True
+            return {"job_id": job_id}
+        finally:
+            if not queued:
+                shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
 
     @app.post("/collections/{name}/uploads")
     def add_upload(name: str, request: Request, filename: str, kind: Literal["items", "questions"]):
@@ -448,11 +454,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stem = Path(filename).stem
         source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
         shown = preview_upload(spec, path, filename, kind, None, source)
+        try:
+            estimate = estimate_upload(spec, upload_id, kind, shown, source)
+        except Exception:  # the caller never learns the upload's id: nothing could reuse it
+            shutil.rmtree(path.parent, ignore_errors=True)
+            raise
         return {
             "upload_id": upload_id,
             "filename": filename,
             "preview": shown,
-            "estimate": estimate_upload(spec, upload_id, kind, shown, source),
+            "estimate": estimate,
         }
 
     @app.post("/collections/{name}/imports", status_code=202)
@@ -474,7 +485,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else "no usable rows"
             )
             raise HTTPException(422, why)
-        if estimate["est_usd"] > 0 and spec.summarize:
+        if estimate["est_usd"] != 0 and spec.summarize:  # None: no model to price it
             need_ai("summary")
         setup = {
             "upload_id": body.upload_id,
@@ -676,8 +687,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
-        if estimate["est_usd"] > 0:  # without a model it would stop at once
-            need_ai("answer" if body.answer else "query")
+        if estimate["est_usd"] != 0:  # without a model for each job it would stop at once
+            for role in estimate["roles"]:
+                need_ai(role)
         job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
@@ -769,10 +781,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, refusal)
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
-        row = db.get_job(state.conn, job_id)
-        role = "answer" if row and row["setup"]["answer"] else "query"
-        if not state.ai.ready(role) and state.evaluator.estimate_resume(job_id)["est_usd"] > 0:
-            raise NoConnection(role)
+        estimate = state.evaluator.estimate_resume(job_id)
+        if estimate["est_usd"] != 0:
+            for role in estimate["roles"]:
+                need_ai(role)
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
