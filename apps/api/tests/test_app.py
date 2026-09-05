@@ -476,7 +476,17 @@ def test_half_set_auth_is_503(tmp_path):
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/ragqa_api/static"
-PUBLIC = {"/collections", "/query", "/eval", "/jobs", "/budget", "/health", "/catalog", "/status"}
+PUBLIC = {
+    "/collections",
+    "/query",
+    "/eval",
+    "/jobs",
+    "/budget",
+    "/health",
+    "/catalog",
+    "/status",
+    "/ai",
+}
 PAGES = ("/", "/c/x", "/c/x/runs/abc", "/worker", "/lab")
 
 

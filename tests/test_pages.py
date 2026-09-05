@@ -1320,3 +1320,81 @@ def test_run_page_lists_what_the_run_left_out(page, seeded):
     expect(left).to_contain_text("Retrieval left out: upload:notes")
     expect(left).to_contain_text("2 questions' evidence is switched off")
     expect(left).to_contain_text("3 leaked questions left out")
+
+
+# -- Settings page ------------------------------------------------------------------------
+
+
+def ai_state(seeded):
+    return httpx.get(seeded.url + "/ai").json()
+
+
+def add_connection(page, seeded, preset, id, key=""):
+    page.goto(seeded.url + "/settings")
+    page.locator("#add-preset").select_option(label=preset)
+    page.locator("#add-id").fill(id)
+    if key:
+        page.locator("#add-key").fill(key)
+    page.get_by_role("button", name="Add connection").click()
+    row = page.locator(f'#connections [data-connection="{id}"]')
+    expect(row).to_be_visible()
+    return row
+
+
+def test_settings_page_adds_local_connection(page, seeded, monkeypatch):
+    ai = seeded.app.state.ai
+    monkeypatch.setattr(ai, "_list_models", lambda connection: ["llama3"])
+    monkeypatch.setattr(
+        ai, "_send", lambda connection, model_id, system, prompt, max_tokens: ("OK", 3, 1)
+    )
+    row = add_connection(page, seeded, "Ollama (local)", "ollama")
+    expect(row).to_contain_text("Ollama (local)")
+    row.get_by_role("button", name="Fetch models").click()
+    expect(page.locator('#models [data-model="ollama/llama3"]')).to_be_visible()
+    row.get_by_role("button", name="Test").click()
+    expect(row.locator(".result")).to_contain_text("Worked with llama3")
+
+
+def test_settings_page_never_shows_key(page, seeded):
+    row = add_connection(page, seeded, "OpenAI", "keyed", key="sk-proj-SECRET123456")
+    expect(row).to_contain_text("…3456")
+    assert "SECRET" not in page.content()
+    assert page.locator("#add-key").input_value() == ""
+    page.reload()
+    expect(page.locator('#connections [data-connection="keyed"]')).to_be_visible()
+    assert "SECRET" not in page.content()
+
+
+def test_unpriced_model_is_flagged_and_not_offered(page, seeded, monkeypatch):
+    monkeypatch.setattr(seeded.app.state.ai, "_list_models", lambda connection: ["gpt-unpriced"])
+    row = add_connection(page, seeded, "OpenAI", "remote", key="sk-remote-key-0000")
+    row.get_by_role("button", name="Fetch models").click()
+    model = page.locator('#models [data-model="remote/gpt-unpriced"]')
+    expect(model).to_contain_text("needs a price before use")
+    options = page.locator("#roles select option").all_inner_texts()
+    assert "gpt-unpriced" not in " ".join(options)
+    assert "Haiku 5.5" in options
+    model.locator("input[name=price_in]").fill("1")
+    model.locator("input[name=price_out]").fill("2")
+    model.locator("input[name=price_out]").blur()
+    expect(model).not_to_contain_text("needs a price before use")
+    expect(
+        page.locator("#roles select").first.locator("option", has_text="gpt-unpriced")
+    ).to_have_count(1)
+
+
+def test_run_form_models_come_from_settings(page, seeded):
+    seeded.build("pickers")
+    state = ai_state(seeded)
+    want = [
+        m["label"]
+        for m in state["models"]
+        if m["enabled"] and m["price_in"] is not None and m["price_out"] is not None
+    ]
+    assert want
+    page.goto(seeded.url + "/c/pickers")
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("#rf-model option").first).to_be_attached()
+    assert page.locator("#rf-model option").all_inner_texts() == want
+    refs = page.locator("#rf-model option").evaluate_all("os => os.map(o => o.value)")
+    assert refs == [m["ref"] for m in state["models"] if m["label"] in want]

@@ -1,5 +1,5 @@
 import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, gapSpan,
-  head, legendHtml, methodLabel, metricLabel, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
+  head, legendHtml, methodLabel, metricLabel, modelOptions, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
   upload, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
@@ -14,7 +14,6 @@ const GROUPS = [
   ["keywords", "Keywords"],
 ];
 const CONTROLS = ["random_example", "fixed_example"];
-const MODELS = ["claude-haiku-5-5", "claude-sonnet-5-5"];
 
 const name = decodeURIComponent(location.pathname.split("/")[2] ?? "");
 const enc = encodeURIComponent(name);
@@ -107,7 +106,7 @@ function measureHtml() {
     (no.length ? `<p class="muted">Not measurable here: ${esc(no.join("; "))}.</p>` : "");
 }
 
-function runFormHtml() {
+function runFormHtml(ai) {
   const groups = GROUPS.map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
@@ -120,7 +119,7 @@ function runFormHtml() {
       .join("");
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";
   }).join("");
-  const models = MODELS.map((m) => `<option>${esc(m)}</option>`).join("");
+  const models = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
   return `<div class="card form">${groups}
     <label class="check"><input type="checkbox" id="rf-answer" checked> Have Claude answer the questions <span class="credit muted">uses credit</span></label>
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
@@ -138,7 +137,7 @@ function bindRunForm() {
     collection: name,
     methods: [...form.querySelectorAll("input[name=method]:checked")].map((i) => i.value),
     answer: $("rf-answer").checked,
-    model: $("rf-model").value,
+    model: $("rf-model").value || null,
     split: $("rf-split").value,
     k: 5,
     rrf_k: 60,
@@ -172,13 +171,17 @@ function bindRunForm() {
   });
 }
 
-function toggleRunForm() {
+async function toggleRunForm() {
   const form = $("run-form");
   if (!form.hidden) {
     form.hidden = true;
     return;
   }
-  form.innerHTML = runFormHtml();
+  try {
+    form.innerHTML = runFormHtml(await api("/ai")); // the model list is whatever Settings holds now
+  } catch (e) {
+    form.innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
   form.hidden = false;
   bindRunForm();
 }

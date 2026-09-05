@@ -1,4 +1,4 @@
-import { $, api, catalog, creditMark, esc, head, methodLabel, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, creditMark, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
 
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
@@ -68,6 +68,7 @@ $("form").addEventListener("submit", async (event) => {
     k: +$("k").value,
     rrf_k: +$("rrfk").value,
     answer: $("answer").checked,
+    model: $("model").value || null,
   };
   $("run").disabled = true;
   $("status").textContent = "running…";
@@ -83,8 +84,15 @@ $("form").addEventListener("submit", async (event) => {
   }
 });
 
+// The answer model: enabled, priced models from Settings, the answer job's choice first.
+async function loadModels() {
+  const ai = await api("/ai");
+  $("model").innerHTML = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
+}
+
 // Labels come from the catalog, so wait for it before drawing method names.
 catalog()
   .catch(() => {})
+  .then(loadModels)
   .then(loadCollections)
   .catch((e) => ($("status").textContent = e.message));

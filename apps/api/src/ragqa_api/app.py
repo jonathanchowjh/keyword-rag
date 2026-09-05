@@ -966,6 +966,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/c/{name}/runs/{id}": "run",
         "/worker": "worker",
         "/lab": "lab",
+        "/settings": "settings",
     }
     for route, page in pages.items():
         app.add_api_route(

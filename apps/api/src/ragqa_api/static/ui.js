@@ -132,6 +132,14 @@ export function methodLabel(id, cat = known) {
   return cat?.methods?.[id]?.label ?? id;
 }
 
+// <option>s for the models a job may use: enabled and priced, by label, sending the ref.
+export function modelOptions(models, chosen) {
+  return models
+    .filter((m) => m.enabled && m.price_in != null && m.price_out != null)
+    .map((m) => `<option value="${esc(m.ref)}"${m.ref === chosen ? " selected" : ""}>${esc(m.label)}</option>`)
+    .join("");
+}
+
 // The muted "uses credit" note beside a paid method (spec §7.1); "" for a free one. A keyword
 // method spends only on a collection with summaries (`summarize`), and is unmarked elsewhere.
 export function creditMark(id, summarize, cat = known) {
@@ -351,6 +359,7 @@ function sideHtml(active, names) {
   return `<div class="brand">rag-qa</div><div class="tag">keyword RAG test bench</div>
     ${link("/", "Collections", "", active, "collections")}${collections}
     ${link("/lab", "Lab", "", active, "lab")}
+    ${link("/settings", "Settings", "", active, "settings")}
     <div class="group">BEHIND THE NUMBERS</div>
     ${link("/worker", 'Worker <span id="worker-dot" class="dot" role="img" aria-label="state not known yet"></span>', "", active, "worker")}
     <a id="worker-problem" class="problem" href="/worker"></a>
@@ -390,7 +399,7 @@ function refreshDot() {
     .catch(() => {});
 }
 
-// Renders the sidebar into <aside id="side">. `active` is "collections", "lab", "worker",
+// Renders the sidebar into <aside id="side">. `active` is "collections", "lab", "settings", "worker",
 // or "c/<name>" for a collection's page.
 export function shell(active) {
   const side = document.getElementById("side");
