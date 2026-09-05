@@ -38,7 +38,7 @@ function connectionHtml(c) {
     ? ""
     : `<div class="keyline"><label>New key <input type="password" name="key" autocomplete="off"
         ${locked ? `disabled placeholder="${ENV}"` : ""}></label>
-        <button type="button" class="secondary" data-act="key" ${locked ? "disabled" : ""}>Save key</button></div>`;
+        <button type="button" class="secondary" data-act="key" disabled>Save key</button></div>`;
   return `<div class="card conn" data-connection="${esc(c.id)}">
     <div class="top"><strong>${esc(c.label)}</strong><code>${esc(c.kind)}</code>${where}
       <span class="muted">${c.local ? "local" : `key ${esc(key)}`}</span></div>
@@ -46,7 +46,7 @@ function connectionHtml(c) {
     <div class="actions" style="margin:0">
       <button type="button" class="secondary" data-act="test">Test</button>
       <button type="button" class="secondary" data-act="fetch">Fetch models</button>
-      <button type="button" class="danger" data-act="remove">Remove</button>
+      ${c.from_env.length ? "" : '<button type="button" class="danger" data-act="remove">Remove</button>'}
       <span class="result" role="status">${notes[c.id] ?? ""}</span></div>
   </div>`;
 }
@@ -76,6 +76,7 @@ const ACTIONS = {
   },
   async key(id, box) {
     const input = box.querySelector("[name=key]");
+    if (!input.value) return;
     await api(connPath(id), { method: "PATCH", body: { api_key: input.value } });
     input.value = "";
     notes[id] = '<span class="muted">key saved</span>';
@@ -87,6 +88,12 @@ $("connections").addEventListener("click", (event) => {
   if (!button) return;
   const box = button.closest("[data-connection]");
   act(() => ACTIONS[button.dataset.act](box.dataset.connection, box));
+});
+
+// Save key stays off until something is typed, so an empty box can never clear a key.
+$("connections").addEventListener("input", (event) => {
+  const input = event.target.closest("[name=key]");
+  if (input) input.closest(".keyline").querySelector("button").disabled = !input.value;
 });
 
 // -- add form ---------------------------------------------------------------------
@@ -130,6 +137,7 @@ function modelHtml(m) {
     <span class="name">${esc(m.label)}<code>${esc(m.model_id)}</code></span>
     <label><input type="checkbox" name="enabled" ${m.enabled ? "checked" : ""}> Enabled</label>
     ${priceBox("price_in", m.price_in)}${priceBox("price_out", m.price_out)}
+    <button type="button" class="secondary" data-save>Save</button>
     ${unpriced ? '<span class="warn">needs a price before use</span>' : ""}</div>`;
 }
 
@@ -145,19 +153,32 @@ function drawModels() {
     .join("");
 }
 
-$("models").addEventListener("change", (event) => {
-  const row = event.target.closest(".model");
-  if (!row) return;
+// A row saves whole, on its Save button: both prices or neither. Only that row and the job lists
+// redraw, so text typed elsewhere on the page stays.
+async function saveRow(row) {
   const number = (name) => {
     const v = row.querySelector(`[name=${name}]`).value;
     return v === "" ? null : Number(v);
   };
-  const m = { connection_id: row.dataset.connection, model_id: row.dataset.id };
   const body = { enabled: row.querySelector("[name=enabled]").checked, price_in: number("price_in"), price_out: number("price_out") };
-  act(() => api(modelPath(m), { method: "PUT", body }));
-});
+  say("");
+  if ((body.price_in === null) !== (body.price_out === null)) {
+    say("Give both prices, or leave both empty.");
+    return;
+  }
+  try {
+    await api(modelPath({ connection_id: row.dataset.connection, model_id: row.dataset.id }), { method: "PUT", body });
+    ai = await api("/ai");
+    row.outerHTML = modelHtml(ai.models.find((m) => m.ref === row.dataset.model));
+    drawRoles();
+  } catch (e) {
+    say(e.message);
+  }
+}
 
 $("models").addEventListener("click", (event) => {
+  const save = event.target.closest("[data-save]");
+  if (save) return saveRow(save.closest(".model"));
   if (!event.target.closest("[data-add]")) return;
   const card = event.target.closest("[data-connection]");
   const id = card.querySelector("[name=new-id]").value.trim();

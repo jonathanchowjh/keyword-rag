@@ -1376,11 +1376,60 @@ def test_unpriced_model_is_flagged_and_not_offered(page, seeded, monkeypatch):
     assert "Haiku 5.5" in options
     model.locator("input[name=price_in]").fill("1")
     model.locator("input[name=price_out]").fill("2")
-    model.locator("input[name=price_out]").blur()
+    with page.expect_response(
+        lambda r: r.request.method == "PUT" and "remote/gpt-unpriced" in r.url
+    ):
+        model.get_by_role("button", name="Save").click()
     expect(model).not_to_contain_text("needs a price before use")
     expect(
         page.locator("#roles select").first.locator("option", has_text="gpt-unpriced")
     ).to_have_count(1)
+    row = next(m for m in ai_state(seeded)["models"] if m["ref"] == "remote/gpt-unpriced")
+    assert (row["price_in"], row["price_out"]) == (1, 2)
+
+
+def test_half_a_price_is_not_sent_and_typing_is_kept(page, seeded, monkeypatch):
+    monkeypatch.setattr(seeded.app.state.ai, "_list_models", lambda connection: ["gpt-half"])
+    row = add_connection(page, seeded, "OpenAI", "half", key="sk-half-key-00000")
+    row.get_by_role("button", name="Fetch models").click()
+    model = page.locator('#models [data-model="half/gpt-half"]')
+    expect(model).to_be_visible()
+    page.locator('#models [data-connection="anthropic"] input[name=new-id]').fill("typed-id")
+    model.locator("input[name=price_in]").fill("1")
+    model.get_by_role("button", name="Save").click()
+    expect(page.locator("#msg")).to_contain_text("both prices")
+    assert model.locator("input[name=price_in]").input_value() == "1"
+    assert (
+        page.locator('#models [data-connection="anthropic"] input[name=new-id]').input_value()
+        == "typed-id"
+    )
+    stored = next(m for m in ai_state(seeded)["models"] if m["ref"] == "half/gpt-half")
+    assert stored["price_in"] is None
+
+
+def test_env_connection_has_no_remove(page, seeded):
+    page.goto(seeded.url + "/settings")
+    env = page.locator('#connections [data-connection="anthropic"]')
+    expect(env).to_be_visible()
+    expect(env.get_by_role("button", name="Remove")).to_have_count(0)
+    add_connection(page, seeded, "Ollama (local)", "removable")
+    expect(
+        page.locator('#connections [data-connection="removable"]').get_by_role(
+            "button", name="Remove"
+        )
+    ).to_have_count(1)
+
+
+def test_empty_save_key_leaves_the_key_alone(page, seeded):
+    row = add_connection(page, seeded, "OpenAI", "keep", key="sk-proj-KEEPME123456")
+    expect(row.get_by_role("button", name="Save key")).to_be_disabled()
+    before = next(c for c in ai_state(seeded)["connections"] if c["id"] == "keep")["key"]
+    assert before
+    row.locator("input[name=key]").fill("x")
+    row.locator("input[name=key]").fill("")
+    expect(row.get_by_role("button", name="Save key")).to_be_disabled()
+    after = next(c for c in ai_state(seeded)["connections"] if c["id"] == "keep")["key"]
+    assert after == before
 
 
 def test_run_form_models_come_from_settings(page, seeded):
