@@ -3,7 +3,7 @@
 Loads, imports, re-keys and evals are queued as jobs, and the worker thread
 (ragqa_worker), started by the lifespan, runs them in order. A few routes still
 work in the request: /documents indexes its items, and /query and a confirmed
-proposal call Claude.
+proposal call the AI.
 
 Run with `uvicorn --factory ragqa_api.app:create_app`.
 """
@@ -37,7 +37,7 @@ from aiconnect.presets import PRESETS
 from ragqa_core import db, imports
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
-from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, runnable
+from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, no_ai, runnable
 from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
@@ -71,7 +71,7 @@ PROBLEM = {
     "failed": "failed",
     "interrupted": "was interrupted by a restart",
     "stopped_budget": "stopped at the monthly cap",
-    "stopped_no_key": "stopped: needs ANTHROPIC_API_KEY",
+    "stopped_no_key": "stopped: no AI model is set up for this job (see the Settings page)",
 }
 KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
@@ -868,7 +868,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "month": datetime.now(UTC).strftime("%Y-%m"),
             "spent_usd": state.ai.month_spend(),
             "cap_usd": state.ai.cap_usd,
-            "note": "This service's own spend; the Console shows the credit balance.",
+            "note": "This service's own spend; your provider's dashboard shows the rest.",
         }
 
     # -- AI settings ------------------------------------------------------------
@@ -1055,13 +1055,9 @@ def job_problems(newest: list[dict]) -> list[str]:
     return lines
 
 
-def no_ai(role: str) -> str:
-    return f"no AI model is set up for the '{role}' job; choose one on the Settings page"
-
-
 def stalled(job: dict | None, batches: list[dict], at: datetime) -> str | None:
     """A running job that has not reported for STALL_AFTER and is not waiting on a
-    Claude batch: the worker may be hung while its thread is still alive (spec §5.7)."""
+    AI batch: the worker may be hung while its thread is still alive (spec §5.7)."""
     if job is None or any(b["job_id"] == job["id"] for b in batches):
         return None
     quiet = at - datetime.fromisoformat(job["updated_at"])

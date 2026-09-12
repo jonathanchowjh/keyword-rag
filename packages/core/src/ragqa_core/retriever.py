@@ -207,7 +207,7 @@ class Retriever:
         return self._mark(query_kw, fused)
 
     def _iterative(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
-        """Retrieve, then let Claude name the next query, up to MAX_HOPS calls.
+        """Retrieve, then let the AI name the next query, up to MAX_HOPS calls.
 
         Reading of spec §5: rather than decomposing up front, each hop asks
         for the next missing fact given what has been found (≤3 calls)."""

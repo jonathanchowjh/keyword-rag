@@ -400,7 +400,7 @@ class Evaluator:
         except BudgetExceeded as e:
             db.update_job(self.conn, job_id, status="stopped_budget", error=str(e))
         except NoConnection as e:
-            db.update_job(self.conn, job_id, status="stopped_no_key", error=str(e))
+            db.update_job(self.conn, job_id, status="stopped_no_key", error=no_ai(e.role))
         except Exception as e:  # recorded on the job; the thread must not die silently
             db.update_job(self.conn, job_id, status="failed", error=repr(e))
 
@@ -415,7 +415,7 @@ class Evaluator:
         report: Callable[[float], None],
     ) -> None:
         """One method over `questions`, the ones still incomplete for it. Every 10
-        questions and after each Claude step it reports and checks, so the job's
+        questions and after each AI step it reports and checks, so the job's
         updated_at stays fresh and a cancel does not wait for the method to end."""
         if not questions:
             return
@@ -761,6 +761,10 @@ class Evaluator:
                 }
             )
         return out
+
+
+def no_ai(role: str) -> str:
+    return f"no AI model is set up for the '{role}' job; choose one on the Settings page"
 
 
 def avg(values) -> float:

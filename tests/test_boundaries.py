@@ -111,3 +111,29 @@ def test_env_example_lists_every_setting():
 def test_docker_context_excludes_private_files():
     ignored = (ROOT / ".dockerignore").read_text().split()
     assert {"docs", ".env", ".superpowers", ".remember"} <= set(ignored)
+
+
+def test_pages_name_no_provider_and_no_credit():
+    for path in sorted((API_SRC / "ragqa_api/static").iterdir()):
+        assert not re.search(r"claude|anthropic|credit", path.read_text(), re.I), path.name
+
+
+def test_python_strings_name_no_provider():
+    # Provider names live only in the preset and wire files. Lowercase ids
+    # ("anthropic", "claude-haiku-5-5") and ANTHROPIC_API_KEY stay legal: they
+    # are identifiers, not prose.
+    srcs = [CORE_SRC, AICONNECT_SRC, *sorted((ROOT / "apps").glob("*/src"))]
+    skip = {AICONNECT_SRC / "aiconnect/presets.py", AICONNECT_SRC / "aiconnect/wire.py"}
+    found = []
+    for src in srcs:
+        for path in sorted(src.rglob("*.py")):
+            if path in skip:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and re.search(r"Claude|Anthropic", node.value)
+                ):
+                    found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    assert found == []

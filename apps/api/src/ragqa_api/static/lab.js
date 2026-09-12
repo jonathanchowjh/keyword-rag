@@ -1,4 +1,4 @@
-import { $, api, catalog, creditMark, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
 
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
@@ -27,7 +27,7 @@ async function loadMethods() {
   if (mine !== asking) return; // the choice moved on while this was loading
   $("methods").innerHTML = detail.methods_available
     .map(
-      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${creditMark(m, detail.summarize)}</label>`,
+      (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${costMark(m, detail.summarize)}</label>`,
     )
     .join("");
 }

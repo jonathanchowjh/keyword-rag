@@ -12,6 +12,8 @@ services:
         required: false
     environment:
       RAGQA_QDRANT_URL: http://qdrant:6333
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets Linux reach an Ollama on the host
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

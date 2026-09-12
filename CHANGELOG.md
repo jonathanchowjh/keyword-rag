@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- AI connections: a Settings page (`/settings`) and `/ai` routes set up any
+  number of providers (Anthropic, OpenAI, Gemini, xAI, OpenRouter, Ollama or
+  any OpenAI-compatible server), their models and prices, the model each job
+  uses (`answer`, `summary`, `keywords`, `query`) and the monthly cap. Keys are
+  stored in the database file and never returned. A model with no price is
+  refused before anything is sent. The reusable package is `aiconnect`.
+- `ANTHROPIC_API_KEY`, `RAGQA_MODEL` and `RAGQA_MONTHLY_CAP_USD` still work,
+  are applied at every start and are read-only on the page. An existing
+  database keeps its spend, cached answers and pending batches; batches from
+  before the upgrade are collected through the Anthropic connection.
+- Provider-neutral wording: pages say "costs money" and "AI call" instead of
+  naming a provider or "credit". `/health` returns `ai` instead of `api_key`.
+  The 503 for a job with no model names the job and the Settings page.
+- `compose.yaml` maps `host.docker.internal` so Linux hosts reach an Ollama
+  running on the host.
 - Your own corpus: upload JSONL, JSON, CSV, TSV, text, Markdown or a zip of
   them as items or questions, with a preview, a field mapping and an estimate
   before anything is queued. Each import is a source (`upload:<name>`) that can

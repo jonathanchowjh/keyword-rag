@@ -143,7 +143,7 @@ class Indexer:
         return counts
 
     def backfill(self, name: str, progress: Callable[[float], None] = lambda p: None) -> dict:
-        """Label points that predate sources, in place: no embedding, no Claude."""
+        """Label points that predate sources, in place: no embedding, no AI call."""
         self.store.ensure_indexes(name)
         datasets = db.loaded_datasets(self.conn, name)
         total, done = self.store.count(name), 0
@@ -183,7 +183,7 @@ class Indexer:
         method = dedupe(proposed.get("method") or [])
         if not topic or not method:
             raise ValueError(
-                f"Claude's reply had no usable topic or method list: {reply.text[:200]!r}"
+                f"The AI's reply had no usable topic or method list: {reply.text[:200]!r}"
             )
         # A small sample can have no term in two texts; reuse the proposed phrases.
         common = tfidf_terms([i.text for i in sample]) or topic + method

@@ -45,12 +45,12 @@ def sample_items(store: Store, name: str, skip: tuple[str, ...] = ()) -> list[It
 
 
 def propose_sample(items: list[Item]) -> list[Item]:
-    """The items a load shows Claude when it proposes the keyword lists."""
+    """The items a load shows the AI when it proposes the keyword lists."""
     return random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
 
 
 def tfidf_lists(texts: list[str]) -> KeywordLists | None:
-    """Lists without Claude: the corpus's own top terms. A small corpus has too
+    """Lists without AI: the corpus's own top terms. A small corpus has too
     few terms to fill all three facets, so a facet that would be empty reuses
     the head of the ranking rather than leaving its keyword vector undefined."""
     terms = tfidf_terms(texts, n=565)

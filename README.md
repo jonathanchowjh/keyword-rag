@@ -4,7 +4,7 @@ A question-answering RAG microservice and test bench. It indexes four common
 kinds of QA, runs the retrieval methods from *Keyword Vectorization for
 Retrieval Augmented Generation on Science Question Answering* (Jonathan Chow,
 2024) next to modern ones, and evaluates them over an HTTP API. Every result
-says how sure it is, and nothing spends Claude credit without showing the
+says how sure it is, and nothing spends money without showing the
 estimate first, except the Lab (`/query`), which reports each method's cost
 after the call.
 
@@ -27,6 +27,7 @@ and where.
 - [Your own corpus](#your-own-corpus)
 - [Retrieval methods](#retrieval-methods)
 - [Datasets](#datasets)
+- [AI connections](#ai-connections)
 - [Cost safety](#cost-safety)
 - [Pages](#pages)
 - [Reading a run](#reading-a-run)
@@ -37,8 +38,11 @@ How it is built and how to work on it is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Requires Docker.
 
-**1. A key that cannot overspend.** Claude Max 5x, Max 20x and Team plans
-include monthly API credit ($100 a month on Max 5x).
+**1. An AI key that cannot overspend.** You can also add a key, or a local
+model, from the Settings page after it starts (see
+[AI connections](#ai-connections)); this step is the Anthropic way to have one
+ready in `.env`. Claude Max 5x, Max 20x and Team plans include monthly API
+credit ($100 a month on Max 5x).
 1. On claude.ai, open **Settings → Billing → API credits** and link a Console
    organisation.
 2. In the Console, create a workspace for rag-qa and give it its own spend
@@ -61,8 +65,9 @@ Open http://localhost:8080/docs for every endpoint, http://localhost:8080/lab
 to compare methods on one question, and http://localhost:8080/ for the
 collections and their evaluations (see [Pages](#pages)).
 
-With no key, the service still starts. Every free retrieval method works, and
-calls that would spend return 503 `needs ANTHROPIC_API_KEY`.
+With no AI model set up, the service still starts. Every free retrieval method
+works, and calls that would spend return 503 `no AI model is set up for the
+'<job>' job; choose one on the Settings page`.
 
 ## First run
 
@@ -110,9 +115,9 @@ Environment variables, read at start. `compose.yaml` passes `.env` through.
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Key from the Console workspace above. Empty: retrieval only. |
+| `ANTHROPIC_API_KEY` | Optional. Becomes the Anthropic connection: stored, shown read-only on the Settings page, applied at every start. Empty: add any connection on the Settings page, or run retrieval only. |
 | `RAGQA_MONTHLY_CAP_USD` | This service's own monthly ceiling, counted from its own calls. Default `20`. |
-| `RAGQA_MODEL` | Default Claude model: `claude-haiku-5-5` (default) or `claude-sonnet-5-5`. |
+| `RAGQA_MODEL` | Sets the default job model, a model id or `<connection>/<model id>`. With only the key set, it is `claude-haiku-5-5`. Read-only on the Settings page. |
 | `RAGQA_USERNAME`, `RAGQA_PASSWORD` | HTTP basic auth over every route. Set both or neither; exactly one set is a 503 on every request. |
 | `RAGQA_DENSE_MODEL` | Retrieval embedding model (fastembed). Default `Qwen/Qwen3-Embedding-0.6B-Q`. |
 | `RAGQA_JUDGE_MODEL` | A different model, used only to score solution similarity. Default `BAAI/bge-small-en-v1.5`. |
@@ -130,35 +135,41 @@ A collection remembers the dense model it was built with. Changing
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | Liveness, and whether a key is set |
+| `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
 | `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize}` |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}` |
 | `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
-| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no key is set |
+| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up |
 | `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
 | `PATCH /collections/{name}/sources/{source}` | `{enabled}`: switch a source on or off for retrieval. 409 while an eval runs, or to switch off the last item source |
 | `DELETE /collections/{name}/sources/{source}` | Remove a source's items, chunks and imported questions; 409 while a job is queued or running on the collection |
 | `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
 | `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
-| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or a Claude keyword proposal because a key is set and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
-| `POST /collections/{name}/keyword-lists/propose` | Claude proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
+| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or an AI keyword proposal because an AI model is set up and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
+| `POST /collections/{name}/keyword-lists/propose` | The AI proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
-| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every Claude call it made (query summary, hops, answer) |
-| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no key is set |
+| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer) |
+| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since`, what changed after it (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome` (`right` or `wrong`, absent when unmeasured); `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
-| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; 503 when what is left would spend and no key is set |
-| `GET /status` | The worker, the queue, pending Claude batches and the problems that need a person |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; 503 when what is left would spend and no AI model is set up |
+| `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
 | `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
 | `GET /budget` | This service's spend this month against its cap |
+| `GET /ai` | Connections (keys never shown), models with prices, jobs and budget |
+| `POST /ai/connections`, `PATCH`/`DELETE /ai/connections/{id}` | Add, edit, remove a connection; 409 when a job uses it or the field is set by the environment |
+| `POST /ai/connections/{id}/test`, `/models/fetch`, `/models` | Test a connection (an unreachable server is reported, not raised), fetch its model list, add a model by hand |
+| `PUT /ai/models/{connection}/{model}` | Price or enable a model |
+| `PUT /ai/roles/{job}` | Choose the model a job uses |
+| `PUT /ai/budget` | The monthly cap |
 
 Loads, re-keys and evaluations run one at a time, oldest first, on a worker
 thread inside the service. A resumed run keeps its original place in that
@@ -223,7 +234,7 @@ curl -X POST http://localhost:8080/collections/notes/imports \
 | `kw_rrf` | paper | One vector per list (+ summary), fused with RRF |
 | `hybrid_rerank` | modern | `hybrid` top-50 reranked by a local cross-encoder |
 | `kw_hybrid` | new | `kw_individual` fused with `hybrid`: a dual index like Doc2Query++ |
-| `iterative` | modern | Up to 3 retrieval hops; Claude decides the next query |
+| `iterative` | modern | Up to 3 retrieval hops; the AI decides the next query |
 | `random_example` | control | Random items, seeded by the question: the same draw on every run |
 | `fixed_example` | control | The same random items for every question |
 
@@ -279,12 +290,50 @@ MuSiQue recall can be set beside published HippoRAG-2 numbers, but only as
 small local model. EM and F1 come from a different reader and are not
 comparable to the papers.
 
+## AI connections
+
+The **Settings** page (`/settings`) sets up which AI the service calls. Nothing
+is needed in `.env`.
+
+- **Connections.** A connection is a provider with an address and a key:
+  Anthropic, OpenAI, Gemini, xAI, OpenRouter, Ollama or any OpenAI-compatible
+  server. Test it, then fetch its model list. Keys are stored in the database
+  file (mode `0600`) and are never shown again or put in a log or response.
+- **Prices.** Every model needs a price per million input and output tokens
+  before it can be used, and a call to an unpriced model is refused before
+  anything is sent. A price of 0 is allowed. Models fetched from a local
+  connection are priced 0.
+- **Jobs.** Each job picks a model: `answer`, `summary`, `keywords` and `query`
+  (query-time summaries, keywords and hops), with `default` for any job left
+  alone. Old run setups that name a bare model id still resolve while exactly
+  one enabled model has it.
+- **Budget.** The monthly cap is set here too. This month's spend counts every
+  connection together.
+- **Environment.** `ANTHROPIC_API_KEY`, `RAGQA_MODEL` and
+  `RAGQA_MONTHLY_CAP_USD`, when set, are applied at every start and cannot be
+  edited on the page. The key is stored as the Anthropic connection, so if you
+  later remove the variable it stays as an ordinary stored key you can edit.
+- **Upgrading.** An existing database keeps its ledger, cached answers and
+  pending batches; this month's spend still counts against the cap. A batch
+  submitted before the upgrade is collected through the Anthropic connection,
+  so keep the Anthropic key (the env key, or one added on the page) until
+  those batches finish.
+
+### Running a local model with Ollama
+
+Add a connection from the Ollama preset, with base URL
+`http://host.docker.internal:11434/v1`. It needs no key and costs $0. On
+Linux hosts `compose.yaml` maps `host.docker.internal` to the host, so a
+host-run Ollama is reachable from the container. If Ollama is stopped, Test
+reports it and a job using it fails with a readable line instead of crashing.
+
 ## Cost safety
 
-- **The Console workspace spend limit is the real ceiling.** The service only
-  sees its own calls; other keys in the organisation draw on the same credit.
+- **The provider's own spend limit is the real ceiling.** The service only
+  sees its own calls; other keys on the same account draw on the same budget.
+  For Anthropic that is the Console workspace limit from step 1.
 - **A monthly cap inside the service** (`RAGQA_MONTHLY_CAP_USD`). Each call is
-  priced from Claude's reported token usage and written to a ledger. A call
+  priced from the provider's reported token usage and written to a ledger. A call
   that would cross the cap is refused before it is sent, and an evaluation
   that hits the cap stops with `stopped_budget` and keeps its rows.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`
@@ -293,8 +342,9 @@ comparable to the papers.
   method's cost after.
 - **Every response is cached.** A re-run with the same prompts is free, and its
   answers are identical.
-- **Haiku by default, and batches.** Runs of more than 50 calls use the Batch
-  API at half price. A batch usually finishes in minutes but can take up to
+- **Haiku by default, and batches.** With the Anthropic connection, runs of
+  more than 50 calls use the Batch API at half price; other connections send
+  one call at a time. A batch usually finishes in minutes but can take up to
   24 hours.
 - **Localhost only.** The port is published on `127.0.0.1`. Opening it wider
   without basic auth would let anyone on the network spend up to the cap.
@@ -315,6 +365,7 @@ times as much.
 | `/c/{name}/runs/{id}` | One run |
 | `/lab` | One question, methods side by side |
 | `/worker` | The worker, its queue and what needs a person |
+| `/settings` | AI connections, models and prices, the model each job uses, the monthly cap |
 | `/board` | Redirects to `/` (the old Eval Board) |
 | `/docs` | Every endpoint |
 

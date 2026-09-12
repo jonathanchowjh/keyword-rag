@@ -68,7 +68,7 @@ async function showForm() {
   $("form").innerHTML = `<div class="card form">
     <label>Name<input id="f-name" autocomplete="off"></label>
     <label>Type<select id="f-type">${types}</select></label>
-    <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with Claude <span class="credit muted">uses credit</span></label>
+    <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with AI <span class="cost muted">costs money</span></label>
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
       <span id="f-msg" class="err" role="status"></span></div></div>`;

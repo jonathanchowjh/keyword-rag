@@ -49,7 +49,7 @@ function runningHtml(job, batches) {
   if (!job) return '<p class="muted">Nothing is running.</p>';
   const batch = batches.find((b) => b.job_id === job.id);
   const waiting = batch
-    ? `<p class="warn">waiting on Claude batch since ${esc(clock(batch.created_at))}, can take up to 24 h</p>`
+    ? `<p class="warn">waiting on AI batch since ${esc(clock(batch.created_at))}, can take up to 24 h</p>`
     : "";
   const log = (job.log ?? []).slice(-10)
     .map((l) => `<li>${esc(clock(l.at))} ${esc(l.message)}</li>`)
@@ -73,7 +73,7 @@ function queuedHtml(queue) {
 }
 
 function batchesHtml(batches) {
-  if (!batches.length) return '<p class="muted">No Claude batches are pending.</p>';
+  if (!batches.length) return '<p class="muted">No AI batches are pending.</p>';
   const rows = batches
     .map((b) => `<tr><td><code>${esc(b.id)}</code></td><td>${esc(b.model)}</td><td>${esc(b.purpose)}</td>
       <td>since ${esc(clock(b.created_at))}</td><td>${esc(short(b.job_id))}</td></tr>`)

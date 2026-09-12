@@ -41,7 +41,7 @@ METHODS: dict[str, dict] = {
         "Step by step",
         "modern",
         "modern",
-        "Claude picks the next search, up to 3 hops",
+        "The AI picks the next search, up to 3 hops",
         paid="always",
     ),
     "kw_all": _method(
@@ -82,7 +82,7 @@ def _metric(label: str, says: str, kind: str, unit: str = "share") -> dict:
 METRICS: dict[str, dict] = {
     "accuracy": _metric("Answered correctly", "Share of questions answered correctly", "answer"),
     "em": _metric("Exact answer", "Share of questions where the answer matched exactly", "answer"),
-    "f1": _metric("Partly right", "Partial credit for overlapping words", "answer"),
+    "f1": _metric("Partly right", "Part marks for overlapping words", "answer"),
     "recall@1": _metric(
         "Found the table (top 1)",
         "Share of questions where the right table came first",
@@ -130,7 +130,7 @@ METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "multihop": {},
     "table": {
         "em": "Share answered exactly right; numbers are compared at 2 decimal places",
-        "f1": "Share answered right, with partial credit for text answers that overlap the gold "
+        "f1": "Share answered right, with part marks for text answers that overlap the gold "
         "one; numbers are all-or-nothing",
     },
 }

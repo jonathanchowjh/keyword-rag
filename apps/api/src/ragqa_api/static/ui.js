@@ -140,12 +140,12 @@ export function modelOptions(models, chosen) {
     .join("");
 }
 
-// The muted "uses credit" note beside a paid method (spec §7.1); "" for a free one. A keyword
+// The muted "costs money" note beside a paid method (spec §7.1); "" for a free one. A keyword
 // method spends only on a collection with summaries (`summarize`), and is unmarked elsewhere.
-export function creditMark(id, summarize, cat = known) {
+export function costMark(id, summarize, cat = known) {
   const paid = cat?.methods?.[id]?.paid;
-  const note = paid === "always" ? "uses credit" : paid === "with_summaries" && summarize ? "uses credit" : "";
-  return note ? ` <span class="credit muted">${esc(note)}</span>` : "";
+  const note = paid === "always" ? "costs money" : paid === "with_summaries" && summarize ? "costs money" : "";
+  return note ? ` <span class="cost muted">${esc(note)}</span>` : "";
 }
 
 export function metricLabel(id, qaType, cat = known) {
@@ -283,11 +283,11 @@ export function head({ title, crumb = [], sub = "", aside = "" }) {
   </div>${aside ? `<div class="aside">${aside}</div>` : ""}</div>`;
 }
 
-// Renders "≈ $0.41 · 400 Claude calls · [Start]" into el; onStart runs only on click.
+// Renders "≈ $0.41 · 400 AI calls · [Start]" into el; onStart runs only on click.
 export function confirmSpend(el, estimate, onStart) {
   const money = usd(estimate.est_usd);
   const calls = Number(estimate.calls ?? 0);
-  const what = calls === 1 ? "1 Claude call" : `${calls} Claude calls`;
+  const what = calls === 1 ? "1 AI call" : `${calls} AI calls`;
   // No price when a job has no AI model set up: Start then gets the reason from the API.
   const cost = estimate.est_usd == null ? UNPRICED : money.startsWith("<") ? money : `≈ ${money}`;
   el.innerHTML = `<span class="confirm">${cost} · ${esc(what)} ·
@@ -372,7 +372,7 @@ export function refreshSpend() {
   return api("/budget")
     .then((b) => {
       const el = document.getElementById("spend");
-      if (el) el.textContent = `${usd(b.spent_usd)} of $${money(b.cap_usd)} this month`;
+      if (el) el.textContent = `Spent ${usd(b.spent_usd)} of $${money(b.cap_usd)} this month`;
     })
     .catch(() => {});
 }

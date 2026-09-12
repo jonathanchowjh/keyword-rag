@@ -1,4 +1,4 @@
-import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, creditMark, esc, gapBar, gapSpan,
+import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, costMark, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
   upload, verdictNotes, wordHtml } from "/static/ui.js";
 
@@ -114,14 +114,14 @@ function runFormHtml(ai) {
         const on = cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
         const ok = col.methods_available.includes(mid);
         return `<label class="check"><input type="checkbox" name="method" value="${esc(mid)}"
-          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${creditMark(mid, col.summarize, cat)}</label>`;
+          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${costMark(mid, col.summarize, cat)}</label>`;
       })
       .join("");
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";
   }).join("");
   const models = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
   return `<div class="card form">${groups}
-    <label class="check"><input type="checkbox" id="rf-answer" checked> Have Claude answer the questions <span class="credit muted">uses credit</span></label>
+    <label class="check"><input type="checkbox" id="rf-answer" checked> Have the AI answer the questions <span class="cost muted">costs money</span></label>
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
       <label>Questions<select id="rf-split">
         <option value="dev">Dev slice (${esc(count(col.dev_questions))})</option>
@@ -398,7 +398,7 @@ function previewHtml(kind, p, estimate) {
     })
     .join("");
   const cost = estimate
-    ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "Claude call"))}</span>`
+    ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "AI call"))}</span>`
     : "";
   const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
   return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}
@@ -486,7 +486,7 @@ function buildLists() {
   $("lists").innerHTML = `<p class="muted">One keyword per line. Each item is described by the
     best few from each list.</p><div class="lists">${areas}</div>
     <div class="actions"><button type="button" id="kw-save">Save lists</button>
-      <button type="button" id="kw-propose" class="secondary">Propose with Claude</button></div>
+      <button type="button" id="kw-propose" class="secondary">Propose with AI</button></div>
     <p id="kw-hint" class="muted"></p><p id="kw-msg" role="status"></p>
     <h3>Earlier versions</h3><ul id="lists-history" class="history"></ul>`;
   for (const [k] of LIST_KEYS) $(`kw-${k}`).addEventListener("input", () => (listsDirty = true));
@@ -565,7 +565,7 @@ async function proposeLists() {
       try {
         fillLists(await api(path, { method: "POST", body: { confirm: true } }));
         listsDirty = true;
-        note("Proposed by Claude. Review them, then Save lists.");
+        note("Proposed by the AI. Review them, then Save lists.");
         refreshSpend();
       } catch (e) {
         note(`<span class="err">${esc(e.message)}</span>`);

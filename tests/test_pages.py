@@ -99,8 +99,8 @@ def test_propose_shows_its_estimate_first(page, seeded):
     try:
         page.goto(seeded.url + "/c/prop")
         expect(page.locator("#kw-topic")).to_have_value("enzyme\nmarket\nvolcano\noptics")
-        page.get_by_role("button", name="Propose with Claude").click()
-        expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
+        page.get_by_role("button", name="Propose with AI").click()
+        expect(page.get_by_text("AI call", exact=False)).to_be_visible()
         assert page.locator("#kw-topic").input_value().startswith("enzyme\n")  # not proposed yet
         page.get_by_role("button", name="Start").click()
         expect(page.locator("#kw-topic")).to_have_value("enzymes")
@@ -116,7 +116,7 @@ def test_new_run_estimates_then_starts(page, seeded):
     expect(page.get_by_label("kw_individual")).to_be_checked()
     expect(page.get_by_label("random_example")).to_be_checked()
     page.get_by_role("button", name="Estimate").click()
-    expect(page.get_by_text("Claude calls", exact=False)).to_be_visible()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
     page.get_by_role("button", name="Start").click()
     expect(page.locator("#runs tbody tr")).to_have_count(2)
 
@@ -259,7 +259,7 @@ def test_run_rerun_estimates_then_starts(page, seeded):
     runs = httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()
     page.goto(f"{seeded.url}/c/rerun/runs/{runs[0]['id']}")
     page.get_by_role("button", name="Re-run").click()
-    expect(page.get_by_text("Claude calls", exact=False)).to_be_visible()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
     assert len(httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()) == 1
     page.get_by_role("button", name="Start").click()
     page.wait_for_url(lambda u: "/runs/" in u and runs[0]["id"] not in u)
@@ -301,7 +301,7 @@ def test_resume_without_refusal_shows_the_button(page, seeded):
     page.goto(f"{seeded.url}/c/resumable/runs/{run_id}")
     expect(page.get_by_role("button", name="Resume")).to_be_visible()
     page.get_by_role("button", name="Resume").click()
-    expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
+    expect(page.get_by_text("AI call", exact=False)).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{run_id}").json()["status"] == "interrupted"
 
 
@@ -346,7 +346,7 @@ def test_worker_page_resume_estimates_first_and_shows_a_refusal(page, seeded):
     interrupt(seeded, ok)
     page.goto(seeded.url + "/worker")
     page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
-    expect(page.get_by_text("Claude call", exact=False)).to_be_visible()
+    expect(page.get_by_text("AI call", exact=False)).to_be_visible()
     assert httpx.get(f"{seeded.url}/jobs/{ok}").json()["status"] == "interrupted"
     page.expected = ["409"]
     r = httpx.put(
@@ -419,7 +419,7 @@ def test_collection_load_shows_its_estimate_and_queues_only_on_start(page, seede
     )
     page.goto(seeded.url + "/c/est")
     page.get_by_role("button", name="Load scienceqa").click()
-    expect(page.get_by_text("51 Claude calls")).to_be_visible()
+    expect(page.get_by_text("51 AI calls")).to_be_visible()
     assert [b.get("confirm") for b in seen] == [False]
     page.get_by_role("button", name="Start").click()
     expect(page.get_by_text("Queued (job ab12cd)")).to_be_visible()
@@ -442,7 +442,7 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq", "sb")}
     page.goto(seeded.url + "/")
     page.get_by_role("button", name="Set up the four benchmark collections").click()
-    expect(page.get_by_text("5 Claude calls")).to_be_visible()
+    expect(page.get_by_text("5 AI calls")).to_be_visible()
     expect(page.get_by_text("$0.35")).to_be_visible()
     expect(page.get_by_role("button", name="Start")).to_have_count(1)
     assert [b.get("confirm") for b in seen["sqa"]] == [None] and len(seen["tq"]) == 1
@@ -606,44 +606,44 @@ def test_reasoning_match_is_rescaled_in_own_scores_and_pairs(page, seeded):
     expect(page.locator("#pairs tbody tr").first).to_contain_text("+50 pts")
 
 
-def credit_label(page, name):
-    return page.locator(f"label.check:has(input[value='{name}'])").locator(".credit")
+def cost_label(page, name):
+    return page.locator(f"label.check:has(input[value='{name}'])").locator(".cost")
 
 
-def test_paid_methods_carry_a_uses_credit_mark(page, seeded):
-    seeded.build("credit")
-    page.goto(seeded.url + "/c/credit")
+def test_paid_methods_carry_a_costs_money_mark(page, seeded):
+    seeded.build("cost")
+    page.goto(seeded.url + "/c/cost")
     page.get_by_role("button", name="New run").click()
-    expect(credit_label(page, "iterative")).to_have_text("uses credit")
-    expect(credit_label(page, "hybrid")).to_have_count(0)
+    expect(cost_label(page, "iterative")).to_have_text("costs money")
+    expect(cost_label(page, "hybrid")).to_have_count(0)
     # a keyword method spends only with summaries, and this collection has none
-    expect(credit_label(page, "kw_individual")).to_have_count(0)
+    expect(cost_label(page, "kw_individual")).to_have_count(0)
     expect(
-        page.locator("label.check", has=page.locator("#rf-answer")).locator(".credit")
-    ).to_have_text("uses credit")
+        page.locator("label.check", has=page.locator("#rf-answer")).locator(".cost")
+    ).to_have_text("costs money")
 
 
-def test_keyword_methods_say_uses_credit_on_a_summarising_collection(page, seeded):
+def test_keyword_methods_say_costs_money_on_a_summarising_collection(page, seeded):
     seeded.build("sumcol", summarize=True)
     page.goto(seeded.url + "/c/sumcol")
     page.get_by_role("button", name="New run").click()
-    expect(credit_label(page, "kw_individual")).to_have_text("uses credit")
-    expect(credit_label(page, "iterative")).to_have_text("uses credit")
+    expect(cost_label(page, "kw_individual")).to_have_text("costs money")
+    expect(cost_label(page, "iterative")).to_have_text("costs money")
 
 
 def test_lab_marks_paid_methods_and_the_answer_box(page, seeded):
     page.goto(seeded.url + "/lab")
-    expect(page.locator("#methods label", has_text="iterative").locator(".credit")).to_have_text(
-        "uses credit"
+    expect(page.locator("#methods label", has_text="iterative").locator(".cost")).to_have_text(
+        "costs money"
     )
-    expect(
-        page.locator("#methods label", has_text="hybrid").first.locator(".credit")
-    ).to_have_count(0)
-    expect(
-        page.locator("#methods label", has_text="kw_individual").locator(".credit")
-    ).to_have_count(0)  # `c` has no summaries
-    expect(page.locator("label", has=page.locator("#answer")).locator(".credit")).to_have_text(
-        "uses credit"
+    expect(page.locator("#methods label", has_text="hybrid").first.locator(".cost")).to_have_count(
+        0
+    )
+    expect(page.locator("#methods label", has_text="kw_individual").locator(".cost")).to_have_count(
+        0
+    )  # `c` has no summaries
+    expect(page.locator("label", has=page.locator("#answer")).locator(".cost")).to_have_text(
+        "costs money"
     )
 
 
@@ -651,9 +651,9 @@ def test_lab_marks_keyword_methods_on_a_summarising_collection(page, seeded):
     seeded.build("labsum", summarize=True)
     page.goto(seeded.url + "/lab")
     page.locator("#collection").select_option("labsum")
-    expect(
-        page.locator("#methods label", has_text="kw_individual").locator(".credit")
-    ).to_have_text("uses credit")
+    expect(page.locator("#methods label", has_text="kw_individual").locator(".cost")).to_have_text(
+        "costs money"
+    )
 
 
 def test_lab_renders_its_method_picker_for_a_collection(page, seeded):
@@ -904,7 +904,7 @@ def test_worker_resume_estimate_shows_in_the_clicked_row(page, seeded):
     page.goto(seeded.url + "/worker")
     page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
     box = page.locator(f"[data-finished-job='{ok}'] + tr[data-resume-row]")
-    expect(box).to_contain_text("Claude call")
+    expect(box).to_contain_text("AI call")
     expect(box.get_by_role("button", name="Start")).to_be_in_viewport()
     seen = polls["n"]
     page.wait_for_timeout(5500)  # past a poll that repaints: the estimate and its Start stay put
@@ -1292,7 +1292,7 @@ def test_a_new_source_name_gets_its_own_estimate_before_import_is_allowed(page, 
     data["estimate"]["calls"] = 7
     held[0].fulfill(json=data)
     expect(page.locator("#imp-items-import")).to_be_enabled()
-    expect(page.locator("#imp-items-preview")).to_contain_text("7 Claude calls")
+    expect(page.locator("#imp-items-preview")).to_contain_text("7 AI calls")
 
 
 def test_run_page_says_one_question_s_evidence_in_the_singular(page, seeded):

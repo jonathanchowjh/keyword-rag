@@ -439,7 +439,7 @@ def test_bad_name_422(client):
 
 def test_budget_note(client):
     body = client.get("/budget").json()
-    assert "Console" in body["note"] and body["cap_usd"] == 20.0 and body["spent_usd"] == 0.0
+    assert "own spend" in body["note"] and body["cap_usd"] == 20.0 and body["spent_usd"] == 0.0
 
 
 def test_budget_exceeded_is_402(tmp_path):
