@@ -21,7 +21,7 @@ for _ in $(seq 1 120); do
   if curl -sf "$BASE/health" >/dev/null; then break; fi
   sleep 1
 done
-curl -sf "$BASE/health" | python3 -I -c 'import json,sys; h=json.load(sys.stdin); assert h=={"ok":True,"api_key":False}, h'
+curl -sf "$BASE/health" | python3 -I -c 'import json,sys; h=json.load(sys.stdin); assert h=={"ok":True,"ai":False}, h'
 
 post() { curl -sf -X "$1" "$BASE$2" -H 'content-type: application/json' -d "$3"; }
 
@@ -44,6 +44,6 @@ post POST /query '{"collection":"smoke","question":"Which gas do plants take in 
   | python3 -I -c 'import json,sys; r=json.load(sys.stdin)["results"]; bad=[m for m,v in r.items() if not v["hits"] or v["error"]]; assert not bad, r; print("smoke: retrieval ok:", {m: v["hits"][0]["id"] for m,v in r.items()})'
 
 post POST /query '{"collection":"smoke","question":"Which gas?","choices":["oxygen","carbon dioxide"],"methods":["keyword"],"answer":true}' \
-  | python3 -I -c 'import json,sys; r=json.load(sys.stdin)["results"]["keyword"]; assert r["error"]=="needs ANTHROPIC_API_KEY", r'
+  | python3 -I -c 'import json,sys; r=json.load(sys.stdin)["results"]["keyword"]; assert r["error"].startswith("no AI model is set up for the") and "Settings page" in r["error"], r'
 
 echo "image smoke: OK"
