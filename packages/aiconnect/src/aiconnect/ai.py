@@ -130,13 +130,17 @@ class AI:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        os.chmod(path, 0o600)
         self._db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self.sql("pragma journal_mode=wal")
         self.sql("pragma busy_timeout=5000")
         with self.lock:
             self._db.executescript(SCHEMA)
+        # Keys live in the file and, until a checkpoint, in its WAL. A connection opened
+        # before this one made the WAL files with its own mode; later ones copy the file's.
+        for file in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+            if file.exists():
+                os.chmod(file, 0o600)
         self.env: dict[str, set[str]] = {}  # connection id -> fields set by the environment
         self.env_cap = False
         self.env_default = False
@@ -178,18 +182,28 @@ class AI:
             )
 
     def update_connection(self, id: str, *, label=KEEP, base_url=KEEP, api_key=KEEP) -> None:
-        self.need_connection(id)
+        """A new base_url without a new api_key drops the stored key, given for the old one."""
+        row = self.need_connection(id)
         if label is not KEEP and not label:
             raise ValueError("a connection needs a label")
-        for field, value in (("label", label), ("base_url", base_url), ("api_key", api_key)):
-            if value is KEEP:
-                continue
+        changes = {
+            field: value or None
+            for field, value in (("label", label), ("base_url", base_url), ("api_key", api_key))
+            if value is not KEEP
+        }
+        for field in changes:
             if field in self.env.get(id, set()):
                 raise Conflict(f"{field} is set by the environment")
-            self.sql(f"update ai_connections set {field} = ? where id = ?", (value or None, id))
+        if "base_url" in changes and changes["base_url"] != row["base_url"]:
+            changes.setdefault("api_key", None)
+        with self.lock:
+            for field, value in changes.items():
+                self.sql(f"update ai_connections set {field} = ? where id = ?", (value, id))
 
     def remove_connection(self, id: str) -> None:
         self.need_connection(id)
+        if self.env.get(id):  # it would come back at the next start
+            raise Conflict(f"connection {id} is set by the environment")
         with self.lock:
             for role, ref in self.roles().items():
                 if ref and self.split(ref)[0] == id:
@@ -417,13 +431,23 @@ class AI:
     # environment
 
     def apply_env(self, *, api_key: str | None, model: str | None, cap_usd: float | None) -> None:
-        """Apply the environment's values; they win over stored ones and become read-only."""
+        """Apply the environment's values; they win over stored ones and become read-only.
+
+        model names a stored model (a ref, or a bare id one enabled model has) and is used
+        as it resolves. Any other value is a model id on the "anthropic" connection (that
+        prefix may lead): added, unpriced, when the connection exists, and the default
+        either way, so jobs refuse until that model exists and has a price.
+        """
         preset = PRESETS["anthropic"]
         if api_key:
             if not self.sql("select 1 from ai_connections where id = 'anthropic'"):
                 self.add_connection("anthropic", preset["kind"], preset["label"])
-            self.sql("update ai_connections set api_key = ? where id = 'anthropic'", (api_key,))
-            self.env["anthropic"] = {"api_key"}
+            # The env key is for the preset's address only, so that is locked too.
+            self.sql(
+                "update ai_connections set api_key = ?, base_url = ? where id = 'anthropic'",
+                (api_key, preset["base_url"]),
+            )
+            self.env["anthropic"] = {"api_key", "base_url"}
             for model_id, (label, price_in, price_out) in preset["models"].items():
                 if not self.sql(
                     "select 1 from ai_models where connection_id = 'anthropic' and model_id = ?",
@@ -432,17 +456,22 @@ class AI:
                     self.add_model(
                         "anthropic", model_id, label=label, price_in=price_in, price_out=price_out
                     )
-        chosen = model or (preset["default_model"] if api_key else None)
-        if chosen and (model or not self.role_model("default")):
-            if api_key and not self.sql(
-                "select 1 from ai_models where connection_id = 'anthropic' and model_id = ?",
-                (chosen,),
-            ):
-                self.add_model("anthropic", chosen)
+        if model:
+            try:
+                ref = "/".join(self.resolve(model))
+            except UnknownModel:
+                model_id = model.removeprefix("anthropic/")
+                ref = f"anthropic/{model_id}"
+                has_connection = self.sql("select 1 from ai_connections where id = 'anthropic'")
+                if has_connection and ref not in {m["ref"] for m in self.models()}:
+                    self.add_model("anthropic", model_id)
+            self.sql("insert or replace into ai_roles values ('default', ?)", (ref,))
+            self.env_default = True
+        elif api_key and not self.role_model("default"):
             self.sql(
-                "insert or replace into ai_roles values ('default', ?)", (f"anthropic/{chosen}",)
+                "insert or replace into ai_roles values ('default', ?)",
+                (f"anthropic/{preset['default_model']}",),
             )
-            self.env_default = bool(model)
         if cap_usd is not None:
             self.store_cap(cap_usd)
             self.env_cap = True
@@ -477,9 +506,10 @@ class AI:
             raise NoConnection(role)
         return ref
 
-    def ready(self, role: str = "default") -> bool:
+    def ready(self, role: str = "default", model: str | None = None) -> bool:
+        """The model a call would use (model when given, else the role's) is usable and priced."""
         try:
-            connection_id, model_id = self.resolve(self.model_for(role))
+            connection_id, model_id = self.resolve(model or self.model_for(role))
         except (NoConnection, UnknownModel):
             return False
         return (

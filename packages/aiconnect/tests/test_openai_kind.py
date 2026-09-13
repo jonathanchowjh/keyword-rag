@@ -5,7 +5,7 @@ import pytest
 from aiconnect import Conflict, ProviderError, wire
 from aiconnect.ai import estimate_tokens
 from aiconnect.fakes import fake_ai
-from aiconnect.wire import openai_client, openai_send
+from aiconnect.wire import anthropic_client, openai_client, openai_send
 
 
 def fake_client(usage=(12, 3), text="hi", base_url="http://localhost:11434/v1/"):
@@ -75,6 +75,12 @@ def test_openai_send_tolerates_empty_content():
 
 def test_openai_client_needs_no_key():
     assert openai_client("http://x:11434/v1", None).api_key == "unused"
+
+
+def test_anthropic_client_without_a_key_never_takes_the_process_key(monkeypatch):
+    # A second connection of this kind must not send the env key to its own address.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process-SECRET")
+    assert anthropic_client("http://other/", None).api_key == "unused"
 
 
 def local_ai(tmp_path, local=True):

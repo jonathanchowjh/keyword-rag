@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aiconnect import fakes
 from ragqa_core import db
 from ragqa_core.db import (
     JOBS_RESUMABLE,
@@ -187,6 +188,21 @@ def test_upgrade_moves_spend_cache_and_batches(tmp_path):
     move_ai_tables(conn)  # second run: no-op
     assert ai.month_spend() == pytest.approx(1.5)
     assert len(ai.pending_batches()) == 1
+
+
+def test_upgrade_batch_is_collected_into_the_ledger(tmp_path, monkeypatch):
+    path = tmp_path / "ragqa.db"
+    make_pre_phase1_db(path)
+    conn = connect(path)
+    ai = fake_ai(conn, lambda p: "x")
+    move_ai_tables(conn)
+    # The provider still holds the old batch's answer.
+    monkeypatch.setitem(fakes.BATCHES, "b1", {"k-b1": ("batched answer", 40, 60)})
+    ai.collect_pending()
+    rows = conn.execute("select batch, job_id, connection_id, model from ai_ledger where batch = 1")
+    assert [tuple(r) for r in rows] == [(1, "j1", "anthropic", "claude-haiku-5-5")]
+    assert ai.pending_batches() == []
+    assert ai.month_spend() > 1.5
 
 
 def test_upgrade_of_a_new_database_does_nothing(tmp_path):

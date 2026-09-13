@@ -18,7 +18,8 @@ def estimate_tokens(chars: int) -> int:
 
 
 def anthropic_client(base_url: str | None, api_key: str | None) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key, base_url=base_url)
+    # With no key the SDK would send the process's own key to this connection's address.
+    return anthropic.Anthropic(api_key=api_key or "unused", base_url=base_url)
 
 
 def anthropic_send(

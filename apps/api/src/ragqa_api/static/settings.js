@@ -190,13 +190,24 @@ $("models").addEventListener("click", (event) => {
 
 const JOB_NOTE = { default: "Used by any job without its own choice" };
 
+// A job's model that can no longer be used still shows, marked and selected, so the
+// choice is visible and picking anything else (even "same as default") changes it.
+function unusableOption(ref) {
+  if (!ref) return "";
+  const m = ai.models.find((x) => x.ref === ref);
+  const why = !m ? "not set up" : !m.enabled ? "disabled" : m.price_in == null || m.price_out == null ? "needs a price" : "";
+  return why ? `<option value="${esc(ref)}" selected>${esc(m?.label ?? ref)} (${why})</option>` : "";
+}
+
 function drawRoles() {
   $("roles").innerHTML = ai.known_roles
     .map((role) => {
       const first = role === "default" ? "none chosen" : "same as default";
-      return `<label>${esc(role)} <select data-role="${esc(role)}"><option value="">${first}</option>
-        ${modelOptions(ai.models, ai.roles[role])}</select>
-        ${JOB_NOTE[role] ? `<span class="muted">${esc(JOB_NOTE[role])}</span>` : ""}</label>`;
+      const locked = role === "default" && ai.default_from_env;
+      const note = [JOB_NOTE[role], locked ? ENV : ""].filter(Boolean).join("; ");
+      return `<label>${esc(role)} <select data-role="${esc(role)}"${locked ? " disabled" : ""}><option value="">${first}</option>
+        ${unusableOption(ai.roles[role])}${modelOptions(ai.models, ai.roles[role])}</select>
+        ${note ? `<span class="muted">${esc(note)}</span>` : ""}</label>`;
     })
     .join("");
 }

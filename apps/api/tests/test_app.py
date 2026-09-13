@@ -250,7 +250,7 @@ def test_load_rejects_the_other_qa_type_for_science_datasets(client):
 def test_env_key_becomes_anthropic_connection(tmp_path):
     app = create_app(settings(tmp_path, api_key="sk-env-key-123456"))
     assert app.state.ai.connections()[0]["id"] == "anthropic"
-    assert app.state.ai.connections()[0]["from_env"] == ["api_key"]
+    assert app.state.ai.connections()[0]["from_env"] == ["api_key", "base_url"]
     assert app.state.ai.ready("answer")
 
 
@@ -1841,3 +1841,89 @@ def test_role_with_disabled_model_is_503_naming_job(client):
     r = client.post("/eval", json={**EVAL, "answer": True, "confirm": True})
     assert r.status_code == 503, r.text
     assert "'answer'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+
+
+def test_env_model_locks_the_default_job(tmp_path):
+    app = create_app(settings(tmp_path, api_key="sk-env-key-123456", model="claude-sonnet-5-5"))
+    client = TestClient(app)
+    assert client.get("/ai").json()["default_from_env"] is True
+    r = client.put("/ai/roles/default", json={"model": "anthropic/claude-haiku-5-5"})
+    assert r.status_code == 409 and "environment" in r.json()["detail"]
+    assert client.put("/ai/roles/answer", json={"model": "claude-haiku-5-5"}).status_code == 200
+
+
+def test_env_connection_keeps_its_address_and_cannot_be_removed(tmp_path):
+    app = create_app(settings(tmp_path, api_key="sk-env-key-123456"))
+    client = TestClient(app)
+    assert client.get("/ai").json()["default_from_env"] is False
+    r = client.patch("/ai/connections/anthropic", json={"base_url": "http://elsewhere"})
+    assert r.status_code == 409 and "environment" in r.json()["detail"]
+    assert client.put("/ai/roles/default", json={"model": None}).status_code == 200
+    r = client.delete("/ai/connections/anthropic")
+    assert r.status_code == 409 and "environment" in r.json()["detail"]
+
+
+def test_new_address_without_a_new_key_drops_the_stored_key(client):
+    client.post(
+        "/ai/connections", json={"preset": "openai", "id": "oa", "api_key": "sk-proj-SECRET123456"}
+    )
+    r = client.patch("/ai/connections/oa", json={"base_url": "http://other/v1"})
+    assert r.status_code == 200, r.text
+    oa = next(c for c in client.get("/ai").json()["connections"] if c["id"] == "oa")
+    assert oa["key"] is None and oa["base_url"] == "http://other/v1"
+
+
+def eval_with_model(client, model, confirm=True):
+    body = {**EVAL, "answer": True, "model": model, "confirm": confirm}
+    return client.post("/eval", json=body)
+
+
+def test_confirm_checks_the_named_model_not_the_answer_job(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        ai.update_model("anthropic", "claude-sonnet-5-5", enabled=False)
+        r = eval_with_model(client, "anthropic/claude-sonnet-5-5")
+        assert r.status_code == 503 and "'answer'" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+        # The other way round: the job's model is off, the named one works.
+        ai.update_model("anthropic", "claude-sonnet-5-5", enabled=True)
+        ai.update_model("anthropic", "claude-haiku-5-5", enabled=False)
+        r = eval_with_model(client, "anthropic/claude-sonnet-5-5")
+        assert r.status_code == 202, r.text
+
+
+def test_confirm_refuses_a_disabled_free_model(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        ai.add_connection("local", "openai", "Local", local=True)
+        ai.add_model("local", "llama", price_in=0, price_out=0)
+        ai.update_model("local", "llama", enabled=False)
+        assert (
+            eval_with_model(client, "local/llama", confirm=False).json()["estimate"]["est_usd"] == 0
+        )
+        r = eval_with_model(client, "local/llama")
+        assert r.status_code == 503 and "'answer'" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+
+
+def test_resume_checks_the_runs_own_model(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        ai, conn = client.app.state.ai, client.app.state.conn
+        job = client.app.state.evaluator.queue(
+            "c", "dev", ["hybrid"], True, "anthropic/claude-sonnet-5-5"
+        )
+        db.update_job(conn, job, status="stopped_no_key")
+        ai.update_model("anthropic", "claude-sonnet-5-5", enabled=False)
+        r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
+        assert r.status_code == 503 and "'answer'" in r.json()["detail"]
+        assert db.get_job(conn, job)["status"] == "stopped_no_key"
+        ai.update_model("anthropic", "claude-sonnet-5-5", enabled=True)
+        ai.update_model("anthropic", "claude-haiku-5-5", enabled=False)  # the job's own model
+        r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
+        assert r.status_code == 202, r.text

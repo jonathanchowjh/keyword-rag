@@ -1,4 +1,6 @@
 import json
+import os
+import sqlite3
 
 import pytest
 
@@ -115,7 +117,7 @@ def test_env_values_win_and_are_read_only(tmp_path):
         "anthropic/claude-sonnet-5-5",
     }
     assert ai.role_model("answer") == "anthropic/claude-sonnet-5-5" and ai.cap_usd == 5.0
-    assert set(ai.connections()[0]["from_env"]) == {"api_key"}
+    assert set(ai.connections()[0]["from_env"]) == {"api_key", "base_url"}
     with pytest.raises(Conflict):
         ai.update_connection("anthropic", api_key="other")
     with pytest.raises(Conflict):
@@ -136,3 +138,104 @@ def test_env_key_without_model_uses_preset_default(tmp_path):
     ai.set_role("default", "claude-sonnet-5-5")  # not locked, and a restart keeps the choice
     ai.apply_env(api_key="k-1234567890ab", model=None, cap_usd=None)
     assert ai.role_model("default") == "anthropic/claude-sonnet-5-5"
+
+
+def test_env_model_names_a_stored_connections_model(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("ollama", "openai", "Ollama", local=True)
+    ai.add_model("ollama", "llama3.1:8b", price_in=0, price_out=0)
+    ai.apply_env(api_key="k-1234567890ab", model="ollama/llama3.1:8b", cap_usd=None)
+    assert ai.role_model("default") == "ollama/llama3.1:8b" and ai.ready()
+    assert "anthropic/ollama/llama3.1:8b" not in {m["ref"] for m in ai.models()}
+
+
+def test_env_bare_model_id_resolves_to_its_connection(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("ollama", "openai", "Ollama", local=True)
+    ai.add_model("ollama", "llama3.1:8b", price_in=0, price_out=0)
+    ai.apply_env(api_key="k-1234567890ab", model="llama3.1:8b", cap_usd=None)
+    assert ai.role_model("default") == "ollama/llama3.1:8b" and ai.ready()
+    assert all(
+        m["model_id"] != "llama3.1:8b" for m in ai.models() if m["connection_id"] == "anthropic"
+    )
+
+
+@pytest.mark.parametrize("value", ["claude-opus-9", "anthropic/claude-opus-9"])
+def test_env_model_named_nowhere_is_added_to_the_anthropic_connection(tmp_path, value):
+    ai = AI(tmp_path / "ai.db")
+    ai.apply_env(api_key="k-1234567890ab", model=value, cap_usd=None)
+    assert ai.role_model("default") == "anthropic/claude-opus-9"
+    added = next(m for m in ai.models() if m["ref"] == "anthropic/claude-opus-9")
+    assert added["price_in"] is None  # needs a price before use
+    assert "anthropic/anthropic/claude-opus-9" not in {m["ref"] for m in ai.models()}
+
+
+def test_env_model_without_any_connection_is_still_the_default(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.apply_env(api_key=None, model="claude-haiku-5-5", cap_usd=None)
+    assert ai.role_model("default") == "anthropic/claude-haiku-5-5" and not ai.ready()
+    assert ai.connections() == [] and ai.models() == []
+    with pytest.raises(Conflict):
+        ai.set_role("default", None)
+
+
+def test_env_model_is_added_to_a_stored_anthropic_connection(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("anthropic", "anthropic", "A", api_key="sk-stored-123456")
+    ai.apply_env(api_key=None, model="claude-opus-9", cap_usd=None)
+    assert ai.role_model("default") == "anthropic/claude-opus-9"
+    assert "anthropic/claude-opus-9" in {m["ref"] for m in ai.models()}
+
+
+def test_env_model_locks_the_default_role(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.apply_env(api_key="k-1234567890ab", model="claude-sonnet-5-5", cap_usd=None)
+    assert ai.env_default
+    with pytest.raises(Conflict, match="environment"):
+        ai.set_role("default", "anthropic/claude-haiku-5-5")
+    ai.set_role("answer", "anthropic/claude-haiku-5-5")  # other jobs stay editable
+
+
+def test_wal_files_made_by_another_connection_become_private(tmp_path):
+    path = tmp_path / "ai.db"
+    other = sqlite3.connect(path)  # the app's own connection opens the file first
+    other.execute("pragma journal_mode=wal")
+    other.execute("create table t (x)")
+    files = [path, tmp_path / "ai.db-wal", tmp_path / "ai.db-shm"]
+    for file in files:
+        os.chmod(file, 0o644)
+    AI(path)
+    assert [file.stat().st_mode & 0o777 for file in files] == [0o600] * 3
+    other.close()
+
+
+def test_new_base_url_without_a_new_key_drops_the_stored_key(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("c", "openai", "C", base_url="https://a/v1", api_key="sk-stored-123456")
+    ai.update_connection("c", label="C2")
+    ai.update_connection("c", base_url="https://a/v1")  # the same address keeps it
+    assert ai.connections()[0]["key"] == "sk-…3456"
+    ai.update_connection("c", base_url="https://b/v1")
+    assert ai.connections()[0]["key"] is None
+    ai.update_connection("c", base_url="https://c/v1", api_key="sk-other-654321")
+    assert ai.connections()[0]["key"] == "sk-…4321"
+    assert ai.connections()[0]["base_url"] == "https://c/v1"
+
+
+def test_env_keyed_connection_keeps_its_address(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.add_connection("anthropic", "anthropic", "A", base_url="http://proxy")
+    ai.apply_env(api_key="k-1234567890ab", model=None, cap_usd=None)
+    assert ai.connections()[0]["base_url"] is None  # the env key goes to the preset's address
+    with pytest.raises(Conflict, match="environment"):
+        ai.update_connection("anthropic", base_url="http://elsewhere")
+    assert ai.connections()[0]["key"] == "k-1…90ab"
+
+
+def test_env_connection_cannot_be_removed(tmp_path):
+    ai = AI(tmp_path / "ai.db")
+    ai.apply_env(api_key="k-1234567890ab", model=None, cap_usd=None)
+    ai.set_role("default", None)  # nothing uses it now
+    with pytest.raises(Conflict, match="environment"):
+        ai.remove_connection("anthropic")
+    assert [c["id"] for c in ai.connections()] == ["anthropic"]

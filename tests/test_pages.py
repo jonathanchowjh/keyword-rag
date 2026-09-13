@@ -1447,3 +1447,52 @@ def test_run_form_models_come_from_settings(page, seeded):
     assert page.locator("#rf-model option").all_inner_texts() == want
     refs = page.locator("#rf-model option").evaluate_all("os => os.map(o => o.value)")
     assert refs == [m["ref"] for m in state["models"] if m["label"] in want]
+
+
+def test_a_job_on_a_model_it_can_no_longer_use_shows_it_and_can_be_cleared(page, seeded):
+    ai = seeded.app.state.ai
+    ai.add_model("anthropic", "pinned-off", label="Pinned off", price_in=1, price_out=1)
+    ai.add_model("anthropic", "pinned-unpriced", label="Pinned unpriced")
+    ai.set_role("answer", "anthropic/pinned-off")
+    ai.set_role("summary", "anthropic/pinned-unpriced")
+    ai.update_model("anthropic", "pinned-off", enabled=False)
+    try:
+        page.goto(seeded.url + "/settings")
+        answer = page.locator('#roles select[data-role="answer"]')
+        expect(answer.locator("option:checked")).to_have_text("Pinned off (disabled)")
+        summary = page.locator('#roles select[data-role="summary"]')
+        expect(summary.locator("option:checked")).to_have_text("Pinned unpriced (needs a price)")
+        with page.expect_response(
+            lambda r: r.request.method == "PUT" and r.url.endswith("/ai/roles/answer")
+        ):
+            answer.select_option(label="same as default")
+        assert "answer" not in ai_state(seeded)["roles"]
+        expect(answer.locator("option:checked")).to_have_text("same as default")
+        expect(answer.locator("option", has_text="Pinned off")).to_have_count(0)
+    finally:
+        ai.set_role("answer", None)
+        ai.set_role("summary", None)
+
+
+def test_default_job_set_by_the_environment_is_read_only(page, seeded):
+    def env_default(route):
+        response = route.fetch()
+        route.fulfill(response=response, json={**response.json(), "default_from_env": True})
+
+    page.route("**/ai", env_default)
+    page.goto(seeded.url + "/settings")
+    expect(page.locator('#roles select[data-role="default"]')).to_be_disabled()
+    expect(page.locator("#roles")).to_contain_text("set by environment")
+    expect(page.locator('#roles select[data-role="answer"]')).to_be_enabled()
+
+
+def test_add_form_id_follows_the_server_rule(page, seeded):
+    page.goto(seeded.url + "/settings")
+    box = page.locator("#add-id")
+
+    def valid(value):
+        box.fill(value)
+        return box.evaluate("e => e.checkValidity()")
+
+    assert valid("ollama-2") and valid("a" * 32)
+    assert not valid("a_b") and not valid("-a") and not valid("a" * 33)

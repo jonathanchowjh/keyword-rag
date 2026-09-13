@@ -117,7 +117,7 @@ Environment variables, read at start. `compose.yaml` passes `.env` through.
 |---|---|
 | `ANTHROPIC_API_KEY` | Optional. Becomes the Anthropic connection: stored, shown read-only on the Settings page, applied at every start. Empty: add any connection on the Settings page, or run retrieval only. |
 | `RAGQA_MONTHLY_CAP_USD` | This service's own monthly ceiling, counted from its own calls. Default `20`. |
-| `RAGQA_MODEL` | Sets the default job model, a model id or `<connection>/<model id>`. With only the key set, it is `claude-haiku-5-5`. Read-only on the Settings page. |
+| `RAGQA_MODEL` | Sets the default job model: `<connection>/<model id>`, or a bare model id that one enabled model has. A value that names no stored model is taken as an Anthropic model id (an `anthropic/` prefix is allowed) and added, unpriced, to the Anthropic connection when there is one; enter its price on the Settings page before use. Either way it is the default, and jobs on it refuse until that model exists and has a price. With only the key set, the default starts as `claude-haiku-5-5` and stays editable. Read-only on the Settings page. |
 | `RAGQA_USERNAME`, `RAGQA_PASSWORD` | HTTP basic auth over every route. Set both or neither; exactly one set is a 503 on every request. |
 | `RAGQA_DENSE_MODEL` | Retrieval embedding model (fastembed). Default `Qwen/Qwen3-Embedding-0.6B-Q`. |
 | `RAGQA_JUDGE_MODEL` | A different model, used only to score solution similarity. Default `BAAI/bge-small-en-v1.5`. |
@@ -164,8 +164,8 @@ A collection remembers the dense model it was built with. Changing
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
 | `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
 | `GET /budget` | This service's spend this month against its cap |
-| `GET /ai` | Connections (keys never shown), models with prices, jobs and budget |
-| `POST /ai/connections`, `PATCH`/`DELETE /ai/connections/{id}` | Add, edit, remove a connection; 409 when a job uses it or the field is set by the environment |
+| `GET /ai` | Connections (keys never shown), models with prices, jobs (`default_from_env` when `RAGQA_MODEL` sets the default) and budget |
+| `POST /ai/connections`, `PATCH`/`DELETE /ai/connections/{id}` | Add, edit, remove a connection; 409 when a job uses it, or the field or connection is set by the environment. A new `base_url` without a new `api_key` clears the stored key |
 | `POST /ai/connections/{id}/test`, `/models/fetch`, `/models` | Test a connection (an unreachable server is reported, not raised), fetch its model list, add a model by hand |
 | `PUT /ai/models/{connection}/{model}` | Price or enable a model |
 | `PUT /ai/roles/{job}` | Choose the model a job uses |
@@ -311,8 +311,11 @@ is needed in `.env`.
   connection together.
 - **Environment.** `ANTHROPIC_API_KEY`, `RAGQA_MODEL` and
   `RAGQA_MONTHLY_CAP_USD`, when set, are applied at every start and cannot be
-  edited on the page. The key is stored as the Anthropic connection, so if you
-  later remove the variable it stays as an ordinary stored key you can edit.
+  edited on the page. The key is stored as the Anthropic connection, at the
+  preset's address, and that connection cannot be removed while the variable is
+  set. If you later remove the variable it stays as an ordinary stored key you
+  can edit. Changing a connection's base URL without giving a new key clears its
+  stored key, so a key is never sent to an address it was not given for.
 - **Upgrading.** An existing database keeps its ledger, cached answers and
   pending batches; this month's spend still counts against the cap. A batch
   submitted before the upgrade is collected through the Anthropic connection,

@@ -32,7 +32,7 @@
   <form id="add" class="card form">
     <div class="row">
       <label>Preset <select id="add-preset"></select></label>
-      <label>Id <input id="add-id" required pattern="[a-z0-9][a-z0-9_\-]*" title="Lowercase letters, digits, - and _"></label>
+      <label>Id <input id="add-id" required pattern="[a-z0-9][a-z0-9\-]{0,31}" title="Up to 32 lowercase letters, digits and -, not starting with -"></label>
       <label>Name <input id="add-label"></label>
     </div>
     <div class="row">
@@ -47,7 +47,7 @@
   <div id="models"></div>
 
   <h2>Jobs</h2>
-  <p class="muted">Which model each job uses. Only enabled, priced models are listed.</p>
+  <p class="muted">Which model each job uses. Only enabled, priced models are offered; a job still set to another shows it marked.</p>
   <div id="roles" class="jobs"></div>
 
   <h2>Budget</h2>

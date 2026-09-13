@@ -310,10 +310,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -- helpers ---------------------------------------------------------------
 
-    def need_ai(role: str) -> None:
-        """Refuse at once a request that would spend on a job with no usable model."""
-        if not state.ai.ready(role):
+    def need_ai(role: str, model: str | None = None) -> None:
+        """Refuse at once a request that would spend on a job with no usable model.
+        A model the request names is checked itself, not the job's."""
+        if not state.ai.ready(role, model):
             raise NoConnection(role)
+
+    def need_models(estimate: dict, model: str | None) -> None:
+        """Every job a run spends on, with its answers on `model` when one is named. A
+        named model is checked even when it is free: priced 0, it can still be off."""
+        for role in estimate["roles"]:
+            named = model if role == "answer" else None
+            if estimate["est_usd"] != 0 or named:  # with no model each would stop at once
+                need_ai(role, named)
 
     def source_rows(name: str) -> list[dict]:
         counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
@@ -736,9 +745,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
-        if estimate["est_usd"] != 0:  # without a model for each job it would stop at once
-            for role in estimate["roles"]:
-                need_ai(role)
+        need_models(estimate, body.model)
         job_id = state.evaluator.queue(
             body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
         )
@@ -831,9 +838,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
         estimate = state.evaluator.estimate_resume(job_id)
-        if estimate["est_usd"] != 0:
-            for role in estimate["roles"]:
-                need_ai(role)
+        need_models(estimate, job(job_id)["setup"]["model"])
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
@@ -879,6 +884,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "connections": state.ai.connections(),
             "models": state.ai.models(),
             "roles": state.ai.roles(),
+            "default_from_env": state.ai.env_default,
             "known_roles": KNOWN_ROLES,
             "budget": {
                 "cap_usd": state.ai.cap_usd,
