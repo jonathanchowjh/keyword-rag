@@ -126,7 +126,7 @@ def test_create_without_recipe_is_paper_2024(client):
     add_collection(client)
     body = client.get("/collections/c").json()
     assert (body["recipe"], body["corpus_type"]) == ("paper_2024", "worked")
-    assert body["build"]["added_text"] == "none" and body["build"]["chunk_overlap"] == 75
+    assert body["build"]["added_text"] == "none" and body["build"]["chunk_overlap"] == 25
     assert body["search"]["weights"] == {"meaning": 1.0, "words": 1.0, "keywords": 1.0}
     assert body["vocabulary_version"] is None and body["profile"] == {}
     assert "recipes" in client.get("/catalog").json()

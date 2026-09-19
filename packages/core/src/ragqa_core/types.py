@@ -23,7 +23,7 @@ class BuildSettings:
     classifier: bool
     profile: bool
     chunk_words: int = 100
-    chunk_overlap: int = 75
+    chunk_overlap: int = 25
     tag_k: int = 3
     tag_cutoff: float = 0.5
 

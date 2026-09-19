@@ -32,7 +32,7 @@ def test_recipes_match_spec_table():
     assert (p.units, p.chunk_words, p.chunk_overlap, p.vocabulary, p.describes, p.tagging) == (
         "chunks",
         100,
-        75,
+        25,
         "lists",
         "text",
         "similarity",

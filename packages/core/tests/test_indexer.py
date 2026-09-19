@@ -1,9 +1,12 @@
+from dataclasses import replace
+
 import pytest
 
 from aiconnect.ai import Cancelled
+from ragqa_core import db
 from ragqa_core.db import connect, get_keyword_lists
 from ragqa_core.fakes import fake_ai, fake_models
-from ragqa_core.indexer import Indexer, ModelMismatch
+from ragqa_core.indexer import Indexer, ModelMismatch, chunk, embed_text
 from ragqa_core.keywords import keyword_string, list_version
 from ragqa_core.store import Store, item_hash
 from ragqa_core.types import CollectionSpec, Item, KeywordLists
@@ -429,3 +432,69 @@ def test_backfill_labels_chunks_of_already_labelled_items(env):
     assert store.unsourced("c") == 0
     chunks = store.client.scroll("c__chunks", limit=100, with_payload=True)[0]
     assert {r.payload["meta"]["source"] for r in chunks} == {"hand"}
+
+
+def test_chunk_respects_words_and_overlap():
+    text = " ".join(str(n) for n in range(250))
+    assert len(chunk(text, 100, 10)) == 3 and chunk(text, 100, 10)[1].split()[0] == "90"
+    assert chunk(text, 0) == [text]
+    assert len(chunk(text)) == 3 and chunk(text)[1].split()[0] == "75"
+
+
+def long_item():
+    return Item("long", " ".join(f"w{n}" for n in range(250)), "A", "E")
+
+
+def test_paper_2024_chunks_unchanged(env):
+    _, store, _, ix, _ = env
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, [long_item()], "x")
+    assert sorted(chunk_texts(store, "c")) == sorted(chunk(long_item().text, 100, 25))
+
+
+def test_whole_units_store_one_chunk_per_item(env):
+    _, store, _, ix, _ = env
+    spec = ix.create("w", "science", False, recipe="worked_examples")
+    ix.add(spec, [long_item()], "x")
+    assert chunk_texts(store, "w") == [long_item().text]
+
+
+def test_reference_recipe_uses_low_overlap_chunks(env):
+    _, store, _, ix, _ = env
+    spec = ix.create("r", "multihop", False, recipe="reference")
+    ix.add(spec, [long_item()], "x")
+    assert sorted(chunk_texts(store, "r")) == sorted(chunk(long_item().text, 100, 10))
+
+
+def test_title_prefix_changes_embedding_not_text(env):
+    _, store, models, ix, _ = env
+    spec = ix.create("t", "mcq", False)
+    spec = replace(spec, build=replace(spec.build, added_text="title_prefix"))
+    item = Item("1", "volts and amps", "A", "E", {"title": "Ohm"})
+    assert embed_text(spec, item) == "Ohm: volts and amps"
+    assert embed_text(spec, Item("2", "plain", "A", "E", {"title": " "})) == "plain"
+    seen: list[str] = []
+    real = models.embed
+    models.embed = lambda texts: seen.extend(texts) or real(texts)
+    ix.add(spec, [item], "x")
+    assert "Ohm: volts and amps" in seen and "volts and amps" not in seen
+    assert store.get("t", ["1"])[0].text == "volts and amps"
+    assert [p.payload["text"] for p in store.client.scroll("t__chunks", limit=10)[0]] == [
+        "Ohm: volts and amps"
+    ]
+
+
+def test_induced_recipe_skips_keyword_lists(env):
+    conn, store, _, ix, _ = env
+    spec = ix.create("w", "science", False, recipe="worked_examples")
+    db.save_keyword_lists(conn, "w", LISTS, list_version(LISTS))
+    db.set_keyword_version(conn, "w", list_version(LISTS))
+    ix.add(spec, ITEMS, "x")
+    assert store.get("w", ["1"])[0].keywords == {}
+
+
+def test_spec_without_build_acts_as_paper_2024(env):
+    _, store, _, ix, _ = env
+    spec = replace(ix.create("c", "mcq", False), build=None)
+    ix.add(spec, [long_item()], "x")
+    assert len(chunk_texts(store, "c")) == 3

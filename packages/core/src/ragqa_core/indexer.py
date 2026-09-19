@@ -19,7 +19,6 @@ from ragqa_core.types import FACETS, CollectionSpec, Item, KeywordLists, QaType
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 BATCH = 64
-CHUNK_WORDS, CHUNK_STRIDE = 100, 75
 
 
 class ModelMismatch(Exception):
@@ -30,12 +29,23 @@ class ListsBusy(Exception):
     pass
 
 
-def chunk(text: str) -> list[str]:
-    words = text.split()
-    if len(words) <= CHUNK_WORDS:
+def chunk(text: str, words: int = 100, overlap: int = 25) -> list[str]:
+    """Windows of `words` words sliding by `words - overlap`; words <= 0 keeps the text whole."""
+    tokens = text.split()
+    if words <= 0 or len(tokens) <= words:
         return [text]
-    starts = range(0, len(words) - CHUNK_WORDS + CHUNK_STRIDE, CHUNK_STRIDE)
-    return [" ".join(words[s : s + CHUNK_WORDS]) for s in starts]
+    stride = words - overlap
+    starts = range(0, len(tokens) - words + stride, stride)
+    return [" ".join(tokens[s : s + words]) for s in starts]
+
+
+def embed_text(spec: CollectionSpec, item: Item) -> str:
+    """The text that is embedded for an item (dense vector and chunks); stored text is unchanged."""
+    title = item.meta.get("title")
+    build = spec.build or build_for("paper_2024", spec.summarize)
+    if build.added_text == "title_prefix" and isinstance(title, str) and title.strip():
+        return f"{title.strip()}: {item.text}"
+    return item.text
 
 
 def dedupe(words: list[str]) -> list[str]:
@@ -116,6 +126,7 @@ class Indexer:
         progress: Callable[[float], None] = lambda p: None,
     ) -> dict[str, int]:
         self.check_model(spec)
+        build = spec.build or build_for("paper_2024", spec.summarize)
         items, counts = self.changed(spec, items, source)
         if not items:
             progress(1.0)
@@ -135,18 +146,24 @@ class Indexer:
             sums = summaries[start : start + BATCH]
             texts = [i.text for i in part]
             self.store.upsert_items(
-                spec.name, part, self.models.embed(texts), self.models.sparse(texts), sums
+                spec.name,
+                part,
+                self.models.embed([embed_text(spec, i) for i in part]),
+                self.models.sparse(texts),
+                sums,
             )
             # An updated item may now have fewer chunks: drop the old ones first.
             self.store.delete_chunks(spec.name, [i.id for i in part])
             parents, pieces, sources = [], [], []
             for item in part:
-                for piece in chunk(item.text):
+                size = 0 if build.units == "whole" else build.chunk_words
+                for piece in chunk(embed_text(spec, item), size, build.chunk_overlap):
                     parents.append(item.id)
                     pieces.append(piece)
                     sources.append(item.meta["source"])
             self.store.upsert_chunks(spec.name, parents, pieces, self.models.embed(pieces), sources)
-            if lists is not None:
+            # THE INDUCED RECIPES KEEP THEIR TERMS AS TAGS, NOT AS THE THREE LISTS' VECTORS.
+            if lists is not None and build.vocabulary == "lists":
                 keywords, vectors = self.keywords_for(spec, lists, texts, sums)
                 self.store.set_keywords(spec.name, [i.id for i in part], keywords, vectors)
             # Last, so a batch that died part-way reads as changed and is redone.

@@ -31,7 +31,7 @@ RECIPES: dict[str, BuildSettings] = {
     "paper_2024": BuildSettings(
         units="chunks",
         chunk_words=100,
-        chunk_overlap=75,
+        chunk_overlap=25,
         added_text="summary",
         vocabulary="lists",
         describes="text",
