@@ -24,7 +24,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ragqa_core.connection import Connection
-from ragqa_core.types import CollectionSpec, KeywordLists, Question
+from ragqa_core.recipes import build_for, corpus_type_for, default_search
+from ragqa_core.types import (
+    BuildSettings,
+    CollectionSpec,
+    KeywordLists,
+    Question,
+    SearchSettings,
+)
 
 SCHEMA = """
 create table if not exists collections (
@@ -77,8 +84,41 @@ def connect(path: Path) -> Connection:
     columns = {row["name"] for row in conn.execute("pragma table_info(collections)")}
     if "include_leaked" not in columns:
         conn.execute("alter table collections add column include_leaked integer not null default 0")
+    for column in NEW_COLLECTION_COLUMNS:
+        if column not in columns:
+            conn.execute(f"alter table collections add column {column} text")
+    _migrate_collections(conn)
     _migrate_run_items(conn)
     return conn
+
+
+NEW_COLLECTION_COLUMNS = (
+    "corpus_type",
+    "recipe",
+    "build_json",
+    "search_json",
+    "vocabulary_version",
+    "profile_json",
+)
+
+
+def _migrate_collections(conn: Connection) -> None:
+    """Collections from before recipes become "paper 2024", with their old summarize flag."""
+    for row in conn.execute("select * from collections where recipe is null"):
+        qa_type = row["qa_type"]
+        build = build_for("paper_2024", bool(row["summarize"]))
+        conn.execute(
+            "update collections set corpus_type = ?, recipe = ?, build_json = ?,"
+            " search_json = ?, profile_json = ? where name = ?",
+            (
+                corpus_type_for(qa_type),
+                "paper_2024",
+                json.dumps(asdict(build)),
+                json.dumps(asdict(default_search(qa_type, build))),
+                "{}",
+                row["name"],
+            ),
+        )
 
 
 def move_ai_tables(conn: Connection) -> None:
@@ -161,14 +201,21 @@ def _migrate_run_items(conn: Connection) -> None:
 
 
 def save_collection(conn: Connection, spec: CollectionSpec) -> None:
+    build = spec.build or build_for("paper_2024", spec.summarize)
+    search = spec.search or default_search(spec.qa_type, build)
     conn.execute(
         "insert into collections"
-        " (name, qa_type, summarize, dense_model, dense_dim, keyword_version, created_at)"
-        " values (?, ?, ?, ?, ?, ?, ?)"
+        " (name, qa_type, summarize, dense_model, dense_dim, keyword_version, created_at,"
+        " corpus_type, recipe, build_json, search_json, vocabulary_version, profile_json)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " on conflict(name) do update set qa_type = excluded.qa_type,"
         " summarize = excluded.summarize, dense_model = excluded.dense_model,"
         " dense_dim = excluded.dense_dim, keyword_version = excluded.keyword_version,"
-        " created_at = excluded.created_at",
+        " created_at = excluded.created_at, corpus_type = excluded.corpus_type,"
+        " recipe = excluded.recipe, build_json = excluded.build_json,"
+        " search_json = excluded.search_json,"
+        " vocabulary_version = excluded.vocabulary_version,"
+        " profile_json = excluded.profile_json",
         (
             spec.name,
             spec.qa_type,
@@ -177,7 +224,19 @@ def save_collection(conn: Connection, spec: CollectionSpec) -> None:
             spec.dense_dim,
             spec.keyword_version,
             now(),
+            spec.corpus_type,
+            spec.recipe,
+            json.dumps(asdict(build)),
+            json.dumps(asdict(search)),
+            spec.vocabulary_version,
+            json.dumps(spec.profile),
         ),
+    )
+
+
+def set_search(conn: Connection, name: str, search: SearchSettings) -> None:
+    conn.execute(
+        "update collections set search_json = ? where name = ?", (json.dumps(asdict(search)), name)
     )
 
 
@@ -189,6 +248,12 @@ def _spec(row: sqlite3.Row) -> CollectionSpec:
         row["dense_model"],
         row["dense_dim"],
         row["keyword_version"],
+        row["corpus_type"],
+        row["recipe"],
+        BuildSettings(**json.loads(row["build_json"])),
+        SearchSettings(**json.loads(row["search_json"])),
+        row["vocabulary_version"],
+        json.loads(row["profile_json"] or "{}"),
     )
 
 

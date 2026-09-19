@@ -13,6 +13,7 @@ from ragqa_core.datasets import source_for
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, tfidf_terms
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
+from ragqa_core.recipes import build_for, corpus_type_for, default_search
 from ragqa_core.store import Store, item_hash
 from ragqa_core.types import FACETS, CollectionSpec, Item, KeywordLists, QaType
 
@@ -51,11 +52,22 @@ class Indexer:
         # lists do, and re-embedding ~565 keywords per query dominated eval time.
         self._list_vectors: dict[str, tuple[dict[str, np.ndarray], list[str], np.ndarray]] = {}
 
-    def create(self, name: str, qa_type: QaType, summarize: bool) -> CollectionSpec:
+    def create(
+        self, name: str, qa_type: QaType, summarize: bool, recipe: str = "paper_2024"
+    ) -> CollectionSpec:
         if not NAME.match(name):
             raise ValueError(f"collection name {name!r} must match {NAME.pattern}")
+        build = build_for(recipe, summarize)
         spec = CollectionSpec(
-            name, qa_type, summarize, self.models.dense_model, self.models.dense_dim()
+            name,
+            qa_type,
+            build.added_text == "summary",  # the recipe decides; the flag only moves paper 2024
+            self.models.dense_model,
+            self.models.dense_dim(),
+            corpus_type=corpus_type_for(qa_type),
+            recipe=recipe,
+            build=build,
+            search=default_search(qa_type, build),
         )
         db.save_collection(self.conn, spec)
         self.store.create(name, spec.dense_dim)

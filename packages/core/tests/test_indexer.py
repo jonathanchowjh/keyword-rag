@@ -38,8 +38,28 @@ def env(tmp_path):
 def test_create_saves_spec_with_model(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
-    assert spec == CollectionSpec("c", "mcq", False, "fake/dense", 256, None)
+    assert (spec.name, spec.qa_type, spec.summarize, spec.dense_model) == (
+        "c",
+        "mcq",
+        False,
+        "fake/dense",
+    )
+    assert (spec.recipe, spec.corpus_type) == ("paper_2024", "worked")
+    assert spec == ix.spec("c")
     assert store.count("c") == 0
+
+
+def test_create_with_recipe_records_settings(env):
+    _, _, _, ix, _ = env
+    spec = ix.create("w", "science", True, recipe="worked_examples")
+    assert (spec.corpus_type, spec.recipe, spec.summarize) == ("worked", "worked_examples", False)
+    assert spec.search is not None and spec.search.example == "abstracted"
+    assert spec.build is not None and spec.build.units == "whole"
+    assert spec == ix.spec("w")
+    paper = ix.create("p", "mcq", True)
+    assert paper.summarize and paper.build is not None and paper.build.added_text == "summary"
+    with pytest.raises(ValueError):
+        ix.create("x", "mcq", False, recipe="nope")
 
 
 def test_create_rejects_bad_name(env):

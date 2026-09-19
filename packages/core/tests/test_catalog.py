@@ -45,6 +45,7 @@ def test_qa_types_and_catalog_shape():
         "metric_labels_by_type",
         "metric_says_by_type",
         "qa_types",
+        "recipes",
         "answer_pair",
     }
     says = c["metric_says_by_type"]["table"]

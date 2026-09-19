@@ -42,7 +42,7 @@ from ragqa_core.db import (
     upsert_run_item,
 )
 from ragqa_core.fakes import fake_ai
-from ragqa_core.types import CollectionSpec, KeywordLists, Question
+from ragqa_core.types import CollectionSpec, KeywordLists, Question, SearchSettings
 
 SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
 
@@ -50,7 +50,14 @@ SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
 def test_collection_round_trip(tmp_path):
     conn = connect(tmp_path / "r.db")
     save_collection(conn, CollectionSpec("arc", "mcq", True, "m", 64))
-    assert get_collection(conn, "arc") == CollectionSpec("arc", "mcq", True, "m", 64, None)
+    got = get_collection(conn, "arc")
+    assert got is not None and got.build is not None and got.search is not None
+    assert (got.name, got.qa_type, got.summarize, got.keyword_version) == ("arc", "mcq", True, None)
+    assert (got.recipe, got.corpus_type, got.build.added_text) == (
+        "paper_2024",
+        "worked",
+        "summary",
+    )
     assert get_collection(conn, "nope") is None
     assert [c.name for c in list_collections(conn)] == ["arc"]
 
@@ -113,6 +120,40 @@ def test_run_items_filter_by_method(tmp_path):
     upsert_run_item(conn, job, "vector", "q1", {"hit_ids": ["b"]}, complete=False)
     assert [r["hit_ids"] for r in run_items(conn, job, "hybrid")] == [["a"]]
     assert len(run_items(conn, job)) == 2
+
+
+def test_old_collections_migrate_to_paper_2024(tmp_path):
+    path = tmp_path / "r.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "create table collections (name text primary key, qa_type text not null,"
+        " summarize integer not null, dense_model text not null, dense_dim integer not null,"
+        " keyword_version text, created_at text not null,"
+        " include_leaked integer not null default 0)"
+    )
+    raw.execute("insert into collections values ('old', 'multihop', 1, 'm', 8, null, 'now', 0)")
+    raw.commit()
+    raw.close()
+    conn = connect(path)
+    spec = get_collection(conn, "old")
+    assert spec is not None and spec.build is not None and spec.search is not None
+    assert (spec.corpus_type, spec.recipe, spec.build.added_text) == (
+        "reference",
+        "paper_2024",
+        "summary",
+    )
+    assert spec.search.query_tags == "similarity" and spec.search.program is False
+    connect(path)  # a second connect leaves it alone
+    assert get_collection(conn, "old") == spec
+
+
+def test_set_search_round_trips(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    save_collection(conn, CollectionSpec("arc", "mcq", False, "m", 64))
+    db.set_search(conn, "arc", SearchSettings({"meaning": 0.0, "words": 1.0, "keywords": 2.0}))
+    got = get_collection(conn, "arc")
+    assert got is not None and got.search is not None
+    assert got.search.weights["keywords"] == 2.0
 
 
 def test_connect_is_idempotent(tmp_path):

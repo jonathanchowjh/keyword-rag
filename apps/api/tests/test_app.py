@@ -122,6 +122,39 @@ def test_create_add_query_flow(client):
     assert r["results"]["hybrid"]["answer"] is None and r["results"]["hybrid"]["error"] is None
 
 
+def test_create_without_recipe_is_paper_2024(client):
+    add_collection(client)
+    body = client.get("/collections/c").json()
+    assert (body["recipe"], body["corpus_type"]) == ("paper_2024", "worked")
+    assert body["build"]["added_text"] == "none" and body["build"]["chunk_overlap"] == 75
+    assert body["search"]["weights"] == {"meaning": 1.0, "words": 1.0, "keywords": 1.0}
+    assert body["vocabulary_version"] is None and body["profile"] == {}
+    assert "recipes" in client.get("/catalog").json()
+
+
+def test_create_with_recipe(client):
+    r = client.post("/collections", json={"name": "w", "qa_type": "science", "recipe": "reference"})
+    assert r.status_code == 201
+    assert r.json()["recipe"] == "reference" and r.json()["search"]["query_tags"] == "classifier"
+
+
+def test_unknown_recipe_is_422(client):
+    r = client.post("/collections", json={"name": "z", "qa_type": "mcq", "recipe": "nope"})
+    assert r.status_code == 422
+
+
+def test_put_search_merges_and_validates(client):
+    add_collection(client)
+    r = client.put("/collections/c/search", json={"weights": {"keywords": 2}})
+    assert r.status_code == 200
+    assert r.json()["weights"] == {"meaning": 1.0, "words": 1.0, "keywords": 2.0}
+    assert client.get("/collections/c").json()["search"]["weights"]["keywords"] == 2.0
+    r = client.put("/collections/c/search", json={"program": True})
+    assert r.json()["weights"]["keywords"] == 2.0 and r.json()["program"] is True
+    assert client.put("/collections/c/search", json={"example": "x"}).status_code == 422
+    assert client.put("/collections/nope/search", json={}).status_code == 404
+
+
 def test_query_with_answer(client):
     add_collection(client)
     body = {

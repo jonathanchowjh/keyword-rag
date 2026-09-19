@@ -43,6 +43,7 @@ from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import answer_prompt, parse_answer
+from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     KEYWORD_METHODS,
     METHOD_NAMES,
@@ -52,7 +53,7 @@ from ragqa_core.retriever import (
 )
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, SearchSettings
 from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
@@ -81,6 +82,7 @@ class NewCollection(BaseModel):
     name: str
     qa_type: QaType
     summarize: bool = False
+    recipe: str | None = None
 
 
 class ItemIn(BaseModel):
@@ -405,7 +407,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_collection(body: NewCollection) -> dict:
         if db.get_collection(state.conn, body.name):
             raise HTTPException(409, f"collection '{body.name}' already exists")
-        return spec_json(state.indexer.create(body.name, body.qa_type, body.summarize))
+        return spec_json(
+            state.indexer.create(
+                body.name, body.qa_type, body.summarize, body.recipe or "paper_2024"
+            )
+        )
 
     @app.get("/collections")
     def list_collections() -> list[dict]:
@@ -629,6 +635,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.retriever.spec(name)
         db.set_include_leaked(state.conn, name, body.include)
         return {"include_leaked": body.include}
+
+    @app.put("/collections/{name}/search")
+    def put_search(name: str, body: dict) -> dict:
+        spec = state.retriever.spec(name)
+        merged = search_settings(spec.search or SearchSettings(), body)
+        db.set_search(state.conn, name, merged)
+        return asdict(merged)
 
     @app.post("/collections/{name}/load", status_code=202)
     def load(name: str, body: LoadRequest):

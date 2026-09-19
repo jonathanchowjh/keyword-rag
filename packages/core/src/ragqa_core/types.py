@@ -7,6 +7,37 @@ QaType = Literal["science", "mcq", "multihop", "table"]
 # The types that retrieve worked examples.
 EXAMPLE_TYPES: tuple[QaType, ...] = ("mcq", "science")
 FACETS = ("topic", "method", "common")
+CorpusType = Literal["worked", "reference"]
+
+
+@dataclass
+class BuildSettings:
+    """How a collection is built (spec §15). A recipe fills every field."""
+
+    units: Literal["whole", "chunks"]
+    added_text: Literal["none", "title_prefix", "summary"]
+    vocabulary: Literal["lists", "induced"]
+    describes: Literal["text", "solution"]
+    tagging: Literal["similarity", "similarity_cutoff", "ai"]
+    abstracted: bool
+    classifier: bool
+    profile: bool
+    chunk_words: int = 100
+    chunk_overlap: int = 75
+    tag_k: int = 3
+    tag_cutoff: float = 0.5
+
+
+@dataclass
+class SearchSettings:
+    """How a collection is searched. Stored as the default; a request may override."""
+
+    weights: dict[str, float] = field(
+        default_factory=lambda: {"meaning": 1.0, "words": 1.0, "keywords": 1.0}
+    )
+    query_tags: Literal["classifier", "similarity", "oracle"] = "similarity"
+    example: Literal["abstracted", "full", "off"] = "full"
+    program: bool = False
 
 
 @dataclass
@@ -17,6 +48,12 @@ class CollectionSpec:
     dense_model: str
     dense_dim: int
     keyword_version: str | None = None
+    corpus_type: CorpusType = "worked"
+    recipe: str = "paper_2024"
+    build: BuildSettings | None = None
+    search: SearchSettings | None = None
+    vocabulary_version: str | None = None
+    profile: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -59,3 +96,6 @@ class Hit:
     explanation: str | None
     meta: dict
     summary: str | None = None
+    tags: list[str] = field(default_factory=list)
+    abstracted: str | None = None
+    channels: list[str] = field(default_factory=list)
