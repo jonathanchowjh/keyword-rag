@@ -67,6 +67,15 @@ def induce_prompt(texts: list[str], corpus_type: CorpusType) -> str:
     )
 
 
+def tag_prompt(terms: list[str], text: str, k: int) -> str:
+    numbered = "\n".join(f"{n}. {t}" for n, t in enumerate(terms, start=1))
+    return (
+        f"Pick 1 to {k} terms that describe the text below, chosen only from the numbered"
+        ' list; copy each term exactly. Reply with JSON only: {"terms": [...]}.\n\n'
+        f"Terms:\n{numbered}\n\nText:\n{text[:1500]}"
+    )
+
+
 def answer_prompt(
     qa_type: QaType, question: str, choices: list[str] | None, hits: list[Hit]
 ) -> tuple[str, str]:

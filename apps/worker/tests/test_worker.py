@@ -363,3 +363,18 @@ def test_import_job_runs_and_is_done(env):
     w.run_one()
     job = get_job(conn, j)
     assert job["status"] == "done" and job["result"]["new"] == 1
+
+
+def test_worker_runs_retag(env):
+    w, conn = env
+    spec = w.indexer.create("w", "science", False, recipe="worked_examples")
+    w.indexer.add(spec, ITEMS, "x")
+    version = w.builder.save_vocabulary(spec, TOPICS)
+    j = db.create_job(conn, "retag", "w", {"version": version})
+    w.run_one()
+    job = get_job(conn, j)
+    assert job["status"] == "done", job["error"]
+    assert job["progress"] == 1.0 and job["result"] == {"version": version}
+    after = db.get_collection(conn, "w")
+    assert after is not None and after.vocabulary_version == version
+    assert sum(after.profile.values()) == 3 * len(ITEMS)  # the AI's reply is unusable: top 3

@@ -47,6 +47,7 @@ VECTORS = (
     "kw_method",
     "kw_common",
     "kw_summary",
+    "kw_tags",
 )
 SPARSE = "text_sparse"
 CHUNK = "chunk_dense"
@@ -86,6 +87,8 @@ def to_hit(point: ScoredPoint | Record, score: float = 0.0) -> Hit:
         explanation=p.get("explanation"),
         meta=p.get("meta") or {},
         summary=p.get("summary"),
+        tags=p.get("tags") or [],
+        abstracted=p.get("abstracted"),
     )
 
 
@@ -130,6 +133,11 @@ class Store:
         for collection in (name, chunks_of(name)):
             if self.client.collection_exists(collection):
                 self.client.delete_collection(collection)
+
+    def vector_names(self, name: str) -> set[str]:
+        """The dense vectors a collection was created with: older ones lack the newer names."""
+        vectors = self.client.get_collection(name).config.params.vectors
+        return set(vectors) if isinstance(vectors, dict) else set()
 
     def count(self, name: str) -> int:
         return self.client.count(name, exact=True).count
@@ -199,7 +207,10 @@ class Store:
         vectors: dict[str, np.ndarray],
     ) -> None:
         pids: list[ExtendedPointId] = [point_id(name, i) for i in ids]
-        stale = [v for v in VECTORS if v != "text_dense" and v not in vectors]
+        # ONLY THE LISTS' VECTORS: TAGS ARE NOT KEYWORDS, AND A VECTOR THE COLLECTION
+        # WAS NEVER CREATED WITH CANNOT BE DELETED.
+        has = self.vector_names(name)
+        stale = [v for v in VECTORS if v not in ("text_dense", "kw_tags", *vectors) and v in has]
         if stale:
             self.client.delete_vectors(name, vectors=stale, points=PointIdsList(points=pids))
         if vectors:
@@ -214,6 +225,22 @@ class Store:
             )
         for pid, kw in zip(pids, keywords, strict=True):
             self.client.set_payload(name, payload={"keywords": kw}, points=[pid])
+
+    def set_tags(
+        self, name: str, ids: list[str], tags: list[list[str]], vectors: np.ndarray
+    ) -> None:
+        """Each item's tags as payload, and their keyword string's embedding as kw_tags."""
+        if "kw_tags" not in self.vector_names(name):
+            raise ValueError(f"collection '{name}' was made before tags; it has no kw_tags vector")
+        pids: list[ExtendedPointId] = [point_id(name, i) for i in ids]
+        self.client.update_vectors(
+            name,
+            points=[
+                PointVectors(id=pid, vector={"kw_tags": vec.tolist()})
+                for pid, vec in zip(pids, vectors, strict=True)
+            ],
+        )
+        self.send_payloads(name, [(pid, {"tags": t}) for pid, t in zip(pids, tags, strict=True)])
 
     def search(
         self, name: str, using: str, vector: np.ndarray, limit: int, skip: tuple[str, ...] = ()

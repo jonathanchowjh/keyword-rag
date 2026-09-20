@@ -1,7 +1,16 @@
 import pytest
+from qdrant_client.models import Distance, Modifier, SparseVectorParams, VectorParams
 
 from ragqa_core.fakes import fake_models
-from ragqa_core.store import Store, chunks_of, item_hash, point_id, skip_filter
+from ragqa_core.store import (
+    SPARSE,
+    VECTORS,
+    Store,
+    chunks_of,
+    item_hash,
+    point_id,
+    skip_filter,
+)
 from ragqa_core.types import Item
 
 ITEMS = [
@@ -66,6 +75,69 @@ def test_set_keywords_drops_vectors_not_given(setup):
     s.set_keywords("c", ["1", "2"], [{}, {}], {"kw_individual": vec, "kw_summary": vec})
     s.set_keywords("c", ["1", "2"], [{}, {}], {"kw_individual": vec})
     assert s.search("c", "kw_summary", vec[0], 5) == []
+
+
+def test_set_tags_writes_payload_and_vector(setup):
+    s, m = setup
+    tags = [["enzymes"], ["markets", "prices"]]
+    s.set_tags("c", ["1", "2"], tags, m.embed(["enzymes", "markets; prices"]))
+    hit = s.search("c", "kw_tags", m.embed(["markets"])[0], 1)[0]
+    assert hit.id == "2" and hit.tags == ["markets", "prices"]
+    assert s.get("c", ["1"])[0].tags == ["enzymes"]
+
+
+def test_to_hit_carries_tags_and_abstracted(setup):
+    s, _ = setup
+    assert s.get("c", ["1"])[0].tags == [] and s.get("c", ["1"])[0].abstracted is None
+    s.set_payloads("c", {"1": {"abstracted": "A rate is measured."}})
+    assert s.get("c", ["1"])[0].abstracted == "A rate is measured."
+
+
+def test_set_keywords_leaves_kw_tags_alone(setup):
+    s, m = setup
+    vec = m.embed(["enzymes", "markets"])
+    s.set_tags("c", ["1", "2"], [["enzymes"], ["markets"]], vec)
+    s.set_keywords("c", ["1", "2"], [{}, {}], {})
+    assert [h.id for h in s.search("c", "kw_tags", vec[1], 5)][0] == "2"
+
+
+def old_collection():
+    """A collection made before tags: every vector but kw_tags."""
+    s, m = Store(None, None), fake_models()
+    s.client.create_collection(
+        "old",
+        vectors_config={
+            v: VectorParams(size=m.dense_dim(), distance=Distance.COSINE)
+            for v in VECTORS
+            if v != "kw_tags"
+        },
+        sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
+    )
+    s.create("old", m.dense_dim())  # adds the chunks collection; the items one is kept
+    texts = [i.text for i in ITEMS]
+    s.upsert_items("old", ITEMS, m.embed(texts), m.sparse(texts), [None, None])
+    return s, m
+
+
+def test_old_collection_without_kw_tags_still_rekeys():
+    s, m = old_collection()
+    assert "kw_tags" not in s.vector_names("old") and "kw_topic" in s.vector_names("old")
+    vec = m.embed(["biology", "finance"])
+    s.set_keywords("old", ["1", "2"], [{}, {}], {"kw_individual": vec, "kw_summary": vec})
+    s.set_keywords("old", ["1", "2"], [{"topic": ["finance"]}, {}], {"kw_individual": vec})
+    assert s.search("old", "kw_summary", vec[0], 5) == []
+    assert s.get("old", ["1"])[0].keywords == {"topic": ["finance"]}
+
+
+def test_set_tags_refuses_a_collection_without_kw_tags():
+    s, m = old_collection()
+    with pytest.raises(ValueError, match="'old'"):
+        s.set_tags("old", ["1"], [["enzymes"]], m.embed(["enzymes"]))
+
+
+def test_vector_names_of_a_new_collection(setup):
+    s, _ = setup
+    assert s.vector_names("c") == set(VECTORS)
 
 
 def test_chunks_map_to_parent(setup):

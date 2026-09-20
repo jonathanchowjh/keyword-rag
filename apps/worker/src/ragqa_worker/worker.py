@@ -118,6 +118,12 @@ class Worker:
             db.update_job(
                 self.conn, job_id, status="done", progress=1.0, result={"version": version}
             )
+        elif kind == "retag":
+            version = job["setup"]["version"]
+            self.builder.retag(job["collection"], version, progress)
+            db.update_job(
+                self.conn, job_id, status="done", progress=1.0, result={"version": version}
+            )
         elif kind == "backfill":
             result = self.indexer.backfill(job["collection"], progress)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)

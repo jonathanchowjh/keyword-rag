@@ -6,6 +6,7 @@ from ragqa_core.prompts import (
     parse_json,
     propose_prompt,
     summary_prompt,
+    tag_prompt,
 )
 from ragqa_core.types import Hit
 
@@ -113,3 +114,10 @@ def test_induce_prompt_by_corpus_type_and_truncated():
     assert "x" * 800 in worked and "x" * 801 not in worked and "second" in worked
     assert "up to 10 short terms" in worked
     assert "topics and concepts" in induce_prompt(["passage"], "reference")
+
+
+def test_tag_prompt_numbers_the_terms_and_truncates():
+    p = tag_prompt(["ohm's law", "ideal gas law"], "y" * 1600, 3)
+    assert "1. ohm's law" in p and "2. ideal gas law" in p
+    assert "1 to 3" in p and "only from the numbered list" in p and '{"terms": [...]}' in p
+    assert "y" * 1500 in p and "y" * 1501 not in p

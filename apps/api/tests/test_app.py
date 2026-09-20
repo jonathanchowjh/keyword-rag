@@ -451,7 +451,14 @@ def test_vocabulary_export_import_queues_retag(client):
     assert r.status_code == 201, r.text
     empty = client.get("/collections/w/vocabulary").json()
     assert empty == {"version": None, "terms": None, "versions": []}
-    r = client.put("/collections/w/vocabulary", json={"terms": [" Ohm's Law ", "ideal gas law"]})
+    terms = {"terms": [" Ohm's Law ", "ideal gas law"]}
+    r = client.put("/collections/w/vocabulary", json=terms)
+    assert r.status_code == 200 and r.json() == {
+        "estimate": {"est_usd": 0.0, "items": 0, "calls": 0}
+    }
+    assert client.get("/collections/w/vocabulary").json() == empty  # nothing saved
+    assert client.get("/jobs").json() == []  # nothing queued
+    r = client.put("/collections/w/vocabulary", json={**terms, "confirm": True})
     assert r.status_code == 202, r.text
     setup = r.json()
     job = client.get(f"/jobs/{setup['job_id']}").json()
@@ -472,29 +479,94 @@ def test_vocabulary_export_import_queues_retag(client):
     assert exported["versions"][0]["active"] is True
     # The export is the import: the GET body PUTs back as the same version.
     client.post(f"/jobs/{setup['job_id']}/cancel")
-    again = client.put("/collections/w/vocabulary", json=exported)
+    again = client.put("/collections/w/vocabulary", json={**exported, "confirm": True})
     assert again.status_code == 202 and again.json()["version"] == setup["version"]
+
+
+def stored_worked(client) -> None:
+    """Collection w (worked examples, AI tagging) with ITEMS stored."""
+    client.post("/collections", json=WORKED)
+    app = client.app.state
+    spec = app.indexer.spec("w")
+    app.indexer.add(spec, [Item(**i) for i in ITEMS], "hand")
+
+
+def test_vocabulary_estimate_prices_ai_tagging_without_spending(client):
+    client.app.state.worker.stop()
+    stored_worked(client)
+    spent = client.get("/budget").json()["spent_usd"]
+    r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes", "markets"]})
+    assert r.status_code == 200, r.text
+    estimate = r.json()["estimate"]
+    assert estimate["est_usd"] > 0 and estimate["items"] == 3 and estimate["calls"] == 3
+    assert client.get("/budget").json()["spent_usd"] == spent
+    assert client.get("/collections/w/vocabulary").json()["versions"] == []
+    assert client.put("/collections/w/vocabulary", json={"terms": []}).status_code == 422
+
+
+def test_vocabulary_put_with_ai_tagging_and_no_model_is_503(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        client.app.state.worker.stop()
+        stored_worked(client)
+        for body in ({"terms": ["enzymes"]}, {"terms": ["enzymes"], "confirm": True}):
+            r = client.put("/collections/w/vocabulary", json=body)
+            assert r.status_code == 503 and "'keywords'" in r.json()["detail"], body
+        assert client.get("/collections/w/vocabulary").json()["versions"] == []
+        assert client.get("/jobs").json() == []
+        # Similarity tagging spends nothing, so it needs no model.
+        ref = {"name": "r", "qa_type": "multihop", "recipe": "reference"}
+        client.post("/collections", json=ref)
+        r = client.put("/collections/r/vocabulary", json={"terms": ["x"], "confirm": True})
+        assert r.status_code == 202, r.text
+
+
+def test_vocabulary_retag_runs_and_switches(client):
+    stored_worked(client)
+    r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes"], "confirm": True})
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done" and job["result"] == {"version": r.json()["version"]}
+    assert client.get("/collections/w/vocabulary").json()["version"] == r.json()["version"]
+    assert client.get("/collections/w").json()["profile"] == {"enzymes": 3}
 
 
 def test_vocabulary_put_on_lists_recipe_is_409(client):
     client.post("/collections", json={"name": "p", "qa_type": "mcq"})
-    r = client.put("/collections/p/vocabulary", json={"terms": ["ohm's law"]})
-    assert r.status_code == 409 and "lists" in r.json()["detail"]
+    for body in ({"terms": ["ohm's law"]}, {"terms": ["ohm's law"], "confirm": True}):
+        r = client.put("/collections/p/vocabulary", json=body)
+        assert r.status_code == 409 and "lists" in r.json()["detail"]
     assert client.get("/collections/p/vocabulary").json()["versions"] == []
 
 
 def test_vocabulary_put_refuses_while_busy_and_an_empty_list(client):
     client.app.state.worker.stop()
     client.post("/collections", json=WORKED)
+    yes = {"terms": ["ohm's law"], "confirm": True}
     assert client.put("/collections/w/vocabulary", json={"terms": ["  "]}).status_code == 422
+    assert (
+        client.put("/collections/w/vocabulary", json={"terms": ["  "], "confirm": True}).status_code
+        == 422
+    )
     assert client.get("/collections/nope/vocabulary").status_code == 404
     assert client.put("/collections/nope/vocabulary", json={"terms": ["x"]}).status_code == 404
     for kind in ("load", "import", "retag", "eval"):
         job_id = db.create_job(client.app.state.conn, kind, "w", {})
-        r = client.put("/collections/w/vocabulary", json={"terms": ["ohm's law"]})
-        assert r.status_code == 409 and kind in r.json()["detail"], kind
+        for body in ({"terms": ["ohm's law"]}, yes):
+            r = client.put("/collections/w/vocabulary", json=body)
+            assert r.status_code == 409 and kind in r.json()["detail"], kind
         db.request_cancel(client.app.state.conn, job_id)
-    assert client.put("/collections/w/vocabulary", json={"terms": ["ohm's law"]}).status_code == 202
+    assert client.put("/collections/w/vocabulary", json=yes).status_code == 202
+
+
+def test_retag_state_and_problem_wording(client):
+    client.post("/collections", json=WORKED)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    retag = db.create_job(conn, "retag", "w", {"version": "v"})
+    set_running(conn, retag, 0.4)
+    assert client.get("/collections/w").json()["state"] == "retagging"
+    db.update_job(conn, retag, status="failed", error="boom", progress=0.4)
+    problems = client.get("/status").json()["problems"]
+    assert "The vocabulary on w is partly re-tagged; save it again" in problems
 
 
 def test_propose_lists_needs_a_key(client):
@@ -656,7 +728,7 @@ out.k = ans('no', -7, -12, -2);
 out.l = ans('cant_tell', 1, -2, 4);
 out.t = ans('yes', 6, 2, 10, 'em', 'table');
 out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
-out.v = ['rekeying', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
+out.v = ['rekeying', 'retagging', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
 out.w = [u.count(11656), u.count(0)];
 out.x = [0.004, 0, 0.4141, 12].map(u.usd);
 const box = () => ({innerHTML: '', querySelector: () => ({addEventListener() {}})});
@@ -697,6 +769,7 @@ def test_ui_formatting(tmp_path):
     assert got["u"].endswith("exact match vs Hybrid")  # no label for this type: the plain one
     assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
         "Re-keying",
+        "Re-tagging",
         "Stopped budget",
         "Stopped no key",
         "Cancelled",

@@ -347,6 +347,12 @@ def set_vocabulary_version(conn: Connection, name: str, version: str) -> None:
     conn.execute("update collections set vocabulary_version = ? where name = ?", (version, name))
 
 
+def set_profile(conn: Connection, name: str, profile: dict[str, int]) -> None:
+    conn.execute(
+        "update collections set profile_json = ? where name = ?", (json.dumps(profile), name)
+    )
+
+
 def get_vocabulary(conn: Connection, name: str, version: str | None = None) -> list[str] | None:
     """A saved version's terms; with no version, the one in force (None when there is none)."""
     if version is None:

@@ -55,6 +55,7 @@ from ragqa_core.retriever import (
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, SearchSettings
+from ragqa_core.vocabulary import clean_terms
 from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
@@ -62,6 +63,7 @@ PER_METHOD_ERRORS = (MethodUnavailable, NoConnection, BudgetExceeded, ModelMisma
 BUSY_STATE = {
     "load": "loading",
     "rekey": "rekeying",
+    "retag": "retagging",
     "eval": "evaluating",
     "import": "importing",
     "backfill": "labelling",
@@ -134,6 +136,7 @@ class Lists(BaseModel):
 
 class Vocabulary(BaseModel):
     terms: list[str]
+    confirm: bool = False
 
 
 class QueryRequest(BaseModel):
@@ -481,7 +484,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def add_documents(name: str, body: Documents):
         spec = state.retriever.spec(name)
         # An item added now would be keyed under mixed lists, miss a version or skew a run.
-        for kind in ("load", "rekey", "eval", "import", "backfill"):
+        for kind in ("load", "rekey", "retag", "eval", "import", "backfill"):
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         if len(body.items) > SYNC_ITEMS:
@@ -735,11 +738,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.put("/collections/{name}/vocabulary", status_code=202)
-    def put_vocabulary(name: str, body: Vocabulary) -> dict:
-        """Saves the terms as a version; a queued retag job switches to it once every
-        item is tagged with it."""
+    def put_vocabulary(name: str, body: Vocabulary):
+        """Without confirm, what re-tagging every item would cost; with it, saves the terms
+        as a version and a queued retag job switches to it once every item is tagged."""
         spec = state.retriever.spec(name)
-        if spec.build is None or spec.build.vocabulary == "lists":
+        build = spec.build
+        if build is None or build.vocabulary == "lists":
             raise HTTPException(
                 409, f"'{name}' uses keyword lists, not a vocabulary; edit its lists instead"
             )
@@ -747,7 +751,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for kind in VOCABULARY_BUSY:
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
-        version = state.builder.save_vocabulary(spec, body.terms)
+        state.indexer.check_model(spec)  # the retag would embed with another model
+        terms = clean_terms(body.terms)
+        if not terms:
+            raise ValueError("the vocabulary is empty")
+        if build.tagging == "ai":
+            need_ai("keywords")
+        if not body.confirm:
+            items = state.builder.stored_items(name)
+            estimate = state.builder.estimate_tag_usd(spec, terms, items)
+            calls = len(items) if build.tagging == "ai" else 0
+            return JSONResponse(
+                {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
+            )
+        version = state.builder.save_vocabulary(spec, terms)
         job_id = db.create_job(state.conn, "retag", name, {"version": version})
         return {"version": version, "job_id": job_id}
 
@@ -1103,6 +1120,9 @@ def job_problems(newest: list[dict]) -> list[str]:
         if job["kind"] == "rekey" and job["status"] in REKEY_PARTLY_DONE and job["progress"] > 0:
             name = job["collection"]
             lines.append(f"Keyword lists on {name} are partly re-keyed; save them again")
+        elif job["kind"] == "retag" and job["status"] in REKEY_PARTLY_DONE and job["progress"] > 0:
+            name = job["collection"]
+            lines.append(f"The vocabulary on {name} is partly re-tagged; save it again")
         elif job["status"] in PROBLEM:
             lines.append(
                 f"{job['kind'].capitalize()} {job['id'][:8]} on {job['collection']} "
