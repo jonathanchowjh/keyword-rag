@@ -313,7 +313,7 @@ def test_load_summarize_without_key_503(tmp_path):
     assert r.status_code == 503 and "'summary' job" in r.json()["detail"]
 
 
-def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
+def test_load_without_ai_runs_and_saves_no_lists(tmp_path, monkeypatch):
     from ragqa_core import loader
     from ragqa_core.types import Item, Question
 
@@ -331,11 +331,12 @@ def test_load_runs_job_and_falls_back_to_tfidf_lists(tmp_path, monkeypatch):
         assert r.status_code == 202 and set(r.json()) == {"job_id"}
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done", job
-        assert job["result"]["added"] == 3 and job["result"]["lists_source"] == "tfidf"
-        assert client.get("/collections/m").json()["keyword_lists"]["common"]
+        assert job["result"]["added"] == 3 and job["result"]["lists_source"] is None
+        got = client.get("/collections/m").json()
+        assert got["keyword_lists"] is None and got["state"] == "no_lists"
 
 
-def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
+def test_load_saves_no_lists_when_the_ai_proposes_nothing(tmp_path, monkeypatch):
     from ragqa_core import loader
     from ragqa_core.types import Item
 
@@ -346,8 +347,8 @@ def test_load_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeyp
         r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done", job
-        assert job["result"]["lists_source"] == "tfidf (ai proposal unusable)"
-        assert client.get("/collections/m").json()["keyword_lists"]["topic"]
+        assert job["result"]["lists_source"] is None
+        assert client.get("/collections/m").json()["keyword_lists"] is None
 
 
 def ledger_purposes(client):
@@ -367,7 +368,7 @@ def three_items(monkeypatch):
 
 def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
     three_items(monkeypatch)
-    reply = lambda p: '{"topic": ["enzymes"], "method": ["assay"]}'  # noqa: E731
+    reply = lambda p: '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'  # noqa: E731
     with make_client(tmp_path, reply=reply) as client:
         client.post("/collections", json={"name": "m", "qa_type": "multihop"})
         r = client.post("/collections/m/load", json={"dataset": "musique"})
@@ -384,7 +385,7 @@ def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
 
 def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
     three_items(monkeypatch)
-    with make_client(tmp_path, api_key=None) as client:  # tfidf lists, no Claude
+    with make_client(tmp_path, api_key=None) as client:  # no AI: no lists, nothing spent
         client.post("/collections", json={"name": "m", "qa_type": "multihop"})
         assert client.post("/collections/m/load", json={"dataset": "musique"}).status_code == 202
     with make_client(tmp_path / "k") as client:  # lists exist: no propose
@@ -416,7 +417,8 @@ def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
 
 def test_propose_lists(client):
     add_collection(client, lists=False)
-    fake_replies(client.app.state.ai, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
+    proposal = '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'
+    fake_replies(client.app.state.ai, lambda p: proposal)
     url = "/collections/c/keyword-lists/propose"
     spent = client.get("/budget").json()["spent_usd"]
     r = client.post(url)
@@ -424,7 +426,62 @@ def test_propose_lists(client):
     assert r.json()["estimate"]["est_usd"] > 0
     assert client.get("/budget").json()["spent_usd"] == spent  # the estimate spent nothing
     lists = client.post(url, json={"confirm": True}).json()
-    assert lists["topic"] == ["enzymes"] and lists["method"] == ["assay"]
+    assert lists == {"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}
+
+
+WORKED = {"name": "w", "qa_type": "science", "recipe": "worked_examples"}
+
+
+def test_vocabulary_export_import_queues_retag(client):
+    client.app.state.worker.stop()  # the retag job stays queued
+    r = client.post("/collections", json=WORKED)
+    assert r.status_code == 201, r.text
+    empty = client.get("/collections/w/vocabulary").json()
+    assert empty == {"version": None, "terms": None, "versions": []}
+    r = client.put("/collections/w/vocabulary", json={"terms": [" Ohm's Law ", "ideal gas law"]})
+    assert r.status_code == 202, r.text
+    setup = r.json()
+    job = client.get(f"/jobs/{setup['job_id']}").json()
+    assert (job["kind"], job["status"], job["setup"]) == (
+        "retag",
+        "queued",
+        {"version": setup["version"]},
+    )
+    exported = client.get("/collections/w/vocabulary").json()
+    assert exported["version"] is None  # in force only once the retag has run
+    assert [(v["version"], v["count"], v["active"]) for v in exported["versions"]] == [
+        (setup["version"], 2, False)
+    ]
+    db.set_vocabulary_version(client.app.state.conn, "w", setup["version"])
+    exported = client.get("/collections/w/vocabulary").json()
+    assert exported["version"] == setup["version"]
+    assert exported["terms"] == ["ohm's law", "ideal gas law"]
+    assert exported["versions"][0]["active"] is True
+    # The export is the import: the GET body PUTs back as the same version.
+    client.post(f"/jobs/{setup['job_id']}/cancel")
+    again = client.put("/collections/w/vocabulary", json=exported)
+    assert again.status_code == 202 and again.json()["version"] == setup["version"]
+
+
+def test_vocabulary_put_on_lists_recipe_is_409(client):
+    client.post("/collections", json={"name": "p", "qa_type": "mcq"})
+    r = client.put("/collections/p/vocabulary", json={"terms": ["ohm's law"]})
+    assert r.status_code == 409 and "lists" in r.json()["detail"]
+    assert client.get("/collections/p/vocabulary").json()["versions"] == []
+
+
+def test_vocabulary_put_refuses_while_busy_and_an_empty_list(client):
+    client.app.state.worker.stop()
+    client.post("/collections", json=WORKED)
+    assert client.put("/collections/w/vocabulary", json={"terms": ["  "]}).status_code == 422
+    assert client.get("/collections/nope/vocabulary").status_code == 404
+    assert client.put("/collections/nope/vocabulary", json={"terms": ["x"]}).status_code == 404
+    for kind in ("load", "import", "retag", "eval"):
+        job_id = db.create_job(client.app.state.conn, kind, "w", {})
+        r = client.put("/collections/w/vocabulary", json={"terms": ["ohm's law"]})
+        assert r.status_code == 409 and kind in r.json()["detail"], kind
+        db.request_cancel(client.app.state.conn, job_id)
+    assert client.put("/collections/w/vocabulary", json={"terms": ["ohm's law"]}).status_code == 202
 
 
 def test_propose_lists_needs_a_key(client):

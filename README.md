@@ -148,10 +148,12 @@ A collection remembers the dense model it was built with. Changing
 | `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
 | `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
 | `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or an AI keyword proposal because an AI model is set up and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
-| `POST /collections/{name}/keyword-lists/propose` | The AI proposes topic and method lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
+| `POST /collections/{name}/keyword-lists/propose` | The AI proposes the topic, method and common lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
+| `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
+| `PUT /collections/{name}/vocabulary` | `{terms}` (the GET body, edited, is the import): save the terms as a version and queue a `retag` job; returns `{version, job_id}`. 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer) |
 | `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |

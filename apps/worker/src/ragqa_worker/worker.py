@@ -2,6 +2,7 @@ import threading
 
 from aiconnect.ai import AI, BudgetExceeded, Cancelled, NoConnection
 from ragqa_core import db
+from ragqa_core.builder import Builder
 from ragqa_core.connection import Connection
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.indexer import Indexer
@@ -18,6 +19,7 @@ class Worker:
         indexer: Indexer,
         loader: Loader,
         evaluator: Evaluator,
+        builder: Builder,
         idle_seconds: float = 0.5,
     ):
         self.conn = conn
@@ -25,6 +27,7 @@ class Worker:
         self.indexer = indexer
         self.loader = loader
         self.evaluator = evaluator
+        self.builder = builder
         self.idle_seconds = idle_seconds
         self.running_job_id: str | None = None
         self.error: str | None = None  # the last cycle's error, until a clean cycle

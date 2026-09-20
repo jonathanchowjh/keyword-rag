@@ -95,7 +95,7 @@ def test_a_run_without_recorded_versions_does_not_warn_of_stale_lists(page, seed
 def test_propose_shows_its_estimate_first(page, seeded):
     seeded.build("prop")
     ai = seeded.app.state.ai
-    fake_replies(ai, lambda p: '{"topic": ["enzymes"], "method": ["assay"]}')
+    fake_replies(ai, lambda p: '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}')
     try:
         page.goto(seeded.url + "/c/prop")
         expect(page.locator("#kw-topic")).to_have_value("enzyme\nmarket\nvolcano\noptics")

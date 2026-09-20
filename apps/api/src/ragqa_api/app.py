@@ -35,6 +35,7 @@ from aiconnect.ai import (
 )
 from aiconnect.presets import PRESETS
 from ragqa_core import db, imports
+from ragqa_core.builder import Builder
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, no_ai, runnable
@@ -76,6 +77,7 @@ PROBLEM = {
 }
 KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
+VOCABULARY_BUSY = ("load", "import", "retag", "eval")
 
 
 class NewCollection(BaseModel):
@@ -128,6 +130,10 @@ class Lists(BaseModel):
     topic: list[str]
     method: list[str]
     common: list[str]
+
+
+class Vocabulary(BaseModel):
+    terms: list[str]
 
 
 class QueryRequest(BaseModel):
@@ -264,10 +270,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     db.move_ai_tables(state.conn)
     state.ai.apply_env(api_key=settings.api_key, model=settings.model, cap_usd=settings.cap_usd)
     state.indexer = Indexer(state.conn, state.store, state.models, state.ai)
+    state.builder = Builder(state.conn, state.store, state.models, state.ai, state.indexer)
     state.retriever = Retriever(state.conn, state.store, state.models, state.ai, state.indexer)
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
-    state.loader = Loader(state.conn, state.indexer, state.ai, settings.home)
-    state.worker = Worker(state.conn, state.ai, state.indexer, state.loader, state.evaluator)
+    state.loader = Loader(state.conn, state.indexer, state.builder, state.ai, settings.home)
+    state.worker = Worker(
+        state.conn, state.ai, state.indexer, state.loader, state.evaluator, state.builder
+    )
 
     # -- auth ------------------------------------------------------------------
 
@@ -712,6 +721,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
         version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
         job_id = db.create_job(state.conn, "rekey", name, {"version": version})
+        return {"version": version, "job_id": job_id}
+
+    @app.get("/collections/{name}/vocabulary")
+    def get_vocabulary(name: str) -> dict:
+        """The vocabulary in force and every saved version. This body is the export:
+        PUT it back, edited, to import a version (spec §16)."""
+        spec = state.retriever.spec(name)
+        return {
+            "version": spec.vocabulary_version,
+            "terms": db.get_vocabulary(state.conn, name),
+            "versions": db.list_vocabularies(state.conn, name),
+        }
+
+    @app.put("/collections/{name}/vocabulary", status_code=202)
+    def put_vocabulary(name: str, body: Vocabulary) -> dict:
+        """Saves the terms as a version; a queued retag job switches to it once every
+        item is tagged with it."""
+        spec = state.retriever.spec(name)
+        if spec.build is None or spec.build.vocabulary == "lists":
+            raise HTTPException(
+                409, f"'{name}' uses keyword lists, not a vocabulary; edit its lists instead"
+            )
+        # Items tagged now would mix versions, or skew a run that is reading them.
+        for kind in VOCABULARY_BUSY:
+            if db.job_waiting_or_running(state.conn, kind, name):
+                raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+        version = state.builder.save_vocabulary(spec, body.terms)
+        job_id = db.create_job(state.conn, "retag", name, {"version": version})
         return {"version": version, "job_id": job_id}
 
     @app.post("/query")

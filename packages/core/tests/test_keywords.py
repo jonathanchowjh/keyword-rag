@@ -5,7 +5,6 @@ from ragqa_core.keywords import (
     list_version,
     matched,
     pick_all,
-    tfidf_terms,
 )
 from ragqa_core.types import FACETS, KeywordLists
 
@@ -43,17 +42,6 @@ def test_pick_all_returns_k_unique():
 def test_keyword_string():
     assert keyword_string(["a", "b"], None) == "a; b"
     assert keyword_string(["a"], "Sum.") == "a. Sum."
-
-
-def test_tfidf_requires_two_docs_and_drops_stopwords():
-    terms = tfidf_terms(["the enzyme rate rose", "enzyme rate fell", "a solitary word"], n=10)
-    assert "enzyme" in terms and "rate" in terms
-    assert "the" not in terms and "solitary" not in terms
-
-
-def test_tfidf_respects_n():
-    texts = [f"alpha beta gamma delta {i}" for i in range(5)]
-    assert len(tfidf_terms(texts, n=2)) == 2
 
 
 def test_list_version_is_order_sensitive_and_stable():

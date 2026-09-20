@@ -352,6 +352,27 @@ def test_lists_saved_without_switching_version(conn):
     assert get_collection(conn, "c").keyword_version == "v1"
 
 
+def test_vocabulary_versions_saved_without_switching(conn):
+    save_collection(conn, CollectionSpec("c", "science", False, "d", 4))
+    assert db.get_vocabulary(conn, "c") is None  # no version in force
+    db.save_vocabulary(conn, "c", ["ohm's law", "ideal gas law"], "v1")
+    db.save_vocabulary(conn, "c", ["ohm's law"], "v2")
+    assert get_collection(conn, "c").vocabulary_version is None
+    assert db.get_vocabulary(conn, "c") is None
+    assert db.get_vocabulary(conn, "c", "v1") == ["ohm's law", "ideal gas law"]
+    assert db.get_vocabulary(conn, "c", "missing") is None
+    db.set_vocabulary_version(conn, "c", "v1")
+    assert db.get_vocabulary(conn, "c") == ["ohm's law", "ideal gas law"]
+    rows = db.list_vocabularies(conn, "c")
+    assert [(r["version"], r["count"], r["active"]) for r in rows] == [
+        ("v2", 1, False),
+        ("v1", 2, True),
+    ]
+    assert all(r["created_at"] for r in rows)
+    delete_collection_rows(conn, "c")
+    assert db.get_vocabulary(conn, "c", "v1") is None and db.list_vocabularies(conn, "c") == []
+
+
 def test_requeue_clears_cancel_and_error(conn):
     j = create_job(conn, "eval", "c", {})
     claim_next_job_id(conn)

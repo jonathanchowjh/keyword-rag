@@ -4,7 +4,7 @@
 import json
 import re
 
-from ragqa_core.types import Hit, QaType
+from ragqa_core.types import CorpusType, Hit, QaType
 
 LETTERS = "ABCDEFGH"
 ANSWER_LINE = re.compile(r"^\s*Answer:\s*(.+?)\s*$", re.M)
@@ -43,11 +43,27 @@ def summary_prompt(text: str) -> str:
 def propose_prompt(samples: list[str], qa_type: QaType) -> str:
     joined = "\n---\n".join(s[:800] for s in samples)
     return (
-        "Below are sample items from one question-answering collection. Propose two"
+        "Below are sample items from one question-answering collection. Propose three"
         " keyword lists that describe what such items are about.\n"
         '- "topic": about 50 short subject phrases.\n'
         f'- "method": about 15 phrases naming {METHOD_HINT[qa_type]}.\n'
-        'Reply with JSON only: {"topic": [...], "method": [...]}.\n\n' + joined
+        '- "common": about 30 terms of the domain that such items use often.\n'
+        'Reply with JSON only: {"topic": [...], "method": [...], "common": [...]}.\n\n' + joined
+    )
+
+
+INDUCE_ASKS: dict[CorpusType, str] = {
+    "worked": "the skills or principles these solutions use",
+    "reference": "the topics and concepts these passages cover",
+}
+
+
+def induce_prompt(texts: list[str], corpus_type: CorpusType) -> str:
+    joined = "\n---\n".join(t[:800] for t in texts)
+    return (
+        f"Below are texts from one collection. Name {INDUCE_ASKS[corpus_type]}, as up to"
+        " 10 short terms in total (a few words each), general enough to apply to other"
+        ' texts like these. Reply with JSON only: {"terms": [...]}.\n\n' + joined
     )
 
 

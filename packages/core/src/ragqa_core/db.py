@@ -43,6 +43,10 @@ create table if not exists keyword_lists (
   collection text not null, version text not null, lists_json text not null,
   created_at text not null, primary key (collection, version)
 );
+create table if not exists vocabularies (
+  collection text not null, version text not null, terms_json text not null,
+  created_at text not null, primary key (collection, version)
+);
 create table if not exists disabled_sources (
     collection text not null, source text not null, primary key (collection, source)
 );
@@ -332,6 +336,53 @@ def _keyword_version(row: sqlite3.Row) -> dict:
     }
 
 
+def save_vocabulary(conn: Connection, name: str, terms: list[str], version: str) -> None:
+    conn.execute(
+        "insert or replace into vocabularies values (?, ?, ?, ?)",
+        (name, version, json.dumps(terms), now()),
+    )
+
+
+def set_vocabulary_version(conn: Connection, name: str, version: str) -> None:
+    conn.execute("update collections set vocabulary_version = ? where name = ?", (version, name))
+
+
+def get_vocabulary(conn: Connection, name: str, version: str | None = None) -> list[str] | None:
+    """A saved version's terms; with no version, the one in force (None when there is none)."""
+    if version is None:
+        spec = get_collection(conn, name)
+        version = spec.vocabulary_version if spec else None
+        if version is None:
+            return None
+    row = first(
+        conn.execute(
+            "select terms_json from vocabularies where collection = ? and version = ?",
+            (name, version),
+        )
+    )
+    return json.loads(row["terms_json"]) if row else None
+
+
+def list_vocabularies(conn: Connection, name: str) -> list[dict]:
+    """Every saved version of a collection's vocabulary, newest first."""
+    spec = get_collection(conn, name)
+    active = spec.vocabulary_version if spec else None
+    rows = conn.execute(
+        "select version, created_at, terms_json from vocabularies where collection = ?"
+        " order by created_at desc, rowid desc",
+        (name,),
+    )
+    return [
+        {
+            "version": r["version"],
+            "created_at": r["created_at"],
+            "count": len(json.loads(r["terms_json"])),
+            "active": r["version"] == active,
+        }
+        for r in rows
+    ]
+
+
 def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
     conn.executemany(
         "insert or replace into questions values (?, ?, ?)",
@@ -573,6 +624,7 @@ def delete_collection_rows(conn: Connection, name: str) -> None:
     conn.execute("delete from questions where collection = ?", (name,))
     conn.execute("delete from disabled_sources where collection = ?", (name,))
     conn.execute("delete from keyword_lists where collection = ?", (name,))
+    conn.execute("delete from vocabularies where collection = ?", (name,))
     conn.execute("delete from collections where name = ?", (name,))
 
 

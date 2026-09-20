@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -196,14 +197,27 @@ def test_rekey_rejects_an_unknown_version(env):
         ix.rekey("c", "missing")
 
 
-def test_propose_lists_uses_claude_json_and_tfidf(tmp_path):
+def test_propose_lists_returns_all_three_lists(tmp_path):
     conn = connect(tmp_path / "r.db")
-    ai = fake_ai(conn, lambda p: '{"topic": ["genetics", "genetics"], "method": ["titration"]}')
+    prompts: list[str] = []
+    reply = '{"topic": ["genetics", "genetics"], "method": ["titration"], "common": ["rate"]}'
+    ai = fake_ai(conn, lambda p: prompts.append(p) or reply)
     ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("c", "mcq", False)
     lists = ix.propose_lists(spec, ITEMS + [Item("4", "enzyme rate genetics")])
-    assert lists.topic == ["genetics"] and lists.method == ["titration"]
-    assert "rate" in lists.common
+    assert (lists.topic, lists.method, lists.common) == (["genetics"], ["titration"], ["rate"])
+    assert '"common"' in prompts[0]
+
+
+@pytest.mark.parametrize("missing", ["topic", "method", "common"])
+def test_propose_lists_refuses_a_missing_list(tmp_path, missing):
+    conn = connect(tmp_path / "r.db")
+    lists = {"topic": ["genetics"], "method": ["titration"], "common": ["rate"], missing: []}
+    ai = fake_ai(conn, lambda p: json.dumps(lists))
+    ix = Indexer(conn, Store(None, None), fake_models(), ai)
+    spec = ix.create("c", "mcq", False)
+    with pytest.raises(ValueError, match="no usable"):
+        ix.propose_lists(spec, ITEMS)
 
 
 def test_keyword_list_embeddings_are_reused_across_calls(env):

@@ -1,6 +1,7 @@
 from ragqa_core.prompts import (
     answer_prompt,
     hop_prompt,
+    induce_prompt,
     parse_answer,
     parse_json,
     propose_prompt,
@@ -99,3 +100,16 @@ def test_science_parse_reads_letters_only_with_choices():
     assert parse_answer("science", "work...\nAnswer: 4.2 J", has_choices=False) == "4.2 J"
     assert parse_answer("science", "no answer line", has_choices=False) == ""
     assert parse_answer("science", "work...\nAnswer: sulfate", has_choices=True) == ""
+
+
+def test_propose_prompt_asks_for_all_three_lists():
+    prompt = propose_prompt(["sample"], "science")
+    assert all(f'"{f}"' in prompt for f in ("topic", "method", "common"))
+
+
+def test_induce_prompt_by_corpus_type_and_truncated():
+    worked = induce_prompt(["x" * 900, "second"], "worked")
+    assert "skills or principles" in worked and '{"terms": [...]}' in worked
+    assert "x" * 800 in worked and "x" * 801 not in worked and "second" in worked
+    assert "up to 10 short terms" in worked
+    assert "topics and concepts" in induce_prompt(["passage"], "reference")

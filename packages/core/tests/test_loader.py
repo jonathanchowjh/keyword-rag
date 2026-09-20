@@ -2,12 +2,25 @@ import pytest
 
 from aiconnect.ai import Cancelled
 from ragqa_core import loader
-from ragqa_core.db import connect, create_job, get_job, get_questions
+from ragqa_core.builder import Builder
+from ragqa_core.db import connect, create_job, get_job, get_keyword_lists, get_questions
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
 from ragqa_core.store import Store
 from ragqa_core.types import Item, KeywordLists, Question
+
+PROPOSAL = (
+    '{"topic": ["enzyme", "market"], "method": ["assay"], "common": ["shared", "words", "rate"]}'
+)
+
+
+def proposing(prompt: str) -> str:
+    return PROPOSAL
+
+
+def loader_for(ix: Indexer, home) -> Loader:
+    return Loader(ix.conn, ix, Builder(ix.conn, ix.store, ix.models, ix.ai, ix), ix.ai, home)
 
 
 def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
@@ -22,23 +35,38 @@ def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
     questions = [Question("q1", "enzyme rate", None, ["x"], ["a"], {})]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
     job_id = create_job(conn, "load", "m", {"dataset": "musique", "limit": None})
-    return conn, ix, Loader(conn, ix, ix.ai, tmp_path), get_job(conn, job_id)
+    return conn, ix, loader_for(ix, tmp_path), get_job(conn, job_id)
 
 
 def test_loader_runs_a_load_job(tmp_path, monkeypatch):
-    conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.ai.update_connection("anthropic", api_key=None)
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     seen: list[float] = []
     result = ld.run(job, seen.append)
     assert result["added"] == 3 and result["questions"] == 1
-    assert result["lists_source"] == "tfidf"
+    assert result["lists_source"] == "ai"
     assert result["keyword_version"] == ix.spec("m").keyword_version is not None
     assert seen[-1] == pytest.approx(1.0) and seen == sorted(seen)
 
 
-def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, monkeypatch):
-    conn, ix, ld, job = build(tmp_path, monkeypatch)
+def test_load_without_ai_saves_no_lists(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     ld.ai.update_connection("anthropic", api_key=None)
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    assert result["added"] == 3 and result["lists_source"] is None
+    assert result["keyword_version"] is None and get_keyword_lists(conn, "m") is None
+    assert seen[-1] == pytest.approx(1.0)
+
+
+def test_proposed_lists_include_common(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
+    ld.run(job, lambda p: None)
+    lists = get_keyword_lists(conn, "m")
+    assert lists is not None and lists.common == ["shared", "words", "rate"]
+
+
+def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     real = ix.store.scroll
     ix.store.scroll = lambda name: real(name, batch=1)  # one item per re-keyed step
     seen: list[float] = []
@@ -46,8 +74,7 @@ def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, 
     assert 0.5 in seen  # adding is the first half
     assert any(0.5 < p < 1.0 for p in seen)  # the re-key reports its own steps
 
-    conn, ix, ld, job = build(tmp_path / "again", monkeypatch)
-    ld.ai.update_connection("anthropic", api_key=None)
+    conn, ix, ld, job = build(tmp_path / "again", monkeypatch, proposing)
     ix.store.scroll = lambda name: real(name, batch=1)
 
     def progress(p):
@@ -60,8 +87,7 @@ def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, 
 
 
 def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_path, monkeypatch):
-    conn, ix, ld, job = build(tmp_path, monkeypatch)
-    ld.ai.update_connection("anthropic", api_key=None)
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     ld.run(job, lambda p: None)
     version = ix.spec("m").keyword_version
     seen: list[float] = []
@@ -69,9 +95,10 @@ def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_pat
     assert seen == [1.0] and ix.spec("m").keyword_version == version
 
 
-def test_loader_falls_back_to_tfidf_when_claude_proposes_nothing(tmp_path, monkeypatch):
+def test_an_unusable_proposal_saves_no_lists(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    assert ld.run(job, lambda p: None)["lists_source"] == "tfidf (ai proposal unusable)"
+    assert ld.run(job, lambda p: None)["lists_source"] is None
+    assert ix.spec("m").keyword_version is None
 
 
 def test_loader_propagates_cancelled_from_check(tmp_path, monkeypatch):
@@ -147,7 +174,7 @@ def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
     ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("m", "multihop", True)
     ix.set_lists(spec, KeywordLists(topic=["note"], method=["topic"], common=["number"]))
-    ld = Loader(conn, ix, ai, tmp_path)
+    ld = loader_for(ix, tmp_path)
     first = ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
     assert len(calls) == 4 and first["new"] == 4
     calls.clear()
@@ -156,12 +183,18 @@ def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
     assert ix.store.get("m", ["n0"])[0].meta["source"] == "upload:notes"
 
 
-def test_import_items_without_lists_makes_tfidf_lists(tmp_path, monkeypatch):
-    conn, ix, ld, _ = build(tmp_path, monkeypatch)
-    ld.ai.update_connection("anthropic", api_key=None)
+def test_import_items_without_lists_makes_ai_lists(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
     assert ix.spec("m").keyword_version is None
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
     assert ix.spec("m").keyword_version is not None
+
+
+def test_import_items_without_ai_makes_no_lists(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
+    ld.ai.update_connection("anthropic", api_key=None)
+    ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
+    assert ix.spec("m").keyword_version is None
 
 
 LONG = "the enzyme rate rose sharply after the temperature was raised"
@@ -205,7 +238,7 @@ def test_estimates_count_only_changed_items(tmp_path, monkeypatch):
     ai = fake_ai(conn, lambda p: "A summary.")
     ix = Indexer(conn, Store(None, None), fake_models(), ai)
     spec = ix.create("m", "multihop", True)
-    ld = Loader(conn, ix, ai, tmp_path)
+    ld = loader_for(ix, tmp_path)
     items = [Item("a", "enzyme rate", "A"), Item("b", "market price", "B")]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     assert ld.estimate_load(spec, "musique", None)["calls"] == 3  # two summaries and a proposal

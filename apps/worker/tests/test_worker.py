@@ -4,6 +4,7 @@ import pytest
 
 from aiconnect.ai import BudgetExceeded, NoConnection
 from ragqa_core import db
+from ragqa_core.builder import Builder
 from ragqa_core.db import connect, get_job, save_questions
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.fakes import fake_ai, fake_models
@@ -45,7 +46,9 @@ def env(tmp_path):
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
     ev = Evaluator(conn, Retriever(conn, store, models, ai, ix), models, ai)
-    w = Worker(conn, ai, ix, Loader(conn, ix, ai, tmp_path), ev, idle_seconds=0.01)
+    builder = Builder(conn, store, models, ai, ix)
+    loader = Loader(conn, ix, builder, ai, tmp_path)
+    w = Worker(conn, ai, ix, loader, ev, builder, idle_seconds=0.01)
     w.other_version = ix.save_lists(spec, OTHER_LISTS)
     return w, conn
 

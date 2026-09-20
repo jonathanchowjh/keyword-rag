@@ -10,7 +10,7 @@ from aiconnect.ai import AI, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import source_for
-from ragqa_core.keywords import assign, keyword_string, list_version, pick_all, tfidf_terms
+from ragqa_core.keywords import assign, keyword_string, list_version, pick_all
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
 from ragqa_core.recipes import build_for, corpus_type_for, default_search
@@ -50,6 +50,10 @@ def embed_text(spec: CollectionSpec, item: Item) -> str:
 
 def dedupe(words: list[str]) -> list[str]:
     return list(dict.fromkeys(w.strip() for w in words if isinstance(w, str) and w.strip()))
+
+
+def _as_list(value: object) -> list:
+    return value if isinstance(value, list) else []
 
 
 class Indexer:
@@ -208,15 +212,13 @@ class Indexer:
             purpose="propose",
         )
         proposed = parse_json(reply.text)
-        topic = dedupe(proposed.get("topic") or [])
-        method = dedupe(proposed.get("method") or [])
-        if not topic or not method:
+        lists = {f: dedupe(_as_list(proposed.get(f))) for f in FACETS}
+        empty = [f for f in FACETS if not lists[f]]
+        if empty:
             raise ValueError(
-                f"The AI's reply had no usable topic or method list: {reply.text[:200]!r}"
+                f"The AI's reply had no usable {' or '.join(empty)} list: {reply.text[:200]!r}"
             )
-        # A small sample can have no term in two texts; reuse the proposed phrases.
-        common = tfidf_terms([i.text for i in sample]) or topic + method
-        return KeywordLists(topic=topic, method=method, common=common)
+        return KeywordLists(**lists)
 
     def save_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
         """Validate, embed and store a version of the lists, without switching to it."""

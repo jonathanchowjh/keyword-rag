@@ -6,25 +6,11 @@ in the 2024 paper (§4.5): top-3 per list, or top-9 from the pooled lists.
 
 import hashlib
 import json
-import math
-import re
-from collections import Counter
 from dataclasses import asdict
 
 import numpy as np
 
 from ragqa_core.types import FACETS, KeywordLists
-
-STOPWORDS = frozenset(
-    """a about above after again against all also am an and any are as at be because been
-    before being below between both but by can could did do does doing down during each few
-    for from further had has have having he her here hers him his how i if in into is it its
-    itself just me more most my no nor not of off on once only or other our ours out over own
-    same she should so some such than that the their theirs them then there these they this
-    those through to too under until up very was we were what when where which while who whom
-    why will with would you your yours one two three which shown following figure""".split()
-)
-TOKEN = re.compile(r"[a-z][a-z0-9\-]+")
 
 
 def top_k(item_vecs: np.ndarray, word_vecs: np.ndarray, k: int) -> list[list[int]]:
@@ -56,21 +42,6 @@ def pick_all(
 def keyword_string(words: list[str], summary: str | None) -> str:
     text = "; ".join(words)
     return f"{text}. {summary}" if summary else text
-
-
-def tfidf_terms(texts: list[str], n: int = 500) -> list[str]:
-    docs = [
-        [t for t in TOKEN.findall(text.lower()) if len(t) >= 3 and t not in STOPWORDS]
-        for text in texts
-    ]
-    df = Counter(t for doc in docs for t in set(doc))
-    tf = Counter(t for doc in docs for t in doc)
-    total = len(docs)
-    scores = {t: tf[t] * math.log(total / df[t]) for t in df if df[t] >= 2}
-    # A term in every document scores 0 by idf; keep it below the rest but
-    # still rankable so small corpora are not emptied.
-    ranked = sorted(scores, key=lambda t: (-scores[t], -tf[t], t))
-    return ranked[:n]
 
 
 def list_version(lists: KeywordLists) -> str:

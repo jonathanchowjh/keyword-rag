@@ -7,12 +7,12 @@ from pathlib import Path
 
 from aiconnect.ai import AI
 from ragqa_core import db, imports
+from ragqa_core.builder import Builder
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
-from ragqa_core.keywords import tfidf_terms
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
+from ragqa_core.types import CollectionSpec, Item, Question
 
 PROPOSE_SAMPLE = 40
 
@@ -49,28 +49,15 @@ def propose_sample(items: list[Item]) -> list[Item]:
     return random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
 
 
-def tfidf_lists(texts: list[str]) -> KeywordLists | None:
-    """Lists without AI: the corpus's own top terms. A small corpus has too
-    few terms to fill all three facets, so a facet that would be empty reuses
-    the head of the ranking rather than leaving its keyword vector undefined."""
-    terms = tfidf_terms(texts, n=565)
-    if not terms:
-        return None
-    return KeywordLists(
-        topic=terms[:50],
-        method=terms[50:65] or terms[:15],
-        common=terms[65:565] or terms,
-    )
-
-
 def without_leaked(q: Question) -> Question:
     return replace(q, meta={k: v for k, v in q.meta.items() if k != "leaked"})
 
 
 class Loader:
-    def __init__(self, conn: Connection, indexer: Indexer, ai: AI, home: Path):
+    def __init__(self, conn: Connection, indexer: Indexer, builder: Builder, ai: AI, home: Path):
         self.conn = conn
         self.indexer = indexer
+        self.builder = builder
         self.ai = ai
         self.home = home
 
@@ -106,20 +93,20 @@ class Loader:
     def _make_lists(
         self, spec: CollectionSpec, items: list[Item], progress: Callable[[float], None]
     ) -> str | None:
-        """Give the collection lists, proposed by the AI when it can, else its own top terms."""
-        sample = propose_sample(items)
-        lists, source = None, "tfidf"
+        """Give the collection the AI's proposed lists. With no model for keywords, or a
+        reply without all three lists, it gets none (spec §15: no TF-IDF fallback) and
+        its lists can be proposed or written later."""
+        lists = None
         if self.ai.ready("keywords"):
             try:
-                lists, source = self.indexer.propose_lists(spec, sample), "ai"
+                lists = self.indexer.propose_lists(spec, propose_sample(items))
             except ValueError:
-                source = "tfidf (ai proposal unusable)"
+                pass
         if lists is None:
-            lists = tfidf_lists([i.text for i in items])
-        if lists is None:
+            progress(1.0)  # the step is over, with nothing to re-key
             return None
         self.indexer.set_lists(spec, lists, progress=progress)
-        return source
+        return "ai"
 
     def estimate_load(self, spec: CollectionSpec, dataset: str, limit: int | None) -> dict:
         """What a dataset load would spend. The dataset is read (and cached) to price it."""
