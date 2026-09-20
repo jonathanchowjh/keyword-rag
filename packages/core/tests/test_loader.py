@@ -97,8 +97,35 @@ def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_pat
 
 def test_an_unusable_proposal_saves_no_lists(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
-    assert ld.run(job, lambda p: None)["lists_source"] is None
-    assert ix.spec("m").keyword_version is None
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    # Named, unlike "no AI model" (None): the proposal was paid for and is why there are none.
+    assert result["lists_source"] == loader.UNUSABLE_PROPOSAL == "none (ai proposal unusable)"
+    assert result["keyword_version"] is None and ix.spec("m").keyword_version is None
+    assert [r["purpose"] for r in conn.execute("select purpose from ai_ledger")] == ["propose"]
+    assert seen[-1] == pytest.approx(1.0)
+
+
+def test_an_induced_recipe_load_never_proposes_lists(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, proposing))
+    spec = ix.create("w", "science", False, recipe="worked_examples")
+    ld = loader_for(ix, tmp_path)
+    items = [Item("a", "a ball falls 5 m", "10 m/s", "use conservation of energy")]
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
+    assert ld.ai.ready("keywords") and not ld.makes_lists(spec)
+    estimate = ld.estimate_load(spec, "scibench", None)
+    assert estimate["calls"] == 0 and estimate["est_usd"] == 0  # no propose priced
+    job = get_job(conn, create_job(conn, "load", "w", {"dataset": "scibench", "limit": None}))
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    assert result["added"] == 1 and result["lists_source"] is None
+    assert get_keyword_lists(conn, "w") is None
+    assert list(conn.execute("select purpose from ai_ledger")) == []  # no propose call
+    assert seen[-1] == pytest.approx(1.0)  # adding was the whole job
+    ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w"), seen.append)
+    assert get_keyword_lists(conn, "w") is None
+    assert list(conn.execute("select purpose from ai_ledger")) == []
 
 
 def test_loader_propagates_cancelled_from_check(tmp_path, monkeypatch):
@@ -148,17 +175,17 @@ def test_sample_items_skips_disabled(tmp_path):
     assert [i.id for i in loader.sample_items(store, "m", skip=("two",))] == ["a"]
 
 
-def upload(tmp_path, name, rows):
+def upload(tmp_path, name, rows, collection="m"):
     import json
 
     from ragqa_core import imports
 
     data = "\n".join(json.dumps(r) for r in rows).encode()
-    return imports.save_upload(tmp_path, "m", name, [data])
+    return imports.save_upload(tmp_path, collection, name, [data])
 
 
 def import_job(conn, tmp_path, kind, rows, mapping, source="upload:notes", name="m"):
-    upload_id = upload(tmp_path, "rows.jsonl", rows)
+    upload_id = upload(tmp_path, "rows.jsonl", rows, name)
     setup = {"upload_id": upload_id, "kind": kind, "mapping": mapping, "source": source}
     return get_job(conn, create_job(conn, "import", name, setup))
 

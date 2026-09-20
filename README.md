@@ -147,7 +147,7 @@ A collection remembers the dense model it was built with. Changing
 | `DELETE /collections/{name}/sources/{source}` | Remove a source's items, chunks and imported questions; 409 while a job is queued or running on the collection |
 | `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
 | `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
-| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or an AI keyword proposal because an AI model is set up and there are no lists), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
+| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries, or an AI keyword proposal because an AI model is set up and a recipe that uses keyword lists has none), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}` |
 | `POST /collections/{name}/keyword-lists/propose` | The AI proposes the topic, method and common lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists` | Every saved version of the lists, newest first: `{version, created_at, counts: {topic, method, common}, active}`. 404 for an unknown collection |
 | `GET /collections/{name}/keyword-lists/{version}` | One version: `{version, created_at, active, lists}`. 404 for an unknown version |

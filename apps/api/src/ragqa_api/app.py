@@ -666,7 +666,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if spec.summarize:
             need_ai("summary")
         # What the loader spends on: summaries, and a proposal when there are no lists.
-        proposes = state.ai.ready("keywords") and db.get_keyword_lists(state.conn, name) is None
+        proposes = state.ai.ready("keywords") and state.loader.makes_lists(spec)
         if (spec.summarize or proposes) and not body.confirm:
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
             return JSONResponse({"estimate": estimate}, 200)

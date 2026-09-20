@@ -11,10 +11,12 @@ from ragqa_core.builder import Builder
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
+from ragqa_core.recipes import build_for
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, Question
 
 PROPOSE_SAMPLE = 40
+UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
 
 
 def limited(
@@ -72,7 +74,7 @@ class Loader:
 
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
         items, questions = limited(items, questions, job["setup"].get("limit"))
-        makes_lists = db.get_keyword_lists(conn, name) is None
+        makes_lists = self.makes_lists(spec)
         share = 0.5 if makes_lists else 1.0
         dataset = job["setup"]["dataset"]
         counts = self.indexer.add(spec, items, dataset, progress=lambda p: progress(share * p))
@@ -90,21 +92,27 @@ class Loader:
             "keyword_version": fresh.keyword_version if fresh else None,
         }
 
+    def makes_lists(self, spec: CollectionSpec) -> bool:
+        """Whether adding items also gives the collection lists: only a recipe that uses
+        the three lists, and only while it has none. The induced recipes never use them."""
+        build = spec.build or build_for("paper_2024", spec.summarize)
+        return build.vocabulary == "lists" and db.get_keyword_lists(self.conn, spec.name) is None
+
     def _make_lists(
         self, spec: CollectionSpec, items: list[Item], progress: Callable[[float], None]
     ) -> str | None:
-        """Give the collection the AI's proposed lists. With no model for keywords, or a
-        reply without all three lists, it gets none (spec §15: no TF-IDF fallback) and
-        its lists can be proposed or written later."""
-        lists = None
-        if self.ai.ready("keywords"):
-            try:
-                lists = self.indexer.propose_lists(spec, propose_sample(items))
-            except ValueError:
-                pass
-        if lists is None:
+        """Give the collection the AI's proposed lists, and say where they came from. With no
+        model for keywords it gets none (spec §15: no TF-IDF fallback) and the source is
+        None; a paid reply without all three lists is named, so its charge is explained.
+        Either way its lists can be proposed or written later."""
+        if not self.ai.ready("keywords"):
             progress(1.0)  # the step is over, with nothing to re-key
             return None
+        try:
+            lists = self.indexer.propose_lists(spec, propose_sample(items))
+        except ValueError:
+            progress(1.0)
+            return UNUSABLE_PROPOSAL
         self.indexer.set_lists(spec, lists, progress=progress)
         return "ai"
 
@@ -118,7 +126,7 @@ class Loader:
         todo, _ = self.indexer.changed(spec, items, source)
         estimate = self.indexer.estimate_add_usd(spec, items, source)
         calls = len(todo) if spec.summarize else 0
-        if self.ai.ready("keywords") and db.get_keyword_lists(self.conn, spec.name) is None:
+        if self.ai.ready("keywords") and self.makes_lists(spec):
             propose = self.indexer.estimate_propose_usd(spec, propose_sample(items))
             estimate = None if estimate is None else estimate + propose
             calls += 1
@@ -167,7 +175,7 @@ class Loader:
             raise ValueError(f"unknown collection {name!r}")
         built, skipped = self._read_upload(spec, setup)
         if setup["kind"] == "items":
-            makes_lists = db.get_keyword_lists(conn, name) is None
+            makes_lists = self.makes_lists(spec)
             share = 0.5 if makes_lists else 1.0
             counts = self.indexer.add(
                 spec, built, setup["source"], progress=lambda p: progress(share * p)

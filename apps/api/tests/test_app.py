@@ -347,7 +347,7 @@ def test_load_saves_no_lists_when_the_ai_proposes_nothing(tmp_path, monkeypatch)
         r = client.post("/collections/m/load", json={"dataset": "musique", "confirm": True})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done", job
-        assert job["result"]["lists_source"] is None
+        assert job["result"]["lists_source"] == "none (ai proposal unusable)"
         assert client.get("/collections/m").json()["keyword_lists"] is None
 
 
@@ -381,6 +381,19 @@ def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
         job = wait(client, r.json()["job_id"])
         assert job["result"]["lists_source"] == "ai"
         assert ledger_purposes(client) == ["propose"]
+
+
+def test_induced_recipe_load_neither_prices_nor_runs_a_proposal(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    reply = lambda p: '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'  # noqa: E731
+    with make_client(tmp_path, reply=reply) as client:
+        body = {"name": "r", "qa_type": "multihop", "recipe": "reference"}
+        assert client.post("/collections", json=body).status_code == 201
+        r = client.post("/collections/r/load", json={"dataset": "musique"})
+        assert r.status_code == 202 and "estimate" not in r.json()  # free: queued at once
+        job = wait(client, r.json()["job_id"])
+        assert job["status"] == "done" and job["result"]["lists_source"] is None
+        assert ledger_purposes(client) == []
 
 
 def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
@@ -1621,6 +1634,7 @@ def test_delete_source_removes_items_chunks_and_questions(client):
 def test_delete_source_refused_while_a_job_is_queued(client):
     add_collection(client)
     import_items(client)
+    client.app.state.worker.stop()  # else the worker may claim and fail the job first
     db.create_job(client.app.state.conn, "rekey", "c", {})
     assert client.delete("/collections/c/sources/upload:notes").status_code == 409
 
