@@ -1,8 +1,12 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from aiconnect.ai import Cancelled
-from ragqa_core import loader
+from ragqa_core import db, loader
 from ragqa_core.builder import Builder
+from ragqa_core.datasets import load_scibench
 from ragqa_core.db import connect, create_job, get_job, get_keyword_lists, get_questions
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
@@ -17,6 +21,10 @@ PROPOSAL = (
 
 def proposing(prompt: str) -> str:
     return PROPOSAL
+
+
+def purposes(conn) -> list[str]:
+    return [r["purpose"] for r in conn.execute("select purpose from ai_ledger")]
 
 
 def loader_for(ix: Indexer, home) -> Loader:
@@ -115,17 +123,17 @@ def test_an_induced_recipe_load_never_proposes_lists(tmp_path, monkeypatch):
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, []))
     assert ld.ai.ready("keywords") and not ld.makes_lists(spec)
     estimate = ld.estimate_load(spec, "scibench", None)
-    assert estimate["calls"] == 0 and estimate["est_usd"] == 0  # no propose priced
+    assert estimate["calls"] == 3  # induce, tag and abstract: no propose priced
     job = get_job(conn, create_job(conn, "load", "w", {"dataset": "scibench", "limit": None}))
     seen: list[float] = []
     result = ld.run(job, seen.append)
     assert result["added"] == 1 and result["lists_source"] is None
     assert get_keyword_lists(conn, "w") is None
-    assert list(conn.execute("select purpose from ai_ledger")) == []  # no propose call
-    assert seen[-1] == pytest.approx(1.0)  # adding was the whole job
+    assert "propose" not in purposes(conn)
+    assert seen[-1] == pytest.approx(1.0)
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w"), seen.append)
     assert get_keyword_lists(conn, "w") is None
-    assert list(conn.execute("select purpose from ai_ledger")) == []
+    assert "propose" not in purposes(conn)
 
 
 def test_loader_propagates_cancelled_from_check(tmp_path, monkeypatch):
@@ -274,3 +282,114 @@ def test_estimates_count_only_changed_items(tmp_path, monkeypatch):
     job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP)
     est = ld.estimate_import(spec, job["setup"])
     assert est["new"] == 4 and est["skipped"] == 0 and est["calls"] == 5 and est["est_usd"] > 0
+
+
+def test_import_records_an_unusable_proposal(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)  # the AI replies with no lists
+    job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP)
+    result = ld.run_import(job, lambda p: None)
+    assert result["lists_source"] == loader.UNUSABLE_PROPOSAL and purposes(conn) == ["propose"]
+
+
+SCIBENCH = Path(__file__).parent / "data" / "scibench_mini"
+ABSTRACTED = json.dumps(
+    {"principle": "Energy is conserved.", "method": "Equate the energies.", "answer": "3 m/s"}
+)
+
+
+def by_purpose(prompt: str) -> str:
+    if "skills or principles" in prompt:
+        return '{"terms": ["energy conservation", "kinematics"]}'
+    if "Pick 1 to" in prompt:
+        return '{"terms": ["kinematics"]}'
+    if '"principle"' in prompt:
+        return ABSTRACTED
+    return "Answer: A"
+
+
+def scibench_items(cache) -> list[Item]:
+    items, _ = load_scibench(cache, {p.name: p for p in SCIBENCH.glob("*.json")})
+    return items
+
+
+def worked_load(tmp_path, monkeypatch):
+    """A fresh worked-examples collection w and a load job of the scibench mini files."""
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, by_purpose))
+    ix.create("w", "science", False, recipe="worked_examples")
+    files = {p.name: p for p in SCIBENCH.glob("*.json")}
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: load_scibench(cache, files))
+    job = get_job(conn, create_job(conn, "load", "w", {"dataset": "scibench", "limit": None}))
+    return conn, ix, loader_for(ix, tmp_path), job
+
+
+def test_worked_load_builds_vocabulary_tags_and_abstracts(tmp_path, monkeypatch):
+    conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
+    items = scibench_items(tmp_path)
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    spec = ix.spec("w")
+    # Induced, saved and switched to before tagging: tag() reads the version in force.
+    assert result["vocabulary_version"] == spec.vocabulary_version is not None
+    assert db.get_vocabulary(conn, "w") == ["energy conservation", "kinematics"]
+    assert result["tagged"] == len(items) and result["abstracted"] == 2
+    hits = [h for batch in ix.store.scroll("w") for h in batch]
+    assert len(hits) == len(items) and all(h.tags == ["kinematics"] for h in hits)
+    explained = {i.id for i in items if i.explanation}
+    assert {h.id for h in hits if h.abstracted} == explained and len(explained) == 2
+    assert all(h.abstracted.startswith("Principle: ") for h in hits if h.abstracted)
+    assert spec.profile == {"kinematics": len(items)}
+    assert set(purposes(conn)) == {"induce", "tag", "abstract"}
+    assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
+    # The same load again adds nothing, so it builds and spends nothing.
+    spent = len(purposes(conn))
+    again = ld.run(job, lambda p: None)
+    assert again["tagged"] == 0 and again["abstracted"] == 0 and len(purposes(conn)) == spent
+
+
+def test_paper_2024_load_unchanged(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    assert not {"vocabulary_version", "tagged", "abstracted"} & set(result)
+    assert purposes(conn) == ["propose"] and result["lists_source"] == "ai"
+    assert ix.spec("m").vocabulary_version is None
+    assert seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
+
+
+def test_load_estimate_includes_build_cost(tmp_path, monkeypatch):
+    conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
+    spec = ix.spec("w")
+    items = ix.sourced(scibench_items(tmp_path), "scibench")
+    estimate = ld.estimate_load(spec, "scibench", None)
+    build_usd = ld.builder.estimate_build_usd(spec, items)
+    assert build_usd and estimate["est_usd"] == pytest.approx(build_usd)
+    # One induction batch, a tag per item, an abstract per explained item.
+    assert estimate["calls"] == ld.builder.build_calls(spec, items) == 1 + len(items) + 2
+    setup = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w")["setup"]
+    imported = ld.estimate_import(spec, setup)
+    assert imported["calls"] == 1 + 4 and imported["est_usd"] > 0  # no explanations
+    assert purposes(conn) == []
+    ld.run(job, lambda p: None)
+    assert ld.estimate_load(spec, "scibench", None) == {
+        "est_usd": 0,
+        "items": len(items),
+        "calls": 0,
+    }
+
+
+def test_load_estimate_is_none_without_a_keywords_model(tmp_path, monkeypatch):
+    conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
+    ld.ai.set_role("default", None)
+    assert ld.estimate_load(ix.spec("w"), "scibench", None)["est_usd"] is None
+
+
+def test_worked_import_builds_its_items(tmp_path, monkeypatch):
+    conn, ix, ld, _ = worked_load(tmp_path, monkeypatch)
+    job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w")
+    seen: list[float] = []
+    result = ld.run_import(job, seen.append)
+    assert result["tagged"] == 4 and result["abstracted"] == 0
+    assert result["lists_source"] is None and result["vocabulary_version"] is not None
+    assert purposes(conn) == ["induce"] + ["tag"] * 4
+    assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)

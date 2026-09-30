@@ -35,7 +35,7 @@ from aiconnect.ai import (
 )
 from aiconnect.presets import PRESETS
 from ragqa_core import db, imports
-from ragqa_core.builder import Builder
+from ragqa_core.builder import Builder, builds
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, no_ai, runnable
@@ -490,10 +490,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if len(body.items) > SYNC_ITEMS:
             return queue_documents(spec, body)
         items = [Item(**i.model_dump()) for i in body.items]
+        todo, _ = state.indexer.changed(spec, items, "hand")
         estimate = state.indexer.estimate_add_usd(spec, items, "hand")
+        build_usd = state.builder.estimate_build_usd(spec, todo)
+        estimate = None if estimate is None or build_usd is None else estimate + build_usd
         if estimate != 0 and not body.confirm:  # None: no model to price it, so not free
             return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
+        if builds(spec) and estimate != 0:  # before adding: a refused build adds nothing
+            need_ai("keywords")
         state.indexer.add(spec, items, "hand")
+        state.builder.build(spec, todo)
         return JSONResponse({"added": len(items)}, 200)
 
     def queue_documents(spec: CollectionSpec, body: Documents):
@@ -505,11 +511,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         queued = False
         try:  # the upload is the job's input: without a job it goes, whatever stopped it
             estimate = state.loader.estimate_import(spec, setup)
-            # Only summaries can be unpaid-for: a proposal is priced only when it can be made.
-            ready = not spec.summarize or state.ai.ready("summary")
+            # Summaries and the build can be unpaid-for (a proposal is priced only when it
+            # can be made); a collection has one or the other, never both.
+            role = "keywords" if builds(spec) else "summary"
+            ready = not (spec.summarize or builds(spec)) or state.ai.ready(role)
             if estimate["est_usd"] != 0 and (not body.confirm or not ready):
                 if body.confirm:
-                    raise NoConnection("summary")
+                    raise NoConnection(role)
                 return JSONResponse({"estimate": estimate}, 200)
             job_id = db.create_job(state.conn, "import", spec.name, setup)
             queued = True
@@ -563,6 +571,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, why)
         if estimate["est_usd"] != 0 and spec.summarize:  # None: no model to price it
             need_ai("summary")
+        if estimate["est_usd"] != 0 and builds(spec):
+            need_ai("keywords")
         setup = {
             "upload_id": body.upload_id,
             "kind": body.kind,
@@ -668,11 +678,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if spec.summarize:
             need_ai("summary")
-        # What the loader spends on: summaries, and a proposal when there are no lists.
+        # What the loader spends on: summaries, a proposal when there are no lists, and
+        # the build steps. Whether the build spends depends on the items, so with no model
+        # for keywords it is priced even when confirmed.
         proposes = state.ai.ready("keywords") and state.loader.makes_lists(spec)
-        if (spec.summarize or proposes) and not body.confirm:
+        unready_build = builds(spec) and not state.ai.ready("keywords")
+        if unready_build or ((spec.summarize or proposes or builds(spec)) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
-            return JSONResponse({"estimate": estimate}, 200)
+            if builds(spec) and estimate["est_usd"] != 0:  # None: no model to price it
+                need_ai("keywords")
+            spends = spec.summarize or proposes or estimate["est_usd"] != 0
+            if spends and not body.confirm:
+                return JSONResponse({"estimate": estimate}, 200)
         job_id = db.create_job(
             state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
         )

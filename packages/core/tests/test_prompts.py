@@ -1,4 +1,5 @@
 from ragqa_core.prompts import (
+    abstract_prompt,
     answer_prompt,
     hop_prompt,
     induce_prompt,
@@ -121,3 +122,13 @@ def test_tag_prompt_numbers_the_terms_and_truncates():
     assert "1. ohm's law" in p and "2. ideal gas law" in p
     assert "1 to 3" in p and "only from the numbered list" in p and '{"terms": [...]}' in p
     assert "y" * 1500 in p and "y" * 1501 not in p
+
+
+def test_abstract_prompt_asks_for_principle_method_answer():
+    p = abstract_prompt("x" * 1600, "y" * 3100, "10 m/s")
+    assert '{"principle": "...", "method": "...", "answer": "..."}' in p
+    assert "one sentence" in p and "at most 5 short steps" in p
+    assert "no numbers from the problem" in p
+    assert "x" * 1500 in p and "x" * 1501 not in p and "y" * 3000 in p and "y" * 3001 not in p
+    assert "Answer: 10 m/s" in p
+    assert "Answer:" not in abstract_prompt("t", "e", None)

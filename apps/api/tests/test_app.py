@@ -385,15 +385,20 @@ def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
 
 def test_induced_recipe_load_neither_prices_nor_runs_a_proposal(tmp_path, monkeypatch):
     three_items(monkeypatch)
-    reply = lambda p: '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'  # noqa: E731
+    reply = lambda p: '{"terms": ["enzymes"], "topic": ["x"], "method": ["y"], "common": ["z"]}'  # noqa: E731
     with make_client(tmp_path, reply=reply) as client:
         body = {"name": "r", "qa_type": "multihop", "recipe": "reference"}
         assert client.post("/collections", json=body).status_code == 201
         r = client.post("/collections/r/load", json={"dataset": "musique"})
-        assert r.status_code == 202 and "estimate" not in r.json()  # free: queued at once
+        assert r.status_code == 200 and r.json()["estimate"]["calls"] == 1  # induction only
+        r = client.post("/collections/r/load", json={"dataset": "musique", "confirm": True})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "done" and job["result"]["lists_source"] is None
-        assert ledger_purposes(client) == []
+        assert ledger_purposes(client) == ["induce"]  # similarity tags: no tag calls
+        assert job["result"]["tagged"] == 3
+        # With a vocabulary in force, a reference load spends nothing: queued at once.
+        r = client.post("/collections/r/load", json={"dataset": "musique"})
+        assert r.status_code == 202 and "estimate" not in r.json()
 
 
 def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
@@ -2104,3 +2109,52 @@ def test_resume_checks_the_runs_own_model(tmp_path):
         ai.update_model("anthropic", "claude-haiku-5-5", enabled=False)  # the job's own model
         r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
         assert r.status_code == 202, r.text
+
+
+def test_build_without_keywords_model_is_refused_before_spending(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        client.app.state.worker.stop()
+        client.post("/collections", json=WORKED)
+
+        def refused(r) -> None:
+            assert r.status_code == 503, r.text
+            assert "'keywords'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+
+        for body in ({"dataset": "scibench"}, {"dataset": "scibench", "confirm": True}):
+            refused(client.post("/collections/w/load", json=body))
+        refused(client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True}))
+        many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+        refused(client.post("/collections/w/documents", json={"items": many, "confirm": True}))
+        up = upload(client, name="w").json()
+        assert up["estimate"]["est_usd"] > 0
+        refused(do_import(client, up, name="w", confirm=True))
+        # With no model for keywords at all, nothing can price the build: the estimate is None.
+        client.app.state.ai.set_role("default", None)
+        r = client.post("/collections/w/documents", json={"items": ITEMS})
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] is None
+        refused(client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True}))
+        refused(client.post("/collections/w/load", json={"dataset": "scibench"}))
+        assert client.get("/collections/w").json()["count"] == 0
+        assert client.get("/jobs").json() == [] and ledger_purposes(client) == []
+
+
+def test_worked_documents_are_built_in_the_request(tmp_path):
+    def reply(prompt: str) -> str:
+        if "skills or principles" in prompt:
+            return '{"terms": ["rates"]}'
+        if '"principle"' in prompt:
+            return '{"principle": "P.", "method": "M.", "answer": "A"}'
+        return '{"terms": ["rates"]}'
+
+    with make_client(tmp_path, reply=reply) as client:
+        client.post("/collections", json=WORKED)
+        r = client.post("/collections/w/documents", json={"items": ITEMS})
+        estimate = r.json()["estimate"]
+        assert r.status_code == 200 and estimate["est_usd"] > 0 and ledger_purposes(client) == []
+        r = client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True})
+        assert r.status_code == 200 and r.json()["added"] == 3
+        assert client.get("/collections/w").json()["profile"] == {"rates": 3}
+        hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
+        assert all(h.tags == ["rates"] and h.abstracted for h in hits)
+        assert ledger_purposes(client) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3

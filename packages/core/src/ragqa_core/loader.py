@@ -1,4 +1,5 @@
-"""The load and import jobs: index a dataset or an upload and give the collection lists."""
+"""The load and import jobs: index a dataset or an upload, then give the collection lists
+or run its build steps."""
 
 import random
 from collections.abc import Callable
@@ -7,11 +8,10 @@ from pathlib import Path
 
 from aiconnect.ai import AI
 from ragqa_core import db, imports
-from ragqa_core.builder import Builder
+from ragqa_core.builder import Builder, build_of, builds
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
-from ragqa_core.recipes import build_for
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, Question
 
@@ -65,8 +65,9 @@ class Loader:
 
     def run(self, job: dict, progress: Callable[[float], None]) -> dict:
         """Load the job's dataset. `progress(p)` records and logs the job's progress and may raise
-        Cancelled. Adding is the whole of it, or the first half when the load makes the lists:
-        then re-keying every item with them is the second. Returns the result dict."""
+        Cancelled. Adding is the whole of it, or the first half when the load makes the lists
+        or builds: re-keying every item with the lists, or the build steps, are the second.
+        Returns the result dict."""
         conn, name = self.conn, job["collection"]
         spec = self.indexer.spec(name)
         if spec is None:
@@ -74,14 +75,9 @@ class Loader:
 
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
         items, questions = limited(items, questions, job["setup"].get("limit"))
-        makes_lists = self.makes_lists(spec)
-        share = 0.5 if makes_lists else 1.0
         dataset = job["setup"]["dataset"]
-        counts = self.indexer.add(spec, items, dataset, progress=lambda p: progress(share * p))
+        source, build_result, counts = self._add(spec, items, dataset, progress)
         db.save_questions(conn, name, questions)
-        source = None
-        if makes_lists:
-            source = self._make_lists(spec, items, lambda p: progress(0.5 + 0.5 * p))
         fresh = db.get_collection(conn, name)
         return {
             "added": counts["new"] + counts["updated"],
@@ -90,13 +86,35 @@ class Loader:
             "leaked": self.mark_leaked(name),
             "lists_source": source,
             "keyword_version": fresh.keyword_version if fresh else None,
+            **build_result,
         }
+
+    def _add(
+        self,
+        spec: CollectionSpec,
+        items: list[Item],
+        source: str,
+        progress: Callable[[float], None],
+    ) -> tuple[str | None, dict, dict[str, int]]:
+        """Add the items, then make the lists or run the build: (where the lists came
+        from, the build's result, the add counts). Only the items this adds are built."""
+        makes_lists, building = self.makes_lists(spec), builds(spec)
+        todo, _ = self.indexer.changed(spec, items, source)
+        share = 0.5 if makes_lists or building else 1.0
+        counts = self.indexer.add(spec, items, source, progress=lambda p: progress(share * p))
+        lists_source = None
+        if makes_lists:
+            lists_source = self._make_lists(spec, items, lambda p: progress(0.5 + 0.5 * p))
+        build_result = self.builder.build(spec, todo, lambda p: progress(0.5 + 0.5 * p))
+        return lists_source, build_result, counts
 
     def makes_lists(self, spec: CollectionSpec) -> bool:
         """Whether adding items also gives the collection lists: only a recipe that uses
         the three lists, and only while it has none. The induced recipes never use them."""
-        build = spec.build or build_for("paper_2024", spec.summarize)
-        return build.vocabulary == "lists" and db.get_keyword_lists(self.conn, spec.name) is None
+        return (
+            build_of(spec).vocabulary == "lists"
+            and db.get_keyword_lists(self.conn, spec.name) is None
+        )
 
     def _make_lists(
         self, spec: CollectionSpec, items: list[Item], progress: Callable[[float], None]
@@ -130,6 +148,9 @@ class Loader:
             propose = self.indexer.estimate_propose_usd(spec, propose_sample(items))
             estimate = None if estimate is None else estimate + propose
             calls += 1
+        build_usd = self.builder.estimate_build_usd(spec, todo)
+        estimate = None if estimate is None or build_usd is None else estimate + build_usd
+        calls += self.builder.build_calls(spec, todo)
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 
     def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int]:
@@ -174,19 +195,20 @@ class Loader:
         if spec is None:
             raise ValueError(f"unknown collection {name!r}")
         built, skipped = self._read_upload(spec, setup)
+        lists_source, build_result = None, {}
         if setup["kind"] == "items":
-            makes_lists = self.makes_lists(spec)
-            share = 0.5 if makes_lists else 1.0
-            counts = self.indexer.add(
-                spec, built, setup["source"], progress=lambda p: progress(share * p)
-            )
-            if makes_lists:
-                self._make_lists(spec, built, lambda p: progress(0.5 + 0.5 * p))
+            lists_source, build_result, counts = self._add(spec, built, setup["source"], progress)
         else:
             counts, todo = self._question_counts(name, built)
             db.save_questions(conn, name, todo)
         progress(1.0)
-        return {**counts, "skipped": skipped, "leaked": self.mark_leaked(name)}
+        return {
+            **counts,
+            "skipped": skipped,
+            "leaked": self.mark_leaked(name),
+            "lists_source": lists_source,
+            **build_result,
+        }
 
     def mark_leaked(self, name: str) -> int:
         """Mark the imported or hand-written questions whose text sits inside an item of the

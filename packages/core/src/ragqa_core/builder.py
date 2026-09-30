@@ -1,5 +1,6 @@
 """The build steps of the induced recipes (spec §15): a collection's vocabulary,
-and each item's tags from it (the kw_tags vector) with the profile they add up to.
+each item's tags from it (the kw_tags vector) with the profile they add up to, and
+each worked example's abstracted form (D4). `build` runs them after items are added.
 
 Every prompt here is written from an item's text or explanation only, never its
 meta: ScienceQA's gold skill must not reach the vocabulary (spec §12).
@@ -10,27 +11,57 @@ from collections.abc import Callable
 
 import numpy as np
 
-from aiconnect.ai import AI
+from aiconnect.ai import AI, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import BATCH, Indexer
 from ragqa_core.keywords import keyword_string
 from ragqa_core.models import Models
-from ragqa_core.prompts import induce_prompt, parse_json, tag_prompt
+from ragqa_core.prompts import abstract_prompt, induce_prompt, parse_json, tag_prompt
 from ragqa_core.recipes import build_for
 from ragqa_core.store import Store
 from ragqa_core.types import BuildSettings, CollectionSpec, Item
-from ragqa_core.vocabulary import clean_terms, describe_text, merge_terms, terms_version
+from ragqa_core.vocabulary import (
+    MAX_TERMS,
+    clean_terms,
+    describe_text,
+    merge_terms,
+    terms_version,
+)
 
 INDUCE_BATCH = 20
 INDUCE_TOKENS = 300
 TAG_TOKENS = 100
+ABSTRACT_TOKENS = 300
 CUTOFF_MOST = 10  # a cut-off keeps at most this many tags
 AI_BATCH_OVER = 50  # more calls than this go to a provider's Batch API, as summaries do
+# BEFORE INDUCTION THE TERMS ARE UNKNOWN: AI tagging is priced as if the vocabulary
+# had as many terms as one keeps, so the estimate errs high, never low.
+GUESSED_TERMS = [f"a guessed term {n}" for n in range(MAX_TERMS)]
 
 
 def build_of(spec: CollectionSpec) -> BuildSettings:
     return spec.build or build_for("paper_2024", spec.summarize)
+
+
+def builds(spec: CollectionSpec) -> bool:
+    """Whether adding items runs the build steps: every recipe but paper 2024."""
+    return spec.recipe != "paper_2024"
+
+
+def abstracted_text(reply: dict) -> str | None:
+    """The stored form, "Principle: …\nMethod: …\nAnswer: …", of the AI's reply; None
+    when a part is missing or empty. Steps given as a list are numbered on one line."""
+    principle, method, answer = (reply.get(k) for k in ("principle", "method", "answer"))
+    if isinstance(method, list) and all(isinstance(s, str) for s in method):
+        method = " ".join(f"{n}. {s.strip()}" for n, s in enumerate(method, start=1))
+    if isinstance(answer, int | float) and not isinstance(answer, bool):
+        answer = str(answer)
+    parts = [principle, method, answer]
+    if not all(isinstance(p, str) and p.strip() for p in parts):
+        return None
+    principle, method, answer = (str(p).strip() for p in parts)
+    return f"Principle: {principle}\nMethod: {method}\nAnswer: {answer}"
 
 
 class Builder:
@@ -246,3 +277,124 @@ class Builder:
         if build_of(spec).profile:
             db.set_profile(self.conn, spec.name, profile)
         return profile
+
+    def _abstractable(self, spec: CollectionSpec, items: list[Item]) -> list[Item]:
+        """The worked examples that have a solution to abstract."""
+        if spec.corpus_type != "worked":
+            return []
+        return [i for i in items if i.explanation and i.explanation.strip()]
+
+    def _abstract_prompts(self, spec: CollectionSpec, items: list[Item]) -> list[str]:
+        return [
+            abstract_prompt(i.text, i.explanation or "", i.answer)
+            for i in self._abstractable(spec, items)
+        ]
+
+    def estimate_abstract_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
+        """Raises NoConnection("keywords") when no model can price it."""
+        prompts = self._abstract_prompts(spec, items)
+        batch = len(prompts) > AI_BATCH_OVER
+        return sum(
+            self.ai.estimate_usd(len(p), ABSTRACT_TOKENS, role="keywords", batch=batch)
+            for p in prompts
+        )
+
+    def abstract(
+        self,
+        spec: CollectionSpec,
+        items: list[Item],
+        progress: Callable[[float], None] = lambda p: None,
+    ) -> int:
+        """Each worked example with a solution, rewritten once as principle, method and
+        answer and stored as its payload `abstracted`. An unusable reply stores nothing,
+        so the prompt shows that example in full. Returns how many were stored."""
+        todo = self._abstractable(spec, items)
+        if not todo:
+            progress(1.0)
+            return 0
+        done = self.ai.complete_many(
+            self._abstract_prompts(spec, todo),
+            role="keywords",
+            max_tokens=ABSTRACT_TOKENS,
+            purpose="abstract",
+        )
+        written = {}
+        for item, reply in zip(todo, done, strict=True):
+            text = abstracted_text(parse_json(reply.text))
+            if text:
+                written[item.id] = {"abstracted": text}
+        self.store.set_payloads(spec.name, written)
+        progress(1.0)
+        return len(written)
+
+    def estimate_build_usd(self, spec: CollectionSpec, items: list[Item]) -> float | None:
+        """What `build` would spend on the items: induction while the collection has no
+        vocabulary, then tagging and abstraction. None when no model for keywords can
+        price it: adding is then refused, as it is for summaries."""
+        if not builds(spec):
+            return 0.0
+        terms = db.get_vocabulary(self.conn, spec.name)
+        try:
+            usd = 0.0 if terms else self.estimate_induce_usd(spec, items)
+            usd += self.estimate_tag_usd(spec, terms or GUESSED_TERMS, items)
+            if build_of(spec).abstracted:
+                usd += self.estimate_abstract_usd(spec, items)
+        except NoConnection:
+            return None
+        return usd
+
+    def build_calls(self, spec: CollectionSpec, items: list[Item]) -> int:
+        """How many AI calls `build` would make on the items."""
+        if not builds(spec):
+            return 0
+        build = build_of(spec)
+        induced = db.get_vocabulary(self.conn, spec.name)
+        calls = 0 if induced else len(self._induce_prompts(spec, items))
+        calls += len(items) if build.tagging == "ai" else 0
+        return calls + (len(self._abstractable(spec, items)) if build.abstracted else 0)
+
+    def build(
+        self,
+        spec: CollectionSpec,
+        items: list[Item],
+        progress: Callable[[float], None] = lambda p: None,
+    ) -> dict:
+        """The build after adding items, for every recipe but paper 2024 (which gets {}):
+        induce and switch to a vocabulary while there is none, tag the items, abstract
+        the worked examples when the build does, refresh the profile. An induction with
+        no usable term leaves the items untagged; a vocabulary can be saved later."""
+        if not builds(spec):
+            return {}
+        build = build_of(spec)
+        if not items:
+            progress(1.0)
+            fresh = db.get_collection(self.conn, spec.name)
+            return {
+                "vocabulary_version": fresh.vocabulary_version if fresh else None,
+                "tagged": 0,
+                "abstracted": 0,
+            }
+        self.indexer.check_model(spec)
+        induces = not db.get_vocabulary(self.conn, spec.name)
+        steps = 1 + induces + build.abstracted
+
+        def step(n: int) -> Callable[[float], None]:
+            return lambda p: progress((n + p) / steps)
+
+        if induces:
+            terms = self.induce(spec, items, step(0))
+            # SWITCHED BEFORE TAGGING: tagging reads the vocabulary in force, not the spec.
+            if terms:
+                db.set_vocabulary_version(self.conn, spec.name, self.save_vocabulary(spec, terms))
+        terms = db.get_vocabulary(self.conn, spec.name)
+        if terms:
+            self._tag(spec, terms, items, step(induces))
+        abstracted = self.abstract(spec, items, step(induces + 1)) if build.abstracted else 0
+        self.refresh_profile(spec)
+        progress(1.0)
+        fresh = db.get_collection(self.conn, spec.name)
+        return {
+            "vocabulary_version": fresh.vocabulary_version if fresh else None,
+            "tagged": len(items) if terms else 0,
+            "abstracted": abstracted,
+        }

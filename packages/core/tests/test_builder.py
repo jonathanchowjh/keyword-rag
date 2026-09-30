@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from ragqa_core import db
-from ragqa_core.builder import INDUCE_BATCH, Builder
+from ragqa_core.builder import GUESSED_TERMS, INDUCE_BATCH, Builder
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
@@ -293,6 +293,14 @@ BUILD_STEPS = {
         builder.indexer.add(spec, items, "x"),
         builder.retag(spec.name, builder.save_vocabulary(spec, ["energy"]), lambda p: None),
     ),
+    "abstract": lambda builder, spec, items: (
+        builder.indexer.add(spec, items, "x"),
+        builder.abstract(spec, items, lambda p: None),
+    ),
+    "build": lambda builder, spec, items: (
+        builder.indexer.add(spec, items, "x"),
+        builder.build(spec, items, lambda p: None),
+    ),
 }
 
 
@@ -309,3 +317,122 @@ def test_build_prompts_never_see_meta(env, step):
     BUILD_STEPS[step](builder, spec, items)
     assert prompts, "the step sent no prompt"
     assert not any("SECRET" in p for p in prompts)
+
+
+ABSTRACTED = json.dumps(
+    {"principle": "Energy is conserved.", "method": "Equate the energies.", "answer": "10 m/s"}
+)
+
+
+def test_abstract_stores_principle_method_answer(env):
+    builder, spec, prompts, state = env
+    items = worked(3)
+    builder.indexer.add(spec, items, "x")
+
+    def reply(prompt: str) -> str:
+        if "solution 0 uses" in prompt:
+            return ABSTRACTED
+        if "solution 1 uses" in prompt:  # steps as a list are numbered
+            return json.dumps({"principle": "P.", "method": ["Draw it.", "Solve."], "answer": "3"})
+        return '{"principle": "P.", "answer": "no method"}'  # unusable: stores nothing
+
+    state["reply"] = reply
+    seen: list[float] = []
+    assert builder.abstract(spec, items, seen.append) == 2
+    got = {h.id: h.abstracted for h in builder.store.get("w", ["i0", "i1", "i2"])}
+    assert got == {
+        "i0": "Principle: Energy is conserved.\nMethod: Equate the energies.\nAnswer: 10 m/s",
+        "i1": "Principle: P.\nMethod: 1. Draw it. 2. Solve.\nAnswer: 3",
+        "i2": None,
+    }
+    assert "problem 0 asks for a speed" in prompts[0] and "solution 0 uses energy" in prompts[0]
+    assert "10 m/s" in prompts[0] and '"principle"' in prompts[0]
+    assert purposes(builder.conn) == ["abstract"] * 3
+    assert seen and seen[-1] == 1.0 and seen == sorted(seen)
+
+
+def test_abstract_skips_items_without_explanation(env):
+    builder, spec, prompts, state = env
+    state["reply"] = lambda p: ABSTRACTED
+    items = [*worked(2, explained=False), Item("blank", "a problem", "1", "   ")]
+    builder.indexer.add(spec, items, "x")
+    seen: list[float] = []
+    assert builder.abstract(spec, items, seen.append) == 0
+    assert prompts == [] and seen == [1.0]
+    assert all(h.abstracted is None for h in builder.store.get("w", ["i0", "i1", "blank"]))
+    # A reference corpus has no worked examples to abstract, explained or not.
+    ref = builder.indexer.create("r", "multihop", False, recipe="reference")
+    builder.indexer.add(ref, worked(2), "x")
+    assert builder.abstract(ref, worked(2), lambda p: None) == 0 and prompts == []
+
+
+def test_build_induces_switches_then_tags_and_abstracts(env):
+    builder, spec, prompts, state = env
+
+    def reply(prompt: str) -> str:
+        if "skills or principles" in prompt:
+            return '{"terms": ["energy conservation", "kinematics"]}'
+        if "Pick 1 to" in prompt:
+            return '{"terms": ["kinematics"]}'
+        return ABSTRACTED
+
+    state["reply"] = reply
+    items = worked(3)
+    builder.indexer.add(spec, items, "x")
+    seen: list[float] = []
+    result = builder.build(spec, items, seen.append)
+    version = db.get_collection(builder.conn, "w").vocabulary_version
+    assert version == terms_version(["energy conservation", "kinematics"])
+    assert result == {"vocabulary_version": version, "tagged": 3, "abstracted": 3}
+    assert purposes(builder.conn) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3
+    assert all(h.tags == ["kinematics"] for h in builder.store.get("w", ["i0", "i1", "i2"]))
+    assert db.get_collection(builder.conn, "w").profile == {"kinematics": 3}
+    assert seen and seen[-1] == 1.0 and seen == sorted(seen)
+    # With a vocabulary in force, the next build only tags and abstracts.
+    more = [Item("j0", "problem j asks for a speed", "1", "solution j uses energy")]
+    builder.indexer.add(spec, more, "x")
+    assert builder.build(spec, more, lambda p: None)["vocabulary_version"] == version
+    assert purposes(builder.conn).count("induce") == 1
+    assert db.get_collection(builder.conn, "w").profile == {"kinematics": 4}
+
+
+def test_build_with_no_usable_terms_keeps_the_items_untagged(env):
+    builder, spec, prompts, state = env
+    state["reply"] = lambda p: ABSTRACTED if '"principle"' in p else "no terms here"
+    items = worked(2)
+    builder.indexer.add(spec, items, "x")
+    result = builder.build(spec, items, lambda p: None)
+    assert result == {"vocabulary_version": None, "tagged": 0, "abstracted": 2}
+    assert "tag" not in purposes(builder.conn)
+
+
+def test_paper_2024_build_does_nothing(env):
+    builder, _, prompts, _ = env
+    paper = builder.indexer.create("p", "science", False)
+    builder.indexer.add(paper, worked(2), "x")
+    assert builder.build(paper, worked(2), lambda p: None) == {}
+    assert builder.estimate_build_usd(paper, worked(2)) == 0
+    assert prompts == [] and purposes(builder.conn) == []
+
+
+def test_estimate_build_prices_induction_only_without_a_vocabulary(env):
+    builder, spec, prompts, _ = env
+    items = worked(3)
+    first = builder.estimate_build_usd(spec, items)
+    assert first == pytest.approx(
+        builder.estimate_induce_usd(spec, items)
+        + builder.estimate_tag_usd(spec, GUESSED_TERMS, items)
+        + builder.estimate_abstract_usd(spec, items)
+    )
+    switch_to(builder, spec, ["kinematics"])
+    later = builder.estimate_build_usd(spec, items)
+    assert later == pytest.approx(
+        builder.estimate_tag_usd(spec, ["kinematics"], items)
+        + builder.estimate_abstract_usd(spec, items)
+    )
+    assert 0 < later < first
+    assert builder.build_calls(spec, items) == 3 + 3  # tags and abstracts; no induction
+    assert builder.estimate_abstract_usd(spec, worked(3, explained=False)) == 0
+    assert prompts == [] and purposes(builder.conn) == []
+    builder.ai.set_role("default", None)  # no model for keywords: nothing can price it
+    assert builder.estimate_build_usd(spec, items) is None

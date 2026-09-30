@@ -76,6 +76,20 @@ def tag_prompt(terms: list[str], text: str, k: int) -> str:
     )
 
 
+def abstract_prompt(text: str, explanation: str, answer: str | None) -> str:
+    """A worked example rewritten as what to follow (spec D4), from its text, solution
+    and answer only."""
+    given = f"\n\nAnswer: {answer}" if answer else ""
+    return (
+        "Below is a solved problem. Rewrite its solution as the way to solve problems like"
+        ' it: "principle" is the idea it rests on, in one sentence; "method" is at most 5'
+        ' short steps; "answer" is what the solution found. Copy no numbers from the problem'
+        " into the principle or the method. Reply with JSON only:"
+        ' {"principle": "...", "method": "...", "answer": "..."}.\n\n'
+        f"Problem:\n{text[:1500]}\n\nSolution:\n{explanation[:3000]}{given}"
+    )
+
+
 def answer_prompt(
     qa_type: QaType, question: str, choices: list[str] | None, hits: list[Hit]
 ) -> tuple[str, str]:

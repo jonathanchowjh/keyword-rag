@@ -14,6 +14,7 @@ import numpy as np
 from ragqa_core.types import Item
 
 MAX_TERM_CHARS = 60
+MAX_TERMS = 80  # a merged vocabulary keeps at most this many
 SPACES = re.compile(r"\s+")
 
 
@@ -29,7 +30,7 @@ def clean_terms(raw: list) -> list[str]:
 
 
 def merge_terms(
-    terms: list[str], vectors: np.ndarray, threshold: float = 0.88, cap: int = 80
+    terms: list[str], vectors: np.ndarray, threshold: float = 0.88, cap: int = MAX_TERMS
 ) -> list[str]:
     """One representative per cluster of near-duplicate terms. `vectors[n]` embeds
     `terms[n]`; repeats count, and the most frequent surface form names its cluster."""
