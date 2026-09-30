@@ -383,7 +383,7 @@ def test_load_shows_its_propose_cost_first(tmp_path, monkeypatch):
         assert ledger_purposes(client) == ["propose"]
 
 
-def test_induced_recipe_load_neither_prices_nor_runs_a_proposal(tmp_path, monkeypatch):
+def test_induced_recipe_load_prices_its_induction_and_never_proposes(tmp_path, monkeypatch):
     three_items(monkeypatch)
     reply = lambda p: '{"terms": ["enzymes"], "topic": ["x"], "method": ["y"], "common": ["z"]}'  # noqa: E731
     with make_client(tmp_path, reply=reply) as client:
@@ -2158,3 +2158,31 @@ def test_worked_documents_are_built_in_the_request(tmp_path):
         hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
         assert all(h.tags == ["rates"] and h.abstracted for h in hits)
         assert ledger_purposes(client) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3
+
+
+def test_worked_documents_whose_build_failed_are_built_by_sending_them_again(tmp_path):
+    def reply(prompt: str) -> str:
+        if '"principle"' in prompt:
+            return '{"principle": "P.", "method": "M.", "answer": "A"}'
+        return '{"terms": ["rates"]}'
+
+    with make_client(tmp_path, reply=reply) as client:
+        client.post("/collections", json=WORKED)
+        builder = client.app.state.builder
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("provider down")
+
+        builder.abstract = boom
+        with pytest.raises(RuntimeError):
+            client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True})
+        del builder.abstract
+        assert client.get("/collections/w").json()["count"] == 3  # added and tagged only
+        r = client.post("/collections/w/documents", json={"items": ITEMS})
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] > 0  # the abstracts
+        r = client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True})
+        assert r.status_code == 200
+        hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
+        assert all(h.tags == ["rates"] and h.abstracted for h in hits)
+        r = client.post("/collections/w/documents", json={"items": ITEMS})
+        assert r.status_code == 200 and r.json() == {"added": 3}  # built: free, nothing to confirm

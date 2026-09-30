@@ -11,7 +11,7 @@ from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.store import Store
 from ragqa_core.types import Item, Question
-from ragqa_core.vocabulary import terms_version
+from ragqa_core.vocabulary import MAX_TERM_CHARS, MAX_TERMS, terms_version
 
 
 def worked(n: int, explained: bool = True) -> list[Item]:
@@ -436,3 +436,8 @@ def test_estimate_build_prices_induction_only_without_a_vocabulary(env):
     assert prompts == [] and purposes(builder.conn) == []
     builder.ai.set_role("default", None)  # no model for keywords: nothing can price it
     assert builder.estimate_build_usd(spec, items) is None
+
+
+def test_guessed_terms_bound_any_induced_vocabulary():
+    assert len(set(GUESSED_TERMS)) == MAX_TERMS
+    assert all(len(t) == MAX_TERM_CHARS for t in GUESSED_TERMS)

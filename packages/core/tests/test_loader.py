@@ -393,3 +393,39 @@ def test_worked_import_builds_its_items(tmp_path, monkeypatch):
     assert result["lists_source"] is None and result["vocabulary_version"] is not None
     assert purposes(conn) == ["induce"] + ["tag"] * 4
     assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
+
+
+def stop_between(low: float, high: float):
+    def progress(p: float) -> None:
+        if low < p < high:
+            raise Cancelled()
+
+    return progress
+
+
+def test_a_stopped_build_is_finished_by_loading_again(tmp_path, monkeypatch):
+    conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
+    items = scibench_items(tmp_path)
+    # Induce, tag, abstract: the build's thirds of the job's second half.
+    with pytest.raises(Cancelled):
+        ld.run(job, stop_between(0.6, 0.7))  # as the induction ends, before it is saved
+    assert ix.spec("w").vocabulary_version is None
+    # The items are stored, so this load adds none, yet induces over all of them.
+    with pytest.raises(Cancelled):
+        ld.run(job, stop_between(0.7, 0.8))  # inside the tagging, before any tag is written
+    assert ix.spec("w").vocabulary_version is not None
+    assert all(not h.tags for batch in ix.store.scroll("w") for h in batch)
+    # What is left is priced: a tag per item and an abstract per explained one, no induction.
+    spec = ix.spec("w")
+    assert ld.estimate_load(spec, "scibench", None)["calls"] == len(items) + 2
+    result = ld.run(job, lambda p: None)
+    assert result["added"] == 0 and result["tagged"] == len(items) and result["abstracted"] == 2
+    hits = [h for batch in ix.store.scroll("w") for h in batch]
+    assert all(h.tags == ["kinematics"] for h in hits)
+    assert sum(1 for h in hits if h.abstracted) == 2
+    assert ix.spec("w").profile == {"kinematics": len(items)}
+    # Built in full: loading again spends nothing.
+    spent = len(purposes(conn))
+    again = ld.run(job, lambda p: None)
+    assert again["tagged"] == 0 and again["abstracted"] == 0 and len(purposes(conn)) == spent
+    assert ld.estimate_load(spec, "scibench", None)["calls"] == 0

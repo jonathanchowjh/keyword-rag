@@ -20,8 +20,9 @@ from ragqa_core.models import Models
 from ragqa_core.prompts import abstract_prompt, induce_prompt, parse_json, tag_prompt
 from ragqa_core.recipes import build_for
 from ragqa_core.store import Store
-from ragqa_core.types import BuildSettings, CollectionSpec, Item
+from ragqa_core.types import BuildSettings, CollectionSpec, Hit, Item
 from ragqa_core.vocabulary import (
+    MAX_TERM_CHARS,
     MAX_TERMS,
     clean_terms,
     describe_text,
@@ -35,9 +36,10 @@ TAG_TOKENS = 100
 ABSTRACT_TOKENS = 300
 CUTOFF_MOST = 10  # a cut-off keeps at most this many tags
 AI_BATCH_OVER = 50  # more calls than this go to a provider's Batch API, as summaries do
-# BEFORE INDUCTION THE TERMS ARE UNKNOWN: AI tagging is priced as if the vocabulary
-# had as many terms as one keeps, so the estimate errs high, never low.
-GUESSED_TERMS = [f"a guessed term {n}" for n in range(MAX_TERMS)]
+# BEFORE INDUCTION THE TERMS ARE UNKNOWN: AI tagging is priced as if the vocabulary had
+# as many terms as an induced one keeps, each as long as a term may be, so the estimate
+# errs high, never low.
+GUESSED_TERMS = [f"guessed term {n} ".ljust(MAX_TERM_CHARS, "x") for n in range(MAX_TERMS)]
 
 
 def build_of(spec: CollectionSpec) -> BuildSettings:
@@ -327,31 +329,51 @@ class Builder:
         progress(1.0)
         return len(written)
 
+    def unbuilt(self, spec: CollectionSpec, items: list[Item]) -> dict[str, list[Item]]:
+        """What `build` works on: the given items with every stored item not yet built, so a
+        build that stopped part-way is finished by the next one. "induce": every item, while
+        no vocabulary is in force (else none); "tag": those without tags; "abstract": the
+        worked examples with a solution and no abstracted form, when the build makes them.
+        Before the items are added it is what adding them would leave to build."""
+        given = {i.id: i for i in items}
+        hits = [h for batch in self.store.scroll(spec.name) for h in batch if h.id not in given]
+
+        def item(h: Hit) -> Item:
+            return Item(h.id, h.text, h.answer, h.explanation, h.meta)
+
+        every = [*(item(h) for h in hits), *items]
+        unabstracted = [*(item(h) for h in hits if h.abstracted is None), *items]
+        return {
+            "induce": [] if db.get_vocabulary(self.conn, spec.name) else every,
+            "tag": [*(item(h) for h in hits if not h.tags), *items],
+            "abstract": self._abstractable(spec, unabstracted) if build_of(spec).abstracted else [],
+        }
+
     def estimate_build_usd(self, spec: CollectionSpec, items: list[Item]) -> float | None:
-        """What `build` would spend on the items: induction while the collection has no
-        vocabulary, then tagging and abstraction. None when no model for keywords can
-        price it: adding is then refused, as it is for summaries."""
+        """What `build` would spend after adding the items: induction while the collection
+        has no vocabulary, then tagging and abstraction of what is not yet built. None when
+        no model for keywords can price it: adding is then refused, as it is for summaries."""
         if not builds(spec):
             return 0.0
+        todo = self.unbuilt(spec, items)
         terms = db.get_vocabulary(self.conn, spec.name)
         try:
-            usd = 0.0 if terms else self.estimate_induce_usd(spec, items)
-            usd += self.estimate_tag_usd(spec, terms or GUESSED_TERMS, items)
-            if build_of(spec).abstracted:
-                usd += self.estimate_abstract_usd(spec, items)
+            return (
+                self.estimate_induce_usd(spec, todo["induce"])
+                + self.estimate_tag_usd(spec, terms or GUESSED_TERMS, todo["tag"])
+                + self.estimate_abstract_usd(spec, todo["abstract"])
+            )
         except NoConnection:
             return None
-        return usd
 
     def build_calls(self, spec: CollectionSpec, items: list[Item]) -> int:
-        """How many AI calls `build` would make on the items."""
+        """How many AI calls `build` would make after adding the items."""
         if not builds(spec):
             return 0
-        build = build_of(spec)
-        induced = db.get_vocabulary(self.conn, spec.name)
-        calls = 0 if induced else len(self._induce_prompts(spec, items))
-        calls += len(items) if build.tagging == "ai" else 0
-        return calls + (len(self._abstractable(spec, items)) if build.abstracted else 0)
+        todo = self.unbuilt(spec, items)
+        calls = len(self._induce_prompts(spec, todo["induce"])) if todo["induce"] else 0
+        calls += len(todo["tag"]) if build_of(spec).tagging == "ai" else 0
+        return calls + len(todo["abstract"])
 
     def build(
         self,
@@ -359,14 +381,15 @@ class Builder:
         items: list[Item],
         progress: Callable[[float], None] = lambda p: None,
     ) -> dict:
-        """The build after adding items, for every recipe but paper 2024 (which gets {}):
-        induce and switch to a vocabulary while there is none, tag the items, abstract
-        the worked examples when the build does, refresh the profile. An induction with
-        no usable term leaves the items untagged; a vocabulary can be saved later."""
+        """The build after adding items, for every recipe but paper 2024 (which gets {}),
+        over the added items and any stored item an earlier build left unbuilt: induce and
+        switch to a vocabulary while there is none, tag, abstract the worked examples when
+        the build does, refresh the profile. An induction with no usable term leaves the
+        items untagged; a vocabulary can be saved later."""
         if not builds(spec):
             return {}
-        build = build_of(spec)
-        if not items:
+        todo = self.unbuilt(spec, items)
+        if not any(todo.values()):
             progress(1.0)
             fresh = db.get_collection(self.conn, spec.name)
             return {
@@ -375,26 +398,27 @@ class Builder:
                 "abstracted": 0,
             }
         self.indexer.check_model(spec)
-        induces = not db.get_vocabulary(self.conn, spec.name)
-        steps = 1 + induces + build.abstracted
+        induces = bool(todo["induce"])
+        abstracts = bool(todo["abstract"])
+        steps = 1 + induces + abstracts
 
         def step(n: int) -> Callable[[float], None]:
             return lambda p: progress((n + p) / steps)
 
         if induces:
-            terms = self.induce(spec, items, step(0))
+            terms = self.induce(spec, todo["induce"], step(0))
             # SWITCHED BEFORE TAGGING: tagging reads the vocabulary in force, not the spec.
             if terms:
                 db.set_vocabulary_version(self.conn, spec.name, self.save_vocabulary(spec, terms))
         terms = db.get_vocabulary(self.conn, spec.name)
         if terms:
-            self._tag(spec, terms, items, step(induces))
-        abstracted = self.abstract(spec, items, step(induces + 1)) if build.abstracted else 0
+            self._tag(spec, terms, todo["tag"], step(induces))
+        abstracted = self.abstract(spec, todo["abstract"], step(induces + 1)) if abstracts else 0
         self.refresh_profile(spec)
         progress(1.0)
         fresh = db.get_collection(self.conn, spec.name)
         return {
             "vocabulary_version": fresh.vocabulary_version if fresh else None,
-            "tagged": len(items) if terms else 0,
+            "tagged": len(todo["tag"]) if terms else 0,
             "abstracted": abstracted,
         }
