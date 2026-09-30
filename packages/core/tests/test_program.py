@@ -1,5 +1,9 @@
+import os
 import time
 
+import pytest
+
+from ragqa_core import program
 from ragqa_core.program import (
     OUTPUT_CAP,
     PROGRAM_TIMEOUT,
@@ -44,6 +48,47 @@ def test_program_timeout_falls_back():
 def test_program_output_is_capped():
     rec = run_program('print("x" * 10**6)')
     assert rec["output"] is not None and len(rec["output"]) <= OUTPUT_CAP
+    assert rec["ran"] is True and rec["error"] == f"output cut at {OUTPUT_CAP} characters"
+
+
+def test_cut_output_gives_no_answer():
+    # The answer is the last line, and a cut output has lost it: a fragment is no answer.
+    out, rec = program_answer('```python\nprint("x" * 5000)\nprint(42)\n```\nAnswer: 42')
+    assert out is None and rec["ran"] is True and "cut" in rec["error"]
+
+
+def test_a_program_that_cannot_start_did_not_run():
+    rec = run_program("print(1)\x00")
+    assert rec["ran"] is False and rec["output"] is None and "null" in rec["error"]
+    out, rec = program_answer("```python\nprint(1)\x00\n```\nAnswer: 1")
+    assert out is None and rec["ran"] is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_timeout_kills_the_programs_children(monkeypatch):
+    monkeypatch.setattr(program, "PROGRAM_TIMEOUT", 1)
+    code = (
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "print(pid, flush=True)\n"
+        "while True:\n"
+        "    pass\n"
+    )
+    rec = run_program(code)
+    assert rec["ran"] is False and "timed out" in rec["error"]
+    child = int((rec["output"] or "").strip())
+    deadline = time.monotonic() + 3  # the orphan is reaped by init, not by us
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    os.kill(child, 9)
+    raise AssertionError("the program's child outlived the timeout")
 
 
 def test_program_error_is_recorded():

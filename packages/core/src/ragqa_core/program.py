@@ -7,6 +7,7 @@ written by the user's own configured model."""
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,11 +46,20 @@ def limit_resources() -> None:
 
 def run_program(code: str) -> dict:
     """Run `code` as `python -I -c` in a fresh temp dir with an empty environment.
-    `ran` is True only for a clean exit within the timeout."""
+    `ran` is True only for a clean exit within the timeout. A program that cannot be
+    started (a NUL byte in it, no process to spare) did not run: it never raises."""
+    try:
+        return launch(code)
+    except (OSError, ValueError) as e:
+        return {"ran": False, "output": None, "error": str(e) or type(e).__name__}
+
+
+def launch(code: str) -> dict:
     # STDOUT GOES TO A FILE, NOT A PIPE: RLIMIT_FSIZE then bounds what a runaway print
     # can write, and nothing has to drain a pipe while the program runs.
+    posix = os.name == "posix"
     with (
-        tempfile.TemporaryDirectory() as cwd,
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cwd,
         tempfile.TemporaryFile() as out,
         tempfile.TemporaryFile() as err,
     ):
@@ -60,31 +70,49 @@ def run_program(code: str) -> dict:
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=err,
-            preexec_fn=limit_resources if os.name == "posix" else None,
+            preexec_fn=limit_resources if posix else None,
+            start_new_session=posix,  # its own process group, so a timeout reaches its children
         )
         try:
             exit_code = proc.wait(timeout=PROGRAM_TIMEOUT)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            stop(proc, posix)
             exit_code = None
+        size = out.seek(0, os.SEEK_END)
         out.seek(0)
-        output = out.read(OUTPUT_CAP * 4).decode("utf-8", "replace")[:OUTPUT_CAP]
-        err.seek(0, os.SEEK_END)
-        err.seek(max(0, err.tell() - ERROR_CAP * 4))
+        raw = out.read(OUTPUT_CAP * 4)
+        text = raw.decode("utf-8", "replace")
+        output, cut = text[:OUTPUT_CAP], size > len(raw) or len(text) > OUTPUT_CAP
+        err.seek(max(0, err.seek(0, os.SEEK_END) - ERROR_CAP * 4))
         stderr = err.read().decode("utf-8", "replace")[-ERROR_CAP:].strip()
     if exit_code is None:
         return {"ran": False, "output": output, "error": f"timed out after {PROGRAM_TIMEOUT} s"}
     if exit_code != 0:
         return {"ran": False, "output": output, "error": stderr or f"exited with code {exit_code}"}
-    return {"ran": True, "output": output, "error": None}
+    # A CUT OUTPUT HAS LOST ITS LAST LINE, the answer: it ran, but answers nothing.
+    error = f"output cut at {OUTPUT_CAP} characters" if cut else None
+    return {"ran": True, "output": output, "error": error}
+
+
+def stop(proc: subprocess.Popen, posix: bool) -> None:
+    """Kill the program and, on POSIX, every process it started (its process group)."""
+    try:
+        if posix:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    proc.wait()
 
 
 def program_answer(text: str) -> tuple[str | None, dict]:
-    """The last non-empty line the reply's program printed, or None, and the run record."""
+    """The last non-empty line the reply's program printed, or None, and the run record.
+    None too when the output was cut, so the reply's `Answer:` line is used instead."""
     code = extract_program(text)
     if code is None:
         return None, {"ran": False, "output": None, "error": "no program"}
     record = run_program(code)
     lines = [line.strip() for line in (record["output"] or "").splitlines() if line.strip()]
-    return (lines[-1] if record["ran"] and lines else None), record
+    answered = record["ran"] and record["error"] is None and lines
+    return (lines[-1] if answered else None), record

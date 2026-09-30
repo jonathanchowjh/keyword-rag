@@ -280,7 +280,9 @@ or prints nothing falls back to the model's `Answer:` line. The run gets an
 empty environment and a fresh temp directory, 10 s, 512 MB of memory (on
 Linux), 1 MB of file writes and 2,000 characters of output. It is not
 network-isolated, so it only runs code written by the AI model you set up for
-the `answer` job.
+the `answer` job. It can also read any file the service can read, and its code
+follows the question and the passages, so turn program answers on only for
+corpora you trust.
 
 ## Datasets
 
