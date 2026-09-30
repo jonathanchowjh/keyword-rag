@@ -38,11 +38,19 @@ from ragqa_core import db, imports
 from ragqa_core.builder import Builder, builds
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
-from ragqa_core.evaluator import ANSWER_TOKENS, Evaluator, answer_hits, measurable, no_ai, runnable
+from ragqa_core.evaluator import (
+    Evaluator,
+    answer_hits,
+    answer_tokens,
+    measurable,
+    no_ai,
+    runnable,
+)
 from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
+from ragqa_core.program import program_answer
 from ragqa_core.prompts import answer_prompt, parse_answer
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
@@ -804,7 +812,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         skip = tuple(db.disabled_sources(state.conn, body.collection))
         results = {}
         for method in body.methods:
-            out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None}
+            out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None, "program": None}
             # Every call the method makes: query summaries, hops and the answer.
             with state.ai.tally() as spent:
                 try:
@@ -817,21 +825,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     out["hits"] = [asdict(h) for h in hits]
                     if body.answer:
+                        program = search.program and not body.choices
                         system, user = answer_prompt(
                             spec.qa_type,
                             body.question,
                             body.choices,
-                            answer_hits(spec.qa_type, hits),
+                            answer_hits(spec.qa_type, hits, search.example),
+                            search.example,
+                            search.program,
                         )
                         done = state.ai.complete(
                             user,
                             role="answer",
                             system=system,
                             model=body.model,
-                            max_tokens=ANSWER_TOKENS[spec.qa_type],
+                            max_tokens=answer_tokens(spec.qa_type, program),
                             purpose="query",
                         )
-                        out["answer"] = parse_answer(spec.qa_type, done.text, bool(body.choices))
+                        answer = parse_answer(spec.qa_type, done.text, bool(body.choices))
+                        if program:
+                            printed, out["program"] = program_answer(done.text)
+                            answer = printed or answer
+                        out["answer"] = answer
                 except PER_METHOD_ERRORS as e:
                     out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
             out["usd"] = spent["usd"]
@@ -844,7 +859,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(body.collection)
         search_settings(spec.search or SearchSettings(), body.search)  # 422 before an estimate
         estimate = state.evaluator.estimate(
-            body.collection, body.split, body.methods, body.answer, body.model
+            body.collection, body.split, body.methods, body.answer, body.model, body.search
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)

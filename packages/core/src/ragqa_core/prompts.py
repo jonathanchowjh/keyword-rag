@@ -90,30 +90,54 @@ def abstract_prompt(text: str, explanation: str, answer: str | None) -> str:
     )
 
 
+def edge_order(hits: list[Hit]) -> list[Hit]:
+    """Best first and last (spec D12): ranks 1, 3, 5, … then …, 6, 4, 2, so the weakest
+    evidence sits in the middle, where a long prompt is read least."""
+    return hits[0::2] + hits[1::2][::-1]
+
+
+def example_block(hit: Hit, example: str, asked: str, explained: str) -> str:
+    """One worked example: its abstracted form (principle, method, answer) when asked for
+    and written, else the full solution as the paper showed it."""
+    if example == "abstracted" and hit.abstracted:
+        return f"Example problem:\n{hit.text}\n{hit.abstracted}\n"
+    return (
+        f"Example {asked}:\n{hit.text}\n"
+        f"Example answer: {hit.answer}\n"
+        f"Example {explained}:\n{hit.explanation or ''}\n"
+    )
+
+
+def finish(final: str, program: bool) -> str:
+    if program:
+        return (
+            "Write a short plan, then one ```python block that prints only the final answer"
+            f" (a number in the unit asked), then finish with a line {final}."
+        )
+    return f"Reason step by step, then finish with a line {final}."
+
+
 def answer_prompt(
-    qa_type: QaType, question: str, choices: list[str] | None, hits: list[Hit]
+    qa_type: QaType,
+    question: str,
+    choices: list[str] | None,
+    hits: list[Hit],
+    example: str = "full",
+    program: bool = False,
 ) -> tuple[str, str]:
+    """`example` is how worked examples are shown: abstracted, full or off. `program` asks
+    for a program to run (spec D14), only when the question has no choices."""
+    program = program and not choices
+    shown = [] if example == "off" else hits
     if qa_type == "mcq":
         system = "You answer multiple-choice science questions."
-        parts = []
-        for hit in hits:
-            parts.append(
-                f"Example question:\n{hit.text}\n"
-                f"Example answer: {hit.answer}\n"
-                f"Example explanation:\n{hit.explanation or ''}\n"
-            )
+        parts = [example_block(hit, example, "question", "explanation") for hit in shown]
         lines = "\n".join(f"{LETTERS[i]}. {c}" for i, c in enumerate(choices or []))
         parts.append(f"Question:\n{question}\nChoices:\n{lines}\n")
-        parts.append("Reason step by step, then finish with a line `Answer: <letter>`.")
+        parts.append(finish("`Answer: <letter>`", program))
         return system, "\n".join(parts)
     if qa_type == "science":
-        parts = []
-        for hit in hits:
-            parts.append(
-                f"Example problem:\n{hit.text}\n"
-                f"Example answer: {hit.answer}\n"
-                f"Example solution:\n{hit.explanation or ''}\n"
-            )
+        parts = [example_block(hit, example, "problem", "solution") for hit in shown]
         parts.append(f"Problem:\n{question}\n")
         if choices:
             lines = "\n".join(f"{LETTERS[i]}. {c}" for i, c in enumerate(choices))
@@ -121,15 +145,16 @@ def answer_prompt(
             final = "`Answer: <letter>`"
         else:
             final = "`Answer: <number in the unit asked, or a short phrase>`"
-        parts.append(f"Reason step by step, then finish with a line {final}.")
+        parts.append(finish(final, program))
         return "You solve science problems.", "\n".join(parts)
     system = "You answer questions using the passages given."
-    passages = "\n".join(f"[{n}] {hit.text}" for n, hit in enumerate(hits, start=1))
+    ordered = edge_order(hits)
+    passages = "\n".join(f"[{n}] {hit.text}" for n, hit in enumerate(ordered, start=1))
     context = f"Passages:\n{passages}\n\n" if hits else ""
-    return system, (
-        f"{context}Question: {question}\n"
-        "Reason briefly, then finish with a line `Answer: <short answer>`."
-    )
+    cite = "Cite the passages you use as [n].\n" if hits else ""
+    final = "`Answer: <short answer>`"
+    ask = finish(final, True) if program else f"Reason briefly, then finish with a line {final}."
+    return system, f"{context}Question: {question}\n{cite}{ask}"
 
 
 def hop_prompt(question: str, passages: list[str]) -> str:

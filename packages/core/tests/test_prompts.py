@@ -1,6 +1,9 @@
+from dataclasses import replace
+
 from ragqa_core.prompts import (
     abstract_prompt,
     answer_prompt,
+    edge_order,
     hop_prompt,
     induce_prompt,
     parse_answer,
@@ -132,3 +135,80 @@ def test_abstract_prompt_asks_for_principle_method_answer():
     assert "x" * 1500 in p and "x" * 1501 not in p and "y" * 3000 in p and "y" * 3001 not in p
     assert "Answer: 10 m/s" in p
     assert "Answer:" not in abstract_prompt("t", "e", None)
+
+
+SCIENCE_HIT = Hit("i1", "Example problem text", 1.0, {}, [], "4.2 J", "Worked solution", {})
+ABSTRACTED = "Principle: Work is force times distance.\nMethod: Multiply.\nAnswer: 4.2 J"
+
+
+def hits(*ids: str) -> list[Hit]:
+    return [Hit(i, f"passage {i}", 1.0, {}, [], None, None, {}) for i in ids]
+
+
+def test_full_example_prompt_unchanged():
+    # TODAY'S BYTES, captured before the example forms were added: "full" must not drift.
+    assert answer_prompt("mcq", "Q?", ["x", "y"], [HIT_WITH_ANSWER_B], example="full") == (
+        "You answer multiple-choice science questions.",
+        "Example question:\nWhich is a mammal?\nChoices: A. shark; B. whale\nExample answer: B"
+        "\nExample explanation:\nWhales nurse.\n\nQuestion:\nQ?\nChoices:\nA. x\nB. y\n\n"
+        "Reason step by step, then finish with a line `Answer: <letter>`.",
+    )
+    assert answer_prompt("science", "How much work?", None, [SCIENCE_HIT], example="full") == (
+        "You solve science problems.",
+        "Example problem:\nExample problem text\nExample answer: 4.2 J\nExample solution:\n"
+        "Worked solution\n\nProblem:\nHow much work?\n\nReason step by step, then finish"
+        " with a line `Answer: <number in the unit asked, or a short phrase>`.",
+    )
+    assert answer_prompt("science", "Which?", ["x", "y"], [SCIENCE_HIT]) == (
+        "You solve science problems.",
+        "Example problem:\nExample problem text\nExample answer: 4.2 J\nExample solution:\n"
+        "Worked solution\n\nProblem:\nWhich?\n\nChoices:\nA. x\nB. y\n\nReason step by"
+        " step, then finish with a line `Answer: <letter>`.",
+    )
+
+
+def test_abstracted_example_used_and_falls_back():
+    hit = replace(SCIENCE_HIT, abstracted=ABSTRACTED)
+    _, user = answer_prompt("science", "How much work?", None, [hit], example="abstracted")
+    assert user.startswith(f"Example problem:\nExample problem text\n{ABSTRACTED}\n\nProblem:")
+    assert "Worked solution" not in user and "Example answer" not in user
+    _, mcq = answer_prompt("mcq", "Q?", ["x", "y"], [hit], example="abstracted")
+    assert mcq.startswith(f"Example problem:\nExample problem text\n{ABSTRACTED}\n")
+    fallback = answer_prompt("science", "How much work?", None, [SCIENCE_HIT], "abstracted")
+    assert fallback == answer_prompt("science", "How much work?", None, [SCIENCE_HIT], "full")
+
+
+def test_example_off_has_no_example_block():
+    hit = replace(SCIENCE_HIT, abstracted=ABSTRACTED)
+    _, science = answer_prompt("science", "How much work?", None, [hit], example="off")
+    _, mcq = answer_prompt("mcq", "Q?", ["x", "y"], [HIT_WITH_ANSWER_B], example="off")
+    assert science.startswith("Problem:") and mcq.startswith("Question:")
+    assert "Example" not in science + mcq
+
+
+def test_edge_order():
+    assert [h.id for h in edge_order(hits("1", "2", "3", "4", "5"))] == ["1", "3", "5", "4", "2"]
+    assert [h.id for h in edge_order(hits("1", "2", "3", "4"))] == ["1", "3", "4", "2"]
+    assert edge_order([]) == []
+
+
+def test_reference_prompt_numbers_in_edge_order_and_asks_citations():
+    _, user = answer_prompt("multihop", "Who?", None, hits("1", "2", "3", "4", "5"))
+    assert "[1] passage 1\n[2] passage 3\n[3] passage 5\n[4] passage 4\n[5] passage 2" in user
+    cite = user.index("Cite the passages you use as [n].")
+    assert cite < user.index("`Answer: <short answer>`")
+    _, bare = answer_prompt("multihop", "Who?", None, [])
+    assert "Cite" not in bare and "Passages" not in bare
+
+
+def test_program_prompt_only_without_choices():
+    _, free = answer_prompt("science", "How much work?", None, [SCIENCE_HIT], program=True)
+    plan = free.index("short plan")
+    assert plan < free.index("```python") < free.index("`Answer: <number in the unit asked")
+    assert "prints only the final answer" in free
+    _, chosen = answer_prompt("science", "Which?", ["x", "y"], [SCIENCE_HIT], program=True)
+    assert "```python" not in chosen and chosen.rstrip().endswith("`Answer: <letter>`.")
+    _, table = answer_prompt("table", "How much?", None, hits("1", "2"), program=True)
+    assert "```python" in table and "Cite the passages you use as [n]." in table
+    _, mcq = answer_prompt("mcq", "Q?", ["x", "y"], [HIT_WITH_ANSWER_B], program=True)
+    assert "```python" not in mcq

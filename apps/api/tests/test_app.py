@@ -177,6 +177,27 @@ def test_query_on_a_science_collection_without_choices_returns_free_text(tmp_pat
     assert result["answer"] == "3.1 J"
 
 
+def test_query_answers_from_the_program_and_the_example_setting(tmp_path):
+    sent = []
+
+    def reply(prompt):
+        sent.append(prompt)
+        return "plan\n```python\nprint(6*7)\n```\nAnswer: 41"
+
+    with make_client(tmp_path, reply=reply) as client:
+        client.post("/collections", json={"name": "sci", "qa_type": "science", "summarize": False})
+        client.post("/collections/sci/documents", json={"items": ITEMS, "confirm": True})
+        body = {"collection": "sci", "question": "enzyme rate?", "methods": ["vector"]}
+        ask = {**body, "answer": True, "search": {"program": True, "example": "off"}}
+        result = client.post("/query", json=ask).json()["results"]["vector"]
+        assert result["answer"] == "42" and result["program"]["ran"] is True
+        assert "```python" in sent[-1] and "Example" not in sent[-1]
+        chosen = {**ask, "choices": ["x", "y"], "search": {"program": True}}
+        result = client.post("/query", json=chosen).json()["results"]["vector"]
+        assert result["answer"] == "" and result["program"] is None
+        assert "```python" not in sent[-1] and "Example problem" in sent[-1]
+
+
 def test_query_usd_counts_every_claude_call_of_the_method(client):
     add_collection(client, summarize=True)
     body = {"collection": "c", "question": "enzyme rate", "methods": ["kw_individual", "hybrid"]}

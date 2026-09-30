@@ -22,6 +22,7 @@ from ragqa_core.metrics import (
     tatqa_em_f1,
 )
 from ragqa_core.models import Models
+from ragqa_core.program import program_answer
 from ragqa_core.prompts import (
     QUERY_TASK,
     SUMMARY_TOKENS,
@@ -63,6 +64,8 @@ PAIR_ANSWER_METRIC: dict[QaType, str] = {
 }
 # Multi-step science working runs long; a reply cut off before its Answer line scores wrong.
 ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "science": 1500, "multihop": 100, "table": 100}
+# A plan and a program do not fit in a short answer's budget.
+PROGRAM_TOKENS = 600
 ESTIMATE_SAMPLE = 5
 
 
@@ -70,9 +73,26 @@ def clean(value: float) -> float | None:
     return None if math.isnan(value) else value
 
 
-def answer_hits(qa_type: QaType, hits: list[Hit]) -> list[Hit]:
-    # The paper's one-shot: the single best example for mcq; passages otherwise.
-    return hits[:1] if qa_type in EXAMPLE_TYPES else hits
+def answer_tokens(qa_type: QaType, program: bool) -> int:
+    return max(ANSWER_TOKENS[qa_type], PROGRAM_TOKENS) if program else ANSWER_TOKENS[qa_type]
+
+
+def answer_hits(qa_type: QaType, hits: list[Hit], example: str) -> list[Hit]:
+    # The paper's one-shot: the single best example for worked types, none when the
+    # example is off; passages otherwise.
+    if qa_type in EXAMPLE_TYPES:
+        return [] if example == "off" else hits[:1]
+    return hits
+
+
+def example_form(qa_type: QaType, shown: list[Hit], example: str) -> str | None:
+    """How the worked example was shown: "off" when none was, "full" when the abstracted
+    form was asked for and not written; None for passages."""
+    if qa_type not in EXAMPLE_TYPES:
+        return None
+    if not shown:
+        return "off"
+    return "abstracted" if example == "abstracted" and shown[0].abstracted else "full"
 
 
 def runnable(questions: list[Question], include_leaked: bool) -> list[Question]:
@@ -184,12 +204,18 @@ class Evaluator:
         methods: list[str],
         answer: bool,
         model: str | None,
+        search: dict | None = None,
     ) -> dict:
         spec = self.retriever.spec(collection)
         self.retriever.indexer.check_model(spec)
         questions = self._questions(spec, split)
         parts = self._estimate_parts(
-            spec, {m: len(questions) for m in methods}, answer, model, questions[:ESTIMATE_SAMPLE]
+            spec,
+            {m: len(questions) for m in methods},
+            answer,
+            model,
+            questions[:ESTIMATE_SAMPLE],
+            search_settings(spec.search or SearchSettings(), search),
         )
         return {"questions": len(questions), **parts}
 
@@ -211,6 +237,7 @@ class Evaluator:
             setup["answer"],
             setup["model"],
             remaining[:ESTIMATE_SAMPLE],
+            self._search(spec, setup),
         )
         return {"questions": len(remaining), **parts}
 
@@ -221,6 +248,7 @@ class Evaluator:
         answer: bool,
         model: str | None,
         sample: list[Question],
+        search: SearchSettings,
     ) -> dict:
         # (calls, avg prompt chars, output tokens, batched?, role, model) — each part
         # priced the way it is sent: one complete_many per part, batched only
@@ -240,9 +268,11 @@ class Evaluator:
             if m == "iterative"
         )
         if answer and any(n_by_method.values()):
-            chars = self._answer_chars(spec, sample)
+            chars = self._answer_chars(spec, sample, search)
+            program = search.program and any(not q.choices for q in sample)
+            tokens = answer_tokens(spec.qa_type, program)
             parts.extend(
-                (n, chars, ANSWER_TOKENS[spec.qa_type], n > BATCH_THRESHOLD, "answer", model)
+                (n, chars, tokens, n > BATCH_THRESHOLD, "answer", model)
                 for n in n_by_method.values()
             )
         calls = sum(part[0] for part in parts)
@@ -259,11 +289,16 @@ class Evaluator:
             return {"calls": calls, "est_usd": None, "roles": roles}  # a job has no model
         return {"calls": calls, "est_usd": usd, "roles": roles}
 
-    def _answer_chars(self, spec: CollectionSpec, sample: list[Question]) -> float:
+    def _answer_chars(
+        self, spec: CollectionSpec, sample: list[Question], search: SearchSettings
+    ) -> float:
         sizes = []
         for q in sample:
-            hits = answer_hits(spec.qa_type, self.retriever.retrieve(spec.name, q.text, "hybrid"))
-            system, user = answer_prompt(spec.qa_type, q.text, q.choices, hits)
+            hits = self.retriever.retrieve(spec.name, q.text, "hybrid")
+            hits = answer_hits(spec.qa_type, hits, search.example)
+            system, user = answer_prompt(
+                spec.qa_type, q.text, q.choices, hits, search.example, search.program
+            )
             sizes.append(len(system) + len(user))
         return avg(sizes)
 
@@ -480,26 +515,40 @@ class Evaluator:
             return
         report(span)
         check()
+        shown = [answer_hits(spec.qa_type, hits, search.example) for hits in all_hits]
         prompts = [
-            answer_prompt(spec.qa_type, q.text, q.choices, answer_hits(spec.qa_type, hits))
-            for q, hits in zip(questions, all_hits, strict=True)
+            answer_prompt(spec.qa_type, q.text, q.choices, hits, search.example, search.program)
+            for q, hits in zip(questions, shown, strict=True)
         ]
+        programs = [search.program and not q.choices for q in questions]
         done = self.ai.complete_many(
             [user for _, user in prompts],
             role="answer",
             system=prompts[0][0] if prompts else "",
             model=setup["model"],
-            max_tokens=ANSWER_TOKENS[spec.qa_type],
+            max_tokens=answer_tokens(spec.qa_type, any(programs)),
             purpose="answer",
         )
-        for q, row, completion in zip(questions, rows, done, strict=True):
+        for n, (q, row, hits, program, completion) in enumerate(
+            zip(questions, rows, shown, programs, done, strict=True), start=1
+        ):
+            # PROGRAMS RUN HERE, UP TO PROGRAM_TIMEOUT EACH: progress moves, but no cancel
+            # check, since every answer in this batch is already paid for.
+            if n % 10 == 0:
+                report(span + (0.99 - span) * n / len(questions))
             pred = parse_answer(spec.qa_type, completion.text, bool(q.choices))
+            record = None
+            if program:
+                printed, record = program_answer(completion.text)
+                pred = printed or pred
             row.update(
                 {
                     "pred": pred,
                     "raw": answer_line(completion.text),
                     "usd": completion.usd,
                     "answer": score(spec, q, pred),
+                    "program": record,
+                    "example_form": example_form(spec.qa_type, hits, search.example),
                 }
             )
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)

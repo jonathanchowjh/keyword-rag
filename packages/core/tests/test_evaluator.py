@@ -15,7 +15,7 @@ from ragqa_core.db import (
     save_questions,
 )
 from ragqa_core.evaluator import Evaluator
-from ragqa_core.fakes import fake_ai, fake_models
+from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
@@ -1169,3 +1169,77 @@ def test_resume_is_refused_after_a_new_vocabulary(env):
     db.update_job(conn, hybrid, status="interrupted")
     with_vocabulary(ev, TOPICS[:3])
     assert ev.resume_refusal(hybrid) is None  # the vocabulary is not what it searched with
+
+
+PROGRAM_REPLY = "plan\n```python\nprint(6*7)\n```\nAnswer: 41"
+
+
+def test_eval_uses_program_answer_and_records_it(env):
+    conn, ev = env
+    sent = []
+
+    def reply(prompt):
+        sent.append(prompt)
+        return "Answer: A" if "Choices:" in prompt else PROGRAM_REPLY
+
+    ev.ai = fake_ai(conn, reply)
+    ev.retriever.ai = ev.ai
+    questions = [
+        Question("s-free", "an enzyme problem", None, ["42"], [], {"skill": "enzyme"}),
+        Question("s-mc", "a market problem", ["yes", "no"], ["A"], [], {"skill": "market"}),
+    ]
+    science_env(conn, ev, "sci", ITEMS, questions)
+    job = ev.queue("sci", "dev", ["hybrid"], True, None, search={"program": True})
+    ev.run(job)
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    free, chosen = rows["s-free"], rows["s-mc"]
+    assert free["pred"] == "42" and free["answer"] == {"accuracy": 1.0}
+    assert free["program"] == {"ran": True, "output": "42\n", "error": None}
+    assert chosen["pred"] == "A" and chosen["program"] is None
+    assert free["example_form"] == chosen["example_form"] == "full"
+    assert sum("```python" in p for p in sent) == 1
+
+
+def test_eval_program_that_fails_falls_back_to_the_answer_line(env):
+    conn, ev = env
+    ev.ai = fake_ai(conn, lambda p: "```python\nraise ValueError('boom')\n```\nAnswer: 3.0")
+    ev.retriever.ai = ev.ai
+    questions = [Question("s-free", "an enzyme problem", None, ["3.0"], [], {"skill": "enzyme"})]
+    science_env(conn, ev, "sci", ITEMS, questions)
+    job = ev.queue("sci", "dev", ["hybrid"], True, None, search={"program": True})
+    ev.run(job)
+    (row,) = run_items(conn, job)
+    assert row["pred"] == "3.0" and row["program"]["ran"] is False
+    assert "boom" in row["program"]["error"]
+
+
+def test_eval_example_off_sends_no_example(env):
+    conn, ev = env
+    sent = []
+    fake_replies(ev.ai, lambda p: sent.append(p) or "Answer: A")
+    job = ev.queue("c", "dev", ["hybrid"], True, None, search={"example": "off"})
+    ev.run(job)
+    assert len(sent) == 5 and not any("Example" in p for p in sent)
+    assert all(r["example_form"] == "off" and r["program"] is None for r in run_items(conn, job))
+
+
+def test_eval_abstracted_example_and_its_fallback(env):
+    conn, ev = env
+    sent = []
+    fake_replies(ev.ai, lambda p: sent.append(p) or "Answer: A")
+    abstracted = "Principle: P\nMethod: M\nAnswer: A"
+    ev.retriever.store.set_payloads("c", {"enzyme-item": {"abstracted": abstracted}})
+    job = ev.queue("c", "dev", ["hybrid"], True, None, search={"example": "abstracted"})
+    ev.run(job)
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    assert rows["q-enzyme"]["example_form"] == "abstracted"
+    assert rows["q-market"]["example_form"] == "full"
+    assert sum(abstracted in p for p in sent) == 1
+
+
+def test_program_raises_table_answer_tokens():
+    from ragqa_core.evaluator import PROGRAM_TOKENS, answer_tokens
+
+    assert PROGRAM_TOKENS == 600
+    assert answer_tokens("table", True) == 600 and answer_tokens("table", False) == 100
+    assert answer_tokens("science", True) == 1500

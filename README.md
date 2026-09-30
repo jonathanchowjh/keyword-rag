@@ -26,6 +26,7 @@ and where.
 - [Endpoints](#endpoints)
 - [Your own corpus](#your-own-corpus)
 - [Retrieval methods](#retrieval-methods)
+- [Answering](#answering)
 - [Datasets](#datasets)
 - [AI connections](#ai-connections)
 - [Cost safety](#cost-safety)
@@ -263,6 +264,23 @@ with their tags, weighted by similarity; `similarity` takes the terms nearest
 the question, as the paper did; `oracle`, in evals only, takes the tags of the
 question's gold items (or of its worked solution), a ceiling for the other two.
 A channel weighted 0 is not searched.
+
+## Answering
+
+Worked examples are shown to the answering model in the form the search
+settings' `example` names: `abstracted` (principle, method, answer), `full`
+(the paper's question, answer and explanation) or `off`. Reference passages
+are numbered best first and last (ranks 1, 3, 5, …, 4, 2) and the model is
+asked to cite them as `[n]`.
+
+With `program` on, a question without choices is answered by a program: the
+model writes a short Python block that prints the answer, and the service runs
+it locally and takes the last line it printed. A program that fails, times out
+or prints nothing falls back to the model's `Answer:` line. The run gets an
+empty environment and a fresh temp directory, 10 s, 512 MB of memory (on
+Linux), 1 MB of file writes and 2,000 characters of output. It is not
+network-isolated, so it only runs code written by the AI model you set up for
+the `answer` job.
 
 ## Datasets
 
