@@ -1,5 +1,5 @@
-"""The retrieval methods: the 2024 paper's seven, three modern ones, and two
-controls that pick examples without looking at the question's content.
+"""The retrieval methods: the 2024 paper's seven, four modern ones (Keyword-RAG among
+them), and two controls that pick examples without looking at the question's content.
 
 Fusion is reciprocal rank fusion computed here, not by Qdrant, so the paper's
 k=1 and today's k=60 behave identically in every storage mode.
@@ -12,9 +12,10 @@ import numpy as np
 
 from aiconnect.ai import AI
 from ragqa_core import db
+from ragqa_core.builder import Builder, build_of
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer
-from ragqa_core.keywords import matched
+from ragqa_core.keywords import keyword_string, matched
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
     QUERY_TASK,
@@ -24,7 +25,7 @@ from ragqa_core.prompts import (
     summary_prompt,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings
 
 METHOD_NAMES = (
     "question_only",
@@ -36,6 +37,7 @@ METHOD_NAMES = (
     "kw_rrf",
     "hybrid_rerank",
     "kw_hybrid",
+    "keyword_rag",
     "iterative",
     "random_example",
     "fixed_example",
@@ -43,6 +45,7 @@ METHOD_NAMES = (
 FIXED_SEED = "fixed_example"
 KEYWORD_METHODS = ("kw_all", "kw_individual", "kw_rrf", "kw_hybrid")
 POOL = 50
+NEIGHBOURS = 20  # the units whose tags vote for a question's (the classifier, D6)
 MAX_HOPS = 3
 HOP_TOKENS = 200
 
@@ -58,12 +61,14 @@ class UnknownCollection(Exception):
     pass
 
 
-def rrf(rankings: list[list[Hit]], k: int) -> list[Hit]:
+def rrf(rankings: list[list[Hit]], k: int, weights: list[float] | None = None) -> list[Hit]:
+    """Each hit scores the sum over rankings of weight / (k + rank); a weight defaults to 1."""
     scores: dict[str, float] = {}
     first: dict[str, Hit] = {}
-    for ranking in rankings:
+    for n, ranking in enumerate(rankings):
+        weight = weights[n] if weights is not None else 1.0
         for rank, hit in enumerate(ranking, start=1):
-            scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (k + rank)
+            scores[hit.id] = scores.get(hit.id, 0.0) + weight / (k + rank)
             first.setdefault(hit.id, hit)
     order = {hit_id: n for n, hit_id in enumerate(first)}
     fused = sorted(first, key=lambda i: (-scores[i], order[i]))
@@ -90,12 +95,14 @@ class Retriever:
         models: Models,
         ai: AI,
         indexer: Indexer,
+        builder: Builder,
     ) -> None:
         self.conn = conn
         self.store = store
         self.models = models
         self.ai = ai
         self.indexer = indexer
+        self.builder = builder
         # Every item id by collection, with the count and skipped sources it was read at: the
         # controls need them per query, and an 11,656-item scroll each time is slow.
         self._ids: dict[str, tuple[tuple[int, Skip], list[str]]] = {}
@@ -121,15 +128,27 @@ class Retriever:
         return spec
 
     def retrieve(
-        self, collection: str, question: str, method: str, k: int = 5, rrf_k: int = 60
+        self,
+        collection: str,
+        question: str,
+        method: str,
+        k: int = 5,
+        rrf_k: int = 60,
+        search: SearchSettings | None = None,
+        tags: list[str] | None = None,
     ) -> list[Hit]:
-        if method not in self._methods:
+        """`search` None means the collection's own settings; `tags` None means the query's
+        tags are predicted as the settings say. Only keyword_rag uses either."""
+        if method not in METHOD_NAMES:
             raise ValueError(f"unknown method {method!r}; known: {', '.join(METHOD_NAMES)}")
         spec = self.spec(collection)
         # A query embedded by another model is either a dimension crash or,
         # worse, silently meaningless; refuse it by name instead.
         self.indexer.check_model(spec)
         skip = tuple(db.disabled_sources(self.conn, collection))
+        if method == "keyword_rag":
+            settings = search or spec.search or SearchSettings()
+            return self._keyword_rag(spec, question, k, rrf_k, skip, settings, tags)
         return self._methods[method](spec, question, k, rrf_k, skip)
 
     def is_paid(self, spec: CollectionSpec, method: str) -> bool:
@@ -206,6 +225,74 @@ class Retriever:
         fused = rrf([keyword_hits, self._hybrid(spec, q, POOL, rrf_k, skip)], rrf_k)[:k]
         return self._mark(query_kw, fused)
 
+    def _keyword_rag(
+        self,
+        spec: CollectionSpec,
+        q: str,
+        k: int,
+        rrf_k: int,
+        skip: Skip,
+        search: SearchSettings,
+        tags: list[str] | None,
+    ) -> list[Hit]:
+        """Meaning, word match and the predicted keywords, fused by weighted RRF (D7). A
+        channel weighted 0 is not searched; with no query tags, keywords finds nothing."""
+        self._vocabulary(spec)
+        if tags is None:
+            tags = self.query_tags(spec, q, search, skip)
+        weights = search.weights
+        rankings: dict[str, list[Hit]] = {}
+        if weights.get("meaning", 0.0) > 0:
+            if spec.corpus_type == "reference":
+                rankings["meaning"] = self._vector(spec, q, POOL, rrf_k, skip)
+            else:
+                dense = self._dense_query(spec, q)
+                rankings["meaning"] = self.store.search(spec.name, "text_dense", dense, POOL, skip)
+        if weights.get("words", 0.0) > 0:
+            sparse = self.models.sparse_query([q])[0]
+            rankings["words"] = self.store.search_sparse(spec.name, sparse, POOL, skip=skip)
+        if weights.get("keywords", 0.0) > 0 and tags:
+            vector = self.models.embed([keyword_string(tags, None)])[0]
+            rankings["keywords"] = self.store.search(spec.name, "kw_tags", vector, POOL, skip)
+        found: dict[str, list[str]] = {}
+        for channel, ranking in rankings.items():
+            for h in ranking:
+                found.setdefault(h.id, []).append(channel)
+        channels = list(rankings)
+        fused = rrf([rankings[c] for c in channels], rrf_k, [weights[c] for c in channels])[:k]
+        for h in fused:
+            h.channels = found[h.id]
+            h.matched = [t for t in tags if t in h.tags]
+        return fused
+
+    def query_tags(
+        self, spec: CollectionSpec, question: str, search: SearchSettings, skip: Skip
+    ) -> list[str]:
+        """The question's tags from the vocabulary: by the classifier's vote of the nearest
+        units, or by similarity to the terms. Oracle tags come from a question's gold, which
+        a bare question does not have."""
+        if search.query_tags == "oracle":
+            raise ValueError("oracle tags need a question's gold")
+        terms = self._vocabulary(spec)
+        self.indexer.check_model(spec)
+        build = build_of(spec)
+        if search.query_tags == "classifier":
+            return self._classify(spec, question, build.tag_k, skip)
+        cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
+        return self.builder.similar(terms, [question], build.tag_k, cutoff)[0]
+
+    def _classify(self, spec: CollectionSpec, q: str, k: int, skip: Skip) -> list[str]:
+        """The nearest-neighbour vote (D6): each of the NEIGHBOURS nearest units adds its
+        score to each of its tags; the k best win, ties to the tag seen first."""
+        votes: dict[str, float] = {}
+        neighbours = self.store.search(
+            spec.name, "text_dense", self._dense_query(spec, q), NEIGHBOURS, skip=skip
+        )
+        for h in neighbours:
+            for tag in h.tags:
+                votes[tag] = votes.get(tag, 0.0) + h.score
+        return sorted(votes, key=lambda t: -votes[t])[:k]
+
     def _iterative(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         """Retrieve, then let the AI name the next query, up to MAX_HOPS calls.
 
@@ -280,6 +367,20 @@ class Retriever:
             ).text.strip()
         keywords, vectors = self.indexer.keywords_for(spec, lists, [q], [summary])
         return keywords[0], {name: vecs[0] for name, vecs in vectors.items()}
+
+    def _vocabulary(self, spec: CollectionSpec) -> list[str]:
+        """The terms in force; refused while a retag is switching them, or when there are none."""
+        if db.job_running(self.conn, "retag", spec.name):
+            raise MethodUnavailable(
+                "the vocabulary is being re-tagged; try again when the job finishes"
+            )
+        terms = db.get_vocabulary(self.conn, spec.name)
+        if not terms:
+            raise MethodUnavailable(
+                f"no vocabulary for collection '{spec.name}';"
+                " build it with the worked examples or reference recipe"
+            )
+        return terms
 
     def _kw_search(
         self, spec: CollectionSpec, q: str, names: list[str], k: int, rrf_k: int, skip: Skip

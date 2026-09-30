@@ -154,8 +154,8 @@ A collection remembers the dense model it was built with. Changing
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
-| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer) |
-| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up |
+| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
+| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since`, what changed after it (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome` (`right` or `wrong`, absent when unmeasured); `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
@@ -236,6 +236,7 @@ curl -X POST http://localhost:8080/collections/notes/imports \
 | `kw_rrf` | paper | One vector per list (+ summary), fused with RRF |
 | `hybrid_rerank` | modern | `hybrid` top-50 reranked by a local cross-encoder |
 | `kw_hybrid` | new | `kw_individual` fused with `hybrid`: a dual index like Doc2Query++ |
+| `keyword_rag` | new | Meaning (item vectors for worked examples, chunks for reference), BM25, and the question's predicted tags against each item's `kw_tags`, fused by weighted RRF with the collection's channel weights; needs a vocabulary |
 | `iterative` | modern | Up to 3 retrieval hops; the AI decides the next query |
 | `random_example` | control | Random items, seeded by the question: the same draw on every run |
 | `fixed_example` | control | The same random items for every question |
@@ -255,6 +256,13 @@ prefix in its setup.
 The RRF constant is a request parameter `rrf_k`: the paper used 1, today's
 default is 60. Fusion is computed in this service, not by Qdrant, so both
 settings behave the same in every mode.
+
+`keyword_rag` predicts the question's tags from the collection's vocabulary in
+one of three ways (`query_tags`): `classifier` lets the 20 nearest items vote
+with their tags, weighted by similarity; `similarity` takes the terms nearest
+the question, as the paper did; `oracle`, in evals only, takes the tags of the
+question's gold items (or of its worked solution), a ceiling for the other two.
+A channel weighted 0 is not searched.
 
 ## Datasets
 

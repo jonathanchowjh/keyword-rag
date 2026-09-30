@@ -38,6 +38,12 @@ METHODS: dict[str, dict] = {
     "hybrid_rerank": _method(
         "Hybrid + reranker", "modern", "modern", "Hybrid's top 50, reordered by a cross-encoder"
     ),
+    "keyword_rag": _method(
+        "Keyword-RAG",
+        "modern",
+        "new",
+        "meaning + word match + match on predicted keywords, with the collection's channel weights",
+    ),
     "iterative": _method(
         "Step by step",
         "modern",

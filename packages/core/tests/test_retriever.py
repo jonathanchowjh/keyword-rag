@@ -1,6 +1,10 @@
+from dataclasses import replace
+
 import pytest
 
 from aiconnect.ai import NoConnection
+from ragqa_core import db
+from ragqa_core.builder import Builder
 from ragqa_core.catalog import CONTROLS
 from ragqa_core.db import claim_next_job_id, connect, create_job, set_source_enabled
 from ragqa_core.fakes import fake_ai, fake_models
@@ -14,7 +18,7 @@ from ragqa_core.retriever import (
     rrf,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, Item, KeywordLists
+from ragqa_core.types import CollectionSpec, Hit, Item, KeywordLists, SearchSettings
 
 DOMAINS = {
     "enzyme": (
@@ -47,6 +51,8 @@ ITEMS = [
     Item(f"{name}-item", " ".join(t + m + c) + f" notes about {name}", "A", f"{name} expl")
     for name, (t, m, c) in DOMAINS.items()
 ]
+# The vocabulary: each domain's topic words, so an item's tags are its own domain's.
+TERMS = [w for d in DOMAINS.values() for w in d[0]]
 FREE = [m for m in METHOD_NAMES if m not in ("question_only", "iterative", *CONTROLS)]
 
 
@@ -54,16 +60,45 @@ def hit(i: str) -> Hit:
     return Hit(i, i, 0.0, {}, [], None, None, {})
 
 
-def build(tmp_path, summarize=False, lists=True, reply=lambda p: "A summary."):
+def hits(*ids: str) -> list[Hit]:
+    return [hit(i) for i in ids]
+
+
+def build(
+    tmp_path,
+    summarize=False,
+    lists=True,
+    reply=lambda p: "A summary.",
+    vocabulary=True,
+    qa_type="mcq",
+    recipe="paper_2024",
+):
     conn = connect(tmp_path / "r.db")
     store, models = Store(None, None), fake_models()
     ai = fake_ai(conn, reply)
     ix = Indexer(conn, store, models, ai)
-    spec = ix.create("c", "mcq", summarize)
+    spec = ix.create("c", qa_type, summarize, recipe)
     ix.add(spec, ITEMS, "x")
     if lists:
         ix.set_lists(spec, LISTS)
-    return Retriever(conn, store, models, ai, ix), conn
+    r = Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix))
+    if vocabulary:
+        tag_all(r, TERMS)
+    return r, conn
+
+
+def tag_all(r: Retriever, terms: list[str]) -> None:
+    """Put a vocabulary in force and tag every stored item with it by similarity."""
+    spec = r.spec("c")
+    db.set_vocabulary_version(r.conn, "c", r.builder.save_vocabulary(spec, terms))
+    r.builder.tag(r.spec("c"), r.builder.stored_items("c"))
+
+
+def tagged(r: Retriever, tags: dict[str, list[str]]) -> None:
+    """Set the given items' tags (and kw_tags vectors) by hand."""
+    ids = list(tags)
+    vectors = r.models.embed(["; ".join(tags[i]) for i in ids])
+    r.store.set_tags("c", ids, [tags[i] for i in ids], vectors)
 
 
 def test_keyword_methods_refuse_while_rekeying(tmp_path):
@@ -81,6 +116,13 @@ def test_rrf_sums_reciprocal_ranks():
     assert [h.id for h in fused] == ["b", "a", "c"]
     assert fused[0].score == pytest.approx(1 / 3 + 1 / 2)
     assert fused[1].score == pytest.approx(1 / 2)
+
+
+def test_weighted_rrf():
+    a, b = hits("x", "y"), hits("y", "x")
+    assert [h.id for h in rrf([a, b], 60, [2.0, 1.0])] == ["x", "y"]
+    assert [h.id for h in rrf([a, b], 60, [1.0, 2.0])] == ["y", "x"]
+    assert rrf([a, b], 1, [2.0, 1.0])[0].score == pytest.approx(2 / 2 + 1 / 3)
 
 
 def test_rrf_ties_keep_first_appearance():
@@ -271,12 +313,13 @@ SKIP_METHODS = [m for m in METHOD_NAMES if m != "question_only"]
 
 
 def build_sources(tmp_path):
-    r, conn = build(tmp_path, lists=False)
+    r, conn = build(tmp_path, lists=False, vocabulary=False)
     spec = r.spec("c")
     r.indexer.add(spec, [Item("a1", "enzyme rate shared words", "A", "e")], "a")
     r.indexer.add(spec, [Item("a2", "market price shared words", "A", "e")], "a")
     r.indexer.add(spec, [Item("b1", "enzyme market shared words", "A", "e")], "b")
     r.indexer.set_lists(spec, LISTS)
+    tag_all(r, TERMS)
     r.ai = fake_ai(conn, lambda p: '{"done": true}')
     return r, conn
 
@@ -309,3 +352,147 @@ def test_all_ids_returns_the_list_it_fetched_even_if_another_thread_replaces_the
 
     r.store.ids = racing
     assert "someone-elses" not in r._all_ids("c", ("b",))
+
+
+# -- Keyword-RAG -------------------------------------------------------------------
+
+OHM = ["ohm-1", "ohm-2", "ohm-3"]
+
+
+def build_physics(tmp_path):
+    """Three items on Ohm's law, one on kinematics nearest the query alone."""
+    r, conn = build(tmp_path, lists=False, vocabulary=False)
+    spec = r.spec("c")
+    physics = [Item(i, "current voltage resistor", "A", "V = IR") for i in OHM]
+    r.indexer.add(spec, [*physics, Item("kin", "car velocity", "B", "v = d/t")], "x")
+    db.set_vocabulary_version(
+        conn, "c", r.builder.save_vocabulary(spec, ["ohm's law", "kinematics", "optics"])
+    )
+    tagged(r, {**{i: ["ohm's law"] for i in OHM}, "kin": ["kinematics"]})
+    return r, conn
+
+
+def test_classifier_votes_neighbours_tags(tmp_path):
+    r, _ = build_physics(tmp_path)
+    spec = r.spec("c")
+    classify = SearchSettings(query_tags="classifier")
+    # "kin" is the single nearest unit, but three Ohm's-law neighbours outvote it.
+    query = r.models.embed(["car velocity current"])[0]
+    assert r.store.search("c", "text_dense", query, 1)[0].id == "kin"
+    assert r.query_tags(spec, "car velocity current", classify, ()) == ["ohm's law", "kinematics"]
+    one = replace(spec, build=replace(spec.build, tag_k=1))
+    assert r.query_tags(one, "car velocity current", classify, ()) == ["ohm's law"]
+    # Disabled sources cast no vote.
+    assert r.query_tags(spec, "car velocity current", classify, ("x",)) == []
+
+
+def test_similarity_query_tags_are_the_nearest_terms(tmp_path):
+    r, _ = build(tmp_path)
+    tags = r.query_tags(r.spec("c"), "volcano magma", SearchSettings(query_tags="similarity"), ())
+    assert tags[:2] == ["volcano", "magma"] and len(tags) == 3
+
+
+def test_oracle_query_tags_need_gold(tmp_path):
+    r, _ = build(tmp_path)
+    with pytest.raises(ValueError, match="oracle tags need a question's gold"):
+        r.query_tags(r.spec("c"), "x", SearchSettings(query_tags="oracle"), ())
+
+
+def test_keyword_rag_fuses_three_channels(tmp_path):
+    r, _ = build(tmp_path)
+    r.indexer.add(r.spec("c"), [Item("odd-item", "nothing in common here", "D", "e")], "x")
+    tagged(r, {"odd-item": ["enzyme", "kinetics"]})
+    no_meaning = SearchSettings(weights={"meaning": 0.0, "words": 1.0, "keywords": 1.0})
+    found = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=10, search=no_meaning)
+    by_id = {h.id: h for h in found}
+    assert by_id["odd-item"].channels == ["keywords"]  # no shared word: only its tags found it
+    assert by_id["enzyme-item"].channels == ["words", "keywords"]
+    [top] = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=1)
+    assert top.id == "enzyme-item" and top.channels == ["meaning", "words", "keywords"]
+    spec = r.spec("c")
+    tags = r.query_tags(spec, "enzyme kinetics", spec.search or SearchSettings(), ())
+    assert top.matched == [t for t in tags if t in top.tags]  # the query's tags the hit carries
+    assert "enzyme" in top.matched and "kinetics" in top.matched
+
+
+def test_keyword_rag_uses_given_tags_and_weights(tmp_path):
+    r, _ = build(tmp_path)
+    only_keywords = SearchSettings(weights={"meaning": 0.0, "words": 0.0, "keywords": 1.0})
+    [top] = r.retrieve(
+        "c", "enzyme kinetics", "keyword_rag", k=1, search=only_keywords, tags=["lava", "magma"]
+    )
+    assert top.id == "volcano-item" and top.channels == ["keywords"]
+    assert top.matched == ["magma"]  # "lava" is not a tag of any item
+
+
+def test_zero_weight_channel_not_searched(tmp_path):
+    r, _ = build(tmp_path)
+    calls: list[str] = []
+    real = r.store.search_sparse
+    r.store.search_sparse = lambda *a, **kw: calls.append("words") or real(*a, **kw)
+    no_words = SearchSettings(weights={"meaning": 1.0, "words": 0.0, "keywords": 1.0})
+    found = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=4, search=no_words)
+    assert calls == [] and found and all("words" not in h.channels for h in found)
+    r.retrieve("c", "enzyme kinetics", "keyword_rag", k=4)
+    assert calls == ["words"]
+
+
+def test_keyword_rag_defaults_to_the_collections_search(tmp_path):
+    r, conn = build(tmp_path)
+    db.set_search(
+        conn, "c", SearchSettings(weights={"meaning": 0.0, "words": 1.0, "keywords": 0.0})
+    )
+    found = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=4)
+    assert [h.id for h in found] == ["enzyme-item"] and found[0].channels == ["words"]
+
+
+def test_reference_meaning_channel_uses_chunks(tmp_path):
+    r, _ = build(tmp_path, lists=False, qa_type="multihop", recipe="reference")
+    used: list[str] = []
+    real_search, real_chunks = r.store.search, r.store.search_chunks
+    r.store.search = lambda name, using, *a, **kw: (
+        used.append(using) or real_search(name, using, *a, **kw)
+    )
+    r.store.search_chunks = lambda *a, **kw: used.append("chunks") or real_chunks(*a, **kw)
+    similarity = SearchSettings(query_tags="similarity")
+    [top] = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=1, search=similarity)
+    assert top.id == "enzyme-item" and "meaning" in top.channels
+    assert sorted(used) == ["chunks", "kw_tags"]  # never the item's text_dense
+
+
+def test_worked_meaning_channel_uses_item_vectors(tmp_path):
+    r, _ = build(tmp_path)
+    used: list[str] = []
+    real_search = r.store.search
+    r.store.search = lambda name, using, *a, **kw: (
+        used.append(using) or real_search(name, using, *a, **kw)
+    )
+    r.store.search_chunks = lambda *a, **kw: pytest.fail("a worked collection searched chunks")
+    r.retrieve("c", "enzyme kinetics", "keyword_rag", k=1, tags=["enzyme"])
+    assert sorted(used) == ["kw_tags", "text_dense"]
+
+
+def test_keyword_rag_without_vocabulary_is_unavailable(tmp_path):
+    r, _ = build(tmp_path, vocabulary=False)
+    message = (
+        "no vocabulary for collection 'c'; build it with the worked examples or reference recipe"
+    )
+    with pytest.raises(MethodUnavailable, match=message):
+        r.retrieve("c", "enzyme", "keyword_rag")
+    with pytest.raises(MethodUnavailable, match=message):
+        r.query_tags(r.spec("c"), "enzyme", SearchSettings(), ())
+
+
+def test_keyword_rag_refuses_while_retagging(tmp_path):
+    r, conn = build(tmp_path)
+    create_job(conn, "retag", "c", {"version": "v"})
+    claim_next_job_id(conn)
+    with pytest.raises(MethodUnavailable, match="re-tagged"):
+        r.retrieve("c", "enzyme kinetics", "keyword_rag")
+    assert r.retrieve("c", "enzyme kinetics", "kw_individual")  # the lists still answer
+
+
+def test_keyword_rag_is_not_paid(tmp_path):
+    r, _ = build(tmp_path)
+    summarizing = CollectionSpec("s", "mcq", True, "fake/dense", 256)
+    assert not r.is_paid(summarizing, "keyword_rag")

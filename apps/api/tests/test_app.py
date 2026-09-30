@@ -193,6 +193,7 @@ def test_collection_detail(client):
     wait(client, client.put("/collections/c/keyword-lists", json=asdict(LISTS)).json()["job_id"])
     detail = client.get("/collections/c").json()
     assert "kw_all" in detail["methods_available"] and detail["keyword_lists"]["topic"]
+    assert "keyword_rag" not in detail["methods_available"]  # no vocabulary
     assert [c["name"] for c in client.get("/collections").json()] == ["c"]
 
 
@@ -532,6 +533,79 @@ def test_vocabulary_retag_runs_and_switches(client):
     assert job["status"] == "done" and job["result"] == {"version": r.json()["version"]}
     assert client.get("/collections/w/vocabulary").json()["version"] == r.json()["version"]
     assert client.get("/collections/w").json()["profile"] == {"enzymes": 3}
+
+
+def reference_with_vocabulary(client) -> None:
+    """Collection r (reference recipe) with ITEMS stored and tagged from a vocabulary."""
+    client.post("/collections", json={"name": "r", "qa_type": "multihop", "recipe": "reference"})
+    app = client.app.state
+    app.indexer.add(app.indexer.spec("r"), [Item(**i) for i in ITEMS], "hand")
+    terms = {"terms": ["enzyme", "market", "volcano"], "confirm": True}
+    r = client.put("/collections/r/vocabulary", json=terms)
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+
+
+def test_query_returns_channels_and_tags(client):
+    reference_with_vocabulary(client)
+    assert "keyword_rag" in client.get("/collections/r").json()["methods_available"]
+    body = {"collection": "r", "question": "enzyme rate", "methods": ["keyword_rag", "hybrid"]}
+    results = client.post("/query", json=body).json()["results"]
+    found = results["keyword_rag"]
+    assert found["error"] is None and found["query_tags"][0] == "enzyme"
+    top = found["hits"][0]
+    assert top["id"] == "enzyme-item" and top["tags"][0] == "enzyme"
+    assert top["channels"] == ["meaning", "words", "keywords"] and "enzyme" in top["matched"]
+    assert "query_tags" not in results["hybrid"]
+    weighted = {**body, "search": {"weights": {"meaning": 0, "words": 0}}}
+    found = client.post("/query", json=weighted).json()["results"]["keyword_rag"]
+    assert {tuple(h["channels"]) for h in found["hits"]} == {("keywords",)}
+
+
+def test_query_oracle_is_422(client):
+    reference_with_vocabulary(client)
+    body = {"collection": "r", "question": "enzyme", "methods": ["keyword_rag"]}
+    r = client.post("/query", json={**body, "search": {"query_tags": "oracle"}})
+    assert r.status_code == 422 and "oracle tags need a question's gold" in r.json()["detail"]
+
+
+def test_query_and_eval_validate_search(client):
+    reference_with_vocabulary(client)
+    for search in ({"weights": {"vibes": 1}}, {"colour": "red"}, {"weights": {"words": -1}}):
+        body = {"collection": "r", "question": "enzyme", "methods": ["hybrid"], "search": search}
+        assert client.post("/query", json=body).status_code == 422, search
+        run = {"collection": "r", "methods": ["keyword_rag"], "search": search}
+        assert client.post("/eval", json=run).status_code == 422, search
+        assert client.post("/eval", json={**run, "confirm": True}).status_code == 422, search
+
+
+def test_query_keyword_rag_without_vocabulary_is_a_method_error(client):
+    add_collection(client)
+    body = {"collection": "c", "question": "enzyme", "methods": ["keyword_rag", "hybrid"]}
+    results = client.post("/query", json=body).json()["results"]
+    assert "no vocabulary for collection 'c'" in results["keyword_rag"]["error"]
+    assert results["hybrid"]["hits"]
+
+
+def test_eval_records_the_search_override(client):
+    reference_with_vocabulary(client)
+    db.save_questions(
+        client.app.state.conn, "r", [Question("q1", "enzyme rate", None, ["A"], ["enzyme-item"])]
+    )
+    run = {
+        "collection": "r",
+        "methods": ["keyword_rag"],
+        "search": {"weights": {"keywords": 2}},
+        "confirm": True,
+    }
+    r = client.post("/eval", json=run)
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    table = client.get(f"/eval/{r.json()['job_id']}").json()
+    assert table["setup"]["search"]["weights"]["keywords"] == 2.0
+    assert table["setup"]["vocabulary_version"]
+    items = client.get(f"/eval/{r.json()['job_id']}/items?method=keyword_rag").json()
+    assert items[0]["query_tags"][0] == "enzyme"
 
 
 def test_vocabulary_put_on_lists_recipe_is_409(client):

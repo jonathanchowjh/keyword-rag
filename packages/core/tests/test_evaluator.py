@@ -4,6 +4,7 @@ import pytest
 
 from aiconnect.ai import Cancelled
 from ragqa_core import db
+from ragqa_core.builder import Builder
 from ragqa_core.db import (
     connect,
     create_job,
@@ -62,7 +63,7 @@ def env(tmp_path):
     ix.add(spec, ITEMS, "x")
     ix.set_lists(spec, LISTS)
     save_questions(conn, "c", QUESTIONS)
-    retriever = Retriever(conn, store, models, ai, ix)
+    retriever = Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix))
     return conn, Evaluator(conn, retriever, models, ai)
 
 
@@ -260,7 +261,8 @@ def test_setup_is_recorded_on_first_run_only(env):
 
 def test_queue_stores_only_the_request(env):
     conn, ev = env
-    job = ev.queue("c", "dev", ["hybrid"], True, None, k=3, rrf_k=10)
+    search = {"weights": {"words": 0.5}}
+    job = ev.queue("c", "dev", ["hybrid"], True, None, k=3, rrf_k=10, search=search)
     assert get_job(conn, job)["setup"] == {
         "collection": "c",
         "split": "dev",
@@ -269,6 +271,7 @@ def test_queue_stores_only_the_request(env):
         "model": ev.ai.model_for("answer"),
         "k": 3,
         "rrf_k": 10,
+        "search": search,  # the override as asked; the effective settings are recorded on run
     }
     assert get_job(conn, job)["status"] == "queued"
 
@@ -936,7 +939,8 @@ def multihop_env(tmp_path):
             Question("q3", "volcano lava", None, ["C"], [], {}),
         ],
     )
-    return conn, Evaluator(conn, Retriever(conn, store, models, ai, ix), models, ai)
+    retriever = Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix))
+    return conn, Evaluator(conn, retriever, models, ai)
 
 
 def run_multihop(conn, ev, methods=("hybrid",)):
@@ -1053,3 +1057,115 @@ def test_measurable_rules():
     out = measurable("table", fields(questions={"gold_ids": 140}))
     assert out["recall@1"] == {"measurable": True, "note": "on 140 of 200 questions"}
     assert measurable("table", fields())["recall@3"] == {"measurable": True, "note": None}
+
+
+# -- Keyword-RAG runs -----------------------------------------------------------------
+
+
+def with_vocabulary(ev: Evaluator, terms: list[str]) -> str:
+    """Put a vocabulary in force on collection c and tag every item with it."""
+    builder = ev.retriever.builder
+    spec = ev.retriever.spec("c")
+    version = builder.save_vocabulary(spec, terms)
+    db.set_vocabulary_version(ev.conn, "c", version)
+    builder.tag(ev.retriever.spec("c"), builder.stored_items("c"))
+    return version
+
+
+def test_eval_records_search_and_query_tags(env):
+    conn, ev = env
+    version = with_vocabulary(ev, TOPICS)
+    job = ev.queue(
+        "c", "dev", ["keyword_rag", "hybrid"], False, None, search={"weights": {"keywords": 2.0}}
+    )
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done", get_job(conn, job)["error"]
+    setup = get_job(conn, job)["setup"]
+    assert setup["search"]["weights"] == {"meaning": 1.0, "words": 1.0, "keywords": 2.0}
+    assert setup["search"]["query_tags"] == "similarity"  # the collection's default
+    assert setup["vocabulary_version"] == version
+    rows = {(r["method"], r["question_id"]): r for r in run_items(conn, job)}
+    tags = rows[("keyword_rag", "q-enzyme")]["query_tags"]
+    assert tags and tags[0] == "enzyme"
+    assert "query_tags" not in rows[("hybrid", "q-enzyme")]
+    assert ev.table(job)["methods"]["keyword_rag"]["same_skill@1"]["mean"] == 1.0
+
+
+def test_every_run_records_search_and_vocabulary(env):
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["search"] == {
+        "weights": {"meaning": 1.0, "words": 1.0, "keywords": 1.0},
+        "query_tags": "similarity",
+        "example": "full",
+        "program": False,
+    }
+    assert "vocabulary_version" in setup and setup["vocabulary_version"] is None
+
+
+def test_queue_refuses_bad_search(env):
+    _, ev = env
+    with pytest.raises(ValueError, match="unknown channel"):
+        ev.queue("c", "dev", ["keyword_rag"], False, None, search={"weights": {"vibes": 1}})
+    with pytest.raises(ValueError, match="query_tags"):
+        ev.queue("c", "dev", ["keyword_rag"], False, None, search={"query_tags": "psychic"})
+
+
+def test_oracle_tags_from_gold_units(tmp_path):
+    conn, ev = multihop_env(tmp_path)
+    with_vocabulary(ev, ["enzyme", "market", "volcano"])
+    spec = ev.retriever.spec("c")
+    both = Question("qb", "x", None, ["A"], ["g2", "g1"], {})
+    tags_g1 = ev.retriever.store.get("c", ["g1"])[0].tags
+    tags_g2 = ev.retriever.store.get("c", ["g2"])[0].tags
+    assert ev.oracle_tags(spec, both) == list(dict.fromkeys(tags_g2 + tags_g1))
+    assert ev.oracle_tags(spec, both)[0] == "market"
+    # No gold unit: the tags of the worked solution; neither: none.
+    solved = Question("qs", "x", None, ["A"], [], {"solution": "volcano lava"})
+    assert ev.oracle_tags(spec, solved)[0] == "volcano"
+    assert ev.oracle_tags(spec, Question("qn", "x", None, ["A"], [], {})) == []
+
+
+def test_oracle_run_searches_with_the_gold_tags(tmp_path):
+    conn, ev = multihop_env(tmp_path)
+    with_vocabulary(ev, ["enzyme", "market", "volcano"])
+    job = ev.queue("c", "full", ["keyword_rag"], False, None, search={"query_tags": "oracle"})
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done", get_job(conn, job)["error"]
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    spec = ev.retriever.spec("c")
+    assert rows["q2"]["query_tags"] == ev.oracle_tags(spec, db.get_questions(conn, "c")[1])
+    assert rows["q2"]["query_tags"][0] == "market" and rows["q3"]["query_tags"] == []
+
+
+def test_since_notes_a_new_vocabulary_for_keyword_rag_runs(env):
+    from ragqa_core.evaluator import changes_since
+
+    _, ev = env
+    version = with_vocabulary(ev, TOPICS)
+    spec = ev.retriever.spec("c")
+    base = {"keyword_version": spec.keyword_version, "dense_model": "fake/dense"}
+    old = {**setup_for(["keyword_rag"]), **base, "vocabulary_version": "older"}
+    assert changes_since(old, spec, [])["changes"] == ["vocabulary"]
+    same = {**old, "vocabulary_version": version}
+    assert changes_since(same, spec, [])["changes"] == []
+    other_methods = {**old, "methods": ["hybrid", "kw_individual"]}
+    assert changes_since(other_methods, spec, [])["changes"] == []
+
+
+def test_resume_is_refused_after_a_new_vocabulary(env):
+    conn, ev = env
+    with_vocabulary(ev, TOPICS)
+    job = ev.queue("c", "dev", ["keyword_rag"], False, None)
+    ev.run(job)
+    db.update_job(conn, job, status="interrupted")
+    assert ev.resume_refusal(job) is None
+    with_vocabulary(ev, TOPICS[:2])
+    assert "vocabulary changed" in (ev.resume_refusal(job) or "")
+    hybrid = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(hybrid)
+    db.update_job(conn, hybrid, status="interrupted")
+    with_vocabulary(ev, TOPICS[:3])
+    assert ev.resume_refusal(hybrid) is None  # the vocabulary is not what it searched with

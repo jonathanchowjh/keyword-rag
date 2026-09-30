@@ -148,6 +148,7 @@ class QueryRequest(BaseModel):
     rrf_k: int = Field(60, ge=0)
     answer: bool = False
     model: str | None = None
+    search: dict | None = None  # overrides the collection's search settings in part
 
 
 class EvalRequest(BaseModel):
@@ -158,6 +159,7 @@ class EvalRequest(BaseModel):
     model: str | None = None
     k: int = Field(5, ge=1, le=50)
     rrf_k: int = Field(60, ge=0)
+    search: dict | None = None  # overrides the collection's search settings in part
     confirm: bool = False
 
 
@@ -274,7 +276,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     state.ai.apply_env(api_key=settings.api_key, model=settings.model, cap_usd=settings.cap_usd)
     state.indexer = Indexer(state.conn, state.store, state.models, state.ai)
     state.builder = Builder(state.conn, state.store, state.models, state.ai, state.indexer)
-    state.retriever = Retriever(state.conn, state.store, state.models, state.ai, state.indexer)
+    state.retriever = Retriever(
+        state.conn, state.store, state.models, state.ai, state.indexer, state.builder
+    )
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
     state.loader = Loader(state.conn, state.indexer, state.builder, state.ai, settings.home)
     state.worker = Worker(
@@ -433,7 +437,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_collection(name: str) -> dict:
         spec = state.retriever.spec(name)
         lists = db.get_keyword_lists(state.conn, name)
-        available = [m for m in METHOD_NAMES if lists is not None or m not in KEYWORD_METHODS]
+        available = [
+            m
+            for m in METHOD_NAMES
+            if (lists is not None or m not in KEYWORD_METHODS)
+            and (spec.vocabulary_version is not None or m != "keyword_rag")
+        ]
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
         busy, job = collection_state(jobs, count, lists is not None)
@@ -789,14 +798,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def query(body: QueryRequest) -> dict:
         check_methods(body.methods)
         spec = state.retriever.spec(body.collection)
+        search = search_settings(spec.search or SearchSettings(), body.search)
+        if "keyword_rag" in body.methods and search.query_tags == "oracle":
+            raise ValueError("oracle tags need a question's gold")  # eval only
+        skip = tuple(db.disabled_sources(state.conn, body.collection))
         results = {}
         for method in body.methods:
             out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None}
             # Every call the method makes: query summaries, hops and the answer.
             with state.ai.tally() as spent:
                 try:
+                    tags = None
+                    if method == "keyword_rag":
+                        tags = state.retriever.query_tags(spec, body.question, search, skip)
+                        out["query_tags"] = tags
                     hits = state.retriever.retrieve(
-                        body.collection, body.question, method, body.k, body.rrf_k
+                        body.collection, body.question, method, body.k, body.rrf_k, search, tags
                     )
                     out["hits"] = [asdict(h) for h in hits]
                     if body.answer:
@@ -824,6 +841,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/eval", status_code=202)
     def evaluate(body: EvalRequest):
         check_methods(body.methods)
+        spec = state.retriever.spec(body.collection)
+        search_settings(spec.search or SearchSettings(), body.search)  # 422 before an estimate
         estimate = state.evaluator.estimate(
             body.collection, body.split, body.methods, body.answer, body.model
         )
@@ -831,7 +850,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"estimate": estimate}, 200)
         need_models(estimate, body.model)
         job_id = state.evaluator.queue(
-            body.collection, body.split, body.methods, body.answer, body.model, body.k, body.rrf_k
+            body.collection,
+            body.split,
+            body.methods,
+            body.answer,
+            body.model,
+            body.k,
+            body.rrf_k,
+            body.search,
         )
         return {"job_id": job_id, "estimate": estimate}
 

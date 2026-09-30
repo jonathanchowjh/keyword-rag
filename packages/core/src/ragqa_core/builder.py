@@ -145,7 +145,7 @@ class Builder:
         row = {t: n for n, t in enumerate(embedded)}
         return vectors[[row[t] for t in terms]]
 
-    def _similar(
+    def similar(
         self, terms: list[str], texts: list[str], k: int, cutoff: float | None = None
     ) -> list[list[str]]:
         """The k terms nearest each text; with a cut-off, every term at or above it (at
@@ -175,7 +175,7 @@ class Builder:
             cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
             tags: list[list[str]] = []
             for start in range(0, len(texts), BATCH):
-                tags += self._similar(terms, texts[start : start + BATCH], build.tag_k, cutoff)
+                tags += self.similar(terms, texts[start : start + BATCH], build.tag_k, cutoff)
                 progress(min(start + BATCH, len(texts)) / len(texts))
             return tags
         # One call for every text, so a large corpus gets the Batch API's discount.
@@ -193,7 +193,7 @@ class Builder:
             tags.append([t for t in picked if t in known][: build.tag_k])
         # A reply with no term of the vocabulary falls back to similarity: never no tags.
         unusable = [n for n, t in enumerate(tags) if not t]
-        nearest = self._similar(terms, [texts[n] for n in unusable], build.tag_k)
+        nearest = self.similar(terms, [texts[n] for n in unusable], build.tag_k)
         for n, fallback in zip(unusable, nearest, strict=True):
             tags[n] = fallback
         progress(1.0)

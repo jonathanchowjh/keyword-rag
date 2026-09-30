@@ -4,6 +4,7 @@ with intervals so a gap that is noise is shown as noise."""
 import itertools
 import math
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Literal
 
 from aiconnect.ai import AI, BATCH_THRESHOLD, BudgetExceeded, Cancelled, NoConnection
@@ -30,8 +31,9 @@ from ragqa_core.prompts import (
     parse_answer,
     summary_prompt,
 )
+from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, Retriever
-from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question
+from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question, SearchSettings
 
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
     "mcq": ("solution_sim@1", "same_skill@1"),
@@ -129,6 +131,13 @@ def changes_since(setup: dict, spec: CollectionSpec, disabled: list[str]) -> dic
         and any(m in KEYWORD_METHODS for m in setup.get("methods", []))
     ):
         changes.append("keyword lists")
+    # Only Keyword-RAG searches with the vocabulary; a run from before it recorded none.
+    if (
+        "vocabulary_version" in setup
+        and setup["vocabulary_version"] != spec.vocabulary_version
+        and "keyword_rag" in setup.get("methods", [])
+    ):
+        changes.append("vocabulary")
     if setup.get("dense_model") is not None and setup["dense_model"] != spec.dense_model:
         changes.append("dense model")
     if "keyword_version" in setup and setup.get("disabled_sources", []) != disabled:
@@ -267,11 +276,15 @@ class Evaluator:
         model: str | None,
         k: int = 5,
         rrf_k: int = 60,
+        search: dict | None = None,
     ) -> str:
-        """Queue a run with the request only; the rest of its setup is recorded when it runs."""
+        """Queue a run with the request only; the rest of its setup is recorded when it runs.
+        `search` overrides the collection's search settings in part; a bad one raises
+        ValueError."""
         spec = self.retriever.spec(collection)
         if not methods:
             raise ValueError("choose at least one method")
+        search_settings(spec.search or SearchSettings(), search)
         if not self._questions(spec, split):
             raise ValueError(f"collection '{collection}' has no questions")
         setup = {
@@ -283,6 +296,7 @@ class Evaluator:
             "model": model or self.ai.role_model("answer"),
             "k": k,
             "rrf_k": rrf_k,
+            "search": search or {},
         }
         return db.create_job(self.conn, "eval", collection, setup)
 
@@ -306,6 +320,7 @@ class Evaluator:
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
+            "vocabulary_version": spec.vocabulary_version,
             "seed": DEV_SEED,
             "dataset_filter": "; ".join(
                 FILTER_NOTES[d] for d in sorted(db.loaded_datasets(self.conn, spec.name))
@@ -316,9 +331,16 @@ class Evaluator:
             "leaked_excluded": leaked,
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
             **setup,
+            # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
+            # with any other's. Merging a full recorded set over the defaults gives it back.
+            "search": asdict(self._search(spec, setup)),
         }
         db.set_job_setup(self.conn, job_id, setup)
         return setup
+
+    @staticmethod
+    def _search(spec: CollectionSpec, setup: dict) -> SearchSettings:
+        return search_settings(spec.search or SearchSettings(), setup.get("search"))
 
     def _gold_off(
         self, spec: CollectionSpec, questions: list[Question], disabled: list[str]
@@ -341,6 +363,9 @@ class Evaluator:
         old, new = setup["keyword_version"], spec.keyword_version
         if old != new:
             return f"keyword lists changed since this run ({old} → {new}); start a new run"
+        old, new = setup.get("vocabulary_version"), spec.vocabulary_version
+        if "vocabulary_version" in setup and old != new and "keyword_rag" in setup["methods"]:
+            return f"the vocabulary changed since this run ({old} → {new}); start a new run"
         old, new = setup.get("dense_model"), spec.dense_model
         if old != new:
             return f"the dense model changed since this run ({old} → {new}); start a new run"
@@ -420,10 +445,21 @@ class Evaluator:
         if not questions:
             return
         span = 0.5 if setup["answer"] else 0.99  # the share the retrieval step is worth
-        all_hits = []
+        search = self._search(spec, setup)
+        skip = tuple(setup.get("disabled_sources", []))
+        all_hits, all_tags = [], []
         for n, q in enumerate(questions, start=1):
+            tags = None
+            if method == "keyword_rag":
+                if search.query_tags == "oracle":
+                    tags = self.oracle_tags(spec, q)
+                else:
+                    tags = self.retriever.query_tags(spec, q.text, search, skip)
+            all_tags.append(tags)
             all_hits.append(
-                self.retriever.retrieve(spec.name, q.text, method, setup["k"], setup["rrf_k"])
+                self.retriever.retrieve(
+                    spec.name, q.text, method, setup["k"], setup["rrf_k"], search, tags
+                )
             )
             if n % 10 == 0 and n < len(questions):
                 report(span * n / len(questions))
@@ -435,6 +471,9 @@ class Evaluator:
         else:
             off = self._gold_off(spec, questions, setup.get("disabled_sources", []))
             rows = self._retrieval_rows(spec, questions, all_hits, off)
+        if method == "keyword_rag":
+            for row, tags in zip(rows, all_tags, strict=True):
+                row["query_tags"] = tags
         for q, row in zip(questions, rows, strict=True):
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
@@ -466,6 +505,20 @@ class Evaluator:
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)
         report(0.99)
         check()
+
+    def oracle_tags(self, spec: CollectionSpec, q: Question) -> list[str]:
+        """The tags a perfect classifier would predict (eval only, X2): those stored on the
+        question's gold units, in order; without any, the similarity tags of its worked
+        solution; else none."""
+        gold = self.retriever.store.get(spec.name, q.gold_ids) if q.gold_ids else []
+        tags = list(dict.fromkeys(t for h in gold for t in h.tags))
+        if tags:
+            return tags
+        solution = q.meta.get("solution")
+        if isinstance(solution, str) and solution.strip():
+            similarity = SearchSettings(query_tags="similarity")
+            return self.retriever.query_tags(spec, solution, similarity, ())
+        return []
 
     def _retrieval_rows(
         self,
