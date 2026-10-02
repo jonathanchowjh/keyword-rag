@@ -498,22 +498,29 @@ class Evaluator:
         skip = tuple(setup.get("disabled_sources", []))
         all_hits, all_tags = [], []
         for n, q in enumerate(questions, start=1):
+            # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE LEFT OUT
+            # BY EVERY SEARCH, the classifier's vote included, so they are never scored or
+            # shown and each channel's pool and the depth count only the others.
+            excluded = q.meta.get("excluded_ids", [])
             tags = None
             if method == "keyword_rag":
                 if search.query_tags == "oracle":
                     tags = self.oracle_tags(spec, q)
                 else:
-                    tags = self.retriever.query_tags(spec, q.text, search, skip)
+                    tags = self.retriever.query_tags(spec, q.text, search, skip, excluded)
             all_tags.append(tags)
-            # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE DROPPED
-            # HERE, so they are never scored or shown; asking for that many more keeps the
-            # depth wherever the method's pool allows.
-            excluded = set(q.meta.get("excluded_ids", []))
-            depth = retrieval_depth(spec.qa_type, q, setup["k"])
-            hits = self.retriever.retrieve(
-                spec.name, q.text, method, depth + len(excluded), setup["rrf_k"], search, tags
+            all_hits.append(
+                self.retriever.retrieve(
+                    spec.name,
+                    q.text,
+                    method,
+                    retrieval_depth(spec.qa_type, q, setup["k"]),
+                    setup["rrf_k"],
+                    search,
+                    tags,
+                    excluded,
+                )
             )
-            all_hits.append([h for h in hits if h.id not in excluded][:depth])
             if n % 10 == 0 and n < len(questions):
                 report(span * n / len(questions))
                 check()

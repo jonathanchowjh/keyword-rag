@@ -8,7 +8,7 @@ retriever live in a sibling collection, `<name>__chunks`.
 import hashlib
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +19,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    HasIdCondition,
     IsEmptyCondition,
     MatchAny,
     MatchValue,
@@ -68,11 +69,29 @@ def item_hash(item: Item) -> str:
     ).hexdigest()[:16]
 
 
-def skip_filter(skip: tuple[str, ...]) -> Filter | None:
-    """Points without a meta.source never match must_not, so they are never skipped."""
-    if not skip:
+def skip_filter(
+    skip: tuple[str, ...], excluded: HasIdCondition | FieldCondition | None = None
+) -> Filter | None:
+    """Points without a meta.source never match must_not, so they are never skipped.
+    `excluded` leaves out items by id, as items_excluded or parents_excluded builds it."""
+    must_not: list = [] if excluded is None else [excluded]
+    if skip:
+        must_not.append(FieldCondition(key="meta.source", match=MatchAny(any=list(skip))))
+    return Filter(must_not=must_not) if must_not else None
+
+
+def items_excluded(name: str, exclude: Collection[str]) -> HasIdCondition | None:
+    """The items with these ids, by point id: Qdrant needs no payload index for it."""
+    if not exclude:
         return None
-    return Filter(must_not=[FieldCondition(key="meta.source", match=MatchAny(any=list(skip)))])
+    return HasIdCondition(has_id=[point_id(name, i) for i in sorted(exclude)])
+
+
+def parents_excluded(exclude: Collection[str]) -> FieldCondition | None:
+    """The chunks of the items with these ids, by the indexed parent_id."""
+    if not exclude:
+        return None
+    return FieldCondition(key="parent_id", match=MatchAny(any=sorted(exclude)))
 
 
 def to_hit(point: ScoredPoint | Record, score: float = 0.0) -> Hit:
@@ -243,20 +262,32 @@ class Store:
         self.send_payloads(name, [(pid, {"tags": t}) for pid, t in zip(pids, tags, strict=True)])
 
     def search(
-        self, name: str, using: str, vector: np.ndarray, limit: int, skip: tuple[str, ...] = ()
+        self,
+        name: str,
+        using: str,
+        vector: np.ndarray,
+        limit: int,
+        skip: tuple[str, ...] = (),
+        exclude: Collection[str] = (),
     ) -> list[Hit]:
+        """The `limit` nearest items, leaving out skipped sources and excluded item ids."""
         result = self.client.query_points(
             name,
             query=vector.tolist(),
             using=using,
             limit=limit,
             with_payload=True,
-            query_filter=skip_filter(skip),
+            query_filter=skip_filter(skip, items_excluded(name, exclude)),
         )
         return [to_hit(p) for p in result.points]
 
     def search_sparse(
-        self, name: str, vector: SparseVector, limit: int, skip: tuple[str, ...] = ()
+        self,
+        name: str,
+        vector: SparseVector,
+        limit: int,
+        skip: tuple[str, ...] = (),
+        exclude: Collection[str] = (),
     ) -> list[Hit]:
         result = self.client.query_points(
             name,
@@ -264,20 +295,26 @@ class Store:
             using=SPARSE,
             limit=limit,
             with_payload=True,
-            query_filter=skip_filter(skip),
+            query_filter=skip_filter(skip, items_excluded(name, exclude)),
         )
         return [to_hit(p) for p in result.points]
 
     def search_chunks(
-        self, name: str, vector: np.ndarray, limit: int, skip: tuple[str, ...] = ()
+        self,
+        name: str,
+        vector: np.ndarray,
+        limit: int,
+        skip: tuple[str, ...] = (),
+        exclude: Collection[str] = (),
     ) -> list[tuple[str, float]]:
+        """The `limit` nearest chunks as (parent id, score); `exclude` names parent items."""
         result = self.client.query_points(
             chunks_of(name),
             query=vector.tolist(),
             using=CHUNK,
             limit=limit,
             with_payload=True,
-            query_filter=skip_filter(skip),
+            query_filter=skip_filter(skip, parents_excluded(exclude)),
         )
         return [((p.payload or {})["parent_id"], float(p.score)) for p in result.points]
 

@@ -6,7 +6,7 @@ k=1 and today's k=60 behave identically in every storage mode.
 """
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import numpy as np
 
@@ -25,7 +25,7 @@ from ragqa_core.prompts import (
     summary_prompt,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings, Skip
 
 METHOD_NAMES = (
     "question_only",
@@ -48,9 +48,6 @@ POOL = 50
 NEIGHBOURS = 20  # the units whose tags vote for a question's (the classifier, D6)
 MAX_HOPS = 3
 HOP_TOKENS = 200
-
-
-Skip = tuple[str, ...]
 
 
 class MethodUnavailable(Exception):
@@ -105,7 +102,7 @@ class Retriever:
         self.builder = builder
         # Every item id by collection, with the count and skipped sources it was read at: the
         # controls need them per query, and an 11,656-item scroll each time is slow.
-        self._ids: dict[str, tuple[tuple[int, Skip], list[str]]] = {}
+        self._ids: dict[str, tuple[tuple[int, tuple[str, ...]], list[str]]] = {}
         self._methods: dict[str, Callable[[CollectionSpec, str, int, int, Skip], list[Hit]]] = {
             "question_only": lambda spec, q, k, rk, skip: [],
             "vector": self._vector,
@@ -136,16 +133,18 @@ class Retriever:
         rrf_k: int = 60,
         search: SearchSettings | None = None,
         tags: list[str] | None = None,
+        exclude: Collection[str] = (),
     ) -> list[Hit]:
         """`search` None means the collection's own settings; `tags` None means the query's
-        tags are predicted as the settings say. Only keyword_rag uses either."""
+        tags are predicted as the settings say. Only keyword_rag uses either. `exclude` names
+        items no channel may find, so every pool and k counts only the others."""
         if method not in METHOD_NAMES:
             raise ValueError(f"unknown method {method!r}; known: {', '.join(METHOD_NAMES)}")
         spec = self.spec(collection)
         # A query embedded by another model is either a dimension crash or,
         # worse, silently meaningless; refuse it by name instead.
         self.indexer.check_model(spec)
-        skip = tuple(db.disabled_sources(self.conn, collection))
+        skip = Skip(tuple(db.disabled_sources(self.conn, collection)), frozenset(exclude))
         if method == "keyword_rag":
             settings = search or spec.search or SearchSettings()
             return self._keyword_rag(spec, question, k, rrf_k, skip, settings, tags)
@@ -168,7 +167,7 @@ class Retriever:
     def _vector(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         parents: dict[str, float] = {}
         for parent, score in self.store.search_chunks(
-            spec.name, self._dense_query(spec, q), POOL, skip=skip
+            spec.name, self._dense_query(spec, q), POOL, skip.sources, skip.items
         ):
             parents.setdefault(parent, score)
         top = list(parents)[:k]
@@ -178,14 +177,15 @@ class Retriever:
         return hits
 
     def _keyword(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
-        return self.store.search_sparse(spec.name, self.models.sparse_query([q])[0], k, skip=skip)
+        sparse = self.models.sparse_query([q])[0]
+        return self.store.search_sparse(spec.name, sparse, k, skip.sources, skip.items)
 
     def _hybrid(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
         dense = self.store.search(
-            spec.name, "text_dense", self._dense_query(spec, q), POOL, skip=skip
+            spec.name, "text_dense", self._dense_query(spec, q), POOL, skip.sources, skip.items
         )
         sparse = self.store.search_sparse(
-            spec.name, self.models.sparse_query([q])[0], POOL, skip=skip
+            spec.name, self.models.sparse_query([q])[0], POOL, skip.sources, skip.items
         )
         return rrf([dense, sparse], rrf_k)[:k]
 
@@ -239,7 +239,7 @@ class Retriever:
         channel weighted 0 is not searched; with no query tags, keywords finds nothing."""
         self._vocabulary(spec)
         if tags is None:
-            tags = self.query_tags(spec, q, search, skip)
+            tags = self.query_tags(spec, q, search, skip.sources, skip.items)
         weights = search.weights
         rankings: dict[str, list[Hit]] = {}
         if weights.get("meaning", 0.0) > 0:
@@ -247,13 +247,19 @@ class Retriever:
                 rankings["meaning"] = self._vector(spec, q, POOL, rrf_k, skip)
             else:
                 dense = self._dense_query(spec, q)
-                rankings["meaning"] = self.store.search(spec.name, "text_dense", dense, POOL, skip)
+                rankings["meaning"] = self.store.search(
+                    spec.name, "text_dense", dense, POOL, skip.sources, skip.items
+                )
         if weights.get("words", 0.0) > 0:
             sparse = self.models.sparse_query([q])[0]
-            rankings["words"] = self.store.search_sparse(spec.name, sparse, POOL, skip=skip)
+            rankings["words"] = self.store.search_sparse(
+                spec.name, sparse, POOL, skip.sources, skip.items
+            )
         if weights.get("keywords", 0.0) > 0 and tags:
             vector = self.models.embed([keyword_string(tags, None)])[0]
-            rankings["keywords"] = self.store.search(spec.name, "kw_tags", vector, POOL, skip)
+            rankings["keywords"] = self.store.search(
+                spec.name, "kw_tags", vector, POOL, skip.sources, skip.items
+            )
         found: dict[str, list[str]] = {}
         for channel, ranking in rankings.items():
             for h in ranking:
@@ -266,18 +272,23 @@ class Retriever:
         return fused
 
     def query_tags(
-        self, spec: CollectionSpec, question: str, search: SearchSettings, skip: Skip
+        self,
+        spec: CollectionSpec,
+        question: str,
+        search: SearchSettings,
+        skip: tuple[str, ...],
+        exclude: Collection[str] = (),
     ) -> list[str]:
         """The question's tags from the vocabulary: by the classifier's vote of the nearest
         units, or by similarity to the terms. Oracle tags come from a question's gold, which
-        a bare question does not have."""
+        a bare question does not have. Skipped sources and excluded items cast no vote."""
         if search.query_tags == "oracle":
             raise ValueError("oracle tags need a question's gold")
         terms = self._vocabulary(spec)
         self.indexer.check_model(spec)
         build = build_of(spec)
         if search.query_tags == "classifier":
-            return self._classify(spec, question, build.tag_k, skip)
+            return self._classify(spec, question, build.tag_k, Skip(skip, frozenset(exclude)))
         cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
         return self.builder.similar(terms, [question], build.tag_k, cutoff)[0]
 
@@ -286,7 +297,12 @@ class Retriever:
         score to each of its tags; the k best win, ties to the tag seen first."""
         votes: dict[str, float] = {}
         neighbours = self.store.search(
-            spec.name, "text_dense", self._dense_query(spec, q), NEIGHBOURS, skip=skip
+            spec.name,
+            "text_dense",
+            self._dense_query(spec, q),
+            NEIGHBOURS,
+            skip.sources,
+            skip.items,
         )
         for h in neighbours:
             for tag in h.tags:
@@ -332,13 +348,14 @@ class Retriever:
         """random_example seeds by the question, so each question always gets the
         same draw (and the same cached answer); fixed_example uses one seed for all.
         Against these, a method shows whether choosing the example helped at all."""
-        return self.store.get(spec.name, shuffled(self._all_ids(spec.name, skip), seed)[:k])
+        ids = [i for i in self._all_ids(spec.name, skip.sources) if i not in skip.items]
+        return self.store.get(spec.name, shuffled(ids, seed)[:k])
 
     def forget(self, name: str) -> None:
         """Drops what is cached for a collection that is gone."""
         self._ids.pop(name, None)
 
-    def _all_ids(self, name: str, skip: Skip) -> list[str]:
+    def _all_ids(self, name: str, skip: tuple[str, ...]) -> list[str]:
         count = self.store.count(name)
         cached = self._ids.get(name)
         if cached is not None and cached[0] == (count, skip):
@@ -398,7 +415,10 @@ class Retriever:
         skip: Skip,
     ) -> list[Hit]:
         limit = k if len(names) == 1 else POOL
-        rankings = [self.store.search(spec.name, n, vectors[n], limit, skip=skip) for n in names]
+        rankings = [
+            self.store.search(spec.name, n, vectors[n], limit, skip.sources, skip.items)
+            for n in names
+        ]
         return rankings[0][:k] if len(names) == 1 else rrf(rankings, rrf_k)[:k]
 
     @staticmethod

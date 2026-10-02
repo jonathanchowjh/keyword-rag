@@ -334,6 +334,30 @@ def test_disabled_source_is_never_retrieved(tmp_path, method):
     assert hits and "b1" not in [h.id for h in hits]
 
 
+@pytest.mark.parametrize("method", SKIP_METHODS)
+def test_excluded_items_are_never_retrieved(tmp_path, method):
+    r, _ = build_sources(tmp_path)
+    query = "enzyme market rate price shared words"
+    assert method in CONTROLS or "b1" in [h.id for h in r.retrieve("c", query, method, k=10)]
+    hits = r.retrieve("c", query, method, k=10, exclude=["b1", "a2"])
+    assert hits and not {"b1", "a2"} & {h.id for h in hits}
+
+
+@pytest.mark.parametrize("method", ["hybrid", "keyword_rag"])
+def test_fused_methods_fill_k_past_an_excluded_pool(tmp_path, monkeypatch, method):
+    monkeypatch.setattr("ragqa_core.retriever.POOL", 2)
+    r, conn = build(tmp_path, lists=False, vocabulary=False)
+    spec = r.spec("c")
+    fillers = [Item(f"f{n}", f"enzyme market shared words filler {n}", "A", "e") for n in range(8)]
+    r.indexer.add(spec, fillers, "x")
+    tag_all(r, TERMS)
+    query = "enzyme market rate price shared words"
+    # Every channel's whole pool: at most POOL from each of three channels.
+    pooled = [h.id for h in r.retrieve("c", query, method, k=6)]
+    hits = r.retrieve("c", query, method, k=2, exclude=pooled)
+    assert len(hits) == 2 and not set(pooled) & {h.id for h in hits}
+
+
 def test_controls_refresh_after_a_switch(tmp_path):
     r, conn = build_sources(tmp_path)
     assert "b1" in [h.id for h in r.retrieve("c", "enzyme", "random_example", k=3)]
@@ -384,6 +408,9 @@ def test_classifier_votes_neighbours_tags(tmp_path):
     assert r.query_tags(one, "car velocity current", classify, ()) == ["ohm's law"]
     # Disabled sources cast no vote.
     assert r.query_tags(spec, "car velocity current", classify, ("x",)) == []
+    # Nor do a question's excluded items.
+    tags = r.query_tags(spec, "car velocity current", classify, (), exclude=OHM)
+    assert tags == ["kinematics"]
 
 
 def test_similarity_query_tags_are_the_nearest_terms(tmp_path):

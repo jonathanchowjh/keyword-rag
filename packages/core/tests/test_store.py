@@ -294,3 +294,15 @@ def test_unsourced_counts_chunks_too():
     assert s.unsourced("c") == 1
     s.set_chunk_sources("c", {"n1": "a"})
     assert s.unsourced("c") == 0
+
+
+def test_excluded_items_are_left_out_of_every_search():
+    s, m, _ = sourced()
+    q = m.embed_query(["enzyme market light"])[0]
+    sq = m.sparse_query(["enzyme market light"])[0]
+    out = {"a1"}
+    assert "a1" not in {h.id for h in s.search("c", "text_dense", q, 10, exclude=out)}
+    assert "a1" not in {h.id for h in s.search_sparse("c", sq, 10, exclude=out)}
+    assert {p for p, _ in s.search_chunks("c", q, 10, exclude=out)} == {"a2", "b1"}
+    both = {h.id for h in s.search("c", "text_dense", q, 10, skip=("b",), exclude=out)}
+    assert both == {"a2"}

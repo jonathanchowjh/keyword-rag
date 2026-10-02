@@ -40,6 +40,15 @@ class SearchSettings:
     program: bool = False
 
 
+@dataclass(frozen=True)
+class Skip:
+    """What one search leaves out: items of disabled sources, and items by id (a BRIGHT
+    question's excluded ids). Every channel leaves them out before it fills its pool."""
+
+    sources: tuple[str, ...] = ()
+    items: frozenset[str] = frozenset()
+
+
 @dataclass
 class CollectionSpec:
     name: str
