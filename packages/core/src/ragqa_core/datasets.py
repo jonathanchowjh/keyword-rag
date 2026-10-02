@@ -1,4 +1,4 @@
-"""The five datasets, downloaded at runtime and never committed.
+"""The built-in datasets, downloaded at runtime and never committed.
 
 - ScienceQA (CC BY-SA 4.0): exam multiple choice; train is the example store,
   test the queries. Text-only natural science, grades 7–12, templates deduped.
@@ -13,6 +13,12 @@
   with math.isclose(rel_tol=0.05) (eval/eval_zero.py, equiv) and folds a
   power-of-ten unit into the gold (eval/post_process.py, remove_not, cal_not),
   so split_unit does the same. Facts checked 2026-10-27.
+- BRIGHT (CC BY 4.0, xlangai/BRIGHT): reasoning-intensive retrieval. Its `aops` and
+  `theoremqa_questions` tasks are worked collections: a document is relevant when it uses
+  the same technique or theorem. Files examples/<task>-*.parquet (query, reasoning, id,
+  excluded_ids, gold_ids_long, gold_ids, gold_answer) and documents/<task>-*.parquet (id,
+  content). Both tasks share one 188,002-document pool, every gold_answer is "N/A", and
+  each question excludes 1 to 11,224 ids (its own problem among them). Checked 2026-10-28.
 """
 
 import csv
@@ -37,6 +43,8 @@ DATASETS: dict[str, QaType] = {
     "musique": "multihop",
     "tatqa": "table",
     "scibench": "science",
+    "bright_aops": "science",
+    "bright_theoremqa": "science",
 }
 ID_PREFIX: dict[str, str] = {
     "scienceqa": "sqa-",
@@ -44,6 +52,8 @@ ID_PREFIX: dict[str, str] = {
     "musique": "mq-",
     "tatqa": "tq-",
     "scibench": "sb-",
+    "bright_aops": "ba-",
+    "bright_theoremqa": "bt-",
 }
 FILTER_NOTES: dict[str, str] = {
     "scienceqa": "ScienceQA text-only, natural science, grades 7-12, one item per masked template",
@@ -54,6 +64,8 @@ FILTER_NOTES: dict[str, str] = {
     ),
     "musique": "MuSiQue, HippoRAG-2 protocol: 1,000 dev questions over 11,656 passages",
     "tatqa": "TAT-QA dev questions over every train/dev/test context",
+    "bright_aops": "BRIGHT AoPS: competition problems; relevant = same technique",
+    "bright_theoremqa": "BRIGHT TheoremQA questions; relevant = same theorem",
 }
 
 
@@ -84,6 +96,9 @@ TATQA_URL = (
     "tatqa_dataset_{split}.json"
 )
 SCIBENCH_REPO = "xw27/scibench"
+BRIGHT_REPO = "xlangai/BRIGHT"
+# BRIGHT's placeholder for a field it has no value for.
+BRIGHT_NONE = "N/A"
 SCIBENCH_SOURCES = ("atkins", "chemmc", "quan", "matter", "fund", "class", "thermo")
 CHEMISTRY = {"atkins", "chemmc", "quan", "matter"}
 GRADES = {f"grade{n}" for n in range(7, 13)}
@@ -139,6 +154,10 @@ def load(name: str, cache: Path) -> tuple[list[Item], list[Question]]:
         "musique": load_musique,
         "tatqa": load_tatqa,
         "scibench": load_scibench,
+        "bright_aops": lambda cache: _bright("aops", ID_PREFIX["bright_aops"], cache),
+        "bright_theoremqa": lambda cache: _bright(
+            "theoremqa_questions", ID_PREFIX["bright_theoremqa"], cache
+        ),
     }
     if name not in loaders:
         raise ValueError(f"unknown dataset {name!r}; known: {', '.join(loaders)}")
@@ -450,3 +469,47 @@ def load_scibench(
                 else:
                     questions[item_id] = Question(item_id, text, None, [gold], [], meta)
     return list(items.values()), list(questions.values())
+
+
+# -- BRIGHT --------------------------------------------------------------------
+
+
+def _bright_files(task: str, cache: Path) -> dict[str, Path]:
+    """The task's question and document files. The repo also holds each task's queries
+    rewritten by several models (<model>_reason/) and a neighbouring theoremqa_theorems."""
+    files = HfApi().list_repo_files(BRIGHT_REPO, repo_type="dataset")
+    out = {}
+    for part in ("examples", "documents"):
+        name = next(f for f in files if f.startswith(f"{part}/{task}-") and f.endswith(".parquet"))
+        out[part] = Path(
+            hf_hub_download(BRIGHT_REPO, name, repo_type="dataset", cache_dir=cache / "datasets")
+        )
+    return out
+
+
+def _bright(
+    task: str, prefix: str, cache: Path, files: dict[str, Path] | None = None
+) -> tuple[list[Item], list[Question]]:
+    """A document is a worked example whose text is its explanation too. A question's
+    excluded ids (its own problem among them) go in its meta, which no build step reads,
+    and the evaluator drops them before scoring."""
+    files = files or _bright_files(task, cache)
+    documents = pq.read_table(files["documents"], columns=["id", "content"]).to_pylist()
+    items = [Item(prefix + d["id"], d["content"], explanation=d["content"]) for d in documents]
+    examples = pq.read_table(
+        files["examples"], columns=["id", "query", "gold_ids", "excluded_ids", "gold_answer"]
+    ).to_pylist()
+    questions = []
+    for e in examples:
+        answer = e["gold_answer"]
+        questions.append(
+            Question(
+                id=prefix + e["id"],
+                text=e["query"],
+                choices=None,
+                gold_answers=[answer] if answer and answer != BRIGHT_NONE else [],
+                gold_ids=[prefix + g for g in e["gold_ids"]],
+                meta={"excluded_ids": [prefix + x for x in e["excluded_ids"] if x != BRIGHT_NONE]},
+            )
+        )
+    return items, questions

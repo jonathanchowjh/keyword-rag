@@ -19,9 +19,12 @@ def headline_metric(
     if has_answers:
         return "accuracy" if qa_type in EXAMPLE_TYPES else "f1"
     if qa_type in EXAMPLE_TYPES:
-        if proxy_trusted is False or "solution_sim@1" not in measurable:
-            return "same_skill@1"
-        return "solution_sim@1"
+        if proxy_trusted is not False and "solution_sim@1" in measurable:
+            return "solution_sim@1"
+        # BRIGHT: relevance is judged by gold ids, with no skill on either side.
+        if "same_skill@1" not in measurable and "ndcg@10" in measurable:
+            return "ndcg@10"
+        return "same_skill@1"
     return "recall@2" if qa_type == "multihop" else "recall@1"
 
 

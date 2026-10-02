@@ -111,6 +111,12 @@ METRICS: dict[str, dict] = {
         "Share of questions where the example tested the same skill",
         "retrieval",
     ),
+    "ndcg@10": _metric(
+        "Relevant examples ranked first",
+        "0 is none in the top 10, 100 every relevant example ranked ahead of the rest",
+        "retrieval",
+        unit="score",
+    ),
     "solution_sim@1": _metric(
         "Reasoning match",
         "0 is a random example, 100 an identical solution",
@@ -121,9 +127,15 @@ METRICS: dict[str, dict] = {
 
 # The TAT-QA scorer gives numbers all-or-nothing, so on tables f1 is not "Partly right"
 # for most answers: it is the word overlap, which only text answers can have in part.
+# On worked collections recall@1 counts relevant examples, not a table.
+WORKED_RECALL_LABEL = {"recall@1": "Relevant examples found (top 1)"}
+WORKED_RECALL_SAYS = {
+    "recall@1": "Share of a question's relevant examples found in the top 1; "
+    "with 4 relevant, at most 1 in 4"
+}
 METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
-    "science": {},
-    "mcq": {},
+    "science": WORKED_RECALL_LABEL,
+    "mcq": WORKED_RECALL_LABEL,
     "multihop": {},
     "table": {"em": "Exact answer", "f1": "Answer overlap"},
 }
@@ -131,9 +143,10 @@ METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
 METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "science": {
         "accuracy": "Share answered right: the choice, a number within 5% of the gold, "
-        "or the exact short answer"
+        "or the exact short answer",
+        **WORKED_RECALL_SAYS,
     },
-    "mcq": {},
+    "mcq": WORKED_RECALL_SAYS,
     "multihop": {},
     "table": {
         "em": "Share answered exactly right; numbers are compared at 2 decimal places",

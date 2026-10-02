@@ -125,6 +125,13 @@ def test_headline_falls_back_to_same_skill_when_proxy_failed():
     )
 
 
+def test_headline_is_ndcg_when_only_gold_ids_measure_the_example():
+    assert headline_metric("science", False, None, {"ndcg@10", "recall@1"}) == "ndcg@10"
+    assert headline_metric("science", False, None, {"same_skill@1", "ndcg@10"}) == "same_skill@1"
+    both = {"solution_sim@1", "same_skill@1", "ndcg@10"}
+    assert headline_metric("mcq", False, None, both) == "solution_sim@1"
+
+
 def test_headline_for_science_follows_mcq():
     assert headline_metric("science", True, None, set()) == "accuracy"
     assert headline_metric("science", False, None, {"same_skill@1"}) == "same_skill@1"

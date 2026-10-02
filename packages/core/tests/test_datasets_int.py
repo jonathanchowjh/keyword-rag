@@ -4,7 +4,14 @@ the counts the README reports."""
 import pytest
 from huggingface_hub import get_token
 
-from ragqa_core.datasets import load_gpqa, load_musique, load_scibench, load_scienceqa, load_tatqa
+from ragqa_core.datasets import (
+    load,
+    load_gpqa,
+    load_musique,
+    load_scibench,
+    load_scienceqa,
+    load_tatqa,
+)
 from ragqa_core.metrics import NUMBER
 
 pytestmark = pytest.mark.integration
@@ -57,3 +64,22 @@ def test_gpqa_diamond_is_held_out_of_the_store(cache):
     assert 150 <= len(questions) <= 198 and len(items) >= 300
     assert not {i.id for i in items} & {q.id for q in questions}
     assert all(q.meta["skill"] and q.meta["solution"] for q in questions)
+
+
+@pytest.mark.parametrize(("name", "prefix"), [("bright_aops", "ba-"), ("bright_theoremqa", "bt-")])
+def test_bright_task_fields_and_links(cache, name, prefix):
+    items, questions = load(name, cache)
+    ids = {i.id for i in items}
+    excluded = [len(q.meta["excluded_ids"]) for q in questions]
+    print(
+        f"\n{name}: {len(items)} documents, {len(questions)} questions, "
+        f"excluded ids {min(excluded)}-{max(excluded)} per question"
+    )
+    assert len(items) > 0 and len(questions) > 0
+    assert all(i.id.startswith(prefix) and i.text and i.explanation == i.text for i in items)
+    for q in questions:
+        assert q.id.startswith(prefix) and q.text and q.choices is None
+        assert q.gold_ids and set(q.gold_ids) <= ids
+        assert set(q.meta) == {"excluded_ids"} and set(q.meta["excluded_ids"]) <= ids
+        assert not set(q.gold_ids) & set(q.meta["excluded_ids"])
+        assert "N/A" not in q.gold_answers

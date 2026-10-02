@@ -15,6 +15,7 @@ from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
+    ndcg_at,
     recall_at,
     science_correct,
     separated,
@@ -36,9 +37,13 @@ from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, Retriever
 from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question, SearchSettings
 
+# What worked collections whose questions name relevant items (BRIGHT) gain, measured
+# GOLD_DEPTH deep: how high the relevant examples rank, and how many of them come first.
+GOLD_ID_METRICS = ("ndcg@10", "recall@1")
+GOLD_DEPTH = 10
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
-    "mcq": ("solution_sim@1", "same_skill@1"),
-    "science": ("solution_sim@1", "same_skill@1"),
+    "mcq": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
+    "science": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
     "multihop": ("recall@2", "recall@5"),
     "table": ("recall@1", "recall@3"),
 }
@@ -95,6 +100,12 @@ def example_form(qa_type: QaType, shown: list[Hit], example: str) -> str | None:
     return "abstracted" if example == "abstracted" and shown[0].abstracted else "full"
 
 
+def retrieval_depth(qa_type: QaType, q: Question, k: int) -> int:
+    """How many hits a question keeps: k, or GOLD_DEPTH when its gold ids score a worked
+    collection's ranking. Passage types keep k, since every hit kept is shown to the answerer."""
+    return max(k, GOLD_DEPTH) if qa_type in EXAMPLE_TYPES and q.gold_ids else k
+
+
 def runnable(questions: list[Question], include_leaked: bool) -> list[Question]:
     """The questions a run may ask: leaked ones (also in the corpus) only when included."""
     return questions if include_leaked else [q for q in questions if not q.meta.get("leaked")]
@@ -120,15 +131,18 @@ def measurable(qa_type: QaType, fields: dict) -> dict[str, dict]:
         for metric, checks in needs.items():
             note = next((why for why, count in checks if count == 0), None)
             out[metric] = {"measurable": note is None, "note": note}
+    named = q["gold_ids"]
+    partial = f"on {named} of {q['total']} questions" if 0 < named < q["total"] else None
+    if qa_type in EXAMPLE_TYPES:
+        # Gold-id metrics are listed only where questions name relevant items.
+        for metric in GOLD_ID_METRICS if named else ():
+            out[metric] = {"measurable": True, "note": partial}
     else:
-        named = q["gold_ids"]
         for metric in RETRIEVAL_METRICS[qa_type]:
             if named == 0:
                 out[metric] = {"measurable": False, "note": "no question names its evidence"}
             else:
-                partial = named < q["total"]
-                note = f"on {named} of {q['total']} questions" if partial else None
-                out[metric] = {"measurable": True, "note": note}
+                out[metric] = {"measurable": True, "note": partial}
     return out
 
 
@@ -491,11 +505,15 @@ class Evaluator:
                 else:
                     tags = self.retriever.query_tags(spec, q.text, search, skip)
             all_tags.append(tags)
-            all_hits.append(
-                self.retriever.retrieve(
-                    spec.name, q.text, method, setup["k"], setup["rrf_k"], search, tags
-                )
+            # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE DROPPED
+            # HERE, so they are never scored or shown; asking for that many more keeps the
+            # depth wherever the method's pool allows.
+            excluded = set(q.meta.get("excluded_ids", []))
+            depth = retrieval_depth(spec.qa_type, q, setup["k"])
+            hits = self.retriever.retrieve(
+                spec.name, q.text, method, depth + len(excluded), setup["rrf_k"], search, tags
             )
+            all_hits.append([h for h in hits if h.id not in excluded][:depth])
             if n % 10 == 0 and n < len(questions):
                 report(span * n / len(questions))
                 check()
@@ -599,6 +617,9 @@ class Evaluator:
                         metrics["solution_sim@1"] = cosine(mine[n], gold[n])
                     if skill and hits[0].meta.get("skill"):
                         metrics["same_skill@1"] = float(hits[0].meta["skill"] == skill)
+                if q.gold_ids and not set(q.gold_ids) <= off:
+                    metrics["ndcg@10"] = ndcg_at(ids, q.gold_ids, GOLD_DEPTH)
+                    metrics["recall@1"] = recall_at(ids, q.gold_ids, 1)
             elif not q.gold_ids or set(q.gold_ids) <= off:
                 metrics = {}  # nothing to find: absent, never 0
             else:

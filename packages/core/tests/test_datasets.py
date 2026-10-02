@@ -11,6 +11,8 @@ from ragqa_core.datasets import (
     FILTER_NOTES,
     GPQA_COLUMNS,
     ID_PREFIX,
+    _bright,
+    _bright_files,
     dev_slice,
     load_gpqa,
     load_musique,
@@ -79,7 +81,10 @@ def test_datasets_map_to_qa_types():
         "musique": "multihop",
         "tatqa": "table",
         "scibench": "science",
+        "bright_aops": "science",
+        "bright_theoremqa": "science",
     }
+    assert ID_PREFIX["bright_aops"] == "ba-" and ID_PREFIX["bright_theoremqa"] == "bt-"
 
 
 def test_every_dataset_has_an_id_prefix_and_a_filter_note():
@@ -312,3 +317,73 @@ def test_source_for():
     assert source_for("note-1", {"scienceqa"}) == "upload:unknown"
     assert source_for("mq-x", {"scienceqa"}) == "upload:unknown"
     assert source_for("gpqa-rec1", {"gpqa", "scienceqa"}) == "gpqa"
+
+
+BRIGHT = DATA / "bright_mini"
+
+
+def bright_files() -> dict[str, Path]:
+    return {
+        part: BRIGHT / part / "aops-00000-of-00001.parquet" for part in ("examples", "documents")
+    }
+
+
+def test_bright_fixture_mirrors_the_real_schema():
+    examples = pq.read_schema(bright_files()["examples"])
+    assert examples.names == [
+        "query",
+        "reasoning",
+        "id",
+        "excluded_ids",
+        "gold_ids_long",
+        "gold_ids",
+        "gold_answer",
+    ]
+    assert examples.field("excluded_ids").type == pa.list_(pa.string())
+    assert pq.read_schema(bright_files()["documents"]).names == ["id", "content"]
+
+
+def test_bright_loader_reads_fixture(tmp_path):
+    items, questions = _bright("aops", "ba-", tmp_path, bright_files())
+    assert len(items) == 6 and len(questions) == 3
+    assert all(i.id.startswith("ba-") and i.explanation == i.text for i in items)
+    assert all(i.answer is None and i.meta == {} for i in items)
+    by_id = {q.id: q for q in questions}
+    first = by_id["ba-aops_2019_AMC_12A_Problems/Problem_17"]
+    assert first.choices is None and first.gold_answers == []  # "N/A" is no answer
+    assert first.gold_ids == [
+        "ba-math_test_intermediate_algebra_1179",
+        "ba-math_train_intermediate_algebra_513",
+    ]
+    assert first.meta == {
+        "excluded_ids": ["ba-aops_2019_AMC_12A_Problems/Problem_17", "ba-camel_0"]
+    }
+    assert by_id["ba-aops_2020_AIME_I_Problems/Problem_3"].gold_answers == ["749"]
+    assert by_id["ba-aops_2021_AMC_10B_Problems/Problem_5"].meta == {"excluded_ids": []}
+    ids = {i.id for i in items}
+    assert all(set(q.gold_ids) <= ids for q in questions)
+
+
+def test_bright_files_pick_the_task_not_its_neighbours(tmp_path, monkeypatch):
+    listed = [
+        "gpt4_reason/theoremqa_questions-00000-of-00001.parquet",
+        "documents/theoremqa_theorems-00000-of-00001.parquet",
+        "documents/theoremqa_questions-00000-of-00001.parquet",
+        "examples/theoremqa_theorems-00000-of-00001.parquet",
+        "examples/theoremqa_questions-00000-of-00001.parquet",
+    ]
+
+    class Api:
+        def list_repo_files(self, repo, repo_type):
+            assert (repo, repo_type) == ("xlangai/BRIGHT", "dataset")
+            return listed
+
+    monkeypatch.setattr("ragqa_core.datasets.HfApi", Api)
+    monkeypatch.setattr(
+        "ragqa_core.datasets.hf_hub_download",
+        lambda repo, name, repo_type, cache_dir: str(tmp_path / name),
+    )
+    assert _bright_files("theoremqa_questions", tmp_path) == {
+        "examples": tmp_path / "examples/theoremqa_questions-00000-of-00001.parquet",
+        "documents": tmp_path / "documents/theoremqa_questions-00000-of-00001.parquet",
+    }

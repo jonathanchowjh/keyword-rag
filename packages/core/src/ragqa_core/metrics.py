@@ -33,6 +33,22 @@ def recall_at(hit_ids: list[str], gold_ids: list[str], k: int) -> float:
     return len(set(hit_ids[:k]) & set(gold_ids)) / len(set(gold_ids))
 
 
+def ndcg_at(ids: list[str], gold: list[str], k: int) -> float:
+    """Binary-relevance nDCG: each gold id in the top k gains 1 / log2(rank + 1), once;
+    the ideal ranks min(len(gold), k) gold ids first."""
+    relevant = set(gold)
+    if not relevant:
+        return 0.0
+    seen: set[str] = set()
+    dcg = 0.0
+    for rank, item_id in enumerate(ids[:k], start=1):
+        if item_id in relevant and item_id not in seen:
+            seen.add(item_id)
+            dcg += 1 / math.log2(rank + 1)
+    ideal = sum(1 / math.log2(rank + 1) for rank in range(1, min(len(relevant), k) + 1))
+    return dcg / ideal
+
+
 def normalise_answer(text: str) -> str:
     text = text.lower()
     text = "".join(ch for ch in text if ch not in string.punctuation)

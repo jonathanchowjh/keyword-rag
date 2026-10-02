@@ -6,6 +6,7 @@ import pytest
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
+    ndcg_at,
     paired_diff_ci,
     recall_at,
     science_correct,
@@ -15,6 +16,17 @@ from ragqa_core.metrics import (
     squad_em_f1,
     tatqa_em_f1,
 )
+
+
+def test_ndcg_at():
+    assert ndcg_at(["a", "x", "b"], ["a", "b"], 10) == pytest.approx(
+        (1 + 1 / math.log2(4)) / (1 + 1 / math.log2(3))
+    )
+    assert ndcg_at(["x"], [], 10) == 0.0
+    assert ndcg_at(["a", "b"], ["a", "b"], 10) == pytest.approx(1.0)
+    assert ndcg_at(["x", "a"], ["a", "b", "c"], 1) == 0.0  # past the cut-off
+    assert ndcg_at(["a"], ["a", "b", "c"], 1) == pytest.approx(1.0)  # ideal is min(gold, k)
+    assert ndcg_at(["a", "a"], ["a", "b"], 10) == pytest.approx(1 / (1 + 1 / math.log2(3)))
 
 
 def test_recall():

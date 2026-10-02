@@ -1243,3 +1243,74 @@ def test_program_raises_table_answer_tokens():
     assert PROGRAM_TOKENS == 600
     assert answer_tokens("table", True) == 600 and answer_tokens("table", False) == 100
     assert answer_tokens("science", True) == 1500
+
+
+# -- Gold ids on worked collections (BRIGHT) -------------------------------------------
+
+OWN = "Find the sum of the cubes of the roots of a cubic by Newton's sums."
+WORKED = [
+    Item("own", OWN, None, "The question's own solution, LEAKED-MARKER", {}),
+    Item("g1", "Newton's sums relate power sums of roots to coefficients.", None, "sums", {}),
+    Item("g2", "Power sums of the roots of a cubic follow a recurrence.", None, "roots", {}),
+    *ITEMS,
+]
+GOLD_QUESTIONS = [
+    Question("b1", OWN, None, [], ["g1", "g2"], {"excluded_ids": ["own"]}),
+    Question("b2", "the roots of a cubic and their power sums", None, [], ["g2"], {}),
+]
+
+
+def test_worked_collection_with_gold_ids_scores_ndcg(env):
+    from ragqa_core.metrics import ndcg_at, recall_at
+
+    conn, ev = env
+    science_env(conn, ev, "sci", WORKED, GOLD_QUESTIONS)
+    job = ev.queue("sci", "full", ["hybrid"], False, None)
+    ev.run(job)
+    rows = {r["question_id"]: r for r in run_items(conn, job)}
+    for q in GOLD_QUESTIONS:
+        ids = rows[q.id]["hit_ids"]
+        assert 5 < len(ids) <= 10  # k is 5; gold ids retrieve to max(k, 10)
+        assert rows[q.id]["retrieval"] == {
+            "ndcg@10": ndcg_at(ids, q.gold_ids, 10),
+            "recall@1": recall_at(ids, q.gold_ids, 1),
+        }
+    assert rows["b2"]["retrieval"]["ndcg@10"] > 0
+    table = ev.table(job)
+    assert table["methods"]["hybrid"]["ndcg@10"]["n"] == 2
+    assert table["methods"]["hybrid"]["recall@1"]["n"] == 2
+    assert table["headline"] == "ndcg@10"
+
+
+def test_excluded_ids_never_scored_or_shown(env):
+    conn, ev = env
+    sent = []
+    fake_replies(ev.ai, lambda p: sent.append(p) or "Answer: 3")
+    science_env(conn, ev, "sci", WORKED, GOLD_QUESTIONS[:1])
+    assert ev.retriever.retrieve("sci", OWN, "hybrid")[0].id == "own"  # it would come first
+    methods = ["hybrid", "keyword", "vector", "random_example"]
+    job = ev.queue("sci", "full", methods, True, None, search={"example": "full"})
+    ev.run(job)
+    rows = run_items(conn, job)
+    assert len(rows) == 4
+    assert all(r["hit_ids"] and "own" not in r["hit_ids"] for r in rows)
+    assert sent and not any("LEAKED-MARKER" in p for p in sent)
+
+
+def test_scienceqa_like_collection_lists_no_ndcg(env):
+    from ragqa_core.evaluator import measurable
+
+    out = measurable("mcq", fields(questions={"gold_ids": 0}))
+    assert "ndcg@10" not in out and "recall@1" not in out
+    out = measurable("science", fields(questions={"gold_ids": 0}))
+    assert "ndcg@10" not in out and "recall@1" not in out
+    out = measurable("science", fields(questions={"gold_ids": 111, "solution": 0, "skill": 0}))
+    assert out["ndcg@10"] == {"measurable": True, "note": "on 111 of 200 questions"}
+    assert out["recall@1"]["measurable"] and out["same_skill@1"]["measurable"] is False
+    assert measurable("science", fields())["ndcg@10"] == {"measurable": True, "note": None}
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    rows = run_items(conn, job)
+    assert all(len(r["hit_ids"]) == 5 for r in rows)  # no gold ids: k as asked
+    assert not any({"ndcg@10", "recall@1"} & set(r["retrieval"]) for r in rows)
