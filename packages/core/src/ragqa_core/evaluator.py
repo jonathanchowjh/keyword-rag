@@ -725,7 +725,11 @@ class Evaluator:
                         "n": len(values),
                     }
             methods[method] = entry
-        pair_metrics = [RETRIEVAL_METRICS[spec.qa_type][0]]
+        # The type's first retrieval metric that any method has: BRIGHT has no solutions or
+        # skills, so its runs pair on nDCG@10, their headline.
+        retrieval = RETRIEVAL_METRICS[spec.qa_type]
+        measured = [m for m in retrieval if any(m in entry for entry in methods.values())]
+        pair_metrics = measured[:1] or [retrieval[0]]
         if has_answers:
             pair_metrics.append(PAIR_ANSWER_METRIC[spec.qa_type])
         pairs = []

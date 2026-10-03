@@ -491,8 +491,8 @@ def _bright(
     task: str, prefix: str, cache: Path, files: dict[str, Path] | None = None
 ) -> tuple[list[Item], list[Question]]:
     """A document is a worked example whose text is its explanation too. A question's
-    excluded ids (its own problem among them) go in its meta, which no build step reads,
-    and the evaluator drops them before scoring."""
+    excluded ids (its own problem among them) go in its meta, which no build step reads;
+    every search of the question's run leaves them out."""
     files = files or _bright_files(task, cache)
     documents = pq.read_table(files["documents"], columns=["id", "content"]).to_pylist()
     items = [Item(prefix + d["id"], d["content"], explanation=d["content"]) for d in documents]

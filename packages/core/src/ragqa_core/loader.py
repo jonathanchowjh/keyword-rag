@@ -51,6 +51,15 @@ def propose_sample(items: list[Item]) -> list[Item]:
     return random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
 
 
+def stored_exclusions(q: Question, stored: set[str]) -> Question:
+    """The question with only the excluded ids the collection stores (BRIGHT lists
+    thousands per question, most of them outside a limited load)."""
+    if "excluded_ids" not in q.meta:
+        return q
+    kept = [i for i in q.meta["excluded_ids"] if i in stored]
+    return replace(q, meta={**q.meta, "excluded_ids": kept})
+
+
 def without_leaked(q: Question) -> Question:
     return replace(q, meta={k: v for k, v in q.meta.items() if k != "leaked"})
 
@@ -77,7 +86,10 @@ class Loader:
         items, questions = limited(items, questions, job["setup"].get("limit"))
         dataset = job["setup"]["dataset"]
         source, build_result, counts = self._add(spec, items, dataset, progress)
-        db.save_questions(conn, name, questions)
+        # EVERY LOAD RE-READS THE DATASET'S FULL EXCLUDED LISTS, so a later, larger load
+        # brings back an excluded id it now stores; the rest only slow every search.
+        stored = set(self.indexer.store.ids(name))
+        db.save_questions(conn, name, [stored_exclusions(q, stored) for q in questions])
         fresh = db.get_collection(conn, name)
         return {
             "added": counts["new"] + counts["updated"],

@@ -1314,3 +1314,24 @@ def test_scienceqa_like_collection_lists_no_ndcg(env):
     rows = run_items(conn, job)
     assert all(len(r["hit_ids"]) == 5 for r in rows)  # no gold ids: k as asked
     assert not any({"ndcg@10", "recall@1"} & set(r["retrieval"]) for r in rows)
+
+
+def test_bright_run_pairs_methods_on_ndcg(env, tmp_path):
+    from pathlib import Path
+
+    from ragqa_core.datasets import _bright
+
+    conn, ev = env
+    mini = Path(__file__).parent / "data" / "bright_mini"
+    files = {
+        part: mini / part / "aops-00000-of-00001.parquet" for part in ("examples", "documents")
+    }
+    items, questions = _bright("aops", "ba-", tmp_path, files)
+    science_env(conn, ev, "sci", items, questions)
+    job = ev.queue("sci", "full", ["hybrid", "keyword"], False, None)
+    ev.run(job)
+    table = ev.table(job)
+    assert table["headline"] == "ndcg@10"
+    (pair,) = table["pairs"]
+    assert pair["metric"] == "ndcg@10" and {pair["a"], pair["b"]} == {"hybrid", "keyword"}
+    assert pair["lo"] is not None and pair["hi"] is not None and pair["lo"] <= pair["hi"]

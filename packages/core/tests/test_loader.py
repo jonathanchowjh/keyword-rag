@@ -172,6 +172,22 @@ def test_load_twice_reports_unchanged(tmp_path, monkeypatch):
     assert second["unchanged"] == 3 and second["added"] == 0
 
 
+def test_a_load_keeps_only_the_excluded_ids_the_collection_stores(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)
+    ld.ai.update_connection("anthropic", api_key=None)
+    items = [Item(f"i{n}", f"text {n} shared words", "A") for n in range(6)]
+    question = Question("q", "x", None, ["a"], ["i1"], {"excluded_ids": ["i0", "i4", "z9"]})
+    monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, [question]))
+    small = create_job(conn, "load", "m", {"dataset": "musique", "limit": 2})
+    ld.run(get_job(conn, small), lambda p: None)  # stores i1 (the gold) and i0
+    (saved,) = get_questions(conn, "m")
+    assert saved.meta["excluded_ids"] == ["i0"]
+    full = create_job(conn, "load", "m", {"dataset": "musique", "limit": None})
+    ld.run(get_job(conn, full), lambda p: None)  # now i4 is stored: back in force
+    (saved,) = get_questions(conn, "m")
+    assert saved.meta["excluded_ids"] == ["i0", "i4"]
+
+
 def test_sample_items_skips_disabled(tmp_path):
     conn = connect(tmp_path / "r.db")
     store = Store(None, None)
