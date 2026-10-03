@@ -445,3 +445,88 @@ def test_a_stopped_build_is_finished_by_loading_again(tmp_path, monkeypatch):
     again = ld.run(job, lambda p: None)
     assert again["tagged"] == 0 and again["abstracted"] == 0 and len(purposes(conn)) == spent
     assert ld.estimate_load(spec, "scibench", None)["calls"] == 0
+
+
+def scibench_paper(tmp_path):
+    """Collection p (paper 2024, science) holding the scibench mini items, and one question."""
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, by_purpose))
+    spec = ix.create("p", "science", False)
+    items = scibench_items(tmp_path)
+    ix.add(spec, items, "scibench")
+    question = Question(
+        "q1", "x", None, ["3"], [items[0].id], {"excluded_ids": [items[1].id], "leaked": True}
+    )
+    db.save_questions(conn, "p", [question])
+    return conn, ix, loader_for(ix, tmp_path), items
+
+
+def test_copy_rebuilds_the_items_under_another_recipe(tmp_path):
+    conn, ix, ld, items = scibench_paper(tmp_path)
+    target = ld.copy_spec(ix.spec("p"), "w", "worked_examples", None)
+    estimate = ld.estimate_copy("p", target)
+    # One induction batch, a tag per item, an abstract per explained item.
+    assert estimate["items"] == len(items) and estimate["calls"] == 1 + len(items) + 2
+    assert estimate["est_usd"] > 0 and purposes(conn) == [] and ix.spec("w") is None
+    job = get_job(conn, ld.start_copy("p", target))
+    assert job is not None and (job["kind"], job["collection"]) == ("copy", "w")
+    assert get_questions(conn, "w") == get_questions(conn, "p")  # meta as it is
+    seen: list[float] = []
+    result = ld.run_copy(job, seen.append)
+    spec = ix.spec("w")
+    assert spec is not None and spec.recipe == "worked_examples" and spec.qa_type == "science"
+    assert spec.search is not None and spec.search.example == "abstracted"
+    assert result["added"] == len(items) and result["sources"] == ["scibench"]
+    assert result["vocabulary_version"] == spec.vocabulary_version is not None
+    assert result["tagged"] == len(items) and result["abstracted"] == 2
+    source = {h.id: h for batch in ix.store.scroll("p") for h in batch}
+    copied = {h.id: h for batch in ix.store.scroll("w") for h in batch}
+    assert {i: (h.text, h.answer, h.explanation, h.meta) for i, h in copied.items()} == {
+        i: (h.text, h.answer, h.explanation, h.meta) for i, h in source.items()
+    }
+    assert all(h.tags == ["kinematics"] for h in copied.values())
+    assert set(purposes(conn)) == {"induce", "tag", "abstract"}
+    assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
+
+
+def test_copy_into_paper_2024_takes_the_source_lists(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
+    ld.run(job, lambda p: None)
+    source = ix.spec("m")
+    assert source is not None and source.keyword_version and purposes(conn) == ["propose"]
+    target = ld.copy_spec(source, "m2", "paper_2024", {"chunk_overlap": 10})
+    assert ld.estimate_copy("m", target) == {"est_usd": 0.0, "items": 3, "calls": 0}
+    result = ld.run_copy(get_job(conn, ld.start_copy("m", target)), lambda p: None)
+    assert result == {"added": 3, "sources": ["musique"]}
+    spec = ix.spec("m2")
+    assert spec is not None and spec.build is not None and spec.build.chunk_overlap == 10
+    assert spec.keyword_version == source.keyword_version
+    assert get_keyword_lists(conn, "m2") == get_keyword_lists(conn, "m")
+    assert all(h.keywords["all"] for batch in ix.store.scroll("m2") for h in batch)  # keyed
+    assert purposes(conn) == ["propose"]  # the lists were copied, not proposed again
+
+
+def test_copy_prices_summaries_for_a_summarising_target(tmp_path):
+    conn, ix, ld, items = scibench_paper(tmp_path)
+    target = ld.copy_spec(ix.spec("p"), "s", "paper_2024", {"added_text": "summary"})
+    assert target.summarize
+    estimate = ld.estimate_copy("p", target)
+    assert estimate["calls"] == len(items) and estimate["est_usd"] > 0
+    ld.ai.set_role("default", None)
+    assert ld.estimate_copy("p", target)["est_usd"] is None  # no model to price it with
+    worked = ld.copy_spec(ix.spec("p"), "w", "worked_examples", None)
+    assert ld.estimate_copy("p", worked)["est_usd"] is None
+
+
+def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
+    conn, ix, ld, items = scibench_paper(tmp_path)
+    source = ix.spec("p")
+    for name, recipe, override in (
+        ("bad name!", "reference", None),
+        ("r", "nope", None),
+        ("r", "reference", {"tagging": "magic"}),
+        ("r", "reference", {"vocabulary": "lists"}),
+    ):
+        with pytest.raises(ValueError):
+            ld.copy_spec(source, name, recipe, override)
+    assert ix.spec("r") is None

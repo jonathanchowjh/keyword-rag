@@ -828,7 +828,8 @@ out.k = ans('no', -7, -12, -2);
 out.l = ans('cant_tell', 1, -2, 4);
 out.t = ans('yes', 6, 2, 10, 'em', 'table');
 out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
-out.v = ['rekeying', 'retagging', 'stopped_budget', 'stopped_no_key', 'cancelled'].map(u.pill);
+out.v = ['rekeying', 'retagging', 'copying', 'stopped_budget', 'stopped_no_key', 'cancelled']
+  .map(u.pill);
 out.w = [u.count(11656), u.count(0)];
 out.x = [0.004, 0, 0.4141, 12].map(u.usd);
 const box = () => ({innerHTML: '', querySelector: () => ({addEventListener() {}})});
@@ -870,10 +871,12 @@ def test_ui_formatting(tmp_path):
     assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
         "Re-keying",
         "Re-tagging",
+        "Copying",
         "Stopped budget",
         "Stopped no key",
         "Cancelled",
     ]
+    assert "pill run" in got["v"][2]
     assert got["w"] == ["11,656", "0"]
     assert got["x"] == ["< $0.01", "$0.00", "$0.41", "$12.00"]
     unpriced, priced = got["z"]  # no model to price with: unknown, not $0.00
@@ -2281,3 +2284,172 @@ def test_worked_documents_whose_build_failed_are_built_by_sending_them_again(tmp
         assert all(h.tags == ["rates"] and h.abstracted for h in hits)
         r = client.post("/collections/w/documents", json={"items": ITEMS})
         assert r.status_code == 200 and r.json() == {"added": 3}  # built: free, nothing to confirm
+
+
+SCIBENCH = Path(__file__).parents[3] / "packages" / "core" / "tests" / "data" / "scibench_mini"
+
+
+def building(prompt: str) -> str:
+    if '"principle"' in prompt:
+        return '{"principle": "P.", "method": "M.", "answer": "A"}'
+    return '{"terms": ["kinematics"]}'
+
+
+def scibench_source(client) -> list[Item]:
+    """Collection p (paper 2024, science): the scibench mini items, and ITEMS under a second
+    source "hand" that is switched off; a question asked of each source."""
+    from ragqa_core.datasets import load_scibench
+
+    app = client.app.state
+    r = client.post("/collections", json={"name": "p", "qa_type": "science"})
+    assert r.status_code == 201, r.text
+    items, _ = load_scibench(app.settings.home, {p.name: p for p in SCIBENCH.glob("*.json")})
+    spec = app.indexer.spec("p")
+    app.indexer.add(spec, items, "scibench")
+    app.indexer.add(spec, [Item(**i) for i in ITEMS], "hand")
+    db.save_questions(
+        app.conn,
+        "p",
+        [
+            Question("q1", "a ball falls", None, ["3"], [items[0].id], {"source": "scibench"}),
+            Question("q2", "enzyme rate", None, ["A"], ["enzyme-item"], {"source": "hand"}),
+        ],
+    )
+    db.set_source_enabled(app.conn, "p", "hand", False)
+    return items
+
+
+def test_copy_estimate_then_build(tmp_path):
+    with make_client(tmp_path, reply=building) as client:
+        items = scibench_source(client)
+        body = {"name": "w", "recipe": "worked_examples"}
+        r = client.post("/collections/p/copy", json=body)
+        assert r.status_code == 200, r.text
+        estimate = r.json()["estimate"]
+        assert estimate["est_usd"] > 0 and estimate["items"] == len(items) + len(ITEMS)
+        assert client.get("/collections/w").status_code == 404
+        assert client.get("/jobs").json() == [] and ledger_purposes(client) == []
+        r = client.post("/collections/p/copy", json={**body, "confirm": True})
+        assert r.status_code == 202, r.text
+        assert r.json()["name"] == "w"
+        job = wait(client, r.json()["job_id"])
+        assert (job["kind"], job["status"]) == ("copy", "done"), job
+        assert job["result"]["sources"] == ["hand", "scibench"]
+        w, p = client.get("/collections/w").json(), client.get("/collections/p").json()
+        assert (w["recipe"], w["qa_type"], w["corpus_type"]) == (
+            "worked_examples",
+            "science",
+            "worked",
+        )
+        assert w["search"]["example"] == "abstracted"
+        assert w["count"] == p["count"] and w["questions"] == p["questions"]
+        assert w["vocabulary_version"] and w["profile"] == {"kinematics": w["count"]}
+        conn, store = client.app.state.conn, client.app.state.store
+        assert sorted(store.ids("w")) == sorted(store.ids("p"))
+        assert db.get_questions(conn, "w") == db.get_questions(conn, "p")
+        assert set(ledger_purposes(client)) == {"induce", "tag", "abstract"}
+
+
+def test_copy_keeps_sources_and_disabled_state(tmp_path):
+    with make_client(tmp_path, reply=building) as client:
+        scibench_source(client)
+        db.set_include_leaked(client.app.state.conn, "p", True)
+        r = client.post(
+            "/collections/p/copy", json={"name": "r", "recipe": "reference", "confirm": True}
+        )
+        assert r.status_code == 202, r.text
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        sources = client.get("/collections/r/sources").json()
+        assert sources == client.get("/collections/p/sources").json()
+        assert [(s["source"], s["enabled"]) for s in sources] == [
+            ("hand", False),
+            ("scibench", True),
+        ]
+        assert client.get("/collections/r").json()["include_leaked"] is True
+
+
+def test_copy_to_existing_name_is_409(client):
+    scibench_source(client)
+    client.app.state.worker.stop()
+    client.post("/collections", json={"name": "w", "qa_type": "mcq"})
+    for confirm in (False, True):
+        body = {"name": "w", "recipe": "reference", "confirm": confirm}
+        r = client.post("/collections/p/copy", json=body)
+        assert r.status_code == 409 and "already exists" in r.json()["detail"]
+        r = client.post("/collections/p/copy", json={**body, "name": "p"})  # onto itself
+        assert r.status_code == 409
+    r = client.post("/collections/nope/copy", json={"name": "x", "recipe": "reference"})
+    assert r.status_code == 404
+    # A job on the source could change what is copied while the copy reads it.
+    job_id = db.create_job(client.app.state.conn, "load", "p", {})
+    r = client.post("/collections/p/copy", json={"name": "x", "recipe": "reference"})
+    assert r.status_code == 409 and "load" in r.json()["detail"]
+    db.request_cancel(client.app.state.conn, job_id)
+    assert client.get("/collections/x").status_code == 404
+
+
+def test_copy_build_override_validated(client):
+    scibench_source(client)
+    client.app.state.worker.stop()
+    bad = (
+        ("reference", {"tagging": "magic"}),
+        ("reference", {"colour": "red"}),
+        ("reference", {"chunk_overlap": 100}),
+        ("reference", {"added_text": "summary"}),
+        ("worked_examples", {"vocabulary": "lists"}),
+        ("nope", None),
+    )
+    for recipe, build in bad:
+        for confirm in (False, True):
+            body = {"name": "x", "recipe": recipe, "build": build, "confirm": confirm}
+            r = client.post("/collections/p/copy", json=body)
+            assert r.status_code == 422, (recipe, build, r.text)
+    r = client.post("/collections/p/copy", json={"name": "bad name!", "recipe": "reference"})
+    assert r.status_code == 422
+    assert client.get("/collections/x").status_code == 404 and client.get("/jobs").json() == []
+    body = {"name": "x", "recipe": "reference", "build": {"chunk_words": 50, "chunk_overlap": 5}}
+    r = client.post("/collections/p/copy", json={**body, "confirm": True})
+    assert r.status_code == 202, r.text
+    build = client.get("/collections/x").json()["build"]
+    assert (build["chunk_words"], build["chunk_overlap"], build["tagging"]) == (50, 5, "similarity")
+
+
+def test_copy_without_a_model_is_503_when_it_would_spend(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        scibench_source(client)
+        client.app.state.worker.stop()
+        for recipe, build, role in (
+            ("worked_examples", None, "keywords"),
+            ("paper_2024", {"added_text": "summary"}, "summary"),
+        ):
+            for confirm in (False, True):
+                body = {"name": "x", "recipe": recipe, "build": build, "confirm": confirm}
+                r = client.post("/collections/p/copy", json=body)
+                assert r.status_code == 503, r.text
+                assert f"'{role}'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+        assert client.get("/collections/x").status_code == 404 and client.get("/jobs").json() == []
+        # Embedding is free: a plain paper 2024 copy needs no model.
+        r = client.post("/collections/p/copy", json={"name": "x", "recipe": "paper_2024"})
+        assert r.status_code == 200 and r.json()["estimate"]["est_usd"] == 0
+        r = client.post(
+            "/collections/p/copy", json={"name": "x", "recipe": "paper_2024", "confirm": True}
+        )
+        assert r.status_code == 202, r.text
+
+
+def test_copy_state_and_problem_wording(client):
+    client.post("/collections", json=WORKED)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    copy = db.create_job(conn, "copy", "w", {"source": "p"})
+    set_running(conn, copy, 0.4)
+    assert client.get("/collections/w").json()["state"] == "copying"
+    db.update_job(conn, copy, status="failed", error="boom", progress=0.4)
+    problems = client.get("/status").json()["problems"]
+    assert "The copy into w failed; delete w and copy it again" in problems
+    # A collection being copied into takes no hand-added items or vocabulary meanwhile.
+    db.update_job(conn, db.create_job(conn, "copy", "w", {"source": "p"}), status="queued")
+    r = client.post("/collections/w/documents", json={"items": ITEMS})
+    assert r.status_code == 409 and "copy" in r.json()["detail"]
+    r = client.put("/collections/w/vocabulary", json={"terms": ["x"]})
+    assert r.status_code == 409 and "copy" in r.json()["detail"]

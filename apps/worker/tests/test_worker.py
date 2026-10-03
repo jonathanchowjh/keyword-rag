@@ -378,3 +378,16 @@ def test_worker_runs_retag(env):
     after = db.get_collection(conn, "w")
     assert after is not None and after.vocabulary_version == version
     assert sum(after.profile.values()) == 3 * len(ITEMS)  # the AI's reply is unusable: top 3
+
+
+def test_worker_runs_copy(env):
+    w, conn = env
+    source = db.get_collection(conn, "c")
+    assert source is not None
+    j = w.loader.start_copy("c", w.loader.copy_spec(source, "r", "reference", None))
+    w.run_one()
+    job = get_job(conn, j)
+    assert job["status"] == "done", job["error"]
+    assert job["progress"] == 1.0 and job["result"]["added"] == len(ITEMS)
+    assert job["result"]["sources"] == ["x"]
+    assert w.indexer.store.count("r") == len(ITEMS)

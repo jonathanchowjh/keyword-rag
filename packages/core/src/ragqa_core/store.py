@@ -153,6 +153,9 @@ class Store:
             if self.client.collection_exists(collection):
                 self.client.delete_collection(collection)
 
+    def exists(self, name: str) -> bool:
+        return self.client.collection_exists(name)
+
     def vector_names(self, name: str) -> set[str]:
         """The dense vectors a collection was created with: older ones lack the newer names."""
         vectors = self.client.get_collection(name).config.params.vectors

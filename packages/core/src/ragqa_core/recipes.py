@@ -1,7 +1,7 @@
-"""Build recipes (spec §15) and search-setting validation. Imports only types."""
+"""Build recipes (spec §15) and build- and search-setting validation. Imports only types."""
 
 import math
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from ragqa_core.types import BuildSettings, CorpusType, QaType, SearchSettings
 
@@ -51,6 +51,15 @@ RECIPE_LABELS: dict[str, str] = {
 CHANNELS = ("meaning", "words", "keywords")
 QUERY_TAGS = ("classifier", "similarity", "oracle")
 EXAMPLES = ("abstracted", "full", "off")
+# The values each worded build setting may take; flags and numbers are checked on their own.
+BUILD_CHOICES: dict[str, tuple[str, ...]] = {
+    "units": ("whole", "chunks"),
+    "added_text": ("none", "title_prefix", "summary"),
+    "vocabulary": ("lists", "induced"),
+    "describes": ("text", "solution"),
+    "tagging": ("similarity", "similarity_cutoff", "ai"),
+}
+BUILD_FLAGS = ("abstracted", "classifier", "profile")
 
 
 def corpus_type_for(qa_type: QaType) -> CorpusType:
@@ -103,3 +112,43 @@ def search_settings(base: SearchSettings, override: dict | None) -> SearchSettin
     if not isinstance(program, bool):
         raise ValueError("program must be true or false")
     return SearchSettings(weights, query_tags, example, program)
+
+
+def _whole_number(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def build_settings(base: BuildSettings, override: dict | None) -> BuildSettings:
+    """The base build (a recipe's) with a partial override merged in. Raises ValueError on
+    bad input, and on an override that would make lists and run the build both."""
+    override = override or {}
+    known = [f.name for f in fields(BuildSettings)]
+    unknown = [k for k in override if k not in known]
+    if unknown:
+        raise ValueError(f"unknown build settings {unknown}; known: {known}")
+    for key, value in override.items():
+        if key in BUILD_CHOICES and value not in BUILD_CHOICES[key]:
+            raise ValueError(f"{key} must be one of {list(BUILD_CHOICES[key])}")
+        if key in BUILD_FLAGS and not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false")
+    build = replace(base, **override)
+    if not _whole_number(build.chunk_words) or build.chunk_words < 1:
+        raise ValueError("chunk_words must be a whole number, 1 or more")
+    if not _whole_number(build.chunk_overlap) or build.chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be a whole number, 0 or more")
+    if build.units == "chunks" and build.chunk_overlap >= build.chunk_words:
+        raise ValueError("chunk_overlap must be below chunk_words, or the windows never move")
+    if not _whole_number(build.tag_k) or build.tag_k < 1:
+        raise ValueError("tag_k must be a whole number, 1 or more")
+    cutoff = build.tag_cutoff
+    if not isinstance(cutoff, int | float) or isinstance(cutoff, bool) or not 0 <= cutoff <= 1:
+        raise ValueError("tag_cutoff must be a number from 0 to 1")
+    # THE RECIPE DECIDES THE VOCABULARY: paper 2024 makes the three lists and the others
+    # run the build, and nothing makes both. Summaries only feed the lists' vectors.
+    if build.vocabulary != base.vocabulary:
+        raise ValueError(
+            f"the recipe sets vocabulary to {base.vocabulary!r}; choose another recipe instead"
+        )
+    if build.added_text == "summary" and build.vocabulary != "lists":
+        raise ValueError("added_text 'summary' needs a recipe that uses keyword lists")
+    return build

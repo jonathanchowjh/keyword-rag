@@ -1,6 +1,6 @@
 """The HTTP API. Thin: every decision lives in ragqa_core; this maps it to HTTP.
 
-Loads, imports, re-keys and evals are queued as jobs, and the worker thread
+Loads, imports, copies, re-keys and evals are queued as jobs, and the worker thread
 (ragqa_worker), started by the lifespan, runs them in order. A few routes still
 work in the request: /documents indexes its items, and /query and a confirmed
 proposal call the AI.
@@ -72,6 +72,7 @@ BUSY_STATE = {
     "load": "loading",
     "rekey": "rekeying",
     "retag": "retagging",
+    "copy": "copying",
     "eval": "evaluating",
     "import": "importing",
     "backfill": "labelling",
@@ -87,7 +88,8 @@ PROBLEM = {
 }
 KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
-VOCABULARY_BUSY = ("load", "import", "retag", "eval")
+COPY_UNFINISHED = (*REKEY_PARTLY_DONE, "stopped_budget", "stopped_no_key")
+VOCABULARY_BUSY = ("load", "import", "retag", "copy", "eval")
 
 
 class NewCollection(BaseModel):
@@ -129,6 +131,13 @@ class LeakedSwitch(BaseModel):
 class LoadRequest(BaseModel):
     dataset: str
     limit: int | None = None
+    confirm: bool = False
+
+
+class CopyRequest(BaseModel):
+    name: str
+    recipe: str
+    build: dict | None = None  # overrides the recipe's build settings in part
     confirm: bool = False
 
 
@@ -501,7 +510,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def add_documents(name: str, body: Documents):
         spec = state.retriever.spec(name)
         # An item added now would be keyed under mixed lists, miss a version or skew a run.
-        for kind in ("load", "rekey", "retag", "eval", "import", "backfill"):
+        for kind in ("load", "rekey", "retag", "copy", "eval", "import", "backfill"):
             if db.job_waiting_or_running(state.conn, kind, name):
                 raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
         if len(body.items) > SYNC_ITEMS:
@@ -711,6 +720,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
         )
         return {"job_id": job_id}
+
+    @app.post("/collections/{name}/copy", status_code=202)
+    def copy_collection(name: str, body: CopyRequest):
+        """A new collection of this one's items, questions and switched-off sources, built
+        under another recipe. Without confirm, what the copy would spend; with it, the
+        collection is made and a queued copy job adds and builds its items."""
+        source = state.retriever.spec(name)
+        if db.get_collection(state.conn, body.name):
+            raise HTTPException(409, f"collection '{body.name}' already exists")
+        target = state.loader.copy_spec(source, body.name, body.recipe, body.build)
+        # A job on the source could change the items while the copy reads them.
+        for status in ("running", "queued"):
+            busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
+            if busy:
+                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        if target.summarize:
+            need_ai("summary")
+        estimate = state.loader.estimate_copy(name, target)
+        if builds(target) and estimate["est_usd"] != 0:  # None: no model to price it
+            need_ai("keywords")
+        if not body.confirm:
+            return JSONResponse({"estimate": estimate}, 200)
+        return {"name": body.name, "job_id": state.loader.start_copy(name, target)}
 
     @app.post("/collections/{name}/keyword-lists/propose")
     def propose(name: str, body: ProposeRequest | None = None):
@@ -1181,6 +1213,9 @@ def job_problems(newest: list[dict]) -> list[str]:
         elif job["kind"] == "retag" and job["status"] in REKEY_PARTLY_DONE and job["progress"] > 0:
             name = job["collection"]
             lines.append(f"The vocabulary on {name} is partly re-tagged; save it again")
+        elif job["kind"] == "copy" and job["status"] in COPY_UNFINISHED:
+            name, why = job["collection"], PROBLEM.get(job["status"], "was cancelled")
+            lines.append(f"The copy into {name} {why}; delete {name} and copy it again")
         elif job["status"] in PROBLEM:
             lines.append(
                 f"{job['kind'].capitalize()} {job['id'][:8]} on {job['collection']} "

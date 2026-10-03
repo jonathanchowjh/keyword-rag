@@ -3,6 +3,7 @@ import pytest
 from ragqa_core.recipes import (
     RECIPES,
     build_for,
+    build_settings,
     corpus_type_for,
     default_search,
     search_settings,
@@ -83,3 +84,47 @@ def test_search_override_does_not_change_the_base():
     base = SearchSettings()
     search_settings(base, {"weights": {"words": 0}})
     assert base.weights["words"] == 1.0
+
+
+def test_build_override_merges_and_rejects_bad_input():
+    base = RECIPES["reference"]
+    b = build_settings(base, {"chunk_words": 50, "chunk_overlap": 5, "tagging": "ai"})
+    assert (b.chunk_words, b.chunk_overlap, b.tagging, b.units) == (50, 5, "ai", "chunks")
+    assert base.chunk_words == 100 and build_settings(base, None) == base
+    bad_inputs = (
+        {"tagging": "magic"},
+        {"nope": 1},
+        {"units": "pages"},
+        {"describes": "title"},
+        {"abstracted": "yes"},
+        {"profile": 1},
+        {"chunk_words": 0},
+        {"chunk_words": -5},
+        {"chunk_words": True},
+        {"chunk_words": 2.5},
+        {"chunk_overlap": -1},
+        {"chunk_overlap": 100},  # a stride of 0: the windows would never move
+        {"chunk_words": 10},  # under the recipe's overlap of 10
+        {"tag_k": 0},
+        {"tag_cutoff": float("nan")},
+        {"tag_cutoff": 2},
+    )
+    for bad in bad_inputs:
+        with pytest.raises(ValueError):
+            build_settings(base, bad)
+    # Whole units ignore the overlap; the window size must still be a size.
+    assert build_settings(base, {"units": "whole", "chunk_overlap": 100}).units == "whole"
+
+
+def test_build_override_keeps_one_vocabulary_path():
+    """A collection makes the three lists or runs the build, never both: the recipe says which."""
+    worked, paper = RECIPES["worked_examples"], build_for("paper_2024")
+    with pytest.raises(ValueError, match="recipe"):
+        build_settings(worked, {"vocabulary": "lists"})
+    with pytest.raises(ValueError, match="recipe"):
+        build_settings(paper, {"vocabulary": "induced"})
+    assert build_settings(worked, {"vocabulary": "induced"}).vocabulary == "induced"
+    # Summaries feed the lists' keyword vectors only.
+    with pytest.raises(ValueError, match="summary"):
+        build_settings(worked, {"added_text": "summary"})
+    assert build_settings(paper, {"added_text": "summary"}).added_text == "summary"

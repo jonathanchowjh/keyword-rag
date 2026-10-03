@@ -15,7 +15,7 @@ from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
 from ragqa_core.recipes import build_for, corpus_type_for, default_search
 from ragqa_core.store import Store, item_hash
-from ragqa_core.types import FACETS, CollectionSpec, Item, KeywordLists, QaType
+from ragqa_core.types import FACETS, BuildSettings, CollectionSpec, Item, KeywordLists, QaType
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 BATCH = 64
@@ -66,16 +66,22 @@ class Indexer:
         # lists do, and re-embedding ~565 keywords per query dominated eval time.
         self._list_vectors: dict[str, tuple[dict[str, np.ndarray], list[str], np.ndarray]] = {}
 
-    def create(
-        self, name: str, qa_type: QaType, summarize: bool, recipe: str = "paper_2024"
+    def new_spec(
+        self,
+        name: str,
+        qa_type: QaType,
+        summarize: bool,
+        recipe: str = "paper_2024",
+        build: BuildSettings | None = None,
     ) -> CollectionSpec:
+        """A new collection's spec, not yet saved: the recipe's build, or the one given."""
         if not NAME.match(name):
             raise ValueError(f"collection name {name!r} must match {NAME.pattern}")
-        build = build_for(recipe, summarize)
-        spec = CollectionSpec(
+        build = build or build_for(recipe, summarize)
+        return CollectionSpec(
             name,
             qa_type,
-            build.added_text == "summary",  # the recipe decides; the flag only moves paper 2024
+            build.added_text == "summary",  # the build decides; the flag only moves paper 2024
             self.models.dense_model,
             self.models.dense_dim(),
             corpus_type=corpus_type_for(qa_type),
@@ -83,6 +89,16 @@ class Indexer:
             build=build,
             search=default_search(qa_type, build),
         )
+
+    def create(
+        self,
+        name: str,
+        qa_type: QaType,
+        summarize: bool,
+        recipe: str = "paper_2024",
+        build: BuildSettings | None = None,
+    ) -> CollectionSpec:
+        spec = self.new_spec(name, qa_type, summarize, recipe, build)
         db.save_collection(self.conn, spec)
         self.store.create(name, spec.dense_dim)
         return spec
@@ -111,13 +127,17 @@ class Indexer:
         if not spec.summarize:
             return 0.0
         todo, _ = self.changed(spec, items, source)
-        batch = len(todo) > 50
+        return self.estimate_summaries_usd(todo)
+
+    def estimate_summaries_usd(self, items: list[Item]) -> float | None:
+        """A summary of each item; None when the summary job has no model to price it with."""
+        batch = len(items) > 50
         try:
             return sum(
                 self.ai.estimate_usd(
                     len(summary_prompt(i.text)), SUMMARY_TOKENS, role="summary", batch=batch
                 )
-                for i in todo
+                for i in items
             )
         except NoConnection:
             return None

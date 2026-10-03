@@ -1,5 +1,5 @@
-"""The load and import jobs: index a dataset or an upload, then give the collection lists
-or run its build steps."""
+"""The load, import and copy jobs: index a dataset, an upload or another collection's items,
+then give the collection lists or run its build steps."""
 
 import random
 from collections.abc import Callable
@@ -12,6 +12,7 @@ from ragqa_core.builder import Builder, build_of, builds
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.indexer import Indexer
+from ragqa_core.recipes import build_for, build_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, Question
 
@@ -221,6 +222,69 @@ class Loader:
             "lists_source": lists_source,
             **build_result,
         }
+
+    def copy_spec(
+        self, source: CollectionSpec, name: str, recipe: str, override: dict | None
+    ) -> CollectionSpec:
+        """What a copy of the source under the recipe would be, not yet saved: the source's
+        qa type and the recipe's build with the override merged in. Raises ValueError for a
+        bad name, an unknown recipe or a bad override."""
+        build = build_settings(build_for(recipe), override)
+        return self.indexer.new_spec(name, source.qa_type, False, recipe, build)
+
+    def estimate_copy(self, source: str, target: CollectionSpec) -> dict:
+        """What copying the source's items into the target, not yet made, would spend.
+        Embedding is free: the target's summaries and build steps are what cost."""
+        items = self.builder.stored_items(source)
+        estimate = self.indexer.estimate_summaries_usd(items) if target.summarize else 0.0
+        build_usd = self.builder.estimate_build_usd(target, items)
+        estimate = None if estimate is None or build_usd is None else estimate + build_usd
+        calls = (len(items) if target.summarize else 0) + self.builder.build_calls(target, items)
+        return {"est_usd": estimate, "items": len(items), "calls": calls}
+
+    def start_copy(self, source: str, target: CollectionSpec) -> str:
+        """Make the target with the source's questions, switched-off sources and leaked
+        setting, and queue the copy job that fills it. Returns the job's id."""
+        conn = self.conn
+        self.indexer.create(
+            target.name, target.qa_type, target.summarize, target.recipe, target.build
+        )
+        # Meta as it is: the copy stores the same item ids, so gold and excluded ids hold.
+        db.save_questions(conn, target.name, db.get_questions(conn, source))
+        for off in db.disabled_sources(conn, source):
+            db.set_source_enabled(conn, target.name, off, False)
+        db.set_include_leaked(conn, target.name, db.get_include_leaked(conn, source))
+        return db.create_job(conn, "copy", target.name, {"source": source})
+
+    def run_copy(self, job: dict, progress: Callable[[float], None]) -> dict:
+        """Add the source collection's items to the job's, source by source, then build
+        them. A target that uses keyword lists takes the source's lists in force first, so
+        adding keys the items with them; it proposes none. Adding is the first half of the
+        progress when the target builds. Returns the result dict."""
+        conn, name, source = self.conn, job["collection"], job["setup"]["source"]
+        spec = self.indexer.spec(name)
+        if spec is None or self.indexer.spec(source) is None:
+            raise ValueError(f"cannot copy {source!r} into {name!r}: no such collection")
+        lists = db.get_keyword_lists(conn, source)
+        if build_of(spec).vocabulary == "lists" and lists is not None:
+            db.set_keyword_version(conn, name, self.indexer.save_lists(spec, lists))
+        items = self.builder.stored_items(source)
+        by_source: dict[str, list[Item]] = {}
+        for item in items:
+            by_source.setdefault(item.meta["source"], []).append(item)
+        share = 0.5 if builds(spec) else 1.0
+        added = done = 0
+        for each, part in sorted(by_source.items()):
+
+            def step(p: float, done: int = done, size: int = len(part)) -> None:
+                progress(share * (done + p * size) / len(items))
+
+            counts = self.indexer.add(spec, part, each, progress=step)
+            added += counts["new"] + counts["updated"]
+            done += len(part)
+        build_result = self.builder.build(spec, items, lambda p: progress(share + (1 - share) * p))
+        progress(1.0)
+        return {"added": added, "sources": sorted(by_source), **build_result}
 
     def mark_leaked(self, name: str) -> int:
         """Mark the imported or hand-written questions whose text sits inside an item of the

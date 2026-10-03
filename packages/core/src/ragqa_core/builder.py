@@ -334,9 +334,11 @@ class Builder:
         build that stopped part-way is finished by the next one. "induce": every item, while
         no vocabulary is in force (else none); "tag": those without tags; "abstract": the
         worked examples with a solution and no abstracted form, when the build makes them.
-        Before the items are added it is what adding them would leave to build."""
+        Before the items are added it is what adding them would leave to build; before the
+        collection is made (a copy's estimate) nothing is stored."""
         given = {i.id: i for i in items}
-        hits = [h for batch in self.store.scroll(spec.name) for h in batch if h.id not in given]
+        stored = self.store.scroll(spec.name) if self.store.exists(spec.name) else []
+        hits = [h for batch in stored for h in batch if h.id not in given]
 
         def item(h: Hit) -> Item:
             return Item(h.id, h.text, h.answer, h.explanation, h.meta)

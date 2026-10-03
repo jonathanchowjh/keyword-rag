@@ -264,7 +264,7 @@ export function gapBar(lo, diff, hi, span) {
 
 export function pill(state) {
   const kind =
-    { ready: "ok", done: "ok", loading: "run", rekeying: "run", retagging: "run", evaluating: "run", importing: "run", labelling: "run", running: "run",
+    { ready: "ok", done: "ok", loading: "run", rekeying: "run", retagging: "run", copying: "run", evaluating: "run", importing: "run", labelling: "run", running: "run",
       busy: "run", queued: "idle", failed: "bad", interrupted: "bad", stopped_budget: "bad",
       stopped_no_key: "bad", cancelled: "idle" }[state] ?? "idle";
   const text = String(state ?? "").replace(/_/g, " ").replace("rekeying", "re-keying").replace("retagging", "re-tagging");
