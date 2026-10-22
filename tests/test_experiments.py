@@ -68,7 +68,7 @@ def test_unknown_experiment_is_refused():
         arms("x9", "c")
 
 
-def fake_api(est_usd: float, posts: list[dict]) -> httpx.Client:
+def fake_api(est_usd: float | None, posts: list[dict]) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/eval":
             body = json.loads(request.content)
@@ -85,6 +85,17 @@ def fake_api(est_usd: float, posts: list[dict]) -> httpx.Client:
                         "rrf_k": 60,
                         "search": {"query_tags": "oracle", "example": "full"},
                     },
+                    "pairs": [
+                        {
+                            "a": "keyword_rag",
+                            "b": "hybrid",
+                            "metric": "ndcg@10",
+                            "diff": 0.05,
+                            "lo": 0.01,
+                            "hi": 0.09,
+                            "separated": True,
+                        }
+                    ],
                     "methods": {
                         "keyword_rag": {
                             "usd": 0.0,
@@ -140,3 +151,20 @@ def test_report_prints_arm_metric_value_ci(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "keyword_rag" in out and "tags=oracle" in out
     assert "ndcg@10" in out and "0.500" in out and "0.400" in out and "0.600" in out
+
+
+def test_unpriced_arm_is_shown_and_needs_paid(monkeypatch, capsys):
+    posts: list[dict] = []
+    monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(None, posts))
+    assert experiments.main(["estimate", "x1", "c"]) == 0
+    assert "unpriced (no model)" in capsys.readouterr().out
+    assert experiments.main(["run", "x1", "c", "--confirm"]) == 2
+    assert not any(p["confirm"] for p in posts)
+    assert experiments.main(["run", "x1", "c", "--confirm", "--paid"]) == 0
+
+
+def test_report_prints_paired_differences(monkeypatch, capsys):
+    monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.0, []))
+    assert experiments.main(["report", "job1"]) == 0
+    out = capsys.readouterr().out
+    assert "keyword_rag - hybrid" in out and "0.050" in out and "0.010" in out and "(paired)" in out

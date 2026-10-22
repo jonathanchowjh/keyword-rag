@@ -18,6 +18,11 @@ python scripts/experiments.py report JOB_ID [JOB_ID ...]
 - `report` prints one table: arm, metric, value, 95% bootstrap CI. Arms are named
   by method and the settings that differ (`keyword_rag tags=oracle`, `w=1/1/2`,
   `rrf_k=30`, `ex=abstracted`). Take the job ids from the `run` output.
+- Each arm is its own run with one method, so `report` has no paired difference
+  between arms. X1's and X4's verdicts need the CI of the paired difference (for
+  example `keyword_rag` minus `hybrid`): queue those methods together in one run
+  (`POST /eval` with a `methods` list, or the Runs page), and `report` then prints
+  the pairs (marked "paired"); the Run page shows them too.
 - `--model` (X4) picks the answer model; the default is the one set up for the
   `answer` job.
 

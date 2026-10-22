@@ -91,23 +91,28 @@ def make_client(api: str) -> httpx.Client:
     return httpx.Client(base_url=api, timeout=60)
 
 
-def estimates(client: httpx.Client, bodies: list[dict]) -> list[float]:
-    """Each arm priced without confirm; prints one line per arm."""
-    costs = []
+def estimates(client: httpx.Client, bodies: list[dict]) -> list[float | None]:
+    """Each arm priced without confirm; prints one line per arm. None means unpriced."""
+    costs: list[float | None] = []
     for body in bodies:
         r = client.post("/eval", json={**body, "confirm": False})
         r.raise_for_status()
         est = r.json()["estimate"]
-        costs.append(float(est.get("est_usd", 0.0)))
-        print(f"{body_label(body):55} ${costs[-1]:.4f}  {est.get('calls', 0)} calls")
-    print(f"{'total':55} ${sum(costs):.4f}")
+        usd = est.get("est_usd")  # null when the job has no model to price it
+        costs.append(None if usd is None else float(usd))
+        price = "unpriced (no model)" if usd is None else f"${usd:.4f}"
+        print(f"{body_label(body):55} {price}  {est.get('calls', 0)} calls")
+    print(f"{'total':55} ${sum(c for c in costs if c is not None):.4f}")
     return costs
 
 
 def run(client: httpx.Client, bodies: list[dict], paid: bool) -> int:
     costs = estimates(client, bodies)
-    if any(c > 0 for c in costs) and not paid:
-        print("these arms cost money; read the estimate, then add --paid", file=sys.stderr)
+    if any(c is None or c > 0 for c in costs) and not paid:
+        print(
+            "these arms cost money or are unpriced; read the estimate, then add --paid",
+            file=sys.stderr,
+        )
         return 2  # nothing is queued
     for body in bodies:
         r = client.post("/eval", json={**body, "confirm": True})
@@ -129,6 +134,10 @@ def report(client: httpx.Client, job_ids: list[str]) -> int:
                 if isinstance(cell, dict) and "mean" in cell:
                     ci = f"[{cell['lo']:.3f}, {cell['hi']:.3f}]"
                     print(f"{name:55} {metric:20} {cell['mean']:7.3f}  {ci}")
+        # Paired differences exist only between methods of ONE run; one-method arms have none.
+        for p in table.get("pairs", []):
+            ci = f"[{p['lo']:.3f}, {p['hi']:.3f}]"
+            print(f"{p['a']} - {p['b']:35} {p['metric']:20} {p['diff']:7.3f}  {ci} (paired)")
     return 0
 
 
