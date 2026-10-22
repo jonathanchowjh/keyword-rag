@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Method v2: collections get a recipe (`worked_examples`, `reference`, `paper_2024`),
+  chosen at creation or by copying a collection's items under another recipe. Build
+  steps (induced vocabulary, AI tagging, abstracted examples) are estimated before
+  anything is spent; a vocabulary is exported, edited and re-imported through the
+  API.
+- New method `keyword_rag`: meaning, BM25 and the question's predicted tags
+  (`classifier`, `similarity` or, in evals, `oracle`) fused by weighted RRF, with
+  per-collection search settings (`PUT /collections/{name}/search`) that `/eval` and
+  `/query` override in part. Answers can use abstracted or full examples, numbered
+  best-first-and-last passages with `[n]` citations, and a locally run program for
+  numeric questions (10 s, 512 MB, empty environment, not network-isolated).
+- BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
+  questions that name gold documents.
+- `scripts/experiments.py` and `scripts/experiments.md`: queue and compare
+  experiments X1-X4. Nothing is queued without `--confirm`, nor any paid arm
+  without `--paid`.
+- The TF-IDF keyword lists are removed: with no AI model a paper-2024 load saves
+  no lists, and the AI proposal returns all three.
+
 - AI connections: a Settings page (`/settings`) and `/ai` routes set up any
   number of providers (Anthropic, OpenAI, Gemini, xAI, OpenRouter, Ollama or
   any OpenAI-compatible server), their models and prices, the model each job

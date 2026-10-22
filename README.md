@@ -25,6 +25,7 @@ and where.
 - [Configuration](#configuration)
 - [Endpoints](#endpoints)
 - [Your own corpus](#your-own-corpus)
+- [Recipes](#recipes)
 - [Retrieval methods](#retrieval-methods)
 - [Answering](#answering)
 - [Datasets](#datasets)
@@ -32,6 +33,7 @@ and where.
 - [Cost safety](#cost-safety)
 - [Pages](#pages)
 - [Reading a run](#reading-a-run)
+- [Experiments](#experiments)
 
 How it is built and how to work on it is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -137,7 +139,7 @@ A collection remembers the dense model it was built with. Changing
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
-| `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize}` |
+| `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize, recipe?: worked_examples\|reference\|paper_2024}`; no `recipe` means paper 2024, as before |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503 |
@@ -225,6 +227,29 @@ curl -X POST http://localhost:8080/collections/notes/imports \
   -d '{"upload_id": "...", "kind": "items", "mapping": {"text": "body"}, "source_name": "notes", "confirm": true}'
 ```
 
+## Recipes
+
+A recipe is a set of build choices, picked when a collection is created
+(`recipe` on `POST /collections`) or applied to a copy of another collection's
+items (`POST /collections/{name}/copy`). Each stores its choices with the
+collection, and `PUT /collections/{name}/search` sets its default search settings.
+
+| Recipe | For | Build |
+|---|---|---|
+| `worked_examples` | Solved problems (science, multiple choice) | One unit per item; an induced vocabulary; items tagged by the AI from their solution; abstracted examples; the classifier |
+| `reference` | Passages (multi-hop, tables) | 100-word chunks with 10 words of overlap; the title put before the text; an induced vocabulary; tags by similarity; the classifier |
+| `paper_2024` | The paper's method (the default) | 100-word chunks with 25 words of overlap; the paper's three keyword lists (yours, or AI-proposed) and optional summaries |
+
+Build steps that call the AI (inducing a vocabulary, AI tagging, abstracted
+examples) are priced with the `keywords` job's model and shown as an estimate
+first; with no model set up for `keywords` they return 503 rather than spend. The
+question's `meta` (ScienceQA's skill, topic and lecture) never reaches those
+prompts. A recipe's vocabulary is reviewed through the API: `GET
+/collections/{name}/vocabulary` exports the terms, and `PUT` with the edited list
+re-tags every item (see [Endpoints](#endpoints)). Without an AI model a
+paper-2024 load saves no keyword lists and the collection reads `no_lists`; the
+old TF-IDF lists are gone.
+
 ## Retrieval methods
 
 | Method | Origin | What it does |
@@ -294,6 +319,7 @@ All are downloaded at runtime into the `ragqa` volume and never committed.
 | Science problems | SciBench (physics and chemistry textbook problems) | MIT | 273 examples (76 worked solutions) and 219 questions: solved problems are all examples, the 416 unsolved split by a hash of their id. Small, a stand-in until your own corpus is imported | same-skill@1 | accuracy |
 | Exam multiple choice | ScienceQA | CC BY-SA 4.0 | 693 solved train examples; 291 test questions | solution similarity@1, same-skill@1 | accuracy |
 | Exam multiple choice, hard | GPQA (gated) | CC BY 4.0 | GPQA Extended minus Diamond as examples; Diamond's 198 as questions | solution similarity@1, same-subdomain@1 | accuracy |
+| Reasoning-intensive retrieval | BRIGHT `bright_aops`, `bright_theoremqa` (xlangai/BRIGHT) | CC BY 4.0 | Each task's documents as examples (the pool of both is 188,002 documents; use server Qdrant, or a load `limit`); its questions, with the documents to exclude removed from every search | nDCG@10, recall@1 | none: BRIGHT has no gold answers |
 | Multi-hop factual | MuSiQue (HippoRAG-2 protocol) | CC BY 4.0 | 11,656 passages; 1,000 dev questions | recall@2, recall@5 | EM, F1 |
 | Table + text numeric | TAT-QA | CC BY 4.0 | 2,757 contexts; 1,668 dev questions | recall@1, recall@3 | EM, F1 |
 
@@ -320,6 +346,12 @@ MuSiQue recall can be set beside published HippoRAG-2 numbers, but only as
 **gain over our own dense baseline**: their baseline is NV-Embed-v2, ours a
 small local model. EM and F1 come from a different reader and are not
 comparable to the papers.
+
+BRIGHT's questions name their gold documents, so a worked-examples collection that
+has them also reports nDCG@10 (binary relevance) and recall@1, measured after the
+question's excluded ids are removed. Answering runs on BRIGHT score 0; use SciBench
+or ScienceQA to compare answers. Copy a collection under another recipe to compare
+recipes on the same items.
 
 ## AI connections
 
@@ -436,3 +468,12 @@ service:
 - Every run records its full setup: models, keyword-list version, `k`,
   `rrf_k`, seed, dataset filter and question ids. `log` holds the run's last
   50 events.
+
+## Experiments
+
+`scripts/experiments.py` queues the method-v2 experiments (X1 retrieval, X2 query
+tags, X3 fusion, X4 answer accuracy) through the API: `estimate` prices every arm,
+`run --confirm` queues them (`--paid` for the one that costs money, X4b, about
+1,200 calls), and `report` prints one table with confidence intervals. Setup,
+commands and what each result proves or kills are in
+[scripts/experiments.md](scripts/experiments.md).
