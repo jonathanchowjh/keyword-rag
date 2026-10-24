@@ -71,7 +71,7 @@ def arms(experiment: str, collection: str) -> list[dict]:
 
 def label(methods: list[str], rrf_k: int | None, search: dict) -> str:
     """A run's arm name: the method, and for keyword_rag the settings that vary between arms."""
-    name = methods[0]
+    name = "+".join(methods) if len(methods) > 1 else methods[0]
     if name == "keyword_rag":
         w = search.get("weights")
         if w:
