@@ -32,7 +32,9 @@ def arm(collection: str, method: str, *, k: int = 10, answer: bool = False, **re
 def arms(experiment: str, collection: str) -> list[dict]:
     """The /eval request bodies (without confirm) of one experiment."""
     if experiment == "x1":
-        return [arm(collection, m) for m in ("vector", "keyword", "hybrid", "keyword_rag")]
+        # ONE run: paired differences exist only between methods of the same run.
+        methods = ["vector", "keyword", "hybrid", "keyword_rag"]
+        return [{**arm(collection, methods[0]), "methods": methods}]
     if experiment == "x2":
         return [
             arm(collection, "keyword_rag", search={"query_tags": mode})

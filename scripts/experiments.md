@@ -18,11 +18,10 @@ python scripts/experiments.py report JOB_ID [JOB_ID ...]
 - `report` prints one table: arm, metric, value, 95% bootstrap CI. Arms are named
   by method and the settings that differ (`keyword_rag tags=oracle`, `w=1/1/2`,
   `rrf_k=30`, `ex=abstracted`). Take the job ids from the `run` output.
-- Each arm is its own run with one method, so `report` has no paired difference
-  between arms. X1's and X4's verdicts need the CI of the paired difference (for
-  example `keyword_rag` minus `hybrid`): queue those methods together in one run
-  (`POST /eval` with a `methods` list, or the Runs page), and `report` then prints
-  the pairs (marked "paired"); the Run page shows them too.
+- X1 is one run of four methods, so `report` prints its paired differences (marked
+  "paired"). X2, X3 and X4 vary the search settings per run, so each arm is a
+  separate run and they compare unpaired: per-arm means with CIs. Overlapping CIs
+  are not a verdict; the Run page shows the pairs inside a run.
 - `--model` (X4) picks the answer model; the default is the one set up for the
   `answer` job.
 
@@ -74,7 +73,9 @@ curl -X POST localhost:8080/collections/sci/copy -H 'content-type: application/j
 ## X1 Retrieval only
 
 Dense, BM25, hybrid and the Keyword-RAG label channel, nDCG@10 on BRIGHT.
-Arms: `vector`, `keyword`, `hybrid`, `keyword_rag`; k 10; no answering; free.
+Queued as one run of `vector`, `keyword`, `hybrid` and `keyword_rag`; k 10; no
+answering; free. One run, so `report` prints the paired difference of each method
+against `hybrid`, the CI that decides this experiment.
 
 ```sh
 python scripts/experiments.py run x1 aops --confirm

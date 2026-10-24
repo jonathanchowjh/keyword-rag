@@ -15,10 +15,11 @@ spec.loader.exec_module(experiments)
 arms = experiments.arms
 
 
-def test_x1_arms():
+def test_x1_is_one_run_of_four_methods():
     got = arms("x1", "c")
-    assert {a["methods"][0] for a in got} == {"vector", "keyword", "hybrid", "keyword_rag"}
-    assert all(a["k"] == 10 and not a["answer"] and a["collection"] == "c" for a in got)
+    assert len(got) == 1
+    assert got[0]["methods"] == ["vector", "keyword", "hybrid", "keyword_rag"]
+    assert got[0]["k"] == 10 and not got[0]["answer"] and got[0]["collection"] == "c"
 
 
 def test_x2_arms_cover_three_query_tag_modes():
@@ -137,8 +138,8 @@ def test_run_queues_free_arms_and_paid_with_flag(monkeypatch, capsys):
     posts: list[dict] = []
     monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.0, posts))
     assert experiments.main(["run", "x1", "c", "--confirm"]) == 0
-    assert sum(p["confirm"] for p in posts) == 4
-    assert "queued keyword_rag: job8" in capsys.readouterr().out
+    assert sum(p["confirm"] for p in posts) == 1
+    assert "queued" in capsys.readouterr().out
     posts.clear()
     monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.4, posts))
     assert experiments.main(["run", "x4", "c", "--confirm", "--paid"]) == 0
