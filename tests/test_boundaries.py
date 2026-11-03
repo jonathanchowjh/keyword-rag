@@ -74,6 +74,11 @@ def test_only_tests_import_fakes():
     assert modules_importing("ragqa_core.fakes", [CORE_SRC, API_SRC, WORKER_SRC]) == []
 
 
+def test_the_service_never_runs_the_owners_tools():
+    # Authored outputs are put in place by the owner, inside the container; never by a request.
+    assert modules_importing("ragqa_core.apply_outputs", [CORE_SRC, API_SRC, WORKER_SRC]) == []
+
+
 def test_pre_push_stays_fast():
     body = (ROOT / ".githooks/pre-push").read_text()
     code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))

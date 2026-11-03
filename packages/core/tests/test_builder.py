@@ -441,3 +441,88 @@ def test_estimate_build_prices_induction_only_without_a_vocabulary(env):
 def test_guessed_terms_bound_any_induced_vocabulary():
     assert len(set(GUESSED_TERMS)) == MAX_TERMS
     assert all(len(t) == MAX_TERM_CHARS for t in GUESSED_TERMS)
+
+
+# -- authored outputs ---------------------------------------------------------------------
+
+
+def authored(n: int) -> dict[str, dict]:
+    return {
+        f"i{k}": {
+            "tags": ["Unitary Method"] if k % 2 else ["relative speed", "unitary method"],
+            "principle": "Scale one unit to the quantity asked.",
+            "method": ["Find the rate for one unit.", "Multiply by the quantity asked."],
+            "answer": "10 m/s",
+        }
+        for k in range(n)
+    }
+
+
+def test_authored_outputs_build_the_collection_with_no_ai_call(env):
+    builder, spec, prompts, _ = env
+    builder.indexer.add(spec, worked(3), "x")
+    got = builder.apply_outputs(spec, ["unitary method", "relative speed"], authored(3))
+    assert got == {
+        "vocabulary_version": terms_version(["unitary method", "relative speed"]),
+        "tagged": 3,
+        "abstracted": 3,
+    }
+    assert prompts == [] and purposes(builder.conn) == []
+    fresh = db.get_collection(builder.conn, "w")
+    assert fresh is not None and fresh.vocabulary_version == got["vocabulary_version"]
+    hits = {h.id: h for h in builder.store.get("w", ["i0", "i1"])}
+    assert hits["i0"].tags == ["relative speed", "unitary method"] and hits["i1"].tags == [
+        "unitary method"
+    ]
+    assert hits["i1"].abstracted == (
+        "Principle: Scale one unit to the quantity asked.\n"
+        "Method: 1. Find the rate for one unit. 2. Multiply by the quantity asked.\n"
+        "Answer: 10 m/s"
+    )
+    assert fresh.profile == {"unitary method": 3, "relative speed": 2}
+    # Nothing is left to build, so a later load of the same items needs no model.
+    assert not any(builder.unbuilt(spec, []).values()) and builder.build_calls(spec, []) == 0
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda o: o["i0"].update(tags=["pigeonhole principle"]), "outside the vocabulary"),
+        (lambda o: o["i0"].update(tags=[]), "without tags"),
+        (lambda o: o.pop("i2"), "no output for"),
+        (lambda o: o.update(nope=dict(o["i0"])), "not in collection"),
+        (lambda o: o["i1"].update(method=""), "no usable abstracted form"),
+    ],
+)
+def test_authored_outputs_are_refused_whole_before_anything_is_written(env, change, message):
+    builder, spec, _, _ = env
+    builder.indexer.add(spec, worked(3), "x")
+    outputs = authored(3)
+    change(outputs)
+    with pytest.raises(ValueError, match=message):
+        builder.apply_outputs(spec, ["unitary method", "relative speed"], outputs)
+    assert db.get_collection(builder.conn, "w").vocabulary_version is None
+    assert all(not h.tags for h in builder.store.get("w", ["i0", "i1", "i2"]))
+
+
+def test_apply_outputs_command_reads_the_vocabulary_and_outputs_files(env, tmp_path, monkeypatch):
+    from ragqa_core import apply_outputs
+
+    builder, spec, _, _ = env
+    builder.indexer.add(spec, worked(3), "x")
+    vocabulary = tmp_path / "vocabulary.json"
+    vocabulary.write_text(
+        json.dumps(
+            {
+                "terms": [
+                    {"term": "unitary method", "definition": "scale one unit"},
+                    {"term": "relative speed", "definition": "speeds add or subtract"},
+                ]
+            }
+        )
+    )
+    outputs = tmp_path / "outputs.jsonl"
+    outputs.write_text("".join(json.dumps({"id": k, **v}) + "\n" for k, v in authored(3).items()))
+    monkeypatch.setattr(apply_outputs, "make_builder", lambda: builder)
+    assert apply_outputs.main(["w", str(vocabulary), str(outputs)]) == 0
+    assert db.get_collection(builder.conn, "w").vocabulary_version is not None

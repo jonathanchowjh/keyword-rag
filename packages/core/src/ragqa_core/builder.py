@@ -271,6 +271,62 @@ class Builder:
         db.set_vocabulary_version(self.conn, name, version)
         self.refresh_profile(spec)
 
+    def apply_outputs(
+        self, spec: CollectionSpec, terms: list[str], outputs: dict[str, dict]
+    ) -> dict:
+        """Authored build outputs, put in place with no AI call. `terms` becomes the
+        vocabulary in force; `outputs` maps every stored item's id to its tags (terms of
+        that vocabulary) and, for a worked example with a solution, its principle, method
+        and answer. Afterwards nothing is left to build, so a later load needs no model.
+
+        THE WHOLE SET IS CHECKED BEFORE ANYTHING IS WRITTEN, so a bad file changes nothing:
+        ValueError for an unknown or missing id, an item without tags, a tag outside the
+        vocabulary, or an abstracted form that is not usable."""
+        self.indexer.check_model(spec)  # before any tag is embedded with another model
+        vocabulary = clean_terms(terms)
+        if not vocabulary:
+            raise ValueError("the vocabulary is empty")
+        stored = self.stored_items(spec.name)
+        ids = {i.id for i in stored}
+        unknown = sorted(set(outputs) - ids)
+        if unknown:
+            raise ValueError(
+                f"{len(unknown)} outputs not in collection '{spec.name}': {unknown[:5]}"
+            )
+        missing = sorted(ids - set(outputs))
+        if missing:
+            raise ValueError(f"no output for {len(missing)} items: {missing[:5]}")
+        abstractable = (
+            {i.id for i in self._abstractable(spec, stored)} if build_of(spec).abstracted else set()
+        )
+        known = set(vocabulary)
+        tags: dict[str, list[str]] = {}
+        abstracted: dict[str, dict] = {}
+        for item_id, out in outputs.items():
+            chosen = clean_terms(out.get("tags") or [])
+            if not chosen:
+                raise ValueError(f"item {item_id} without tags")
+            outside = [t for t in chosen if t not in known]
+            if outside:
+                raise ValueError(f"item {item_id} has tags outside the vocabulary: {outside}")
+            tags[item_id] = chosen
+            if item_id in abstractable:
+                text = abstracted_text(out)
+                if not text:
+                    raise ValueError(f"item {item_id} has no usable abstracted form")
+                abstracted[item_id] = {"abstracted": text}
+        version = self.save_vocabulary(spec, vocabulary)
+        db.set_vocabulary_version(self.conn, spec.name, version)
+        order = sorted(tags)
+        for start in range(0, len(order), BATCH):
+            part = order[start : start + BATCH]
+            chosen = [tags[i] for i in part]
+            vectors = self.models.embed([keyword_string(t, None) for t in chosen])
+            self.store.set_tags(spec.name, part, chosen, vectors)
+        self.store.set_payloads(spec.name, abstracted)
+        self.refresh_profile(spec)
+        return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
+
     def refresh_profile(self, spec: CollectionSpec) -> dict[str, int]:
         """How many items carry each tag, most first, over every item; saved as the
         collection's profile when its build keeps one."""
