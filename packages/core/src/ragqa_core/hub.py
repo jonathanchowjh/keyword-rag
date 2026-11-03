@@ -60,7 +60,7 @@ def merge_manifest(remote: dict | None, entry: dict) -> dict:
     return {**(remote or {}), "entries": entries}
 
 
-def dataset_card(manifest: dict) -> str:
+def dataset_card(manifest: dict, repo: str) -> str:
     """The repo's README: viewer configs, what each entry is, its columns, a pandas
     example, and credit to the data the outputs describe."""
     entries = manifest.get("entries", [])
@@ -112,7 +112,7 @@ def dataset_card(manifest: dict) -> str:
             "```python",
             "import pandas as pd",
             "",
-            f'base = "hf://datasets/<repo>/builds/{first}"',
+            f'base = "hf://datasets/{repo}/builds/{first}"',
             'outputs = pd.read_parquet(f"{base}/outputs.parquet")',
             'vocabulary = pd.read_parquet(f"{base}/vocabulary.parquet")',
             "```",

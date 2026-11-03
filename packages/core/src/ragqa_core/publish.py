@@ -40,6 +40,7 @@ from ragqa_core.hub import (
     sha256,
 )
 from ragqa_core.settings import load_settings
+from ragqa_core.vocabulary import clean_terms
 
 ABSTRACTED = re.compile(r"Principle: (.*?)\nMethod: (.*)\nAnswer: (.*)", re.S)
 
@@ -62,6 +63,17 @@ def source_revision(home: Path, repo: str) -> str | None:
     """The commit of `repo` the loads read, from the Hub cache's refs/main; None if unknown."""
     ref = home / "datasets" / f"datasets--{repo.replace('/', '--')}" / "refs" / "main"
     return ref.read_text().strip() if ref.exists() else None
+
+
+def read_definitions(path: Path) -> dict[str, str]:
+    """{"terms": [{term, definition}]} by each term as the collection stores it (cleaned,
+    so lower case), since that is the form the vocabulary is published in."""
+    out: dict[str, str] = {}
+    for t in json.loads(path.read_text())["terms"]:
+        cleaned = clean_terms([t.get("term")])
+        if cleaned and t.get("definition"):
+            out.setdefault(cleaned[0], t["definition"])
+    return out
 
 
 def write_build(
@@ -156,7 +168,7 @@ def publish(
     }
     manifest = merge_manifest(remote, entry)
     (out / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
-    (out / "README.md").write_text(dataset_card(manifest))
+    (out / "README.md").write_text(dataset_card(manifest, hub.repo))
     files = {**files, MANIFEST: out / MANIFEST, "README.md": out / "README.md"}
     if api is not None:
         api.create_repo(hub.repo, repo_type="dataset", exist_ok=True)
@@ -187,10 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     if not repo:
         print("refused: no repo (--repo, or RAGQA_BUILD_HUB)", file=sys.stderr)
         return 2
-    definitions = {}
-    if args.definitions:
-        listed = json.loads(args.definitions.read_text())["terms"]
-        definitions = {t["term"]: t.get("definition") for t in listed}
+    definitions = read_definitions(args.definitions) if args.definitions else {}
     builder = make_builder()
     out = args.out or settings.home / "publish" / args.collection
     try:

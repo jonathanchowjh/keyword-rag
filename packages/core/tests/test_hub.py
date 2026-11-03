@@ -122,13 +122,15 @@ def test_card_lists_entries_columns_and_attribution():
         "items": 2000,
         "files": {"builds/bright_aops-2000-worked_examples/outputs.parquet": "x"},
     }
-    card = dataset_card({"entries": [entry]})
+    card = dataset_card({"entries": [entry]}, "owner/builds")
     assert card.startswith("---\nlicense: cc-by-4.0\n")
     assert "data_files: builds/bright_aops-2000-worked_examples/outputs.parquet" in card
     assert "Claude Opus 5.5, in-session" in card
     for column in ("position", "term", "definition", "doc_id", "tags", "principle", "method"):
         assert f"`{column}`" in card
-    assert "pd.read_parquet" in card
+    assert (
+        "pd.read_parquet" in card and "hf://datasets/owner/builds/builds/bright_aops-2000" in card
+    )
     assert "Su et al." in card and "xlangai/BRIGHT" in card and "CC BY 4.0" in card
     assert "AQuA-RAT" in card and "TheoremQA" in card
 

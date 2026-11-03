@@ -11,7 +11,7 @@ from ragqa_core.db import connect, create_job, update_job
 from ragqa_core.fakes import fake_ai, fake_hub, fake_models
 from ragqa_core.hub import MANIFEST, Hub, sha256
 from ragqa_core.indexer import Indexer
-from ragqa_core.publish import Refused, abstracted_parts, publish
+from ragqa_core.publish import Refused, abstracted_parts, publish, read_definitions
 from ragqa_core.store import Store
 from ragqa_core.types import Item
 
@@ -178,3 +178,10 @@ def test_abstracted_parts_read_back_the_stored_form():
     assert stored is not None
     assert abstracted_text(abstracted_parts(stored)) == stored
     assert abstracted_parts(None) == {"principle": None, "method": None, "answer": None}
+
+
+def test_definitions_are_matched_by_the_term_as_stored(tmp_path):
+    # The collection keeps cleaned, lower-case terms; an authored file need not.
+    listed = [{"term": "Pythagorean  Theorem", "definition": "a² + b² = c²"}, {"term": "x"}]
+    (tmp_path / "v.json").write_text(json.dumps({"terms": listed}))
+    assert read_definitions(tmp_path / "v.json") == {"pythagorean theorem": "a² + b² = c²"}
