@@ -131,7 +131,12 @@ def seeded(tmp_path_factory):
     """Collection `c` (mcq, 3 items, lists, 40 questions) with one answered run, done."""
     home = tmp_path_factory.mktemp("home")
     base = load_settings({"ANTHROPIC_API_KEY": "test"})
-    fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
+    fake = {
+        "dense_model": "fake/dense",
+        "judge_model": "fake/judge",
+        "rerank_model": "fake/rerank",
+        "build_hub": "",  # tests never read the real Hub
+    }
     app = create_app(replace(base, home=home, **fake))
     fake_embeddings(app.state.models)
     fake_replies(app.state.ai, lambda p: "Answer: A")

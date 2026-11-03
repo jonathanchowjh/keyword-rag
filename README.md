@@ -248,6 +248,36 @@ again, so no search mixes two versions' tags. Without an AI model a
 paper-2024 load saves no keyword lists and the collection reads `no_lists`; the
 old TF-IDF lists are gone.
 
+### Published builds
+
+A build can be published to a Hugging Face dataset repo, so that anyone loading the
+same dataset, `limit` and recipe gets the same vocabulary, tags and abstracted
+examples with no AI call and no model set up. The repo is
+[`jonathanmiro97/keyword-rag-builds`](https://huggingface.co/datasets/jonathanmiro97/keyword-rag-builds)
+unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
+
+- **A load applies a matching entry.** The estimate and the load first read the
+  repo's `manifest.json` at one commit, and then that entry's files at the same
+  commit. Each file must match its sha256. The entry is applied only when it covers
+  every item the collection will hold. Otherwise, and whenever the Hub cannot be
+  reached, the load builds locally as usual and its result says why
+  (`hub: {skipped: ...}`). A load that applied one reports `hub: {entry, items}`.
+- **Only the owner publishes.** You run the publish script inside the api
+  container. It is a dry run unless you pass `--publish`, and it refuses a token
+  that does not belong to the repo's owner:
+
+  ```sh
+  docker compose exec -e HF_TOKEN api python -m ragqa_core.publish aops \
+      --authored-by "who made the build" [--definitions vocabulary.json] [--publish]
+  ```
+
+  It sends a collection's vocabulary (`vocabulary.parquet`), each item's tags and
+  abstracted form (`outputs.parquet`, keyed by the dataset's own document ids), the
+  manifest, and a dataset card crediting the source dataset, all in one commit.
+  Nothing else leaves: no embeddings, settings, keys, connections or ledger rows.
+- **Authored outputs.** Outputs written by hand go into a collection with
+  `python -m ragqa_core.apply_outputs COLLECTION VOCABULARY.json OUTPUTS.jsonl`.
+
 ## Retrieval methods
 
 | Method | Origin | What it does | Cost |
@@ -423,7 +453,8 @@ All are optional.
 | `RAGQA_JUDGE_MODEL` | A different model, used only to score solution similarity. Default `BAAI/bge-small-en-v1.5` |
 | `RAGQA_RERANK_MODEL` | Cross-encoder for `hybrid_rerank`. Default `BAAI/bge-reranker-v2-m3-int8` |
 | `RAGQA_QDRANT_URL` | Set by compose. Unset means in-process Qdrant (tests only) |
-| `HF_TOKEN` | Hugging Face read token, only to load GPQA (gated) |
+| `HF_TOKEN` | Hugging Face token: read, to load GPQA (gated); write, only for the owner's `ragqa_core.publish --publish` |
+| `RAGQA_BUILD_HUB` | The Hub repo of [published builds](#published-builds) a load applies. Default `jonathanmiro97/keyword-rag-builds`; empty turns it off |
 | `RAGQA_HOME` | State directory. `/home/app/.ragqa` in the image |
 | `PORT` | Listen port. `8080` |
 
@@ -563,8 +594,8 @@ service:
 
 `scripts/experiments.py` queues the method-v2 experiments (X1 retrieval, X2 query
 tags, X3 fusion, X4 answer accuracy) through the API: `estimate` prices every arm,
-`run --confirm` queues them (`--paid` for the one that costs money, X4b, about
-1,200 calls), and `report` prints one table with confidence intervals. Setup,
+`run --confirm` queues them (`--paid` for the arms that cost money: X2's `model`
+arm, one call per question, and X4b, about 1,200 calls), and `report` prints one table with confidence intervals. Setup,
 commands and what each result proves or kills are in
 [scripts/experiments.md](scripts/experiments.md).
 

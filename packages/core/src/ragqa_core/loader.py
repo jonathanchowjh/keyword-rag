@@ -11,12 +11,14 @@ from ragqa_core import db, imports
 from ragqa_core.builder import Builder, build_of, builds
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
+from ragqa_core.hub import Hub
 from ragqa_core.indexer import Indexer
 from ragqa_core.recipes import build_for, build_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, Question
 
 PROPOSE_SAMPLE = 40
+NOTHING_TO_BUILD = "nothing to build"
 UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
 
 
@@ -66,12 +68,22 @@ def without_leaked(q: Question) -> Question:
 
 
 class Loader:
-    def __init__(self, conn: Connection, indexer: Indexer, builder: Builder, ai: AI, home: Path):
+    def __init__(
+        self,
+        conn: Connection,
+        indexer: Indexer,
+        builder: Builder,
+        ai: AI,
+        home: Path,
+        hub_repo: str = "",
+    ):
+        """`hub_repo` names the Hub repo of published builds; empty, a load never reads it."""
         self.conn = conn
         self.indexer = indexer
         self.builder = builder
         self.ai = ai
         self.home = home
+        self.hub = Hub(hub_repo, home / "hub") if hub_repo else None
 
     def run(self, job: dict, progress: Callable[[float], None]) -> dict:
         """Load the job's dataset. `progress(p)` records and logs the job's progress and may raise
@@ -84,9 +96,15 @@ class Loader:
             raise ValueError(f"unknown collection {name!r}")
 
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
-        items, questions = limited(items, questions, job["setup"].get("limit"))
+        limit = job["setup"].get("limit")
+        items, questions = limited(items, questions, limit)
         dataset = job["setup"]["dataset"]
-        source, build_result, counts = self._add(spec, items, dataset, progress)
+        published, hub = self.from_hub(spec, items, dataset, limit)
+        if "skipped" in hub and hub["skipped"] != NOTHING_TO_BUILD:
+            db.log_job(conn, job["id"], f"Hub: {hub['skipped']}; building locally")
+        source, build_result, counts = self._add(spec, items, dataset, progress, published)
+        if hub:
+            build_result = {**build_result, "hub": hub}
         # EVERY LOAD RE-READS THE DATASET'S FULL EXCLUDED LISTS, so a later, larger load
         # brings back an excluded id it now stores; the rest only slow every search.
         stored = set(self.indexer.store.ids(name))
@@ -108,9 +126,11 @@ class Loader:
         items: list[Item],
         source: str,
         progress: Callable[[float], None],
+        published: dict | None = None,
     ) -> tuple[str | None, dict, dict[str, int]]:
         """Add the items, then make the lists or run the build: (where the lists came
-        from, the build's result, the add counts). Only the items this adds are built."""
+        from, the build's result, the add counts). Only the items this adds are built; with
+        a published build that covers them all, it is applied instead, with no AI call."""
         makes_lists, building = self.makes_lists(spec), builds(spec)
         todo, _ = self.indexer.changed(spec, items, source)
         share = 0.5 if makes_lists or building else 1.0
@@ -118,8 +138,41 @@ class Loader:
         lists_source = None
         if makes_lists:
             lists_source = self._make_lists(spec, items, lambda p: progress(0.5 + 0.5 * p))
-        build_result = self.builder.build(spec, todo, lambda p: progress(0.5 + 0.5 * p))
+        if published is not None:
+            build_result = self.builder.apply_outputs(
+                spec, published["terms"], published["outputs"]
+            )
+            progress(1.0)
+        else:
+            build_result = self.builder.build(spec, todo, lambda p: progress(0.5 + 0.5 * p))
         return lists_source, build_result, counts
+
+    def from_hub(
+        self, spec: CollectionSpec, items: list[Item], dataset: str, limit: int | None
+    ) -> tuple[dict | None, dict]:
+        """The published build to apply after adding the items, and what the load's result
+        says of it: {entry, items}, or {skipped: why}; {} when the collection never builds.
+        ALL OR NOTHING: it is applied only when it covers every item the collection will
+        hold, so no collection mixes two authors' vocabularies."""
+        if not builds(spec):
+            return None, {}
+        if self.hub is None:
+            return None, {"skipped": "Hub off"}
+        if not self.builder.build_calls(spec, items):
+            return None, {"skipped": NOTHING_TO_BUILD}
+        published, reason = self.hub.fetch(dataset, limit, spec.recipe)
+        if published is None:
+            return None, {"skipped": reason}
+        store = self.indexer.store
+        held = set(store.ids(spec.name)) if store.exists(spec.name) else set()
+        every = held | {i.id for i in items}
+        covered = every & set(published["outputs"])
+        if covered != every:
+            return None, {"skipped": f"the entry covers {len(covered)} of {len(every)} items"}
+        extra = len(published["outputs"]) - len(every)
+        if extra:
+            return None, {"skipped": f"the entry holds {extra} items this load does not"}
+        return published, {"entry": published["entry"]["id"], "items": len(every)}
 
     def makes_lists(self, spec: CollectionSpec) -> bool:
         """Whether adding items also gives the collection lists: only a recipe that uses
@@ -151,9 +204,14 @@ class Loader:
         """What a dataset load would spend. The dataset is read (and cached) to price it."""
         items, questions = load_dataset(dataset, self.home)
         items, _ = limited(items, questions, limit)
-        return self._estimate(spec, items, dataset)
+        published, hub = self.from_hub(spec, items, dataset, limit)
+        estimate = self._estimate(spec, items, dataset, built=published is not None)
+        return {**estimate, "hub": hub["entry"]} if published is not None else estimate
 
-    def _estimate(self, spec: CollectionSpec, items: list[Item], source: str) -> dict:
+    def _estimate(
+        self, spec: CollectionSpec, items: list[Item], source: str, built: bool = False
+    ) -> dict:
+        """`built`: a published build will be applied, so the build steps cost nothing."""
         todo, _ = self.indexer.changed(spec, items, source)
         estimate = self.indexer.estimate_add_usd(spec, items, source)
         calls = len(todo) if spec.summarize else 0
@@ -161,9 +219,10 @@ class Loader:
             propose = self.indexer.estimate_propose_usd(spec, propose_sample(items))
             estimate = None if estimate is None else estimate + propose
             calls += 1
-        build_usd = self.builder.estimate_build_usd(spec, todo)
-        estimate = None if estimate is None or build_usd is None else estimate + build_usd
-        calls += self.builder.build_calls(spec, todo)
+        if not built:
+            build_usd = self.builder.estimate_build_usd(spec, todo)
+            estimate = None if estimate is None or build_usd is None else estimate + build_usd
+            calls += self.builder.build_calls(spec, todo)
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 
     def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int]:

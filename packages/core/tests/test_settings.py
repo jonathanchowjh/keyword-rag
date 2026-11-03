@@ -57,3 +57,11 @@ def test_unset_ai_settings_are_none():
 def test_set_cap_still_validated(cap):
     with pytest.raises(ValueError):
         load_settings({"RAGQA_MONTHLY_CAP_USD": cap})
+
+
+def test_the_build_hub_is_on_by_default_and_empty_turns_it_off():
+    from ragqa_core.settings import HUB_REPO
+
+    assert load_settings({}).build_hub == HUB_REPO
+    assert load_settings({"RAGQA_BUILD_HUB": "me/builds"}).build_hub == "me/builds"
+    assert load_settings({"RAGQA_BUILD_HUB": ""}).build_hub == ""

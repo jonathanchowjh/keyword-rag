@@ -5,6 +5,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+# The Hub repo of published builds a load applies (ragqa_core.hub); RAGQA_BUILD_HUB names
+# another, and set to empty turns the Hub off.
+HUB_REPO = "jonathanmiro97/keyword-rag-builds"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -20,6 +24,7 @@ class Settings:
     judge_model: str
     rerank_model: str
     port: int
+    build_hub: str
 
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
@@ -48,4 +53,5 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         judge_model=get("RAGQA_JUDGE_MODEL", "BAAI/bge-small-en-v1.5") or "",
         rerank_model=get("RAGQA_RERANK_MODEL", "BAAI/bge-reranker-v2-m3-int8") or "",
         port=int(get("PORT", "8080") or "8080"),
+        build_hub=env.get("RAGQA_BUILD_HUB", HUB_REPO).strip(),  # empty is off, not unset
     )

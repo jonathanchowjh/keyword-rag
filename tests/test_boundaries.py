@@ -75,8 +75,13 @@ def test_only_tests_import_fakes():
 
 
 def test_the_service_never_runs_the_owners_tools():
-    # Authored outputs are put in place by the owner, inside the container; never by a request.
-    assert modules_importing("ragqa_core.apply_outputs", [CORE_SRC, API_SRC, WORKER_SRC]) == []
+    # Authored outputs are put in place, and builds published to the Hub, by the owner inside
+    # the container; never by a request. Only the tools themselves import each other.
+    tools = ["ragqa_core.apply_outputs", "ragqa_core.publish"]
+    own = {f"packages/core/src/{t.replace('.', '/')}.py" for t in tools}
+    for tool in tools:
+        found = modules_importing(tool, [CORE_SRC, API_SRC, WORKER_SRC])
+        assert [m for m in found if m not in own] == [], tool
 
 
 def test_pre_push_stays_fast():

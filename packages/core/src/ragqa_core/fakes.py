@@ -16,6 +16,7 @@ from qdrant_client.models import SparseVector
 from aiconnect import fakes
 from aiconnect.ai import AI
 from ragqa_core.connection import Connection
+from ragqa_core.hub import Hub
 from ragqa_core.models import Models, normalise
 
 WORD = re.compile(r"[a-z0-9]+")
@@ -78,3 +79,25 @@ def fake_ai(
 def fake_replies(ai: AI, reply: Callable[[str], str]) -> AI:
     """Patches `ai` in place to answer every prompt with reply(prompt)."""
     return fakes.fake_replies(ai, reply)
+
+
+def fake_hub(hub: Hub, root: Path, newest: str | None) -> list[tuple[str, str]]:
+    """Serves `hub` from root/<commit>/<path>, with `newest` the commit on main; None makes
+    the Hub unreachable. Returns the (path, revision) of every download asked for."""
+    asked: list[tuple[str, str]] = []
+
+    def commit() -> str:
+        if newest is None:
+            raise ConnectionError("no route to host")
+        return newest
+
+    def download(path: str, revision: str) -> Path:
+        asked.append((path, revision))
+        local = root / revision / path
+        if not local.exists():
+            raise FileNotFoundError(path)
+        return local
+
+    hub._commit = commit  # type: ignore[method-assign]
+    hub._download = download  # type: ignore[method-assign]
+    return asked

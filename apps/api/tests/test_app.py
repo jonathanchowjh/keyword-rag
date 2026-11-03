@@ -54,7 +54,12 @@ PAIR = ["kw_individual", "hybrid"]
 
 def settings(tmp_path: Path, **overrides):
     base = load_settings({})
-    fake = {"dense_model": "fake/dense", "judge_model": "fake/judge", "rerank_model": "fake/rerank"}
+    fake = {
+        "dense_model": "fake/dense",
+        "judge_model": "fake/judge",
+        "rerank_model": "fake/rerank",
+        "build_hub": "",  # tests never read the real Hub
+    }
     return replace(base, home=tmp_path, **{**fake, **overrides})
 
 

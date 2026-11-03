@@ -297,7 +297,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.conn, state.store, state.models, state.ai, state.indexer, state.builder
     )
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
-    state.loader = Loader(state.conn, state.indexer, state.builder, state.ai, settings.home)
+    state.loader = Loader(
+        state.conn, state.indexer, state.builder, state.ai, settings.home, settings.build_hub
+    )
     state.worker = Worker(
         state.conn, state.ai, state.indexer, state.loader, state.evaluator, state.builder
     )

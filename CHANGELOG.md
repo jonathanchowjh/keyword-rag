@@ -15,6 +15,12 @@
   best-first-and-last passages with `[n]` citations, and a locally run program for
   numeric questions (10 s, 512 MB, no new processes, not network-isolated; on by
   default for new science and table collections, off for older ones).
+- Published builds: a load of a dataset, limit and recipe with an entry on the
+  Hub (`RAGQA_BUILD_HUB`, default `jonathanmiro97/keyword-rag-builds`) applies its
+  vocabulary, tags and abstracted examples with no AI call, when the entry covers
+  every item; otherwise it builds locally. Only the owner publishes, with
+  `python -m ragqa_core.publish` (a dry run unless `--publish`); authored outputs
+  go into a collection with `python -m ragqa_core.apply_outputs`.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare
