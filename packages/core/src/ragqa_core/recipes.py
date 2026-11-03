@@ -49,7 +49,7 @@ RECIPE_LABELS: dict[str, str] = {
 }
 
 CHANNELS = ("meaning", "words", "keywords")
-QUERY_TAGS = ("classifier", "similarity", "oracle")
+QUERY_TAGS = ("classifier", "similarity", "oracle", "model")
 EXAMPLES = ("abstracted", "full", "off")
 # The values each worded build setting may take; flags and numbers are checked on their own.
 BUILD_CHOICES: dict[str, tuple[str, ...]] = {

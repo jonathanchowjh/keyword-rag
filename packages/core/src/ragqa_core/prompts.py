@@ -76,6 +76,23 @@ def tag_prompt(terms: list[str], text: str, k: int) -> str:
     )
 
 
+QUERY_TAG_ASKS: dict[CorpusType, str] = {
+    "worked": "name the skills or principles a solution to the question below would use",
+    "reference": "name the topics a passage that answers the question below would cover",
+}
+
+
+def query_tag_prompt(terms: list[str], question: str, k: int, corpus_type: CorpusType) -> str:
+    """A question's tags, asked of the AI: the same list and reply as tag_prompt, but asked
+    about what would answer the question, since the items were tagged by what they hold."""
+    numbered = "\n".join(f"{n}. {t}" for n, t in enumerate(terms, start=1))
+    return (
+        f"Pick 1 to {k} terms that {QUERY_TAG_ASKS[corpus_type]}, chosen only from the"
+        ' numbered list; copy each term exactly. Reply with JSON only: {"terms": [...]}.\n\n'
+        f"Terms:\n{numbered}\n\nQuestion:\n{question[:1500]}"
+    )
+
+
 def abstract_prompt(text: str, explanation: str, answer: str | None) -> str:
     """A worked example rewritten as what to follow (spec D4), from its text, solution
     and answer only."""

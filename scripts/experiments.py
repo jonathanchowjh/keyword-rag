@@ -36,10 +36,13 @@ def arms(experiment: str, collection: str) -> list[dict]:
         methods = ["vector", "keyword", "hybrid", "keyword_rag"]
         return [{**arm(collection, methods[0]), "methods": methods}]
     if experiment == "x2":
-        return [
+        out = [
             arm(collection, "keyword_rag", search={"query_tags": mode})
             for mode in ("similarity", "classifier", "oracle")
         ]
+        # The AI's tags run beside hybrid, so the difference that decides it is paired.
+        both = {**arm(collection, "hybrid", search={"query_tags": "model"})}
+        return [*out, {**both, "methods": ["hybrid", "keyword_rag"]}]
     if experiment == "x3":
         out = [
             arm(

@@ -65,6 +65,8 @@ def test_build_for_copies_and_sets_paper_summary():
 def test_search_override_merges_weights_and_rejects_bad_input():
     s = search_settings(SearchSettings(), {"weights": {"keywords": 2.0}})
     assert s.weights == {"meaning": 1.0, "words": 1.0, "keywords": 2.0}
+    for mode in ("classifier", "similarity", "oracle", "model"):
+        assert search_settings(SearchSettings(), {"query_tags": mode}).query_tags == mode
     bad_inputs = (
         {"nope": 1},
         {"weights": {"x": 1}},

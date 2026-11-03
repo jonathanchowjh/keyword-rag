@@ -9,6 +9,7 @@ from typing import Literal
 
 from aiconnect.ai import AI, BATCH_THRESHOLD, BudgetExceeded, Cancelled, NoConnection
 from ragqa_core import db, verdict
+from ragqa_core.builder import TAG_TOKENS, build_of
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
@@ -31,6 +32,7 @@ from ragqa_core.prompts import (
     answer_prompt,
     hop_prompt,
     parse_answer,
+    query_tag_prompt,
     summary_prompt,
 )
 from ragqa_core.recipes import search_settings
@@ -266,8 +268,8 @@ class Evaluator:
     ) -> dict:
         # (calls, avg prompt chars, output tokens, batched?, role, model) — each part
         # priced the way it is sent: one complete_many per part, batched only
-        # above 50 calls; iterative hops are single real-time calls. Summaries and
-        # hops run on the query job's model; only answers use the requested one.
+        # above 50 calls; iterative hops are single real-time calls. Summaries, hops and
+        # the AI's query tags run on the query job's model; only answers use the requested one.
         parts: list[tuple[int, float, int, bool, str, str | None]] = []
         summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
         if spec.summarize and summaries:
@@ -275,6 +277,12 @@ class Evaluator:
             parts.append(
                 (summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, "query", None)
             )
+        asked = n_by_method.get("keyword_rag", 0) if search.query_tags == "model" else 0
+        if asked:
+            terms = db.get_vocabulary(self.conn, spec.name) or []
+            k = build_of(spec).tag_k
+            chars = avg(len(query_tag_prompt(terms, q.text, k, spec.corpus_type)) for q in sample)
+            parts.append((asked, chars, TAG_TOKENS, asked > BATCH_THRESHOLD, "query", None))
         hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
         parts.extend(
             (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, "query", None)
@@ -459,6 +467,9 @@ class Evaluator:
             summarise = {q.id for m in paid for q in self._todo(job_id, m, questions)}
             if summarise:
                 self.retriever.prepare(spec, [q.text for q in questions if q.id in summarise])
+            if "keyword_rag" in methods and self._search(spec, setup).query_tags == "model":
+                asked = self._todo(job_id, "keyword_rag", questions)
+                self.retriever.prepare_tags(spec, [q.text for q in asked])
             for n, method in enumerate(methods, start=1):
                 check()
                 todo = self._todo(job_id, method, questions)  # read now: a repeat finds none

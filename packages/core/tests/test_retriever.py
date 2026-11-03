@@ -7,7 +7,7 @@ from ragqa_core import db
 from ragqa_core.builder import Builder
 from ragqa_core.catalog import CONTROLS
 from ragqa_core.db import claim_next_job_id, connect, create_job, set_source_enabled
-from ragqa_core.fakes import fake_ai, fake_models
+from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import (
@@ -417,6 +417,37 @@ def test_similarity_query_tags_are_the_nearest_terms(tmp_path):
     r, _ = build(tmp_path)
     tags = r.query_tags(r.spec("c"), "volcano magma", SearchSettings(query_tags="similarity"), ())
     assert tags[:2] == ["volcano", "magma"] and len(tags) == 3
+
+
+def test_model_query_tags_are_the_ais_pick_of_the_vocabulary(tmp_path):
+    r, conn = build_physics(tmp_path)
+    sent: list[str] = []
+    reply = '{"terms": ["optics", "made-up", "kinematics"]}'
+    fake_replies(r.ai, lambda p: sent.append(p) or reply)
+    asked = SearchSettings(query_tags="model")
+    spec = r.spec("c")
+    # Terms outside the vocabulary are dropped; the rest keep the AI's order.
+    assert r.query_tags(spec, "a lens bends light", asked, ()) == ["optics", "kinematics"]
+    [prompt] = sent
+    assert "1. ohm's law" in prompt and prompt.endswith("Question:\na lens bends light")
+    assert "a solution to the question below would use" in prompt  # a worked-examples corpus
+    [row] = conn.execute("select purpose from ai_ledger")
+    assert row["purpose"] == "query_tags"
+    # A reply naming no term falls back to similarity: a question never goes untagged.
+    fake_replies(r.ai, lambda p: "I am not sure.")
+    similar = r.query_tags(spec, "car velocity", SearchSettings(query_tags="similarity"), ())
+    assert r.query_tags(spec, "car velocity", asked, ()) == similar
+
+
+def test_prepared_model_tags_cost_one_call_each(tmp_path):
+    r, conn = build_physics(tmp_path)
+    fake_replies(r.ai, lambda p: '{"terms": ["optics"]}')
+    questions = ["a lens bends light", "a mirror reflects it"]
+    r.prepare_tags(r.spec("c"), questions)
+    asked = SearchSettings(query_tags="model")
+    for q in questions:
+        assert r.query_tags(r.spec("c"), q, asked, ()) == ["optics"]
+    assert conn.execute("select count(*) from ai_ledger")[0][0] == len(questions)
 
 
 def test_oracle_query_tags_need_gold(tmp_path):

@@ -583,6 +583,15 @@ def test_query_returns_channels_and_tags(client):
     assert {tuple(h["channels"]) for h in found["hits"]} == {("keywords",)}
 
 
+def test_query_model_tags_are_the_ais_pick_and_counted_in_its_usd(client):
+    reference_with_vocabulary(client)
+    fake_replies(client.app.state.ai, lambda p: '{"terms": ["volcano"]}')
+    body = {"collection": "r", "question": "enzyme rate", "methods": ["keyword_rag"]}
+    found = client.post("/query", json={**body, "search": {"query_tags": "model"}}).json()
+    found = found["results"]["keyword_rag"]
+    assert found["error"] is None and found["query_tags"] == ["volcano"] and found["usd"] > 0
+
+
 def test_query_oracle_is_422(client):
     reference_with_vocabulary(client)
     body = {"collection": "r", "question": "enzyme", "methods": ["keyword_rag"]}

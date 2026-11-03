@@ -22,10 +22,12 @@ def test_x1_is_one_run_of_four_methods():
     assert got[0]["k"] == 10 and not got[0]["answer"] and got[0]["collection"] == "c"
 
 
-def test_x2_arms_cover_three_query_tag_modes():
+def test_x2_arms_cover_four_query_tag_modes():
     got = arms("x2", "c")
-    assert [a["search"]["query_tags"] for a in got] == ["similarity", "classifier", "oracle"]
-    assert all(a["methods"] == ["keyword_rag"] and a["k"] == 10 for a in got)
+    modes = ["similarity", "classifier", "oracle", "model"]
+    assert [a["search"]["query_tags"] for a in got] == modes
+    assert all(a["methods"] == ["keyword_rag"] and a["k"] == 10 for a in got[:3])
+    assert got[3]["methods"] == ["hybrid", "keyword_rag"]  # paired with hybrid in one run
 
 
 def test_x3_arms_single_channels_rrf_k_and_weights():
@@ -115,7 +117,7 @@ def test_estimate_prints_each_arm_and_queues_nothing(monkeypatch, capsys):
     posts: list[dict] = []
     monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.0, posts))
     assert experiments.main(["estimate", "x2", "c"]) == 0
-    assert len(posts) == 3 and not any(p["confirm"] for p in posts)
+    assert len(posts) == 4 and not any(p["confirm"] for p in posts)
     assert "oracle" in capsys.readouterr().out
 
 

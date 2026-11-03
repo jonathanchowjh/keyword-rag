@@ -94,11 +94,14 @@ from solutions only. Repeat on `bright_theoremqa` in a second collection.
 ## X2 Query mapping
 
 How the question's tags are predicted. Arms: `keyword_rag` with `query_tags`
-`similarity` (cosine top-3, the paper's way), `classifier` (nearest-neighbour vote)
-and `oracle` (the tags of the question's gold items; evals only). k 10; free.
+`similarity` (cosine top-3, the paper's way), `classifier` (nearest-neighbour vote),
+`oracle` (the tags of the question's gold items; evals only) and `model` (the query
+job's AI picks 1 to 3 terms of the vocabulary, one call per question). The `model`
+arm runs `hybrid` beside it, so their difference is paired. k 10; free but for the
+`model` arm, which needs a priced query model and `--paid`.
 
 ```sh
-python scripts/experiments.py run x2 aops --confirm
+python scripts/experiments.py run x2 aops --confirm --paid
 ```
 
 | | |
@@ -107,8 +110,9 @@ python scripts/experiments.py run x2 aops --confirm
 | Proves it | Classifier closes most of the cosine-to-oracle gap |
 | Kills it | Even oracle labels don't beat hybrid: keep facets only for routing and explanation |
 
-Where the app differs: the local-LLM draft arm is out of scope. To judge "beats
-hybrid", read the oracle row beside X1's `hybrid` row.
+Where the app differs: the LLM draft arm is `model`, on a priced provider rather
+than a local model. To judge "beats hybrid", read the oracle row beside X1's
+`hybrid` row, and the `model` arm's paired `hybrid - keyword_rag` row.
 
 ## X3 Fusion
 

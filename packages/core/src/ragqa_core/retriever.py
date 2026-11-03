@@ -12,7 +12,7 @@ import numpy as np
 
 from aiconnect.ai import AI
 from ragqa_core import db
-from ragqa_core.builder import Builder, build_of
+from ragqa_core.builder import TAG_TOKENS, Builder, build_of, picked_terms
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer
 from ragqa_core.keywords import keyword_string, matched
@@ -22,6 +22,7 @@ from ragqa_core.prompts import (
     SUMMARY_TOKENS,
     hop_prompt,
     parse_json,
+    query_tag_prompt,
     summary_prompt,
 )
 from ragqa_core.store import Store
@@ -162,6 +163,22 @@ class Retriever:
                 purpose="query_summary",
             )
 
+    def tag_prompts(self, spec: CollectionSpec, questions: list[str]) -> list[str]:
+        terms = self.vocabulary(spec)
+        k = build_of(spec).tag_k
+        return [query_tag_prompt(terms, q, k, spec.corpus_type) for q in questions]
+
+    def prepare_tags(self, spec: CollectionSpec, questions: list[str]) -> None:
+        """Asks the AI for every question's tags in one go, so a large run gets the Batch
+        API's discount and a cancel between sends; query_tags then finds them cached."""
+        if questions:
+            self.ai.complete_many(
+                self.tag_prompts(spec, questions),
+                role="query",
+                max_tokens=TAG_TOKENS,
+                purpose="query_tags",
+            )
+
     # -- the paper's methods ---------------------------------------------------
 
     def _vector(self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip) -> list[Hit]:
@@ -280,8 +297,9 @@ class Retriever:
         exclude: Collection[str] = (),
     ) -> list[str]:
         """The question's tags from the vocabulary: by the classifier's vote of the nearest
-        units, or by similarity to the terms. Oracle tags come from a question's gold, which
-        a bare question does not have. Skipped sources and excluded items cast no vote."""
+        units, by similarity to the terms, or picked by the AI (the query job's model). Oracle
+        tags come from a question's gold, which a bare question does not have. Skipped
+        sources and excluded items cast no vote."""
         if search.query_tags == "oracle":
             raise ValueError("oracle tags need a question's gold")
         terms = self.vocabulary(spec)
@@ -289,6 +307,14 @@ class Retriever:
         build = build_of(spec)
         if search.query_tags == "classifier":
             return self._classify(spec, question, build.tag_k, Skip(skip, frozenset(exclude)))
+        if search.query_tags == "model":
+            [prompt] = self.tag_prompts(spec, [question])
+            reply = self.ai.complete(
+                prompt, role="query", max_tokens=TAG_TOKENS, purpose="query_tags"
+            )
+            # A reply naming no term falls back to similarity, as an item's does: never none.
+            picked = picked_terms(reply.text, terms, build.tag_k)
+            return picked or self.builder.similar(terms, [question], build.tag_k)[0]
         cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
         return self.builder.similar(terms, [question], build.tag_k, cutoff)[0]
 

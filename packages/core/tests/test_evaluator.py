@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -1111,6 +1112,24 @@ def test_queue_refuses_bad_search(env):
         ev.queue("c", "dev", ["keyword_rag"], False, None, search={"weights": {"vibes": 1}})
     with pytest.raises(ValueError, match="query_tags"):
         ev.queue("c", "dev", ["keyword_rag"], False, None, search={"query_tags": "psychic"})
+
+
+def test_model_query_tags_are_priced_and_asked_once_per_question(env):
+    conn, ev = env
+    with_vocabulary(ev, TOPICS)
+    asked = {"query_tags": "model"}
+    est = ev.estimate("c", "dev", ["keyword_rag"], answer=False, model=None, search=asked)
+    assert est["calls"] == 5 and est["est_usd"] > 0 and est["roles"] == ["query"]
+    free = ev.estimate("c", "dev", ["hybrid"], answer=False, model=None, search=asked)
+    assert free["calls"] == 0  # only keyword_rag asks for tags
+    fake_replies(ev.ai, lambda p: json.dumps({"terms": [TOPICS[0]]}))
+    job = ev.queue("c", "dev", ["keyword_rag"], False, None, search=asked)
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done", get_job(conn, job)["error"]
+    assert {r["query_tags"][0] for r in run_items(conn, job)} == {TOPICS[0]}
+    # Sent once up front; each question's search then finds its tags cached.
+    calls = conn.execute("select count(*) from ai_ledger where purpose='query_tags'")[0][0]
+    assert calls == 5
 
 
 def test_oracle_tags_from_gold_units(tmp_path):

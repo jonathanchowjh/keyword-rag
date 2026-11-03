@@ -35,7 +35,7 @@ class SearchSettings:
     weights: dict[str, float] = field(
         default_factory=lambda: {"meaning": 1.0, "words": 1.0, "keywords": 1.0}
     )
-    query_tags: Literal["classifier", "similarity", "oracle"] = "similarity"
+    query_tags: Literal["classifier", "similarity", "oracle", "model"] = "similarity"
     example: Literal["abstracted", "full", "off"] = "full"
     program: bool = False
 

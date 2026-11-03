@@ -51,6 +51,15 @@ def builds(spec: CollectionSpec) -> bool:
     return spec.recipe != "paper_2024"
 
 
+def picked_terms(text: str, terms: list[str], k: int) -> list[str]:
+    """The vocabulary terms an AI reply of {"terms": [...]} picked, at most k; none when
+    it named no term of the list."""
+    replied = parse_json(text).get("terms")
+    picked = clean_terms(replied) if isinstance(replied, list) else []
+    known = set(terms)
+    return [t for t in picked if t in known][:k]
+
+
 def abstracted_text(reply: dict) -> str | None:
     """The stored form, "Principle: …\nMethod: …\nAnswer: …", of the AI's reply; None
     when a part is missing or empty. Steps given as a list are numbered on one line."""
@@ -185,12 +194,7 @@ class Builder:
             max_tokens=TAG_TOKENS,
             purpose="tag",
         )
-        known = set(terms)
-        tags = []
-        for reply in done:
-            replied = parse_json(reply.text).get("terms")
-            picked = clean_terms(replied) if isinstance(replied, list) else []
-            tags.append([t for t in picked if t in known][: build.tag_k])
+        tags = [picked_terms(reply.text, terms, build.tag_k) for reply in done]
         # A reply with no term of the vocabulary falls back to similarity: never no tags.
         unusable = [n for n, t in enumerate(tags) if not t]
         nearest = self.similar(terms, [texts[n] for n in unusable], build.tag_k)

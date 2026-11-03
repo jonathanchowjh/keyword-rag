@@ -286,10 +286,13 @@ default is 60. Fusion is computed in this service, not by Qdrant, so both
 settings behave the same in every mode.
 
 `keyword_rag` predicts the question's tags from the collection's vocabulary in
-one of three ways (`query_tags`): `classifier` lets the 20 nearest items vote
+one of four ways (`query_tags`): `classifier` lets the 20 nearest items vote
 with their tags, weighted by similarity; `similarity` takes the terms nearest
-the question, as the paper did; `oracle`, in evals only, takes the tags of the
-question's gold items (or of its worked solution), a ceiling for the other two.
+the question, as the paper did; `model` asks the query job's AI to pick up to
+`tag_k` terms (one paid call per question, priced in an eval's estimate, falling
+back to `similarity` when the reply names none); `oracle`, in evals only, takes
+the tags of the question's gold items (or of its worked solution), a ceiling for
+the others.
 A channel weighted 0 is not searched.
 
 ## Answering
