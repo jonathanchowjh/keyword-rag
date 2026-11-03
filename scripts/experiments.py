@@ -130,8 +130,8 @@ def report(client: httpx.Client, job_ids: list[str]) -> int:
         r.raise_for_status()
         table = r.json()
         setup = table["setup"]
-        name = label(setup["methods"], setup.get("rrf_k"), setup.get("search") or {})
-        for entry in table["methods"].values():
+        for method, entry in table["methods"].items():
+            name = label([method], setup.get("rrf_k"), setup.get("search") or {})
             for metric, cell in entry.items():
                 if isinstance(cell, dict) and "mean" in cell:
                     ci = f"[{cell['lo']:.3f}, {cell['hi']:.3f}]"

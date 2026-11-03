@@ -164,6 +164,27 @@ def test_unpriced_arm_is_shown_and_needs_paid(monkeypatch, capsys):
     assert experiments.main(["run", "x1", "c", "--confirm", "--paid"]) == 0
 
 
+def test_report_names_each_method_of_a_one_run_experiment(monkeypatch, capsys):
+    def handler(request: httpx.Request) -> httpx.Response:
+        cell = {"lo": 0.1, "hi": 0.9, "n": 4}
+        return httpx.Response(
+            200,
+            json={
+                "setup": {"methods": ["vector", "hybrid"], "rrf_k": 60, "search": {}},
+                "methods": {
+                    "vector": {"usd": 0.0, "n": 4, "ndcg@10": {"mean": 0.25, **cell}},
+                    "hybrid": {"usd": 0.0, "n": 4, "ndcg@10": {"mean": 0.75, **cell}},
+                },
+            },
+        )
+
+    client = httpx.Client(base_url="http://api", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(experiments, "make_client", lambda api: client)
+    assert experiments.main(["report", "job1"]) == 0
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()[1:]]
+    assert {(r[0], r[2]) for r in rows} == {("vector", "0.250"), ("hybrid", "0.750")}
+
+
 def test_report_prints_paired_differences(monkeypatch, capsys):
     monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.0, []))
     assert experiments.main(["report", "job1"]) == 0
