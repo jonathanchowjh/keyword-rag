@@ -16,6 +16,11 @@ from fastembed.rerank.cross_encoder import TextCrossEncoder
 from qdrant_client.models import SparseVector
 
 SPARSE_MODEL = "Qdrant/bm25"
+# TEXTS PER ONNX RUN. fastembed's default is 256, so a caller's batch of 64 runs as one,
+# padded to its longest text: memory grows with batch x length squared. 64 BRIGHT
+# documents of ~3,000 characters took 6 GB and 54 min that way; in runs of 8, 64 typical
+# ones take 18 s with Qwen3-Embedding-0.6B.
+EMBED_BATCH = 8
 # Qwen3-Embedding was trained with an instruction on queries and none on
 # documents; fastembed's query_embed does not add it, so it is added here.
 INSTRUCTED_PREFIX = "Qwen/Qwen3-Embedding"
@@ -69,7 +74,8 @@ class Models:
         return self._loaded[key]
 
     def embed(self, texts: list[str]) -> np.ndarray:
-        return normalise(np.array(list(self._load("text", self.dense_model).embed(texts))))
+        model = self._load("text", self.dense_model)
+        return normalise(np.array(list(model.embed(texts, batch_size=EMBED_BATCH))))
 
     def query_instruction(self, task: str) -> str:
         """The prefix the dense model expects on a query; "" for models trained without one."""
@@ -80,10 +86,12 @@ class Models:
     def embed_query(self, texts: list[str], task: str = "") -> np.ndarray:
         prefix = self.query_instruction(task)
         model = self._load("text", self.dense_model)
-        return normalise(np.array(list(model.query_embed([prefix + t for t in texts]))))
+        queries = [prefix + t for t in texts]
+        return normalise(np.array(list(model.query_embed(queries, batch_size=EMBED_BATCH))))
 
     def judge(self, texts: list[str]) -> np.ndarray:
-        return normalise(np.array(list(self._load("text", self.judge_model).embed(texts))))
+        model = self._load("text", self.judge_model)
+        return normalise(np.array(list(model.embed(texts, batch_size=EMBED_BATCH))))
 
     def sparse(self, texts: list[str]) -> list[SparseVector]:
         return [

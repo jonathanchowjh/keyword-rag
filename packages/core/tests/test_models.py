@@ -6,10 +6,27 @@ from ragqa_core.models import Models
 class Recorder:
     def __init__(self) -> None:
         self.texts: list[str] = []
+        self.batch_sizes: list[int | None] = []
 
-    def query_embed(self, texts):
+    def query_embed(self, texts, batch_size=None):
         self.texts.extend(texts)
+        self.batch_sizes.append(batch_size)
         return [[1.0, 0.0] for _ in texts]
+
+    def embed(self, texts, batch_size=None):
+        return self.query_embed(texts, batch_size)
+
+
+def test_every_dense_call_names_a_small_batch():
+    # fastembed's default batch is 256: one call of 64 long documents became one padded
+    # ONNX batch of ~6 GB, which killed the 7.6 GB container on a BRIGHT load.
+    from ragqa_core.models import EMBED_BATCH
+
+    models, recorder = models_with("Qwen/Qwen3-Embedding-0.6B-Q")
+    models.embed(["a"] * 64)
+    models.embed_query(["q"])
+    models.judge(["b"])
+    assert recorder.batch_sizes == [EMBED_BATCH] * 3 and EMBED_BATCH <= 8
 
 
 def models_with(dense: str) -> tuple[Models, Recorder]:
