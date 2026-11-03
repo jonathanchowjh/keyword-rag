@@ -169,23 +169,26 @@ class Indexer:
             part = items[start : start + BATCH]
             sums = summaries[start : start + BATCH]
             texts = [i.text for i in part]
-            self.store.upsert_items(
-                spec.name,
-                part,
-                self.models.embed([embed_text(spec, i) for i in part]),
-                self.models.sparse(texts),
-                sums,
-            )
+            whole = [embed_text(spec, i) for i in part]
+            vectors = self.models.embed(whole)
+            self.store.upsert_items(spec.name, part, vectors, self.models.sparse(texts), sums)
             # An updated item may now have fewer chunks: drop the old ones first.
             self.store.delete_chunks(spec.name, [i.id for i in part])
-            parents, pieces, sources = [], [], []
-            for item in part:
+            parents, pieces, sources, own = [], [], [], []
+            for n, item in enumerate(part):
                 size = 0 if build.units == "whole" else build.chunk_words
-                for piece in chunk(embed_text(spec, item), size, build.chunk_overlap):
+                for piece in chunk(whole[n], size, build.chunk_overlap):
                     parents.append(item.id)
                     pieces.append(piece)
                     sources.append(item.meta["source"])
-            self.store.upsert_chunks(spec.name, parents, pieces, self.models.embed(pieces), sources)
+                    own.append(n if piece == whole[n] else None)
+            # A TEXT THAT IS ITS OWN ONLY CHUNK (whole units, short items) REUSES ITS ITEM
+            # VECTOR: embedding it again doubled the load's slowest step.
+            # Only the rest are embedded, and never an empty list (the real model can't).
+            rest = [p for p, o in zip(pieces, own, strict=True) if o is None]
+            fresh = iter(self.models.embed(rest) if rest else [])
+            chunk_vectors = np.stack([vectors[o] if o is not None else next(fresh) for o in own])
+            self.store.upsert_chunks(spec.name, parents, pieces, chunk_vectors, sources)
             # THE INDUCED RECIPES KEEP THEIR TERMS AS TAGS, NOT AS THE THREE LISTS' VECTORS.
             if lists is not None and build.vocabulary == "lists":
                 keywords, vectors = self.keywords_for(spec, lists, texts, sums)

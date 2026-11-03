@@ -81,6 +81,26 @@ def test_add_without_lists_indexes_text_only(env):
     assert store.search_chunks("c", models.embed(["pea plants"])[0], 1)[0][0] == "3"
 
 
+def test_a_text_that_is_its_own_only_chunk_is_embedded_once(env):
+    # Whole units, and any item short enough to be one chunk, used to embed every text
+    # twice: once as the item, once as its chunk. On BRIGHT that was half the load.
+    _, store, models, ix, _ = env
+    embedded: list[str] = []
+    real = models.embed
+    models.embed = lambda texts: embedded.extend(texts) or real(texts)  # type: ignore[method-assign]
+    long = Item("4", " ".join(f"w{n}" for n in range(150)), "D", "Long.")
+    spec = ix.create("c", "mcq", False)
+    ix.add(spec, [*ITEMS, long], "x")
+    assert sorted(embedded).count(ITEMS[0].text) == 1
+    assert len(embedded) == 4 + 2  # four items, and the long one's two windows
+    assert store.search_chunks("c", real(["pea plants"])[0], 1)[0][0] == "3"
+    whole = ix.create("w", "science", False, recipe="worked_examples")
+    embedded.clear()
+    ix.add(whole, [*ITEMS, long], "x")
+    assert len(embedded) == 4
+    assert store.search_chunks("w", real([long.text])[0], 1)[0][0] == "4"
+
+
 def test_add_reports_progress(env):
     *_, ix, _ = env
     spec = ix.create("c", "mcq", False)
