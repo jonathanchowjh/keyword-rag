@@ -616,7 +616,12 @@ class AI:
                     )
                 else:
                     # Recorded one by one, so a failure part-way keeps what was paid for.
+                    # THE JOB'S CHECK RUNS BEFORE EACH SEND: a local model answers one at a
+                    # time, and a cancel must not wait for every prompt left.
+                    check = getattr(self._job, "check", None)
                     for key, p in misses.items():
+                        if check:
+                            check()
                         with provider_errors(connection):
                             text, tokens_in, tokens_out = self._send(
                                 connection, model_id, system, p, max_tokens

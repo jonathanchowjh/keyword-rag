@@ -41,6 +41,25 @@ def test_complete_records_cost_and_caches(tmp_path):
     assert rows(c, "select connection_id from ai_ledger")[0][0] == "anthropic"
 
 
+def test_a_cancel_stops_sequential_calls_between_sends_and_keeps_the_answers(tmp_path):
+    # A local model answers one prompt at a time; a cancel used to wait for all of them
+    # (about 2,000 abstraction prompts, hours, on a BRIGHT build).
+    sent: list[str] = []
+    c = fake_ai(tmp_path / "ai.db", lambda p: sent.append(p) or "ok")
+    prompts = [f"prompt {n}" for n in range(5)]
+
+    def check():
+        if len(sent) >= 2:
+            raise Cancelled()
+
+    with pytest.raises(Cancelled), c.for_job("j1", check=check, log=lambda m: None):
+        c.complete_many(prompts, purpose="answer")
+    assert sent == prompts[:2] and cache_rows(c) == 2  # stopped before the 3rd send
+    done = c.complete_many(prompts, purpose="answer")  # a resume pays only for the rest
+    assert [d.cached for d in done] == [True, True, False, False, False]
+    assert sent == prompts
+
+
 def test_cost_uses_haiku_prices(tmp_path):
     c = fake_ai(tmp_path / "ai.db", lambda p: "x" * 4000)
     r = c.complete("y" * 4000, purpose="t")
