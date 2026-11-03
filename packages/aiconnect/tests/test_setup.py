@@ -142,19 +142,19 @@ def test_env_key_without_model_uses_preset_default(tmp_path):
 
 def test_env_model_names_a_stored_connections_model(tmp_path):
     ai = AI(tmp_path / "ai.db")
-    ai.add_connection("ollama", "openai", "Ollama", local=True)
-    ai.add_model("ollama", "llama3.1:8b", price_in=0, price_out=0)
-    ai.apply_env(api_key="k-1234567890ab", model="ollama/llama3.1:8b", cap_usd=None)
-    assert ai.role_model("default") == "ollama/llama3.1:8b" and ai.ready()
-    assert "anthropic/ollama/llama3.1:8b" not in {m["ref"] for m in ai.models()}
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "llama3.1:8b", price_in=0, price_out=0)
+    ai.apply_env(api_key="k-1234567890ab", model="gw/llama3.1:8b", cap_usd=None)
+    assert ai.role_model("default") == "gw/llama3.1:8b" and ai.ready()
+    assert "anthropic/gw/llama3.1:8b" not in {m["ref"] for m in ai.models()}
 
 
 def test_env_bare_model_id_resolves_to_its_connection(tmp_path):
     ai = AI(tmp_path / "ai.db")
-    ai.add_connection("ollama", "openai", "Ollama", local=True)
-    ai.add_model("ollama", "llama3.1:8b", price_in=0, price_out=0)
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "llama3.1:8b", price_in=0, price_out=0)
     ai.apply_env(api_key="k-1234567890ab", model="llama3.1:8b", cap_usd=None)
-    assert ai.role_model("default") == "ollama/llama3.1:8b" and ai.ready()
+    assert ai.role_model("default") == "gw/llama3.1:8b" and ai.ready()
     assert all(
         m["model_id"] != "llama3.1:8b" for m in ai.models() if m["connection_id"] == "anthropic"
     )

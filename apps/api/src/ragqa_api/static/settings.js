@@ -34,14 +34,12 @@ function connectionHtml(c) {
   const locked = c.from_env.includes("api_key");
   const key = locked ? ENV : c.key ?? "no key";
   const where = c.base_url ? `<code>${esc(c.base_url)}</code>` : "";
-  const keyBox = c.local
-    ? ""
-    : `<div class="keyline"><label>New key <input type="password" name="key" autocomplete="off"
+  const keyBox = `<div class="keyline"><label>New key <input type="password" name="key" autocomplete="off"
         ${locked ? `disabled placeholder="${ENV}"` : ""}></label>
         <button type="button" class="secondary" data-act="key" disabled>Save key</button></div>`;
   return `<div class="card conn" data-connection="${esc(c.id)}">
     <div class="top"><strong>${esc(c.label)}</strong><code>${esc(c.kind)}</code>${where}
-      <span class="muted">${c.local ? "local" : `key ${esc(key)}`}</span></div>
+      <span class="muted">key ${esc(key)}</span></div>
     ${keyBox}
     <div class="actions" style="margin:0">
       <button type="button" class="secondary" data-act="test">Test</button>
@@ -109,7 +107,7 @@ function fillFromPreset() {
   $("add-label").value = p.label;
   $("add-url").value = p.base_url ?? "";
   $("add-key").required = false;
-  $("add-key").placeholder = p.local ? "optional for a local server" : "";
+  $("add-key").placeholder = "";
 }
 
 $("add-preset").addEventListener("change", fillFromPreset);

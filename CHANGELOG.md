@@ -21,10 +21,19 @@
   without `--paid`.
 - The TF-IDF keyword lists are removed: with no AI model a paper-2024 load saves
   no lists, and the AI proposal returns all three.
+- No local-model setup: the Ollama preset and the `local` flag that priced a
+  connection's fetched models at $0 are removed, with the Settings text and the
+  `host.docker.internal` mapping. Indexing your own corpus goes through a
+  priced provider; fetched models start unpriced. A database made before this
+  keeps its unused `local` column.
+- Embedding runs 8 texts at a time, and a text that is its own only chunk is
+  embedded once: a BRIGHT load no longer runs out of memory, and takes half as
+  long.
+- A cancel stops a run of one-at-a-time AI calls between sends.
 
 - AI connections: a Settings page (`/settings`) and `/ai` routes set up any
-  number of providers (Anthropic, OpenAI, Gemini, xAI, OpenRouter, Ollama or
-  any OpenAI-compatible server), their models and prices, the model each job
+  number of providers (Anthropic, OpenAI, Gemini, xAI, OpenRouter or any
+  OpenAI-compatible server), their models and prices, the model each job
   uses (`answer`, `summary`, `keywords`, `query`) and the monthly cap. Keys are
   stored in the database file and never returned. A model with no price is
   refused before anything is sent. The reusable package is `aiconnect`.
@@ -35,8 +44,6 @@
 - Provider-neutral wording: pages say "costs money" and "AI call" instead of
   naming a provider or "credit". `/health` returns `ai` instead of `api_key`.
   The 503 for a job with no model names the job and the Settings page.
-- `compose.yaml` maps `host.docker.internal` so Linux hosts reach an Ollama
-  running on the host.
 - Your own corpus: upload JSONL, JSON, CSV, TSV, text, Markdown or a zip of
   them as items or questions, with a preview, a field mapping and an estimate
   before anything is queued. Each import is a source (`upload:<name>`) that can

@@ -1051,7 +1051,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "from_env": state.ai.env_cap,
             },
             "presets": [
-                {k: p[k] for k in ("label", "kind", "base_url", "local")} | {"id": id}
+                {k: p[k] for k in ("label", "kind", "base_url")} | {"id": id}
                 for id, p in PRESETS.items()
             ],
         }
@@ -1070,7 +1070,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.label or preset.get("label") or body.id,
             base_url=body.base_url or preset.get("base_url"),
             api_key=body.api_key,
-            local=preset.get("local", False),
         )
         for model_id, (label, price_in, price_out) in preset.get("models", {}).items():
             state.ai.add_model(

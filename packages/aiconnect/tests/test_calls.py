@@ -42,7 +42,7 @@ def test_complete_records_cost_and_caches(tmp_path):
 
 
 def test_a_cancel_stops_sequential_calls_between_sends_and_keeps_the_answers(tmp_path):
-    # A local model answers one prompt at a time; a cancel used to wait for all of them
+    # A connection without a Batch API answers one prompt at a time; a cancel waited for all
     # (about 2,000 abstraction prompts, hours, on a BRIGHT build).
     sent: list[str] = []
     c = fake_ai(tmp_path / "ai.db", lambda p: sent.append(p) or "ok")
@@ -469,9 +469,9 @@ def test_ready_is_false_without_key_for_anthropic(tmp_path):
 
 def test_ready_for_openai_kind_needs_no_key(tmp_path):
     ai = core.AI(tmp_path / "ai.db")
-    ai.add_connection("local", "openai", "Local", base_url="http://x/v1", local=True)
-    ai.add_model("local", "llama", price_in=0, price_out=0)
-    ai.set_role("default", "local/llama")
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "llama", price_in=0, price_out=0)
+    ai.set_role("default", "gw/llama")
     assert ai.ready()
     assert not core.AI(tmp_path / "other.db").ready()
 

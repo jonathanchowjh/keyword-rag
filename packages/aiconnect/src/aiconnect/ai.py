@@ -38,7 +38,7 @@ ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 SCHEMA = """
 create table if not exists ai_connections (
   id text primary key, label text not null, kind text not null, base_url text,
-  api_key text, local integer not null default 0
+  api_key text
 );
 create table if not exists ai_models (
   connection_id text not null, model_id text not null, label text not null,
@@ -167,7 +167,6 @@ class AI:
         *,
         base_url: str | None = None,
         api_key: str | None = None,
-        local: bool = False,
     ) -> None:
         if not ID.fullmatch(id):
             raise ValueError("a connection id is lowercase letters, digits and dashes")
@@ -177,8 +176,9 @@ class AI:
             if self.sql("select 1 from ai_connections where id = ?", (id,)):
                 raise Conflict(f"connection {id} already exists")
             self.sql(
-                "insert into ai_connections values (?, ?, ?, ?, ?, ?)",
-                (id, label, kind, base_url or None, api_key or None, int(local)),
+                "insert into ai_connections (id, label, kind, base_url, api_key)"
+                " values (?, ?, ?, ?, ?)",
+                (id, label, kind, base_url or None, api_key or None),
             )
 
     def update_connection(self, id: str, *, label=KEEP, base_url=KEEP, api_key=KEEP) -> None:
@@ -220,7 +220,6 @@ class AI:
                 "label": r["label"],
                 "kind": r["kind"],
                 "base_url": r["base_url"],
-                "local": bool(r["local"]),
                 "key": mask(r["api_key"]),
                 "from_env": sorted(self.env.get(r["id"], set())),
             }
@@ -298,13 +297,12 @@ class AI:
 
     def fetch_models(self, connection_id: str) -> list[str]:
         """Adds the connection's models that are not stored yet and returns their ids.
-        A local server's models cost nothing; others have no price until one is entered."""
+        Every model has no price until one is entered, so none is free by default."""
         connection = self._connection(connection_id)
         known = {m["model_id"] for m in self.models() if m["connection_id"] == connection_id}
         added = [m for m in dict.fromkeys(self._list_models(connection)) if m not in known]
         for model_id in added:
-            price = 0 if connection["local"] else None
-            self.add_model(connection_id, model_id, price_in=price, price_out=price)
+            self.add_model(connection_id, model_id, price_in=None, price_out=None)
         return added
 
     def test_connection(self, connection_id: str) -> dict:
@@ -616,8 +614,8 @@ class AI:
                     )
                 else:
                     # Recorded one by one, so a failure part-way keeps what was paid for.
-                    # THE JOB'S CHECK RUNS BEFORE EACH SEND: a local model answers one at a
-                    # time, and a cancel must not wait for every prompt left.
+                    # THE JOB'S CHECK RUNS BEFORE EACH SEND: a connection without a Batch
+                    # API answers one at a time, and a cancel must not wait for every prompt left.
                     check = getattr(self._job, "check", None)
                     for key, p in misses.items():
                         if check:

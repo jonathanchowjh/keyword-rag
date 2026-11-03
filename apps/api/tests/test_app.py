@@ -2025,33 +2025,35 @@ def test_deleting_a_collection_removes_its_uploads(client):
 def test_ai_settings_round_trip(client):
     ai = client.app.state.ai
     ai._list_models = lambda connection: ["llama3.1", "qwen2"]  # type: ignore[method-assign]
-    r = client.post("/ai/connections", json={"preset": "ollama", "id": "local"})
+    r = client.post("/ai/connections", json={"preset": "openrouter", "id": "router"})
     assert r.status_code == 201, r.text
-    assert client.post("/ai/connections/local/models/fetch").json() == {
+    assert client.post("/ai/connections/router/models/fetch").json() == {
         "added": ["llama3.1", "qwen2"]
     }
-    assert client.put("/ai/roles/answer", json={"model": "local/llama3.1"}).status_code == 200
+    assert client.put("/ai/roles/answer", json={"model": "router/llama3.1"}).status_code == 200
     body = client.get("/ai").json()
-    local = next(c for c in body["connections"] if c["id"] == "local")
-    assert local["kind"] == "openai" and local["local"] and local["label"] == "Ollama (local)"
-    assert {m["ref"]: m["price_in"] for m in body["models"] if m["connection_id"] == "local"} == {
-        "local/llama3.1": 0,
-        "local/qwen2": 0,
+    router = next(c for c in body["connections"] if c["id"] == "router")
+    assert router["kind"] == "openai" and router["label"] == "OpenRouter" and "local" not in router
+    # Fetched models start unpriced: nothing is free unless a price of 0 is entered.
+    assert {m["ref"]: m["price_in"] for m in body["models"] if m["connection_id"] == "router"} == {
+        "router/llama3.1": None,
+        "router/qwen2": None,
     }
-    assert body["roles"]["answer"] == "local/llama3.1"
+    assert body["roles"]["answer"] == "router/llama3.1"
     assert body["known_roles"] == ["default", "answer", "summary", "keywords", "query"]
     assert body["budget"] == {"cap_usd": 20.0, "spent_usd": 0.0, "from_env": False}
-    assert {"id": "ollama", "label": "Ollama (local)", "kind": "openai"}.items() <= next(
-        p for p in body["presets"] if p["id"] == "ollama"
+    assert "ollama" not in {p["id"] for p in body["presets"]}
+    assert {"id": "openrouter", "label": "OpenRouter", "kind": "openai"}.items() <= next(
+        p for p in body["presets"] if p["id"] == "openrouter"
     ).items()
     assert client.put("/ai/budget", json={"cap_usd": 7.5}).status_code == 200
     assert client.get("/ai").json()["budget"]["cap_usd"] == 7.5
-    r = client.post("/ai/connections/local/models", json={"model_id": "x", "price_in": 1})
+    r = client.post("/ai/connections/router/models", json={"model_id": "x", "price_in": 1})
     assert r.status_code == 200, r.text
-    r = client.patch("/ai/connections/local", json={"label": "Mine", "api_key": "abc"})
+    r = client.patch("/ai/connections/router", json={"label": "Mine", "api_key": "abc"})
     assert r.status_code == 200 and client.get("/ai").json()["connections"][1]["label"] == "Mine"
     assert client.put("/ai/roles/answer", json={"model": None}).status_code == 200
-    assert client.delete("/ai/connections/local").status_code == 204
+    assert client.delete("/ai/connections/router").status_code == 204
 
 
 def test_ai_validation_errors_are_422(client):
@@ -2188,13 +2190,11 @@ def test_confirm_refuses_a_disabled_free_model(tmp_path):
         add_collection(client)
         client.app.state.worker.stop()
         ai = client.app.state.ai
-        ai.add_connection("local", "openai", "Local", local=True)
-        ai.add_model("local", "llama", price_in=0, price_out=0)
-        ai.update_model("local", "llama", enabled=False)
-        assert (
-            eval_with_model(client, "local/llama", confirm=False).json()["estimate"]["est_usd"] == 0
-        )
-        r = eval_with_model(client, "local/llama")
+        ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+        ai.add_model("gw", "llama", price_in=0, price_out=0)  # a price of 0, entered by hand
+        ai.update_model("gw", "llama", enabled=False)
+        assert eval_with_model(client, "gw/llama", confirm=False).json()["estimate"]["est_usd"] == 0
+        r = eval_with_model(client, "gw/llama")
         assert r.status_code == 503 and "'answer'" in r.json()["detail"]
         assert client.get("/eval").json() == []
 

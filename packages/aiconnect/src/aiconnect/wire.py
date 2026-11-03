@@ -83,7 +83,7 @@ def anthropic_list_models(client: anthropic.Anthropic) -> list[str]:
 
 
 def openai_client(base_url: str | None, api_key: str | None) -> openai.OpenAI:
-    # A local server needs no key, but the SDK refuses to start without one.
+    # A server that needs no key still needs one for the SDK to start.
     return openai.OpenAI(base_url=base_url, api_key=api_key or "unused")
 
 

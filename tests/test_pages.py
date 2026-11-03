@@ -1341,16 +1341,18 @@ def add_connection(page, seeded, preset, id, key=""):
     return row
 
 
-def test_settings_page_adds_local_connection(page, seeded, monkeypatch):
+def test_settings_page_adds_a_connection_whose_models_need_a_price(page, seeded, monkeypatch):
     ai = seeded.app.state.ai
     monkeypatch.setattr(ai, "_list_models", lambda connection: ["llama3"])
     monkeypatch.setattr(
         ai, "_send", lambda connection, model_id, system, prompt, max_tokens: ("OK", 3, 1)
     )
-    row = add_connection(page, seeded, "Ollama (local)", "ollama")
-    expect(row).to_contain_text("Ollama (local)")
+    row = add_connection(page, seeded, "OpenRouter", "router", key="sk-or-TEST123456")
+    expect(row).to_contain_text("OpenRouter")
     row.get_by_role("button", name="Fetch models").click()
-    expect(page.locator('#models [data-model="ollama/llama3"]')).to_be_visible()
+    expect(page.locator('#models [data-model="router/llama3"]')).to_be_visible()
+    # Fetched unpriced; the Test call needs the price a person enters.
+    ai.update_model("router", "llama3", price_in=1, price_out=1)
     row.get_by_role("button", name="Test").click()
     expect(row.locator(".result")).to_contain_text("Worked with llama3")
 
@@ -1412,7 +1414,7 @@ def test_env_connection_has_no_remove(page, seeded):
     env = page.locator('#connections [data-connection="anthropic"]')
     expect(env).to_be_visible()
     expect(env.get_by_role("button", name="Remove")).to_have_count(0)
-    add_connection(page, seeded, "Ollama (local)", "removable")
+    add_connection(page, seeded, "OpenRouter", "removable", key="sk-or-TEST123456")
     expect(
         page.locator('#connections [data-connection="removable"]').get_by_role(
             "button", name="Remove"
@@ -1494,5 +1496,5 @@ def test_add_form_id_follows_the_server_rule(page, seeded):
         box.fill(value)
         return box.evaluate("e => e.checkValidity()")
 
-    assert valid("ollama-2") and valid("a" * 32)
+    assert valid("gateway-2") and valid("a" * 32)
     assert not valid("a_b") and not valid("-a") and not valid("a" * 33)

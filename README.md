@@ -17,8 +17,9 @@ console. Every result says how sure it is. Nothing spends money without
 showing the estimate first, except the Lab, which reports each method's cost
 after the call.
 
-Any AI provider can answer: Anthropic, any OpenAI-compatible service, or a
-local model through Ollama at $0. Retrieval itself is always free and local.
+Any AI provider can answer: Anthropic, OpenAI, Gemini, xAI, OpenRouter or any
+OpenAI-compatible service, priced per call. Retrieval itself is always free and
+local.
 
 - **Status:** v0.1.0, in active development (see [Roadmap](#roadmap)). Runs
   locally in Docker; no published image.
@@ -111,13 +112,8 @@ Open http://localhost:8080/ for the collections and their evaluations,
 http://localhost:8080/lab to compare methods on one question, and
 http://localhost:8080/docs for every endpoint (see [Pages](#pages)).
 
-Then connect an AI on **Settings** (http://localhost:8080/settings). Pick one:
-
-**A local model, free.** Install [Ollama](https://ollama.com), pull a model
-(`ollama pull llama3.1:8b`), and add a connection from the **Ollama (local)**
-preset. It needs no key, its base URL is
-`http://host.docker.internal:11434/v1`, and **Fetch models** lists what you
-have pulled, priced at $0. Choose it for the jobs you want it to do.
+Then connect an AI on **Settings** (http://localhost:8080/settings), for
+example:
 
 **Anthropic, with a key that cannot overspend.** Claude Max 5x, Max 20x and
 Team plans include monthly API credit ($100 a month on Max 5x).
@@ -370,7 +366,7 @@ The **Settings** page (`/settings`) sets up which AI the service calls. Nothing
 is needed in `.env`.
 
 - **Connections.** A connection is a provider with an address and a key.
-  Presets cover Anthropic, OpenAI, Gemini, xAI, OpenRouter and Ollama (local);
+  Presets cover Anthropic, OpenAI, Gemini, xAI and OpenRouter;
   **Custom** takes any OpenAI-compatible server. Test it, then fetch its model
   list. Keys are stored in the database file (mode `0600`) and are never shown
   again or put in a log or response; the page shows a masked key.
@@ -378,8 +374,8 @@ is needed in `.env`.
   OpenAI-compatible Chat Completions API.
 - **Prices.** Every model needs a price per million input and output tokens
   before it can be used, and a call to an unpriced model is refused before
-  anything is sent. A price of 0 is allowed. Models fetched from a local
-  connection are priced 0.
+  anything is sent. Fetched models start unpriced, so nothing is free unless you
+  enter a price of 0 yourself.
 - **Jobs.** Each job picks a model, with `default` for any job left alone.
 
   | Job | Used for |
@@ -408,14 +404,6 @@ is needed in `.env`.
 **Model refs** are `<connection id>/<model id>`, split on the first `/`, so
 OpenRouter ids like `openrouter/meta-llama/llama-3.1-8b` work. A bare model id
 is accepted when exactly one enabled model has it.
-
-### Running a local model with Ollama
-
-Run Ollama on the host and add a connection from the Ollama preset. On Linux
-hosts `compose.yaml` maps `host.docker.internal` to the host, so a host-run
-Ollama is reachable from the container. If Ollama is stopped, **Test** reports
-it and a job using it fails with a readable log line (the API returns 502)
-instead of crashing.
 
 ## Configuration
 
@@ -450,7 +438,7 @@ A collection remembers the dense model it was built with. Changing
   cross the cap is refused before it is sent, and an evaluation that hits the
   cap stops with `stopped_budget` and keeps its rows.
 - **No price, no call.** A model with no price is refused before anything is
-  sent. Local models are priced $0.
+  sent.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
   imports and keyword-list proposals return the estimate unless
   `confirm: true` is set. The Lab (`/query`) is the exception: it spends at
@@ -467,7 +455,7 @@ Rough prices on Haiku 5.5: a one-shot multiple-choice answer (400 answer tokens
 at most) is about $0.0005, and a 200-question × 10-method evaluation with
 answers about $1. A science answer works the problem out and may use up to
 1,500 answer tokens, so science runs cost more. Sonnet costs about 20 times as
-much. On a local model, all of it is $0.
+much.
 
 ## Pages
 
@@ -589,9 +577,9 @@ from pathlib import Path
 from aiconnect.ai import AI
 
 ai = AI(Path("my-app.db"))
-ai.add_connection("ollama", "openai", "Ollama", base_url="http://localhost:11434/v1", local=True)
-ai.add_model("ollama", "llama3.1:8b", price_in=0, price_out=0)
-ai.set_role("default", "ollama/llama3.1:8b")
+ai.add_connection("anthropic", "anthropic", "Anthropic", api_key="sk-ant-...")
+ai.add_model("anthropic", "claude-haiku-5-5", price_in=0.10, price_out=0.50)
+ai.set_role("default", "anthropic/claude-haiku-5-5")
 
 reply = ai.complete("Name three noble gases.", role="default", purpose="demo")
 print(reply.text, reply.usd, reply.cached)

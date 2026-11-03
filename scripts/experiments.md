@@ -146,9 +146,9 @@ python scripts/experiments.py run x4 sci --confirm          # refuses if it cost
 python scripts/experiments.py run x4 sci --confirm --paid   # X4b
 ```
 
-X4a is free when the `answer` job uses a local model (Ollama on the host); X4b is the
-**only paid experiment**, about 1,200 answer calls (four arms over about 300 items) on
-a Haiku-class model. Read the estimate first and keep the monthly cap set.
+Both halves of X4 call the `answer` model and cost money: X4a is the small first
+pass, X4b about 1,200 answer calls (four arms over about 300 items) on a Haiku-class
+model. Read the estimate first and keep the monthly cap set.
 
 | | X4a | X4b |
 |---|---|---|
