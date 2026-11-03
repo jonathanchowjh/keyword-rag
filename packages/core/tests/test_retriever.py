@@ -519,6 +519,31 @@ def test_keyword_rag_refuses_while_retagging(tmp_path):
     assert r.retrieve("c", "enzyme kinetics", "kw_individual")  # the lists still answer
 
 
+def stopped_retag(conn, status: str, progress: float) -> None:
+    job = create_job(conn, "retag", "c", {"version": "v"})
+    claim_next_job_id(conn)
+    db.update_job(conn, job, status=status, progress=progress)
+
+
+def test_keyword_rag_refuses_after_a_retag_stopped_writing(tmp_path):
+    r, conn = build(tmp_path)
+    stopped_retag(conn, "cancelled", 0.5)  # the worker checks before it records progress
+    create_job(conn, "retag", "c", {"version": "v2"})  # saved again, still waiting
+    with pytest.raises(MethodUnavailable, match="partly re-tagged"):
+        r.retrieve("c", "enzyme kinetics", "keyword_rag")
+    with pytest.raises(MethodUnavailable, match="partly re-tagged"):
+        r.query_tags(r.spec("c"), "enzyme", SearchSettings(), ())
+    claim_next_job_id(conn)
+    db.update_job(conn, db.newest_jobs(conn)[0]["id"], status="done", progress=1.0)
+    assert r.retrieve("c", "enzyme kinetics", "keyword_rag")
+
+
+def test_keyword_rag_answers_after_a_retag_stopped_before_writing(tmp_path):
+    r, conn = build(tmp_path)
+    stopped_retag(conn, "cancelled", 0.3)  # still choosing tags: nothing was written
+    assert r.retrieve("c", "enzyme kinetics", "keyword_rag")
+
+
 def test_keyword_rag_is_not_paid(tmp_path):
     r, _ = build(tmp_path)
     summarizing = CollectionSpec("s", "mcq", True, "fake/dense", 256)

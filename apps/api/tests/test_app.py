@@ -608,6 +608,15 @@ def test_query_keyword_rag_without_vocabulary_is_a_method_error(client):
     assert results["hybrid"]["hits"]
 
 
+def test_eval_keyword_rag_without_vocabulary_is_refused_before_queueing(client):
+    add_collection(client)
+    run = {"collection": "c", "methods": ["hybrid", "keyword_rag"], "answer": True}
+    assert "estimate" in client.post("/eval", json=run).json()
+    r = client.post("/eval", json={**run, "confirm": True})
+    assert r.status_code == 409 and "no vocabulary for collection 'c'" in r.json()["detail"]
+    assert client.get("/eval?collection=c").json() == []
+
+
 def test_eval_records_the_search_override(client):
     reference_with_vocabulary(client)
     db.save_questions(

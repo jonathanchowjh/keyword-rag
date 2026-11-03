@@ -1,9 +1,12 @@
 """Program-and-run answers (spec D14): the answering model writes a short Python program,
 it runs here, and its last printed line is the answer.
 
-The sandbox bounds time, memory, file size and output and gives the program an empty
-environment and a fresh temp dir. It is NOT network-isolated, so it only ever runs code
-written by the user's own configured model."""
+The sandbox bounds time, memory, file size and output, stops the program starting any
+process or thread, and gives it a fresh temp dir and no secrets in its environment.
+
+It is NOT network-isolated and it can read what the service can read, the database of
+stored API keys included. The code comes from the user's configured model, but that model
+reads the question and the passages, so text in a corpus can steer what it writes."""
 
 import os
 import re
@@ -20,6 +23,8 @@ OUTPUT_CAP = 2000  # characters of stdout kept
 CPU_SECONDS = 10
 MEMORY_BYTES = 512 * 1024 * 1024
 FILE_BYTES = 1024 * 1024
+# ONE BLAS THREAD: with no threads allowed, numpy's default pool dies on import on Linux.
+PROGRAM_ENV = {"OPENBLAS_NUM_THREADS": "1"}
 ERROR_CAP = 500  # the tail of stderr kept as the error
 PYTHON_BLOCK = re.compile(r"```python[^\n]*\n(.*?)```", re.S)
 
@@ -37,6 +42,8 @@ def limit_resources() -> None:
         (resource.RLIMIT_CPU, CPU_SECONDS),
         (resource.RLIMIT_AS, MEMORY_BYTES),
         (resource.RLIMIT_FSIZE, FILE_BYTES),
+        # No new process, so nothing can leave the group the timeout kills. Root ignores it.
+        (resource.RLIMIT_NPROC, 0),
     ):
         try:
             resource.setrlimit(limit, (value, value))
@@ -45,7 +52,7 @@ def limit_resources() -> None:
 
 
 def run_program(code: str) -> dict:
-    """Run `code` as `python -I -c` in a fresh temp dir with an empty environment.
+    """Run `code` as `python -I -c` in a fresh temp dir with only PROGRAM_ENV set.
     `ran` is True only for a clean exit within the timeout. A program that cannot be
     started (a NUL byte in it, no process to spare) did not run: it never raises."""
     try:
@@ -66,7 +73,7 @@ def launch(code: str) -> dict:
         proc = subprocess.Popen(
             [sys.executable, "-I", "-c", code],
             cwd=cwd,
-            env={},
+            env=PROGRAM_ENV,
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=err,

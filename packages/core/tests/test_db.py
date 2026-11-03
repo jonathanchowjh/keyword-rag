@@ -132,9 +132,14 @@ def test_old_collections_migrate_to_paper_2024(tmp_path):
         " include_leaked integer not null default 0)"
     )
     raw.execute("insert into collections values ('old', 'multihop', 1, 'm', 8, null, 'now', 0)")
+    raw.execute("insert into collections values ('sci', 'science', 0, 'm', 8, null, 'now', 0)")
     raw.commit()
     raw.close()
     conn = connect(path)
+    science = get_collection(conn, "sci")
+    # It never ran model-written code, so migrating does not start to.
+    assert science is not None and science.search is not None
+    assert science.search.program is False
     spec = get_collection(conn, "old")
     assert spec is not None and spec.build is not None and spec.search is not None
     assert (spec.corpus_type, spec.recipe, spec.build.added_text) == (

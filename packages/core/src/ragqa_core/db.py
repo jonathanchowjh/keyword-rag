@@ -19,7 +19,7 @@ writes, so it assumes a single writer (the worker).
 import json
 import sqlite3
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -107,10 +107,13 @@ NEW_COLLECTION_COLUMNS = (
 
 
 def _migrate_collections(conn: Connection) -> None:
-    """Collections from before recipes become "paper 2024", with their old summarize flag."""
+    """Collections from before recipes become "paper 2024", with their old summarize flag.
+    Program answers stay off: they never ran model-written code, and a migration must not
+    start to."""
     for row in conn.execute("select * from collections where recipe is null"):
         qa_type = row["qa_type"]
         build = build_for("paper_2024", bool(row["summarize"]))
+        search = replace(default_search(qa_type, build), program=False)
         conn.execute(
             "update collections set corpus_type = ?, recipe = ?, build_json = ?,"
             " search_json = ?, profile_json = ? where name = ?",
@@ -118,7 +121,7 @@ def _migrate_collections(conn: Connection) -> None:
                 corpus_type_for(qa_type),
                 "paper_2024",
                 json.dumps(asdict(build)),
-                json.dumps(asdict(default_search(qa_type, build))),
+                json.dumps(asdict(search)),
                 "{}",
                 row["name"],
             ),
@@ -567,6 +570,22 @@ def job_running(conn: Connection, kind: str, collection: str) -> bool:
         conn.execute(
             "select 1 from jobs where kind = ? and collection = ? and status = 'running' limit 1",
             (kind, collection),
+        )
+    )
+    return row is not None
+
+
+def retag_partly_done(conn: Connection, collection: str) -> bool:
+    """A retag since the last finished one stopped after it began writing tags. Choosing
+    them is the first half of its progress, and the worker records progress after its cancel
+    check, so a stop just after the first batch is written still reads exactly 0.5."""
+    row = first(
+        conn.execute(
+            "select 1 from jobs where kind = 'retag' and collection = ?1"
+            " and status in ('failed', 'cancelled', 'interrupted') and progress >= 0.5"
+            " and rowid > coalesce((select max(rowid) from jobs where kind = 'retag'"
+            " and collection = ?1 and status = 'done'), 0) limit 1",
+            (collection,),
         )
     )
     return row is not None

@@ -1200,6 +1200,45 @@ def test_eval_uses_program_answer_and_records_it(env):
     assert sum("```python" in p for p in sent) == 1
 
 
+def test_cancel_stops_between_programs_and_resuming_pays_nothing(env, monkeypatch):
+    conn, ev = env
+    asked = []
+
+    def reply(prompt):
+        asked.append(prompt)
+        return PROGRAM_REPLY
+
+    ev.ai = fake_ai(conn, reply)
+    ev.retriever.ai = ev.ai
+    questions = [
+        Question(f"s-{n}", f"an enzyme problem {n}", None, ["42"], [], {"skill": "enzyme"})
+        for n in range(25)
+    ]
+    science_env(conn, ev, "sci", ITEMS, questions)
+    job = ev.queue("sci", "dev", ["hybrid"], True, None, search={"program": True})
+    ran = []
+
+    def counted(text):
+        ran.append(text)
+        return "42", {"ran": True, "output": "42\n", "error": None}
+
+    monkeypatch.setattr("ragqa_core.evaluator.program_answer", counted)
+
+    def check():
+        if ran:
+            raise Cancelled()
+
+    ev.run(job, check)
+    assert db.get_job(conn, job)["status"] == "cancelled"
+    assert len(ran) == 9  # stopped at the check before the 10th, not after all 25
+    paid = len(asked)
+    assert paid == 25
+    ev.run(job)
+    assert db.get_job(conn, job)["status"] == "done"
+    assert len(asked) == paid  # the answers were cached
+    assert len(ran) == 25
+
+
 def test_eval_program_that_fails_falls_back_to_the_answer_line(env):
     conn, ev = env
     ev.ai = fake_ai(conn, lambda p: "```python\nraise ValueError('boom')\n```\nAnswer: 3.0")

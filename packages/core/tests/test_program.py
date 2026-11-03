@@ -64,8 +64,26 @@ def test_a_program_that_cannot_start_did_not_run():
     assert out is None and rec["ran"] is False
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process limits are POSIX")
+def test_a_program_cannot_start_a_process_to_outlive_the_timeout():
+    code = (
+        "import subprocess\n"
+        'subprocess.Popen(["sleep", "30"], start_new_session=True)\n'
+        'print("escaped")\n'
+    )
+    rec = run_program(code)
+    assert rec["ran"] is False and "escaped" not in (rec["output"] or "")
+
+
+def test_a_program_can_use_numpy():
+    rec = run_program("import numpy as np\nprint(np.ones((2, 2)).sum())")
+    assert rec["ran"] is True and rec["output"] == "4.0\n", rec
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
 def test_timeout_kills_the_programs_children(monkeypatch):
+    # The group kill is the backstop where the process limit does not bind (root).
+    monkeypatch.setattr(program, "limit_resources", lambda: None)
     monkeypatch.setattr(program, "PROGRAM_TIMEOUT", 1)
     code = (
         "import os, time\n"

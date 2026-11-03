@@ -237,7 +237,7 @@ class Retriever:
     ) -> list[Hit]:
         """Meaning, word match and the predicted keywords, fused by weighted RRF (D7). A
         channel weighted 0 is not searched; with no query tags, keywords finds nothing."""
-        self._vocabulary(spec)
+        self.vocabulary(spec)
         if tags is None:
             tags = self.query_tags(spec, q, search, skip.sources, skip.items)
         weights = search.weights
@@ -284,7 +284,7 @@ class Retriever:
         a bare question does not have. Skipped sources and excluded items cast no vote."""
         if search.query_tags == "oracle":
             raise ValueError("oracle tags need a question's gold")
-        terms = self._vocabulary(spec)
+        terms = self.vocabulary(spec)
         self.indexer.check_model(spec)
         build = build_of(spec)
         if search.query_tags == "classifier":
@@ -385,11 +385,16 @@ class Retriever:
         keywords, vectors = self.indexer.keywords_for(spec, lists, [q], [summary])
         return keywords[0], {name: vecs[0] for name, vecs in vectors.items()}
 
-    def _vocabulary(self, spec: CollectionSpec) -> list[str]:
-        """The terms in force; refused while a retag is switching them, or when there are none."""
+    def vocabulary(self, spec: CollectionSpec) -> list[str]:
+        """The terms in force; refused while a retag is switching them, after one stopped
+        partway (items hold two versions' tags), or when there are none."""
         if db.job_running(self.conn, "retag", spec.name):
             raise MethodUnavailable(
                 "the vocabulary is being re-tagged; try again when the job finishes"
+            )
+        if db.retag_partly_done(self.conn, spec.name):
+            raise MethodUnavailable(
+                f"the vocabulary of collection '{spec.name}' is partly re-tagged; save it again"
             )
         terms = db.get_vocabulary(self.conn, spec.name)
         if not terms:

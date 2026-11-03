@@ -246,7 +246,9 @@ first; with no model set up for `keywords` they return 503 rather than spend. Th
 question's `meta` (ScienceQA's skill, topic and lecture) never reaches those
 prompts. A recipe's vocabulary is reviewed through the API: `GET
 /collections/{name}/vocabulary` exports the terms, and `PUT` with the edited list
-re-tags every item (see [Endpoints](#endpoints)). Without an AI model a
+re-tags every item (see [Endpoints](#endpoints)). A re-tag that stops after it
+has begun writing leaves `keyword_rag` refused until the vocabulary is saved
+again, so no search mixes two versions' tags. Without an AI model a
 paper-2024 load saves no keyword lists and the collection reads `no_lists`; the
 old TF-IDF lists are gone.
 
@@ -305,13 +307,19 @@ asked to cite them as `[n]`.
 With `program` on, a question without choices is answered by a program: the
 model writes a short Python block that prints the answer, and the service runs
 it locally and takes the last line it printed. A program that fails, times out
-or prints nothing falls back to the model's `Answer:` line. The run gets an
-empty environment and a fresh temp directory, 10 s, 512 MB of memory (on
-Linux), 1 MB of file writes and 2,000 characters of output. It is not
-network-isolated, so it only runs code written by the AI model you set up for
-the `answer` job. It can also read any file the service can read, and its code
-follows the question and the passages, so turn program answers on only for
-corpora you trust.
+or prints nothing falls back to the model's `Answer:` line. The run gets a
+fresh temp directory and no secrets in its environment, 10 s, 512 MB of memory
+(on Linux), 1 MB of file writes, 2,000 characters of output, and no new
+processes or threads (unless the service runs as root).
+
+`program` is on by default for new science and table collections; collections
+made before recipes keep it off. Turn it off with `PUT
+/collections/{name}/search` `{"program": false}` for any corpus you did not
+write. The program is not network-isolated and can read any file the service
+can read, including the database that holds stored API keys. Its code comes
+from the AI model set up for the `answer` job, but that model reads the
+question and the passages, so text planted in a corpus can steer what it
+writes.
 
 ## Datasets
 
@@ -500,7 +508,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
-| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
+| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome`; `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |

@@ -896,6 +896,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
         need_models(estimate, body.model)
+        if "keyword_rag" in body.methods:
+            state.retriever.vocabulary(spec)  # refused here, not after the other methods spent
         job_id = state.evaluator.queue(
             body.collection,
             body.split,

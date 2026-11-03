@@ -23,6 +23,16 @@ for _ in $(seq 1 120); do
 done
 curl -sf "$BASE/health" | python3 -I -c 'import json,sys; h=json.load(sys.stdin); assert h=={"ok":True,"ai":False}, h'
 
+# Linux only shows it: with no threads allowed, a program must still import numpy and
+# must still be unable to start a process.
+compose exec -T api python -I -c '
+from ragqa_core.program import run_program
+ok = run_program("import numpy as np\nprint(np.ones((2, 2)).sum())")
+assert ok["ran"] and ok["output"] == "4.0\n", ok
+forked = run_program("import os\nprint(os.fork())")
+assert not forked["ran"], forked
+print("smoke: program sandbox ok")'
+
 post() { curl -sf -X "$1" "$BASE$2" -H 'content-type: application/json' -d "$3"; }
 
 post POST /collections '{"name":"smoke","qa_type":"mcq"}' >/dev/null

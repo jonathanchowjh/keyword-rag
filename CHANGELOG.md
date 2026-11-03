@@ -12,7 +12,8 @@
   per-collection search settings (`PUT /collections/{name}/search`) that `/eval` and
   `/query` override in part. Answers can use abstracted or full examples, numbered
   best-first-and-last passages with `[n]` citations, and a locally run program for
-  numeric questions (10 s, 512 MB, empty environment, not network-isolated).
+  numeric questions (10 s, 512 MB, no new processes, not network-isolated; on by
+  default for new science and table collections, off for older ones).
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

@@ -557,10 +557,11 @@ class Evaluator:
         for n, (q, row, hits, program, completion) in enumerate(
             zip(questions, rows, shown, programs, done, strict=True), start=1
         ):
-            # PROGRAMS RUN HERE, UP TO PROGRAM_TIMEOUT EACH: progress moves, but no cancel
-            # check, since every answer in this batch is already paid for.
+            # PROGRAMS RUN HERE, UP TO PROGRAM_TIMEOUT EACH, so a cancel must not wait for all
+            # of them. It costs nothing: the answers are cached, and a resume finds them.
             if n % 10 == 0:
                 report(span + (0.99 - span) * n / len(questions))
+                check()
             pred = parse_answer(spec.qa_type, completion.text, bool(q.choices))
             record = None
             if program:
