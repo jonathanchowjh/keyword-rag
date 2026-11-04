@@ -1,6 +1,7 @@
 """Starting points for the connection form. Provider names live here and in wire.py."""
 
-KINDS = ("anthropic", "openai")
+# manual: nothing is sent. A prompt its cache does not hold waits until a reply is imported.
+KINDS = ("anthropic", "openai", "manual")
 
 # models: model id -> (label, USD per million input tokens, USD per million output tokens)
 PRESETS: dict[str, dict] = {
@@ -45,6 +46,13 @@ PRESETS: dict[str, dict] = {
     "custom": {
         "label": "Custom",
         "kind": "openai",
+        "base_url": None,
+        "models": {},
+        "default_model": None,
+    },
+    "manual": {
+        "label": "Answered by hand",
+        "kind": "manual",
         "base_url": None,
         "models": {},
         "default_model": None,

@@ -138,6 +138,25 @@ def test_run_stops_without_key(env):
     assert get_job(conn, job)["status"] == "stopped_no_key"
 
 
+def test_a_run_answered_by_hand_stops_for_replies_and_resumes_on_them(env):
+    conn, ev = env
+    ev.ai.add_connection("hand", "manual", "Answered by hand")
+    ev.ai.add_model("hand", "m", price_in=0.0, price_out=0.0)
+    ev.ai.set_role("answer", "hand/m")
+    job = create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True))
+    with ev.ai.for_job(job, lambda: None, lambda m: None):  # as the worker runs it
+        ev.run(job)
+    row = get_job(conn, job)
+    assert row["status"] == "stopped_replies" and "ragqa_core.replies export" in row["error"]
+    assert ev.resume_refusal(job) is None
+    waiting = ev.ai.waiting(job)
+    assert len(waiting) == 5 and {w["purpose"] for w in waiting} == {"answer"}
+    ev.ai.answer({w["key"]: "Answer: A" for w in waiting})
+    ev.run(job)
+    t = ev.table(job)
+    assert t["status"] == "done" and t["methods"]["hybrid"]["accuracy"]["mean"] == 1.0
+
+
 def test_run_records_failure(env):
     conn, ev = env
     job = create_job(conn, "eval", "c", setup_for(["nope"]))

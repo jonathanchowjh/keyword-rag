@@ -411,7 +411,8 @@ is needed in `.env`.
   list. Keys are stored in the database file (mode `0600`) and are never shown
   again or put in a log or response; the page shows a masked key.
 - **Two kinds cover every provider:** Anthropic's Messages API, and the
-  OpenAI-compatible Chat Completions API.
+  OpenAI-compatible Chat Completions API. A third, **Answered by hand**, sends
+  nothing (see below).
 - **Prices.** Every model needs a price per million input and output tokens
   before it can be used, and a call to an unpriced model is refused before
   anything is sent. Fetched models start unpriced, so nothing is free unless you
@@ -444,6 +445,31 @@ is needed in `.env`.
 **Model refs** are `<connection id>/<model id>`, split on the first `/`, so
 OpenRouter ids like `openrouter/meta-llama/llama-3.1-8b` work. A bare model id
 is accepted when exactly one enabled model has it.
+
+### Answered by hand
+
+A connection of kind `manual` sends nothing: a person, or an assistant session,
+writes the replies. Add one with the **Answered by hand** preset, add its models by
+hand and give each a price (0 is allowed), then choose one for a job.
+
+A job that asks such a model something its cache does not hold stops with
+`stopped_replies`, and its prompts wait. Each AI step of a job asks all its prompts at
+once, so a stop holds a whole step: an eval's tags, then each method's answers; a
+load's vocabulary, then its tags and its abstracted examples. Inside the api
+container:
+
+```sh
+python -m ragqa_core.replies export prompts.jsonl [--job JOB_ID]
+# one {"key", "model", "purpose", "job_id", "max_tokens", "system", "prompt"} a line
+python -m ragqa_core.replies import replies.jsonl
+# one {"key", "reply"} a line, for any of the waiting prompts
+```
+
+Then resume the run (or load again): the job finds the replies cached and stops again
+at its next step that asks for something new. A reply is recorded as the model's
+answer, ledgered to its job at the model's price on estimated tokens. An import is
+refused whole, recording nothing, if a reply is empty or answers no waiting prompt.
+Removing the connection drops its waiting prompts.
 
 ## Configuration
 

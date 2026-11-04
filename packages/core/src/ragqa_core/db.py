@@ -470,7 +470,14 @@ def newest_jobs(conn: Connection) -> list[dict]:
     return [_job(r) for r in rows]
 
 
-JOBS_RESUMABLE = ("interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed")
+JOBS_RESUMABLE = (
+    "interrupted",
+    "cancelled",
+    "stopped_budget",
+    "stopped_no_key",
+    "stopped_replies",
+    "failed",
+)
 
 
 def requeue(conn: Connection, job_id: str) -> bool:

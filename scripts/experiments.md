@@ -154,6 +154,12 @@ Every arm calls the `answer` model once per dev question, so X4 always costs mon
 monthly cap set. The four arms share the dev questions, so the Run pages or the rows
 of the four runs can be compared question by question.
 
+To answer the arms without a provider, choose a model answered by hand for the
+`answer` job (README, "Answered by hand"; a price of 0). Each run then stops once
+with `stopped_replies`. Export its prompts with `python -m ragqa_core.replies export
+--job JOB_ID`, write the replies, import them, and resume the run. The same works
+for the `model` arm of X2, on the `query` job.
+
 | | |
 |---|---|
 | Design | Answer accuracy, four arms: zero-shot, full retrieved example, abstracted retrieved example, abstracted *random* example, on a priced answer model |

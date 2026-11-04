@@ -7,7 +7,14 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Literal
 
-from aiconnect.ai import AI, BATCH_THRESHOLD, BudgetExceeded, Cancelled, NoConnection
+from aiconnect.ai import (
+    AI,
+    BATCH_THRESHOLD,
+    AwaitingReplies,
+    BudgetExceeded,
+    Cancelled,
+    NoConnection,
+)
 from ragqa_core import db, verdict
 from ragqa_core.builder import TAG_TOKENS, build_of
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
@@ -486,6 +493,8 @@ class Evaluator:
             db.update_job(self.conn, job_id, status="stopped_budget", error=str(e))
         except NoConnection as e:
             db.update_job(self.conn, job_id, status="stopped_no_key", error=no_ai(e.role))
+        except AwaitingReplies as e:
+            db.update_job(self.conn, job_id, status="stopped_replies", error=awaiting(e))
         except Exception as e:  # recorded on the job; the thread must not die silently
             db.update_job(self.conn, job_id, status="failed", error=repr(e))
 
@@ -911,6 +920,13 @@ class Evaluator:
 
 def no_ai(role: str) -> str:
     return f"no AI model is set up for the '{role}' job; choose one on the Settings page"
+
+
+def awaiting(e: AwaitingReplies) -> str:
+    return (
+        f"{e}: export them with `python -m ragqa_core.replies export`, import the replies,"
+        " then resume the run or load again"
+    )
 
 
 def avg(values) -> float:

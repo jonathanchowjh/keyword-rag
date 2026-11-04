@@ -31,19 +31,24 @@ async function act(change) {
 // -- connections ------------------------------------------------------------------
 
 function connectionHtml(c) {
+  // Answered by hand: nothing is sent, so there is no key, nothing to test and no model list.
+  const manual = c.kind === "manual";
   const locked = c.from_env.includes("api_key");
   const key = locked ? ENV : c.key ?? "no key";
   const where = c.base_url ? `<code>${esc(c.base_url)}</code>` : "";
-  const keyBox = `<div class="keyline"><label>New key <input type="password" name="key" autocomplete="off"
+  const keyBox = manual ? "" : `<div class="keyline"><label>New key <input type="password" name="key" autocomplete="off"
         ${locked ? `disabled placeholder="${ENV}"` : ""}></label>
         <button type="button" class="secondary" data-act="key" disabled>Save key</button></div>`;
+  const status = manual
+    ? '<span class="muted">prompts wait for replies: <code>python -m ragqa_core.replies</code></span>'
+    : `<span class="muted">key ${esc(key)}</span>`;
   return `<div class="card conn" data-connection="${esc(c.id)}">
     <div class="top"><strong>${esc(c.label)}</strong><code>${esc(c.kind)}</code>${where}
-      <span class="muted">key ${esc(key)}</span></div>
+      ${status}</div>
     ${keyBox}
     <div class="actions" style="margin:0">
-      <button type="button" class="secondary" data-act="test">Test</button>
-      <button type="button" class="secondary" data-act="fetch">Fetch models</button>
+      ${manual ? "" : `<button type="button" class="secondary" data-act="test">Test</button>
+      <button type="button" class="secondary" data-act="fetch">Fetch models</button>`}
       ${c.from_env.length ? "" : '<button type="button" class="danger" data-act="remove">Remove</button>'}
       <span class="result" role="status">${notes[c.id] ?? ""}</span></div>
   </div>`;

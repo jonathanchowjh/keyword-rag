@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from aiconnect.ai import BudgetExceeded, NoConnection
+from aiconnect.ai import AwaitingReplies, BudgetExceeded, NoConnection
 from ragqa_core import db
 from ragqa_core.builder import Builder
 from ragqa_core.db import connect, get_job, save_questions
@@ -133,6 +133,7 @@ def test_progress_logs_each_ten_percent_step_once(env):
     [
         (BudgetExceeded("cap"), "stopped_budget"),
         (NoConnection("answer"), "stopped_no_key"),
+        (AwaitingReplies(3), "stopped_replies"),
         (RuntimeError("boom"), "failed"),
     ],
 )
@@ -147,7 +148,12 @@ def test_exceptions_map_to_statuses(env, exc, status):
     w.run_one()
     job = get_job(conn, j)
     assert job["status"] == status
-    expected = {"failed": repr(exc), "stopped_budget": str(exc)}.get(status)
+    expected = {
+        "failed": repr(exc),
+        "stopped_budget": str(exc),
+        "stopped_replies": f"{exc}: export them with `python -m ragqa_core.replies export`,"
+        " import the replies, then resume the run or load again",
+    }.get(status)
     assert job["error"] == expected
 
 

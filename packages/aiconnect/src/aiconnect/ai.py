@@ -60,6 +60,11 @@ create table if not exists ai_batches (
   id text primary key, model text not null, purpose text not null, created_at text not null,
   usd real not null default 0, job_id text, connection_id text
 );
+create table if not exists ai_waiting (
+  key text not null, model text not null, system text not null, prompt text not null,
+  max_tokens integer not null, purpose text not null, job_id text not null default '',
+  at text not null, primary key (key, job_id)
+);
 """
 
 
@@ -91,6 +96,15 @@ class BudgetExceeded(Exception):
 
 class Cancelled(Exception):
     pass
+
+
+class AwaitingReplies(Exception):
+    """A connection answered by hand was asked what its cache does not hold. The prompts
+    wait (AI.waiting) until their replies are imported (AI.answer); then the call is cached."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(f"{count} prompt{'' if count == 1 else 's'} wait for replies by hand")
 
 
 def mask(key: str | None) -> str | None:
@@ -212,6 +226,10 @@ class AI:
                 raise Conflict(f"connection {id} has a batch still pending")
             self.sql("delete from ai_models where connection_id = ?", (id,))
             self.sql("delete from ai_connections where id = ?", (id,))
+            # Its waiting prompts could never be answered now.
+            self.sql(
+                "delete from ai_waiting where substr(model, 1, ?) = ?", (len(id) + 1, id + "/")
+            )
 
     def connections(self) -> list[dict]:
         return [
@@ -299,6 +317,8 @@ class AI:
         """Adds the connection's models that are not stored yet and returns their ids.
         Every model has no price until one is entered, so none is free by default."""
         connection = self._connection(connection_id)
+        if connection["kind"] == "manual":
+            raise Conflict(f"{connection_id} is answered by hand: add its models by hand")
         known = {m["model_id"] for m in self.models() if m["connection_id"] == connection_id}
         added = [m for m in dict.fromkeys(self._list_models(connection)) if m not in known]
         for model_id in added:
@@ -307,7 +327,9 @@ class AI:
 
     def test_connection(self, connection_id: str) -> dict:
         """One tiny paid call, ledgered under purpose "test". Failures are reported, not raised."""
-        self.need_connection(connection_id)
+        if self.need_connection(connection_id)["kind"] == "manual":
+            error = "answered by hand: nothing is sent, so there is nothing to test"
+            return {"ok": False, "model": None, "usd": 0.0, "error": error}
         model_id = next(
             (
                 m["model_id"]
@@ -522,7 +544,7 @@ class AI:
         )
         connection = self.need_connection(connection_id)
         return bool(rows and rows[0]["enabled"]) and (
-            bool(connection["api_key"]) or connection["kind"] == "openai"
+            bool(connection["api_key"]) or connection["kind"] in ("openai", "manual")
         )
 
     def rates(self, connection_id: str, model_id: str) -> tuple[float, float] | None:
@@ -584,6 +606,8 @@ class AI:
             raise NoConnection(role)
         rates = self.need_rates(connection_id, model_id)
         connection = dict(self.need_connection(connection_id))
+        if connection["kind"] == "manual":
+            self._hold(connection_id, model_id, system, max_tokens, purpose, misses)
         if cache:
             # A batch submitted before a crash may already hold these answers.
             self.collect_pending()
@@ -651,6 +675,79 @@ class AI:
                 results[key] = Completion(
                     row["text"], 0.0, True, row["input_tokens"], row["output_tokens"]
                 )
+
+    # answered by hand
+
+    def _hold(
+        self,
+        connection_id: str,
+        model_id: str,
+        system: str,
+        max_tokens: int,
+        purpose: str,
+        misses: dict[str, str],
+    ) -> None:
+        """Keeps the prompts a connection answered by hand was asked, and raises: nothing is
+        sent, and a call asked again after the replies are imported finds them cached."""
+        job_id = getattr(self._job, "job_id", None) or ""  # "": asked by no job
+        at = datetime.now(UTC).isoformat()
+        for key, prompt in misses.items():
+            self.sql(
+                "insert or ignore into ai_waiting values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    f"{connection_id}/{model_id}",
+                    system,
+                    prompt,
+                    max_tokens,
+                    purpose,
+                    job_id,
+                    at,
+                ),
+            )
+        raise AwaitingReplies(len(misses))
+
+    def waiting(self, job_id: str | None = None) -> list[dict]:
+        """The prompts waiting for replies by hand, oldest first: those job_id asked when
+        given, else each prompt once, under the first job that asked it. Two jobs can ask
+        the same prompt; one reply answers both. A prompt cached by now no longer waits."""
+        self.sql("delete from ai_waiting where key in (select key from ai_cache)")
+        first: dict[str, dict] = {}
+        for r in self.sql("select * from ai_waiting order by at, rowid"):
+            row = {**dict(r), "job_id": r["job_id"] or None}
+            if job_id is None:
+                first.setdefault(row["key"], row)
+            elif row["job_id"] == job_id:
+                first[row["key"]] = row
+        return list(first.values())
+
+    def answer(self, replies: dict[str, str]) -> int:
+        """Records replies to waiting prompts as if their model had sent them: cached, and
+        ledgered to the first job that asked, at the model's price, on estimated tokens.
+        Refuses them all, recording none, when one is empty or answers no waiting prompt."""
+        waiting = {r["key"]: r for r in self.waiting()}
+        unknown = [k for k in replies if k not in waiting]
+        if unknown:
+            raise ValueError(f"{len(unknown)} replies answer no waiting prompt: {unknown[:3]}")
+        empty = [k for k, text in replies.items() if not text.strip()]
+        if empty:
+            raise ValueError(f"{len(empty)} replies are empty: {empty[:3]}")
+        for key, text in replies.items():
+            row = waiting[key]
+            connection_id, model_id = self.split(row["model"])
+            self._record(
+                key,
+                connection_id,
+                model_id,
+                text,
+                estimate_tokens(len(row["system"]) + len(row["prompt"])),
+                estimate_tokens(len(text)),
+                False,
+                row["purpose"],
+                job_id=row["job_id"],
+            )
+            self.sql("delete from ai_waiting where key = ?", (key,))
+        return len(replies)
 
     def _record(
         self,

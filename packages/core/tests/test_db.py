@@ -421,6 +421,7 @@ def test_jobs_resumable_statuses():
         "cancelled",
         "stopped_budget",
         "stopped_no_key",
+        "stopped_replies",
         "failed",
     )
 

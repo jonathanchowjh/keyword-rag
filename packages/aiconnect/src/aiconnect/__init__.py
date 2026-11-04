@@ -3,6 +3,7 @@
 from aiconnect.ai import (
     AI,
     KEEP,
+    AwaitingReplies,
     BudgetExceeded,
     Cancelled,
     Conflict,
@@ -16,6 +17,7 @@ from aiconnect.types import Completion
 __all__ = [
     "AI",
     "KEEP",
+    "AwaitingReplies",
     "BudgetExceeded",
     "Cancelled",
     "Conflict",

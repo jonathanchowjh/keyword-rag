@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from aiconnect.ai import (
     AI,
+    AwaitingReplies,
     BudgetExceeded,
     Conflict,
     NoConnection,
@@ -67,7 +68,13 @@ from ragqa_core.vocabulary import clean_terms
 from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
-PER_METHOD_ERRORS = (MethodUnavailable, NoConnection, BudgetExceeded, ModelMismatch)
+PER_METHOD_ERRORS = (
+    MethodUnavailable,
+    NoConnection,
+    BudgetExceeded,
+    ModelMismatch,
+    AwaitingReplies,
+)
 BUSY_STATE = {
     "load": "loading",
     "rekey": "rekeying",
@@ -85,10 +92,11 @@ PROBLEM = {
     "interrupted": "was interrupted by a restart",
     "stopped_budget": "stopped at the monthly cap",
     "stopped_no_key": "stopped: no AI model is set up for this job (see the Settings page)",
+    "stopped_replies": "stopped: its prompts wait for replies by hand",
 }
 KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
-COPY_UNFINISHED = (*REKEY_PARTLY_DONE, "stopped_budget", "stopped_no_key")
+COPY_UNFINISHED = (*REKEY_PARTLY_DONE, "stopped_budget", "stopped_no_key", "stopped_replies")
 
 
 class NewCollection(BaseModel):
@@ -333,7 +341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(TooLarge, error(413))
     for exc in (UnknownModel, UnknownPrice):
         app.add_exception_handler(exc, error(422))
-    for exc in (MethodUnavailable, ModelMismatch, ListsBusy, Conflict):
+    for exc in (MethodUnavailable, ModelMismatch, ListsBusy, Conflict, AwaitingReplies):
         app.add_exception_handler(exc, error(409))
     app.add_exception_handler(ProviderError, error(502))
     app.add_exception_handler(BudgetExceeded, error(402))

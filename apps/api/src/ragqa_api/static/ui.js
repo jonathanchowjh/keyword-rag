@@ -7,7 +7,7 @@ const POLL_MS = 15000;
 
 // Job statuses: still to finish, and stopped short so they may resume.
 export const BUSY = new Set(["queued", "running"]);
-export const RESUMABLE = new Set(["interrupted", "cancelled", "stopped_budget", "stopped_no_key", "failed"]);
+export const RESUMABLE = new Set(["interrupted", "cancelled", "stopped_budget", "stopped_no_key", "stopped_replies", "failed"]);
 
 export const $ = (id) => document.getElementById(id);
 
@@ -270,7 +270,7 @@ export function pill(state) {
   const kind =
     { ready: "ok", done: "ok", loading: "run", rekeying: "run", retagging: "run", copying: "run", evaluating: "run", importing: "run", labelling: "run", running: "run",
       busy: "run", queued: "idle", failed: "bad", interrupted: "bad", stopped_budget: "bad",
-      stopped_no_key: "bad", cancelled: "idle" }[state] ?? "idle";
+      stopped_no_key: "bad", stopped_replies: "idle", cancelled: "idle" }[state] ?? "idle";
   const text = String(state ?? "").replace(/_/g, " ").replace("rekeying", "re-keying").replace("retagging", "re-tagging");
   return `<span class="pill ${kind}">${esc(text.charAt(0).toUpperCase() + text.slice(1))}</span>`;
 }

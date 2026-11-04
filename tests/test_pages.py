@@ -1368,6 +1368,13 @@ def test_settings_page_adds_a_connection_whose_models_need_a_price(page, seeded,
     expect(row.locator(".result")).to_contain_text("Worked with llama3")
 
 
+def test_settings_page_shows_a_connection_answered_by_hand_without_key_or_test(page, seeded):
+    row = add_connection(page, seeded, "Answered by hand", "hand")
+    expect(row).to_contain_text("ragqa_core.replies")
+    for name in ("Test", "Fetch models", "Save key"):
+        expect(row.get_by_role("button", name=name)).to_have_count(0)
+
+
 def test_settings_page_never_shows_key(page, seeded):
     row = add_connection(page, seeded, "OpenAI", "keyed", key="sk-proj-SECRET123456")
     expect(row).to_contain_text("…3456")

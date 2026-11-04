@@ -1,10 +1,10 @@
 import threading
 
-from aiconnect.ai import AI, BudgetExceeded, Cancelled, NoConnection
+from aiconnect.ai import AI, AwaitingReplies, BudgetExceeded, Cancelled, NoConnection
 from ragqa_core import db
 from ragqa_core.builder import Builder
 from ragqa_core.connection import Connection
-from ragqa_core.evaluator import Evaluator
+from ragqa_core.evaluator import Evaluator, awaiting
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
 
@@ -90,6 +90,8 @@ class Worker:
             db.update_job(conn, job_id, status="stopped_budget", error=str(e))
         elif isinstance(e, NoConnection):
             db.update_job(conn, job_id, status="stopped_no_key")
+        elif isinstance(e, AwaitingReplies):
+            db.update_job(conn, job_id, status="stopped_replies", error=awaiting(e))
         else:
             db.update_job(conn, job_id, status="failed", error=repr(e))
 

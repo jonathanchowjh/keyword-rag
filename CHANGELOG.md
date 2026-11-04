@@ -25,6 +25,11 @@
   adding nothing, if the entry is no longer usable when it runs. Only the owner
   publishes, with `python -m ragqa_core.publish` (a dry run unless `--publish`).
   Authored outputs go into a collection with `python -m ragqa_core.apply_outputs`.
+- Connections answered by hand (kind `manual`, preset "Answered by hand"): nothing is
+  sent. A job that asks such a model something it has no reply for stops with the new
+  resumable status `stopped_replies`; `python -m ragqa_core.replies export` writes the
+  waiting prompts out and `import` records the replies, ledgered at the model's price.
+  The job then resumes from them. A query or Lab method reports the wait as its error.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

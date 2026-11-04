@@ -78,7 +78,7 @@ def test_the_service_never_runs_the_owners_tools():
     # Authored outputs are put in place, and builds published to the Hub, by the owner inside
     # the container; never by a request. What both tools need lives in core, so neither
     # imports the other either.
-    for tool in ["ragqa_core.apply_outputs", "ragqa_core.publish"]:
+    for tool in ["ragqa_core.apply_outputs", "ragqa_core.publish", "ragqa_core.replies"]:
         assert modules_importing(tool, [CORE_SRC, API_SRC, WORKER_SRC]) == [], tool
 
 

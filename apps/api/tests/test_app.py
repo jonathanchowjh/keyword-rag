@@ -235,6 +235,23 @@ def test_documents_need_confirm_when_they_cost(client):
     assert client.get("/collections/s").json()["count"] == 0
 
 
+def test_a_query_answered_by_hand_says_its_prompt_waits(client):
+    add_collection(client)
+    ai = client.app.state.ai
+    client.post("/ai/connections", json={"preset": "manual", "id": "hand"})
+    client.post(
+        "/ai/connections/hand/models", json={"model_id": "m", "price_in": 0, "price_out": 0}
+    )
+    ai.set_role("answer", "hand/m")
+    body = {"collection": "c", "question": "enzyme?", "choices": ["x", "y"], "answer": True}
+    result = client.post("/query", json={**body, "methods": ["hybrid"]}).json()["results"]
+    assert "1 prompt wait for replies by hand" in result["hybrid"]["error"]
+    [waiting] = ai.waiting()
+    ai.answer({waiting["key"]: "Answer: B"})
+    result = client.post("/query", json={**body, "methods": ["hybrid"]}).json()["results"]
+    assert result["hybrid"]["answer"] == "B" and result["hybrid"]["usd"] == 0
+
+
 def test_query_reports_unavailable_method_per_method(client):
     add_collection(client, lists=False)
     body = {"collection": "c", "question": "x", "methods": ["hybrid", "kw_all"]}
