@@ -623,6 +623,17 @@ def test_paid_methods_carry_a_costs_money_mark(page, seeded):
     ).to_have_text("costs money")
 
 
+def test_keyword_rag_costs_money_only_when_the_ai_picks_its_tags(page, seeded):
+    page.goto(seeded.url + "/")
+    marks = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+        const cat = await (await fetch('/catalog')).json();
+        return ['model', 'classifier'].map(t =>
+          m.costMark('keyword_rag', {summarize: false, search: {query_tags: t}}, cat)); }"""
+    )
+    assert "costs money" in marks[0] and marks[1] == ""
+
+
 def test_keyword_methods_say_costs_money_on_a_summarising_collection(page, seeded):
     seeded.build("sumcol", summarize=True)
     page.goto(seeded.url + "/c/sumcol")

@@ -13,6 +13,7 @@ def test_paid_marks():
     assert METHODS["iterative"]["paid"] == "always"
     assert METHODS["kw_rrf"]["paid"] == "with_summaries"
     assert METHODS["hybrid"]["paid"] == "never"
+    assert METHODS["keyword_rag"]["paid"] == "with_model_tags"  # the AI picks its tags
 
 
 def test_every_metric_the_evaluator_reports_has_a_label():

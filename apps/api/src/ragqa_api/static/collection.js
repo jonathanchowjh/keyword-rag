@@ -114,7 +114,7 @@ function runFormHtml(ai) {
         const on = cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
         const ok = col.methods_available.includes(mid);
         return `<label class="check"><input type="checkbox" name="method" value="${esc(mid)}"
-          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${costMark(mid, col.summarize, cat)}</label>`;
+          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${costMark(mid, col, cat)}</label>`;
       })
       .join("");
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";

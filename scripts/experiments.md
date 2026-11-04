@@ -146,24 +146,27 @@ with `answer: true`: `question_only`; `keyword_rag` with `example: full`;
 
 ```sh
 python scripts/experiments.py estimate x4 sci
-python scripts/experiments.py run x4 sci --confirm          # refuses if it costs money
-python scripts/experiments.py run x4 sci --confirm --paid   # X4b
+python scripts/experiments.py run x4 sci --confirm --paid
 ```
 
-Both halves of X4 call the `answer` model and cost money: X4a is the small first
-pass, X4b about 1,200 answer calls (four arms over about 300 items) on a Haiku-class
-model. Read the estimate first and keep the monthly cap set.
+Every arm calls the `answer` model once per dev question, so X4 always costs money
+(800 calls for SciBench's 200 dev questions). Read the estimate first and keep the
+monthly cap set. The four arms share the dev questions, so the Run pages or the rows
+of the four runs can be compared question by question.
 
-| | X4a | X4b |
-|---|---|---|
-| Report's design | Answer accuracy, four arms: zero-shot, full retrieved example, abstracted retrieved example, abstracted *random* example. Data: GPQA Diamond plus SciBench subset, **local** small model. Paid cost: 0 | Same four arms. Data: Same, Haiku-class answer model, ~300 items. Paid cost: ~1,200 calls |
-| Proves it | Abstracted retrieved beats both zero-shot and random | As X4a |
-| Kills it | Random ≈ retrieved: the benefit is format, not retrieval | No arm beats zero-shot: switch the example slot off by default for Haiku |
+| | |
+|---|---|
+| Design | Answer accuracy, four arms: zero-shot, full retrieved example, abstracted retrieved example, abstracted *random* example, on a priced answer model |
+| Proves it | Abstracted retrieved beats both zero-shot and random |
+| Kills it | Random ≈ retrieved: the benefit is format, not retrieval. No arm beats zero-shot: switch the example slot off by default for that model |
 
-Where the app differs: the retrieved arms run on Keyword-RAG, not on a plain dense
-retriever. The data is the collection you pass (scibench or scienceqa), not GPQA
-Diamond. A numeric question also goes through the program-and-run step when the
-collection's `program` setting is on; turn it off for a clean example comparison with
+Where the app differs from the report's design: the retrieved arms run on Keyword-RAG,
+not on a plain dense retriever, and the data is the collection you pass (scibench or
+scienceqa), not GPQA Diamond. An example shows its abstracted form only when it has a
+worked solution: on SciBench 76 of 273 items do, so the two Keyword-RAG arms differ only
+on the questions whose top example is one of those. A numeric question also goes
+through the program-and-run step when the collection's `program` setting is on; turn it
+off for a clean example comparison with
 `PUT /collections/{name}/search {"program": false}`.
 
 ## Setting the defaults from the results

@@ -74,14 +74,15 @@ def arms(experiment: str, collection: str) -> list[dict]:
 
 def label(methods: list[str], rrf_k: int | None, search: dict) -> str:
     """A run's arm name: the method, and for keyword_rag the settings that vary between arms."""
-    name = "+".join(methods) if len(methods) > 1 else methods[0]
-    if name == "keyword_rag":
+    method = "+".join(methods) if len(methods) > 1 else methods[0]
+    name = method
+    if method == "keyword_rag":
         w = search.get("weights")
         if w:
             name += " w=" + "/".join(f"{w[c]:g}" for c in CHANNELS)
         if search.get("query_tags"):
             name += f" tags={search['query_tags']}"
-    if name in ("keyword_rag", "random_example") and search.get("example"):
+    if method in ("keyword_rag", "random_example") and search.get("example"):
         name += f" ex={search['example']}"
     if rrf_k is not None and rrf_k != 60:
         name += f" rrf_k={rrf_k}"

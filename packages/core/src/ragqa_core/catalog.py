@@ -43,6 +43,7 @@ METHODS: dict[str, dict] = {
         "modern",
         "new",
         "meaning + word match + match on predicted keywords, with the collection's channel weights",
+        paid="with_model_tags",
     ),
     "iterative": _method(
         "Step by step",

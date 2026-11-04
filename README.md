@@ -602,7 +602,8 @@ service:
 `scripts/experiments.py` queues the method-v2 experiments (X1 retrieval, X2 query
 tags, X3 fusion, X4 answer accuracy) through the API: `estimate` prices every arm,
 `run --confirm` queues them (`--paid` for the arms that cost money: X2's `model`
-arm, one call per question, and X4b, about 1,200 calls), and `report` prints one table with confidence intervals. Setup,
+arm, one call per question, and every X4 arm, one answer call per question), and
+`report` prints one table with confidence intervals. Setup,
 commands and what each result proves or kills are in
 [scripts/experiments.md](scripts/experiments.md).
 

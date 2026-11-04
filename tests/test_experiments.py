@@ -66,6 +66,20 @@ def test_x4_arms_answer_and_vary_example():
     ]
 
 
+def test_a_recorded_search_still_names_the_example():
+    # A run records its search settings in full, so weights and tags are always there;
+    # the example must still tell the X4 arms apart.
+    recorded = {"weights": {"meaning": 1, "words": 1, "keywords": 1}, "query_tags": "classifier"}
+    names = {
+        experiments.label(["keyword_rag"], 60, {**recorded, "example": e})
+        for e in ("full", "abstracted")
+    }
+    assert names == {
+        "keyword_rag w=1/1/1 tags=classifier ex=full",
+        "keyword_rag w=1/1/1 tags=classifier ex=abstracted",
+    }
+
+
 def test_unknown_experiment_is_refused():
     with pytest.raises(ValueError):
         arms("x9", "c")

@@ -141,11 +141,15 @@ export function modelOptions(models, chosen) {
 }
 
 // The muted "costs money" note beside a paid method (spec §7.1); "" for a free one. A keyword
-// method spends only on a collection with summaries (`summarize`), and is unmarked elsewhere.
-export function costMark(id, summarize, cat = known) {
+// method spends only on a collection with summaries, and Keyword-RAG only when the AI picks
+// the question's tags (search `query_tags: "model"`); unmarked elsewhere.
+export function costMark(id, collection, cat = known) {
   const paid = cat?.methods?.[id]?.paid;
-  const note = paid === "always" ? "costs money" : paid === "with_summaries" && summarize ? "costs money" : "";
-  return note ? ` <span class="cost muted">${esc(note)}</span>` : "";
+  const spends =
+    paid === "always" ||
+    (paid === "with_summaries" && collection?.summarize) ||
+    (paid === "with_model_tags" && collection?.search?.query_tags === "model");
+  return spends ? ` <span class="cost muted">costs money</span>` : "";
 }
 
 export function metricLabel(id, qaType, cat = known) {

@@ -8,8 +8,8 @@
   anything is spent; a vocabulary is exported, edited and re-imported through the
   API.
 - New method `keyword_rag`: meaning, BM25 and the question's predicted tags
-  (`classifier`, `similarity`, `model` — the query job's AI picks them — or, in
-  evals, `oracle`) fused by weighted RRF, with
+  (`classifier`, `similarity`, `model` — the query job's AI picks them, so the run
+  forms mark it "costs money" — or, in evals, `oracle`) fused by weighted RRF, with
   per-collection search settings (`PUT /collections/{name}/search`) that `/eval` and
   `/query` override in part. Answers can use abstracted or full examples, numbered
   best-first-and-last passages with `[n]` citations, and a locally run program for
