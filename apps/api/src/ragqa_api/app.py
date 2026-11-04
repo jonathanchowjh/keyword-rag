@@ -707,20 +707,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if spec.summarize:
             need_ai("summary")
         # What the loader spends on: summaries, a proposal when there are no lists, and
-        # the build steps. Whether the build spends depends on the items, so with no model
-        # for keywords it is priced even when confirmed.
+        # the build steps. Whether the build spends depends on the items (and on the Hub), so
+        # a load that builds is priced even when confirmed.
         proposes = state.ai.ready("keywords") and state.loader.makes_lists(spec)
-        unready_build = builds(spec) and not state.ai.ready("keywords")
-        if unready_build or ((spec.summarize or proposes or builds(spec)) and not body.confirm):
+        setup = {"dataset": body.dataset, "limit": body.limit}
+        if builds(spec) or ((spec.summarize or proposes) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
             if builds(spec) and estimate["est_usd"] != 0:  # None: no model to price it
                 need_ai("keywords")
             spends = spec.summarize or proposes or estimate["est_usd"] != 0
             if spends and not body.confirm:
                 return JSONResponse({"estimate": estimate}, 200)
-        job_id = db.create_job(
-            state.conn, "load", name, {"dataset": body.dataset, "limit": body.limit}
-        )
+            if estimate.get("hub"):  # the run holds to it rather than spend what was not shown
+                setup["hub"] = estimate["hub"]
+        job_id = db.create_job(state.conn, "load", name, setup)
         return {"job_id": job_id}
 
     @app.post("/collections/{name}/copy", status_code=202)

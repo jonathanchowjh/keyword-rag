@@ -21,6 +21,10 @@
   every item; otherwise it builds locally. Only the owner publishes, with
   `python -m ragqa_core.publish` (a dry run unless `--publish`); authored outputs
   go into a collection with `python -m ragqa_core.apply_outputs`.
+  A published entry is checked before any item is added (an unusable row means a
+  local build, not a failed load), and a load whose estimate counted on an entry
+  fails, adding nothing, rather than build locally at a price never shown. `publish`
+  refuses a build a load would skip, and a missing or bad token, before sending.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from ragqa_core import db, loader
 from ragqa_core.builder import Builder
@@ -143,9 +144,10 @@ LOAD_ITEMS = [
 ]
 
 
-def hub_load(tmp_path, monkeypatch, newest: str | None = "c1", stored=()):
+def hub_load(tmp_path, monkeypatch, newest: str | None = "c1", stored=(), rows=None, quoted=False):
     """A worked-examples collection, a load job of bright_aops limit 2, and a loader whose
-    Hub serves one entry for it at commit c1."""
+    Hub serves one entry for it at commit c1. `quoted`: the job carries the entry its
+    estimate counted on."""
     conn = connect(tmp_path / "r.db")
     reply = '{"terms": ["relative speed"], "principle": "P", "method": "M", "answer": "4"}'
     ai = fake_ai(conn, lambda p: reply)
@@ -154,14 +156,15 @@ def hub_load(tmp_path, monkeypatch, newest: str | None = "c1", stored=()):
     if stored:
         ix.add(spec, list(stored), "hand")
     ident = entry_id("bright_aops", 2, "worked_examples")
-    rows = [{**ROWS[0], "method": "M"}, ROWS[1]]
+    rows = rows or [{**ROWS[0], "method": "M"}, ROWS[1]]
     entry = write_build(tmp_path / "hub" / "c1", ident, rows)
     served(tmp_path / "hub", {"c1": {"entries": [entry]}}, "c1")
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (LOAD_ITEMS, []))
     builder = Builder(conn, ix.store, ix.models, ai, ix)
     ld = Loader(conn, ix, builder, ai, tmp_path, hub_repo="owner/builds")
     fake_hub(ld.hub, tmp_path / "hub", newest)
-    job = get_job(conn, create_job(conn, "load", "aops", {"dataset": "bright_aops", "limit": 2}))
+    setup = {"dataset": "bright_aops", "limit": 2, **({"hub": ident} if quoted else {})}
+    job = get_job(conn, create_job(conn, "load", "aops", setup))
     return conn, ix, ld, job
 
 
@@ -198,3 +201,22 @@ def test_an_entry_that_does_not_cover_every_item_is_not_applied(tmp_path, monkey
     result = ld.run(job, lambda p: None)
     assert result["hub"] == {"skipped": "the entry covers 2 of 3 items"}
     assert conn.execute("select count(*) from ai_ledger")[0][0] > 0
+
+
+def test_an_entry_with_an_unusable_row_is_skipped_before_anything_is_added(tmp_path, monkeypatch):
+    # d1 has a solution, so it needs an abstracted form; finding that only after the add
+    # would fail the load instead of building locally.
+    rows = [{**ROWS[0], "principle": None}, ROWS[1]]
+    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, rows=rows)
+    result = ld.run(job, lambda p: None)
+    assert result["hub"]["skipped"].startswith("the entry is unusable: item ba-d1")
+    assert result["tagged"] == 2  # built locally instead
+
+
+def test_a_load_quoted_a_hub_entry_does_not_build_locally(tmp_path, monkeypatch):
+    # Its estimate said $0 because of the entry; a local build would spend what was not shown.
+    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, newest=None, quoted=True)
+    with pytest.raises(ValueError, match="estimate the load again"):
+        ld.run(job, lambda p: None)
+    assert ix.store.ids("aops") == []  # nothing was added
+    assert conn.execute("select count(*) from ai_ledger")[0][0] == 0

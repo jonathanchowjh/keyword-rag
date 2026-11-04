@@ -127,7 +127,12 @@ def publish(
     if not terms:
         raise Refused(f"collection {collection!r} has no vocabulary in force")
     if api is not None:
-        owner = api.whoami().get("name")
+        try:
+            owner = api.whoami().get("name")
+        except Exception as e:  # noqa: BLE001 - no token, a bad one, or no network
+            raise Refused(
+                f"the Hub did not say who the token belongs to ({e}); set HF_TOKEN"
+            ) from e
         if owner != hub.repo.split("/")[0]:
             raise Refused(f"the token belongs to {owner!r}, not the owner of {hub.repo}")
     prefix = ID_PREFIX[dataset]
@@ -145,6 +150,15 @@ def publish(
         ),
         key=lambda r: r["doc_id"],
     )
+    try:  # the check a load makes before applying it: nothing is published that it would skip
+        builder.checked_outputs(
+            spec,
+            builder.stored_items(collection),
+            terms,
+            {prefix + r["doc_id"]: r for r in rows},
+        )
+    except ValueError as e:
+        raise Refused(f"a load could not apply this build: {e}") from e
     try:
         parent, remote = hub.manifest()
     except (RepositoryNotFoundError, RemoteEntryNotFoundError):

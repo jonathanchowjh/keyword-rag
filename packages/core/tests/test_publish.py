@@ -17,6 +17,7 @@ from ragqa_core.types import Item
 
 TERMS = ["relative speed", "unit conversion"]
 SECRET = "sk-ant-not-a-real-key-0123456789"
+MARK = "marker-that-must-stay-home"
 
 
 class Api:
@@ -46,7 +47,7 @@ def built(tmp_path):
         spec,
         [
             Item("ba-d1", "two trains approach", "4", "add the speeds"),
-            Item("ba-d2", "kilometres to metres", "2000", None),
+            Item("ba-d2", "kilometres to metres", "2000", None, meta={"note": MARK}),
         ],
         "bright_aops",
     )
@@ -141,12 +142,28 @@ def test_refuses_when_the_hubs_manifest_cannot_be_read(tmp_path):
     assert api.calls == []
 
 
-def test_published_files_hold_no_keys_ledger_or_embeddings(tmp_path):
+def published_text(files: dict) -> str:
+    """Every published file as text, parquet decoded (its pages are compressed)."""
+    return "\n".join(
+        json.dumps(pq.read_table(path).to_pylist())
+        if path.suffix == ".parquet"
+        else path.read_text()
+        for path in files.values()
+    )
+
+
+def test_published_files_hold_only_the_build(tmp_path):
     conn, builder, hub = built(tmp_path)
+    builder.ai.sql("insert into ai_cache values (?, ?, 0, 0)", (MARK, MARK))
+    builder.ai.sql(
+        "insert into ai_ledger (at, model, input_tokens, output_tokens, usd, batch, purpose)"
+        " values ('t', ?, 0, 0, 0, 0, ?)",
+        (MARK, MARK),
+    )
     no_repo(hub)
     done = run(tmp_path, hub, builder)
-    for path in done["files"].values():
-        assert SECRET.encode() not in path.read_bytes()
+    text = published_text(done["files"])
+    assert SECRET not in text and MARK not in text  # no key, item metadata, cache or ledger
     entry = done["entry"]
     [vocabulary] = [p for p in entry["files"] if p.endswith("vocabulary.parquet")]
     [outputs] = [p for p in entry["files"] if p.endswith("outputs.parquet")]
@@ -185,3 +202,25 @@ def test_definitions_are_matched_by_the_term_as_stored(tmp_path):
     listed = [{"term": "Pythagorean  Theorem", "definition": "a² + b² = c²"}, {"term": "x"}]
     (tmp_path / "v.json").write_text(json.dumps({"terms": listed}))
     assert read_definitions(tmp_path / "v.json") == {"pythagorean theorem": "a² + b² = c²"}
+
+
+def test_a_worked_example_without_its_abstracted_form_is_refused(tmp_path):
+    # A load would skip such an entry, so it is not published.
+    conn, builder, hub = built(tmp_path)
+    builder.store.set_payloads("aops", {"ba-d1": {"abstracted": None}})
+    no_repo(hub)
+    with pytest.raises(Refused, match="a load could not apply this build: item ba-d1"):
+        run(tmp_path, hub, builder)
+
+
+def test_publish_without_a_usable_token_is_refused_before_anything_is_sent(tmp_path):
+    _, builder, hub = built(tmp_path)
+    api = Api()
+
+    def whoami():
+        raise OSError("Invalid user token")
+
+    api.whoami = whoami
+    with pytest.raises(Refused, match="set HF_TOKEN"):
+        run(tmp_path, hub, builder, api)
+    assert api.calls == []

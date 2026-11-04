@@ -428,6 +428,21 @@ def test_induced_recipe_load_prices_its_induction_and_never_proposes(tmp_path, m
         assert r.status_code == 202 and "estimate" not in r.json()
 
 
+def test_a_confirmed_load_holds_to_the_hub_entry_its_estimate_counted_on(tmp_path, monkeypatch):
+    # With a keywords model ready, confirm used to queue with no estimate at all, so a Hub
+    # gone by run time meant a local build nobody was shown the price of.
+    three_items(monkeypatch)
+    with make_client(tmp_path) as client:
+        client.app.state.worker.stop()  # the job stays queued, to read its setup
+        assert client.post("/collections", json=WORKED).status_code == 201
+        quote = {"est_usd": 0.0, "items": 3, "calls": 0, "hub": "musique-all-worked_examples"}
+        client.app.state.loader.estimate_load = lambda spec, dataset, limit: quote
+        r = client.post("/collections/w/load", json={"dataset": "scibench", "confirm": True})
+        assert r.status_code == 202, r.text
+        [job] = client.get("/jobs").json()
+        assert client.get(f"/jobs/{job['id']}").json()["setup"]["hub"] == quote["hub"]
+
+
 def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
     three_items(monkeypatch)
     with make_client(tmp_path, api_key=None) as client:  # no AI: no lists, nothing spent

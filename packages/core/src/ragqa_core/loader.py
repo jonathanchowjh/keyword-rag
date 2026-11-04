@@ -100,6 +100,15 @@ class Loader:
         items, questions = limited(items, questions, limit)
         dataset = job["setup"]["dataset"]
         published, hub = self.from_hub(spec, items, dataset, limit)
+        quoted = job["setup"].get("hub")
+        if quoted and hub.get("entry") != quoted:
+            # The estimate priced the build at $0 because of this entry: building locally now
+            # would spend what was never shown.
+            why = hub.get("skipped") or f"the Hub now has {hub.get('entry')}"
+            raise ValueError(
+                f"the Hub entry {quoted} the estimate counted on is not usable now ({why});"
+                " nothing was added; estimate the load again"
+            )
         if "skipped" in hub and hub["skipped"] != NOTHING_TO_BUILD:
             db.log_job(conn, job["id"], f"Hub: {hub['skipped']}; building locally")
         source, build_result, counts = self._add(spec, items, dataset, progress, published)
@@ -172,6 +181,16 @@ class Loader:
         extra = len(published["outputs"]) - len(every)
         if extra:
             return None, {"skipped": f"the entry holds {extra} items this load does not"}
+        # CHECKED NOW, BEFORE ANY ITEM IS ADDED: a bad row found by apply_outputs after the
+        # add would fail the load instead of building locally.
+        by_id = {i.id: i for i in self.builder.stored_items(spec.name)} if held else {}
+        by_id.update({i.id: i for i in items})
+        try:
+            self.builder.checked_outputs(
+                spec, list(by_id.values()), published["terms"], published["outputs"]
+            )
+        except ValueError as e:
+            return None, {"skipped": f"the entry is unusable: {e}"}
         return published, {"entry": published["entry"]["id"], "items": len(every)}
 
     def makes_lists(self, spec: CollectionSpec) -> bool:

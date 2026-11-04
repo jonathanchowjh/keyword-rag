@@ -287,11 +287,31 @@ class Builder:
         ValueError for an unknown or missing id, an item without tags, a tag outside the
         vocabulary, or an abstracted form that is not usable."""
         self.indexer.check_model(spec)  # before any tag is embedded with another model
+        vocabulary, tags, abstracted = self.checked_outputs(
+            spec, self.stored_items(spec.name), terms, outputs
+        )
+        version = self.save_vocabulary(spec, vocabulary)
+        db.set_vocabulary_version(self.conn, spec.name, version)
+        order = sorted(tags)
+        for start in range(0, len(order), BATCH):
+            part = order[start : start + BATCH]
+            chosen = [tags[i] for i in part]
+            vectors = self.models.embed([keyword_string(t, None) for t in chosen])
+            self.store.set_tags(spec.name, part, chosen, vectors)
+        self.store.set_payloads(spec.name, abstracted)
+        self.refresh_profile(spec)
+        return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
+
+    def checked_outputs(
+        self, spec: CollectionSpec, items: list[Item], terms: list[str], outputs: dict[str, dict]
+    ) -> tuple[list[str], dict[str, list[str]], dict[str, dict]]:
+        """(vocabulary, tags by id, abstracted payloads by id) of outputs that cover exactly
+        `items`, or ValueError naming the first problem. Writes nothing, so a load can check a
+        published build before it adds a single item."""
         vocabulary = clean_terms(terms)
         if not vocabulary:
             raise ValueError("the vocabulary is empty")
-        stored = self.stored_items(spec.name)
-        ids = {i.id for i in stored}
+        ids = {i.id for i in items}
         unknown = sorted(set(outputs) - ids)
         if unknown:
             raise ValueError(
@@ -301,7 +321,7 @@ class Builder:
         if missing:
             raise ValueError(f"no output for {len(missing)} items: {missing[:5]}")
         abstractable = (
-            {i.id for i in self._abstractable(spec, stored)} if build_of(spec).abstracted else set()
+            {i.id for i in self._abstractable(spec, items)} if build_of(spec).abstracted else set()
         )
         known = set(vocabulary)
         tags: dict[str, list[str]] = {}
@@ -319,17 +339,7 @@ class Builder:
                 if not text:
                     raise ValueError(f"item {item_id} has no usable abstracted form")
                 abstracted[item_id] = {"abstracted": text}
-        version = self.save_vocabulary(spec, vocabulary)
-        db.set_vocabulary_version(self.conn, spec.name, version)
-        order = sorted(tags)
-        for start in range(0, len(order), BATCH):
-            part = order[start : start + BATCH]
-            chosen = [tags[i] for i in part]
-            vectors = self.models.embed([keyword_string(t, None) for t in chosen])
-            self.store.set_tags(spec.name, part, chosen, vectors)
-        self.store.set_payloads(spec.name, abstracted)
-        self.refresh_profile(spec)
-        return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
+        return vocabulary, tags, abstracted
 
     def refresh_profile(self, spec: CollectionSpec) -> dict[str, int]:
         """How many items carry each tag, most first, over every item; saved as the
