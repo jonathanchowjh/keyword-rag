@@ -1,24 +1,17 @@
 import json
+from dataclasses import asdict, replace
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from ragqa_core import db, loader
 from ragqa_core.builder import Builder
 from ragqa_core.db import connect, create_job, get_job
 from ragqa_core.fakes import fake_ai, fake_hub, fake_models
-from ragqa_core.hub import (
-    MANIFEST,
-    Hub,
-    dataset_card,
-    entry_id,
-    merge_manifest,
-    sha256,
-)
+from ragqa_core.hub import MANIFEST, Hub, entry_id, sha256, write_entry
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
+from ragqa_core.recipes import build_for
 from ragqa_core.store import Store
 from ragqa_core.types import Item
 
@@ -33,25 +26,21 @@ ROWS = [
         "answer": None,
     },
 ]
+BUILD = asdict(build_for("worked_examples"))
 
 
-def write_build(root: Path, ident: str, rows=ROWS) -> dict:
-    """One entry's files under root/builds/<ident>/, and the entry naming them."""
-    folder = root / "builds" / ident
-    folder.mkdir(parents=True)
-    vocabulary = {
-        "position": list(range(len(TERMS))),
-        "term": TERMS,
-        "definition": [None] * len(TERMS),
+def published(root: Path, ident: str, rows=ROWS, build=BUILD) -> dict:
+    """One entry's files under root/builds/<ident>/, written as publish writes them, and
+    the manifest entry naming them."""
+    files = write_entry(root, ident, TERMS, {}, rows)
+    return {
+        "id": ident,
+        "dataset": "bright_aops",
+        "limit": 2,
+        "recipe": "worked_examples",
+        "build": build,
+        "files": {path: sha256(local) for path, local in files.items()},
     }
-    pq.write_table(pa.table(vocabulary), folder / "vocabulary.parquet")
-    pq.write_table(pa.Table.from_pylist(rows), folder / "outputs.parquet")
-    files = {
-        f"builds/{ident}/{name}": sha256(folder / name)
-        for name in ("vocabulary.parquet", "outputs.parquet")
-    }
-    dataset, limit, recipe = "bright_aops", 2, "worked_examples"
-    return {"id": ident, "dataset": dataset, "limit": limit, "recipe": recipe, "files": files}
 
 
 def served(tmp_path, commits: dict[str, dict], newest: str | None) -> tuple[Hub, list]:
@@ -70,7 +59,7 @@ def test_entry_matches_dataset_limit_and_recipe():
 
 def test_manifest_and_files_are_read_at_one_commit(tmp_path):
     ident = entry_id("bright_aops", 2, "worked_examples")
-    entry = write_build(tmp_path / "c2", ident)
+    entry = published(tmp_path / "c2", ident)
     hub, asked = served(tmp_path, {"c2": {"entries": [entry]}}, "c2")
     build, reason = hub.fetch("bright_aops", 2, "worked_examples")
     assert reason == "" and build is not None
@@ -88,7 +77,7 @@ def test_manifest_and_files_are_read_at_one_commit(tmp_path):
 
 def test_a_file_whose_sha_differs_is_not_used(tmp_path):
     ident = entry_id("bright_aops", 2, "worked_examples")
-    entry = write_build(tmp_path / "c1", ident)
+    entry = published(tmp_path / "c1", ident)
     entry["files"][f"builds/{ident}/outputs.parquet"] = "0" * 64
     hub, _ = served(tmp_path, {"c1": {"entries": [entry]}}, "c1")
     build, reason = hub.fetch("bright_aops", 2, "worked_examples")
@@ -105,37 +94,6 @@ def test_an_unreachable_hub_gives_none_and_a_reason(tmp_path):
     assert build is None and "no entry bright_aops-2-worked_examples" in reason
 
 
-def test_merge_replaces_one_entry_and_keeps_the_rest():
-    old = {"entries": [{"id": "a", "items": 1}, {"id": "b", "items": 2}]}
-    merged = merge_manifest(old, {"id": "a", "items": 9})
-    assert merged == {"entries": [{"id": "a", "items": 9}, {"id": "b", "items": 2}]}
-    assert old["entries"][0]["items"] == 1  # the Hub's copy is not changed in place
-    assert merge_manifest(None, {"id": "c"}) == {"entries": [{"id": "c"}]}
-
-
-def test_card_lists_entries_columns_and_attribution():
-    entry = {
-        "id": "bright_aops-2000-worked_examples",
-        "dataset": "bright_aops",
-        "limit": 2000,
-        "recipe": "worked_examples",
-        "authored_by": "Claude Opus 5.5, in-session; vocabulary reviewed",
-        "items": 2000,
-        "files": {"builds/bright_aops-2000-worked_examples/outputs.parquet": "x"},
-    }
-    card = dataset_card({"entries": [entry]}, "owner/builds")
-    assert card.startswith("---\nlicense: cc-by-4.0\n")
-    assert "data_files: builds/bright_aops-2000-worked_examples/outputs.parquet" in card
-    assert "Claude Opus 5.5, in-session" in card
-    for column in ("position", "term", "definition", "doc_id", "tags", "principle", "method"):
-        assert f"`{column}`" in card
-    assert (
-        "pd.read_parquet" in card and "hf://datasets/owner/builds/builds/bright_aops-2000" in card
-    )
-    assert "Su et al." in card and "xlangai/BRIGHT" in card and "CC BY 4.0" in card
-    assert "AQuA-RAT" in card and "TheoremQA" in card
-
-
 # -- a load applies a matching entry -------------------------------------------------
 
 LOAD_ITEMS = [
@@ -144,10 +102,12 @@ LOAD_ITEMS = [
 ]
 
 
-def hub_load(tmp_path, monkeypatch, newest: str | None = "c1", stored=(), rows=None, quoted=False):
+def hub_load(
+    tmp_path, monkeypatch, newest: str | None = "c1", stored=(), rows=ROWS, build=BUILD, held=False
+):
     """A worked-examples collection, a load job of bright_aops limit 2, and a loader whose
-    Hub serves one entry for it at commit c1. `quoted`: the job carries the entry its
-    estimate counted on."""
+    Hub serves one entry for it at commit c1; with what the Hub was asked for. `held`: the
+    job was queued unconfirmed because the entry made it free."""
     conn = connect(tmp_path / "r.db")
     reply = '{"terms": ["relative speed"], "principle": "P", "method": "M", "answer": "4"}'
     ai = fake_ai(conn, lambda p: reply)
@@ -156,26 +116,26 @@ def hub_load(tmp_path, monkeypatch, newest: str | None = "c1", stored=(), rows=N
     if stored:
         ix.add(spec, list(stored), "hand")
     ident = entry_id("bright_aops", 2, "worked_examples")
-    rows = rows or [{**ROWS[0], "method": "M"}, ROWS[1]]
-    entry = write_build(tmp_path / "hub" / "c1", ident, rows)
+    entry = published(tmp_path / "hub" / "c1", ident, rows, build)
     served(tmp_path / "hub", {"c1": {"entries": [entry]}}, "c1")
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (LOAD_ITEMS, []))
     builder = Builder(conn, ix.store, ix.models, ai, ix)
     ld = Loader(conn, ix, builder, ai, tmp_path, hub_repo="owner/builds")
-    fake_hub(ld.hub, tmp_path / "hub", newest)
-    setup = {"dataset": "bright_aops", "limit": 2, **({"hub": ident} if quoted else {})}
+    asked = fake_hub(ld.hub, tmp_path / "hub", newest)
+    setup = {"dataset": "bright_aops", "limit": 2, **({"hub_entry": ident} if held else {})}
     job = get_job(conn, create_job(conn, "load", "aops", setup))
-    return conn, ix, ld, job
+    return conn, ix, ld, job, asked
 
 
 def test_a_load_with_an_entry_sends_no_ai_call(tmp_path, monkeypatch):
-    conn, ix, ld, job = hub_load(tmp_path, monkeypatch)
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch)
     ld.ai.update_connection("anthropic", api_key=None)  # no model for keywords at all
     estimate = ld.estimate_load(ix.spec("aops"), "bright_aops", 2)
     assert estimate["est_usd"] == 0 and estimate["calls"] == 0
-    assert estimate["hub"] == "bright_aops-2-worked_examples"
+    applied = {"entry": "bright_aops-2-worked_examples", "items": 2}
+    assert estimate["hub"] == applied  # the estimate says what the result will
     result = ld.run(job, lambda p: None)
-    assert result["hub"] == {"entry": "bright_aops-2-worked_examples", "items": 2}
+    assert result["hub"] == applied
     assert result["tagged"] == 2 and result["abstracted"] == 1
     assert conn.execute("select count(*) from ai_ledger")[0][0] == 0
     by_id = {h.id: h for h in ix.store.get("aops", ["ba-d1", "ba-d2"])}
@@ -184,8 +144,17 @@ def test_a_load_with_an_entry_sends_no_ai_call(tmp_path, monkeypatch):
     assert db.get_vocabulary(conn, "aops") == TERMS
 
 
+def test_a_reload_with_nothing_to_build_never_reads_the_hub(tmp_path, monkeypatch):
+    conn, ix, ld, job, asked = hub_load(tmp_path, monkeypatch)
+    ld.run(job, lambda p: None)
+    asked.clear()
+    again = get_job(conn, create_job(conn, "load", "aops", {"dataset": "bright_aops", "limit": 2}))
+    assert "hub" not in ld.run(again, lambda p: None) and asked == []
+    assert ld.estimate_load(ix.spec("aops"), "bright_aops", 2)["hub"] == {}
+
+
 def test_a_load_builds_locally_when_the_hub_is_down(tmp_path, monkeypatch):
-    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, newest=None)
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, newest=None)
     result = ld.run(job, lambda p: None)
     assert "unreachable" in result["hub"]["skipped"]
     assert result["tagged"] == 2  # built by the keywords model instead
@@ -197,26 +166,34 @@ def test_a_load_builds_locally_when_the_hub_is_down(tmp_path, monkeypatch):
 def test_an_entry_that_does_not_cover_every_item_is_not_applied(tmp_path, monkeypatch):
     # All or nothing: one author's vocabulary for every item, or a local build.
     other = Item("ba-d3", "a third problem", "1", "count them")
-    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, stored=[other])
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, stored=[other])
     result = ld.run(job, lambda p: None)
-    assert result["hub"] == {"skipped": "the entry covers 2 of 3 items"}
+    assert result["hub"] == {"skipped": "the entry is unusable: no output for 1 items: ['ba-d3']"}
     assert conn.execute("select count(*) from ai_ledger")[0][0] > 0
+
+
+def test_an_entry_built_with_other_settings_is_not_applied(tmp_path, monkeypatch):
+    other = asdict(replace(build_for("worked_examples"), tag_k=1))
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, build=other)
+    result = ld.run(job, lambda p: None)
+    assert result["hub"] == {"skipped": "the entry was built with other build settings"}
 
 
 def test_an_entry_with_an_unusable_row_is_skipped_before_anything_is_added(tmp_path, monkeypatch):
     # d1 has a solution, so it needs an abstracted form; finding that only after the add
     # would fail the load instead of building locally.
     rows = [{**ROWS[0], "principle": None}, ROWS[1]]
-    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, rows=rows)
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, rows=rows)
     result = ld.run(job, lambda p: None)
     assert result["hub"]["skipped"].startswith("the entry is unusable: item ba-d1")
     assert result["tagged"] == 2  # built locally instead
 
 
-def test_a_load_quoted_a_hub_entry_does_not_build_locally(tmp_path, monkeypatch):
-    # Its estimate said $0 because of the entry; a local build would spend what was not shown.
-    conn, ix, ld, job = hub_load(tmp_path, monkeypatch, newest=None, quoted=True)
-    with pytest.raises(ValueError, match="estimate the load again"):
+def test_a_load_free_because_of_an_entry_never_builds_locally(tmp_path, monkeypatch):
+    # It was queued without confirm because the entry made it free: a local build would
+    # spend without anyone having agreed to it.
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, newest=None, held=True)
+    with pytest.raises(ValueError, match="load again to see what it would spend"):
         ld.run(job, lambda p: None)
     assert ix.store.ids("aops") == []  # nothing was added
     assert conn.execute("select count(*) from ai_ledger")[0][0] == 0

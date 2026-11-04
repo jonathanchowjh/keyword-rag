@@ -89,7 +89,6 @@ PROBLEM = {
 KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
 COPY_UNFINISHED = (*REKEY_PARTLY_DONE, "stopped_budget", "stopped_no_key")
-VOCABULARY_BUSY = ("load", "import", "retag", "copy", "eval")
 
 
 class NewCollection(BaseModel):
@@ -718,8 +717,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             spends = spec.summarize or proposes or estimate["est_usd"] != 0
             if spends and not body.confirm:
                 return JSONResponse({"estimate": estimate}, 200)
-            if estimate.get("hub"):  # the run holds to it rather than spend what was not shown
-                setup["hub"] = estimate["hub"]
+            if not body.confirm and estimate["hub"].get("entry"):
+                # Free only because of this entry: the run fails rather than spend unasked.
+                setup["hub_entry"] = estimate["hub"]["entry"]
         job_id = db.create_job(state.conn, "load", name, setup)
         return {"job_id": job_id}
 
@@ -816,9 +816,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 409, f"'{name}' uses keyword lists, not a vocabulary; edit its lists instead"
             )
         # Items tagged now would mix versions, or skew a run that is reading them.
-        for kind in VOCABULARY_BUSY:
-            if db.job_waiting_or_running(state.conn, kind, name):
-                raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+        busy = db.busy_job(state.conn, name)
+        if busy:
+            raise HTTPException(409, f"a {busy} job is queued or running on '{name}'; wait")
         state.indexer.check_model(spec)  # the retag would embed with another model
         terms = clean_terms(body.terms)
         if not terms:

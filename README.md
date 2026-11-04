@@ -256,25 +256,32 @@ examples with no AI call and no model set up. The repo is
 [`jonathanmiro97/keyword-rag-builds`](https://huggingface.co/datasets/jonathanmiro97/keyword-rag-builds)
 unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
 
-- **A load applies a matching entry.** The estimate and the load first read the
-  repo's `manifest.json` at one commit, and then that entry's files at the same
-  commit. Each file must match its sha256. The entry is applied only when it covers
-  every item the collection will hold. Otherwise, and whenever the Hub cannot be
-  reached, the load builds locally as usual and its result says why
-  (`hub: {skipped: ...}`). A load that applied one reports `hub: {entry, items}`.
+- **A load applies a matching entry.** When a load has something to build, the
+  estimate and the load read the repo's `manifest.json` at one commit, then that
+  entry's files at the same commit. Each file must match its sha256. The entry is
+  applied only when it was built with the collection's build settings, and covers
+  exactly the items the collection will hold, each one usable. This is checked
+  before anything is added. Otherwise, and whenever the Hub cannot be reached, the
+  load builds locally as usual, and its estimate and result say why
+  (`hub: {skipped: ...}`). A load that applies one reports `hub: {entry, items}`.
+  There is one exception. A load the entry made free is queued without `confirm`, so
+  if the entry is no longer usable when that load runs, it fails and adds nothing,
+  rather than spend what nobody agreed to.
 - **Only the owner publishes.** You run the publish script inside the api
   container. It is a dry run unless you pass `--publish`, and it refuses a token
   that does not belong to the repo's owner:
 
   ```sh
   docker compose exec -e HF_TOKEN api python -m ragqa_core.publish aops \
-      --authored-by "who made the build" [--definitions vocabulary.json] [--publish]
+      --authored-by "who made the build" [--vocabulary vocabulary.json] [--publish]
   ```
 
-  It sends a collection's vocabulary (`vocabulary.parquet`), each item's tags and
-  abstracted form (`outputs.parquet`, keyed by the dataset's own document ids), the
-  manifest, and a dataset card crediting the source dataset, all in one commit.
-  Nothing else leaves: no embeddings, settings, keys, connections or ledger rows.
+  It sends a collection's vocabulary (`vocabulary.parquet`, with the definitions from
+  `--vocabulary` if given), each item's tags and abstracted form (`outputs.parquet`,
+  keyed by the dataset's own document ids), the manifest (with the build settings),
+  and a dataset card crediting the source dataset, all in one commit. Nothing else
+  leaves: no embeddings, keys, connections or ledger rows. It refuses a build a load
+  would not apply, and a collection with a job running on it.
 - **Authored outputs.** Outputs written by hand go into a collection with
   `python -m ragqa_core.apply_outputs COLLECTION VOCABULARY.json OUTPUTS.jsonl`.
 

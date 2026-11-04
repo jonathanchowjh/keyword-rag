@@ -6,6 +6,7 @@ Every prompt here is written from an item's text or explanation only, never its
 meta: ScienceQA's gold skill must not reach the vocabulary (spec §12).
 """
 
+import re
 from collections import Counter
 from collections.abc import Callable
 
@@ -19,6 +20,7 @@ from ragqa_core.keywords import keyword_string
 from ragqa_core.models import Models
 from ragqa_core.prompts import abstract_prompt, induce_prompt, parse_json, tag_prompt
 from ragqa_core.recipes import build_for
+from ragqa_core.settings import load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import BuildSettings, CollectionSpec, Hit, Item
 from ragqa_core.vocabulary import (
@@ -40,6 +42,7 @@ AI_BATCH_OVER = 50  # more calls than this go to a provider's Batch API, as summ
 # as many terms as an induced one keeps, each as long as a term may be, so the estimate
 # errs high, never low.
 GUESSED_TERMS = [f"guessed term {n} ".ljust(MAX_TERM_CHARS, "x") for n in range(MAX_TERMS)]
+ABSTRACTED = re.compile(r"Principle: (.*?)\nMethod: (.*)\nAnswer: (.*)", re.S)
 
 
 def build_of(spec: CollectionSpec) -> BuildSettings:
@@ -73,6 +76,32 @@ def abstracted_text(reply: dict) -> str | None:
         return None
     principle, method, answer = (str(p).strip() for p in parts)
     return f"Principle: {principle}\nMethod: {method}\nAnswer: {answer}"
+
+
+def abstracted_parts(text: str | None) -> dict[str, str | None]:
+    """The principle, method and answer of a stored form (abstracted_text read back); all
+    None without one."""
+    found = ABSTRACTED.fullmatch(text or "")
+    if not found:
+        return {"principle": None, "method": None, "answer": None}
+    principle, method, answer = found.groups()
+    return {"principle": principle, "method": method, "answer": answer}
+
+
+def as_item(h: Hit) -> Item:
+    return Item(h.id, h.text, h.answer, h.explanation, h.meta)
+
+
+def make_builder() -> "Builder":
+    """The objects the service builds, from the same settings: for the owner's tools."""
+    settings = load_settings()
+    conn = db.connect(settings.home / "ragqa.db")
+    store = Store(settings.qdrant_url, None if settings.qdrant_url else settings.home / "qdrant")
+    models = Models(
+        settings.dense_model, settings.judge_model, settings.rerank_model, settings.home / "models"
+    )
+    ai = AI(settings.home / "ragqa.db")
+    return Builder(conn, store, models, ai, Indexer(conn, store, models, ai))
 
 
 class Builder:
@@ -231,13 +260,22 @@ class Builder:
         build = build_of(spec)
         texts = [describe_text(i, build.describes) for i in items]
         tags = self.tags_for(spec, terms, texts, lambda p: progress(p / 2))
-        for start in range(0, len(items), BATCH):
+        self._write_tags(spec, [i.id for i in items], tags, lambda p: progress(0.5 + p / 2))
+
+    def _write_tags(
+        self,
+        spec: CollectionSpec,
+        ids: list[str],
+        tags: list[list[str]],
+        progress: Callable[[float], None] = lambda p: None,
+    ) -> None:
+        """Each item's tags and their kw_tags vector, a batch at a time."""
+        for start in range(0, len(ids), BATCH):
             part = tags[start : start + BATCH]
             vectors = self.models.embed([keyword_string(t, None) for t in part])
-            ids = [i.id for i in items[start : start + BATCH]]
-            self.store.set_tags(spec.name, ids, part, vectors)
-            progress(0.5 + min(start + BATCH, len(items)) / len(items) / 2)
-        if not items:
+            self.store.set_tags(spec.name, ids[start : start + BATCH], part, vectors)
+            progress(min(start + BATCH, len(ids)) / len(ids))
+        if not ids:
             progress(1.0)
 
     def tag(
@@ -255,11 +293,10 @@ class Builder:
         self.refresh_profile(spec)
 
     def stored_items(self, name: str) -> list[Item]:
-        return [
-            Item(h.id, h.text, h.answer, h.explanation, h.meta)
-            for batch in self.store.scroll(name)
-            for h in batch
-        ]
+        """Every item the collection stores; none before its first add."""
+        if not self.store.exists(name):
+            return []
+        return [as_item(h) for batch in self.store.scroll(name) for h in batch]
 
     def retag(
         self, name: str, version: str, progress: Callable[[float], None] = lambda p: None
@@ -293,11 +330,7 @@ class Builder:
         version = self.save_vocabulary(spec, vocabulary)
         db.set_vocabulary_version(self.conn, spec.name, version)
         order = sorted(tags)
-        for start in range(0, len(order), BATCH):
-            part = order[start : start + BATCH]
-            chosen = [tags[i] for i in part]
-            vectors = self.models.embed([keyword_string(t, None) for t in chosen])
-            self.store.set_tags(spec.name, part, chosen, vectors)
+        self._write_tags(spec, order, [tags[i] for i in order])
         self.store.set_payloads(spec.name, abstracted)
         self.refresh_profile(spec)
         return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
@@ -409,15 +442,11 @@ class Builder:
         given = {i.id: i for i in items}
         stored = self.store.scroll(spec.name) if self.store.exists(spec.name) else []
         hits = [h for batch in stored for h in batch if h.id not in given]
-
-        def item(h: Hit) -> Item:
-            return Item(h.id, h.text, h.answer, h.explanation, h.meta)
-
-        every = [*(item(h) for h in hits), *items]
-        unabstracted = [*(item(h) for h in hits if h.abstracted is None), *items]
+        every = [*(as_item(h) for h in hits), *items]
+        unabstracted = [*(as_item(h) for h in hits if h.abstracted is None), *items]
         return {
             "induce": [] if db.get_vocabulary(self.conn, spec.name) else every,
-            "tag": [*(item(h) for h in hits if not h.tags), *items],
+            "tag": [*(as_item(h) for h in hits if not h.tags), *items],
             "abstract": self._abstractable(spec, unabstracted) if build_of(spec).abstracted else [],
         }
 

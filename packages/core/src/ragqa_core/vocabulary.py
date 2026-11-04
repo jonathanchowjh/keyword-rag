@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +17,19 @@ from ragqa_core.types import Item
 MAX_TERM_CHARS = 60
 MAX_TERMS = 80  # a merged vocabulary keeps at most this many
 SPACES = re.compile(r"\s+")
+
+
+def read_vocabulary(path: Path) -> tuple[list[str], dict[str, str]]:
+    """An authored {"terms": [{term, definition}]} file: (its terms as written, each
+    definition by the term as a collection stores it, cleaned)."""
+    listed = json.loads(path.read_text())["terms"]
+    terms = [t["term"] for t in listed]
+    definitions: dict[str, str] = {}
+    for t in listed:
+        cleaned = clean_terms([t.get("term")])
+        if cleaned and t.get("definition"):
+            definitions.setdefault(cleaned[0], t["definition"])
+    return terms, definitions
 
 
 def terms_version(terms: list[str]) -> str:

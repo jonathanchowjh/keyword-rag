@@ -391,6 +391,7 @@ def test_load_estimate_includes_build_cost(tmp_path, monkeypatch):
         "est_usd": 0,
         "items": len(items),
         "calls": 0,
+        "hub": {},  # nothing left to build, so the Hub is not read
     }
 
 

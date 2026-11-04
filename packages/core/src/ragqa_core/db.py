@@ -591,6 +591,16 @@ def retag_partly_done(conn: Connection, collection: str) -> bool:
     return row is not None
 
 
+# The jobs that add, tag or read a collection's items: its vocabulary or build must not
+# change under one.
+ITEM_JOBS = ("load", "import", "retag", "copy", "eval")
+
+
+def busy_job(conn: Connection, collection: str) -> str | None:
+    """The first of ITEM_JOBS queued or running on the collection, or None."""
+    return next((k for k in ITEM_JOBS if job_waiting_or_running(conn, k, collection)), None)
+
+
 def job_waiting_or_running(conn: Connection, kind: str, collection: str) -> bool:
     row = first(
         conn.execute(

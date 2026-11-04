@@ -8,7 +8,7 @@ from pathlib import Path
 
 from aiconnect.ai import AI
 from ragqa_core import db, imports
-from ragqa_core.builder import Builder, build_of, builds
+from ragqa_core.builder import Builder, as_item, build_of, builds
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.hub import Hub
@@ -18,7 +18,6 @@ from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, Question
 
 PROPOSE_SAMPLE = 40
-NOTHING_TO_BUILD = "nothing to build"
 UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
 
 
@@ -46,7 +45,7 @@ def limited(
 def sample_items(store: Store, name: str, skip: tuple[str, ...] = ()) -> list[Item]:
     hits = [h for batch in store.scroll(name, skip=skip) for h in batch]
     picked = random.Random(472).sample(hits, min(PROPOSE_SAMPLE, len(hits)))
-    return [Item(h.id, h.text, h.answer, h.explanation, h.meta) for h in picked]
+    return [as_item(h) for h in picked]
 
 
 def propose_sample(items: list[Item]) -> list[Item]:
@@ -100,16 +99,15 @@ class Loader:
         items, questions = limited(items, questions, limit)
         dataset = job["setup"]["dataset"]
         published, hub = self.from_hub(spec, items, dataset, limit)
-        quoted = job["setup"].get("hub")
-        if quoted and hub.get("entry") != quoted:
-            # The estimate priced the build at $0 because of this entry: building locally now
-            # would spend what was never shown.
+        held = job["setup"].get("hub_entry")
+        if held and hub.get("entry") != held:
+            # Queued unconfirmed because this entry made it free: nothing may be spent instead.
             why = hub.get("skipped") or f"the Hub now has {hub.get('entry')}"
             raise ValueError(
-                f"the Hub entry {quoted} the estimate counted on is not usable now ({why});"
-                " nothing was added; estimate the load again"
+                f"the Hub entry {held} that made this load free is not usable now ({why});"
+                " nothing was added; load again to see what it would spend"
             )
-        if "skipped" in hub and hub["skipped"] != NOTHING_TO_BUILD:
+        if "skipped" in hub:
             db.log_job(conn, job["id"], f"Hub: {hub['skipped']}; building locally")
         source, build_result, counts = self._add(spec, items, dataset, progress, published)
         if hub:
@@ -160,34 +158,27 @@ class Loader:
         self, spec: CollectionSpec, items: list[Item], dataset: str, limit: int | None
     ) -> tuple[dict | None, dict]:
         """The published build to apply after adding the items, and what the load's result
-        says of it: {entry, items}, or {skipped: why}; {} when the collection never builds.
-        ALL OR NOTHING: it is applied only when it covers every item the collection will
-        hold, so no collection mixes two authors' vocabularies."""
-        if not builds(spec):
+        says of it: {entry, items}, or {skipped: why}; {} when building what the load adds
+        needs no AI call (the recipe never builds, or it is all built), so the Hub is not read.
+        ALL OR NOTHING: it is applied only when it covers exactly the items the collection
+        will hold, built with its build settings, so no collection mixes two authors'
+        vocabularies. Checked before any item is added: an unusable entry means a local
+        build, not a failed load."""
+        todo, _ = self.indexer.changed(spec, items, dataset)
+        if not self.builder.build_calls(spec, todo):
             return None, {}
         if self.hub is None:
             return None, {"skipped": "Hub off"}
-        if not self.builder.build_calls(spec, items):
-            return None, {"skipped": NOTHING_TO_BUILD}
         published, reason = self.hub.fetch(dataset, limit, spec.recipe)
         if published is None:
             return None, {"skipped": reason}
-        store = self.indexer.store
-        held = set(store.ids(spec.name)) if store.exists(spec.name) else set()
-        every = held | {i.id for i in items}
-        covered = every & set(published["outputs"])
-        if covered != every:
-            return None, {"skipped": f"the entry covers {len(covered)} of {len(every)} items"}
-        extra = len(published["outputs"]) - len(every)
-        if extra:
-            return None, {"skipped": f"the entry holds {extra} items this load does not"}
-        # CHECKED NOW, BEFORE ANY ITEM IS ADDED: a bad row found by apply_outputs after the
-        # add would fail the load instead of building locally.
-        by_id = {i.id: i for i in self.builder.stored_items(spec.name)} if held else {}
-        by_id.update({i.id: i for i in items})
+        if published["entry"].get("build") != asdict(build_of(spec)):
+            return None, {"skipped": "the entry was built with other build settings"}
+        every = {i.id: i for i in self.builder.stored_items(spec.name)}
+        every.update({i.id: i for i in items})
         try:
             self.builder.checked_outputs(
-                spec, list(by_id.values()), published["terms"], published["outputs"]
+                spec, list(every.values()), published["terms"], published["outputs"]
             )
         except ValueError as e:
             return None, {"skipped": f"the entry is unusable: {e}"}
@@ -220,12 +211,12 @@ class Loader:
         return "ai"
 
     def estimate_load(self, spec: CollectionSpec, dataset: str, limit: int | None) -> dict:
-        """What a dataset load would spend. The dataset is read (and cached) to price it."""
+        """What a dataset load would spend, with `hub` as its result will report it. The
+        dataset is read (and cached) to price it."""
         items, questions = load_dataset(dataset, self.home)
         items, _ = limited(items, questions, limit)
         published, hub = self.from_hub(spec, items, dataset, limit)
-        estimate = self._estimate(spec, items, dataset, built=published is not None)
-        return {**estimate, "hub": hub["entry"]} if published is not None else estimate
+        return {**self._estimate(spec, items, dataset, built=published is not None), "hub": hub}
 
     def _estimate(
         self, spec: CollectionSpec, items: list[Item], source: str, built: bool = False

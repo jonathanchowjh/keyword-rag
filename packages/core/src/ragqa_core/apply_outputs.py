@@ -15,27 +15,9 @@ import json
 import sys
 from pathlib import Path
 
-from aiconnect.ai import AI
 from ragqa_core import db
-from ragqa_core.builder import Builder
-from ragqa_core.indexer import Indexer
-from ragqa_core.models import Models
-from ragqa_core.settings import load_settings
-from ragqa_core.store import Store
-
-BUSY = ("load", "import", "retag", "copy", "eval")
-
-
-def make_builder() -> Builder:
-    """The same objects the service builds, from the same settings."""
-    settings = load_settings()
-    conn = db.connect(settings.home / "ragqa.db")
-    store = Store(settings.qdrant_url, None if settings.qdrant_url else settings.home / "qdrant")
-    models = Models(
-        settings.dense_model, settings.judge_model, settings.rerank_model, settings.home / "models"
-    )
-    ai = AI(settings.home / "ragqa.db")
-    return Builder(conn, store, models, ai, Indexer(conn, store, models, ai))
+from ragqa_core.builder import make_builder
+from ragqa_core.vocabulary import read_vocabulary
 
 
 def read_outputs(path: Path) -> dict[str, dict]:
@@ -57,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("outputs", type=Path)
     args = parser.parse_args(argv)
     try:
-        terms = [t["term"] for t in json.loads(args.vocabulary.read_text())["terms"]]
+        terms, _ = read_vocabulary(args.vocabulary)
         outputs = read_outputs(args.outputs)
     except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"refused: {e}", file=sys.stderr)
@@ -67,9 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     if spec is None:
         print(f"refused: unknown collection {args.collection!r}", file=sys.stderr)
         return 2
-    busy = [k for k in BUSY if db.job_waiting_or_running(builder.conn, k, spec.name)]
+    busy = db.busy_job(builder.conn, spec.name)
     if busy:
-        print(f"refused: a {busy[0]} job is queued or running on {spec.name}", file=sys.stderr)
+        print(f"refused: a {busy} job is queued or running on {spec.name}", file=sys.stderr)
         return 2
     try:
         result = builder.apply_outputs(spec, terms, outputs)
