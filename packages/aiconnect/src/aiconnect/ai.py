@@ -595,7 +595,11 @@ class AI:
         cache: bool = True,
     ) -> list[Completion]:
         connection_id, model_id = self.resolve(model or self.model_for(role))
-        keys = [cache_key(model_id, system, p, max_tokens) for p in prompts]
+        # A model reached through two connections shares its answers, but one answered by
+        # hand is keyed by its ref: a typed reply is never served as a provider's answer.
+        by_hand = self.need_connection(connection_id)["kind"] == "manual"
+        keyed = f"{connection_id}/{model_id}" if by_hand else model_id
+        keys = [cache_key(keyed, system, p, max_tokens) for p in prompts]
         results: dict[str, Completion] = {}
         if cache:
             self.load_cached(keys, results)
@@ -724,7 +728,8 @@ class AI:
     def answer(self, replies: dict[str, str]) -> int:
         """Records replies to waiting prompts as if their model had sent them: cached, and
         ledgered to the first job that asked, at the model's price, on estimated tokens.
-        Refuses them all, recording none, when one is empty or answers no waiting prompt."""
+        Refuses them all, recording none, when one is empty or answers no waiting prompt, or
+        its model has no price now."""
         waiting = {r["key"]: r for r in self.waiting()}
         unknown = [k for k in replies if k not in waiting]
         if unknown:
@@ -732,6 +737,8 @@ class AI:
         empty = [k for k, text in replies.items() if not text.strip()]
         if empty:
             raise ValueError(f"{len(empty)} replies are empty: {empty[:3]}")
+        for model in {waiting[k]["model"] for k in replies}:
+            self.need_rates(*self.split(model))
         for key, text in replies.items():
             row = waiting[key]
             connection_id, model_id = self.split(row["model"])

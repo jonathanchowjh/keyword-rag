@@ -134,8 +134,12 @@ def report(client: httpx.Client, job_ids: list[str]) -> int:
         r.raise_for_status()
         table = r.json()
         setup = table["setup"]
+        # A stopped run's means cover only what it got to: say so beside every row of it.
+        unfinished = table.get("status") not in (None, "done")
         for method, entry in table["methods"].items():
             name = label([method], setup.get("rrf_k"), setup.get("search") or {})
+            if unfinished:
+                name += f" [{table['status']}]"
             for metric, cell in entry.items():
                 if isinstance(cell, dict) and "mean" in cell:
                     ci = f"[{cell['lo']:.3f}, {cell['hi']:.3f}]"

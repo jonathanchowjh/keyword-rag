@@ -43,9 +43,8 @@ def limited(
 
 
 def sample_items(store: Store, name: str, skip: tuple[str, ...] = ()) -> list[Item]:
-    hits = [h for batch in store.scroll(name, skip=skip) for h in batch]
-    picked = random.Random(472).sample(hits, min(PROPOSE_SAMPLE, len(hits)))
-    return [as_item(h) for h in picked]
+    """propose_sample over the stored items."""
+    return propose_sample([as_item(h) for batch in store.scroll(name, skip=skip) for h in batch])
 
 
 def propose_sample(items: list[Item]) -> list[Item]:
@@ -163,10 +162,13 @@ class Loader:
         ALL OR NOTHING: it is applied only when it covers exactly the items the collection
         will hold, built with its build settings, so no collection mixes two authors'
         vocabularies. Checked before any item is added: an unusable entry means a local
-        build, not a failed load."""
+        build, not a failed load. ONLY A COLLECTION WITH NO VOCABULARY IN FORCE takes one:
+        an entry never replaces a vocabulary built, authored or edited here."""
         todo, _ = self.indexer.changed(spec, items, dataset)
         if not self.builder.build_calls(spec, todo):
             return None, {}
+        if db.get_vocabulary(self.conn, spec.name):
+            return None, {"skipped": "the collection has a vocabulary of its own"}
         if self.hub is None:
             return None, {"skipped": "Hub off"}
         published, reason = self.hub.fetch(dataset, limit, spec.recipe)

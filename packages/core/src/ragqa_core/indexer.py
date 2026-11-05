@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from aiconnect.ai import AI, NoConnection
+from aiconnect.ai import AI, BATCH_THRESHOLD, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import source_for
@@ -131,7 +131,7 @@ class Indexer:
 
     def estimate_summaries_usd(self, items: list[Item]) -> float | None:
         """A summary of each item; None when the summary job has no model to price it with."""
-        batch = len(items) > 50
+        batch = len(items) > BATCH_THRESHOLD
         try:
             return sum(
                 self.ai.estimate_usd(

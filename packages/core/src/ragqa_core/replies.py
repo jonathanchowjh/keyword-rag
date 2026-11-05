@@ -18,7 +18,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from aiconnect.ai import AI
+from aiconnect.ai import AI, UnknownPrice
 from ragqa_core.settings import load_settings
 
 
@@ -27,7 +27,7 @@ def read_replies(path: Path) -> dict[str, str]:
     for n, line in enumerate(path.read_text().splitlines(), start=1):
         if line.strip():
             row = json.loads(line)
-            key, reply = row.get("key"), row.get("reply")
+            key, reply = (row.get("key"), row.get("reply")) if isinstance(row, dict) else (0, 0)
             if not isinstance(key, str) or key in replies or not isinstance(reply, str):
                 raise ValueError(f"{path.name} line {n}: a missing or repeated key, or no reply")
             replies[key] = reply
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         recorded = ai.answer(read_replies(args.replies))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, UnknownPrice) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
     print(json.dumps({"recorded": recorded, "still_waiting": len(ai.waiting())}))

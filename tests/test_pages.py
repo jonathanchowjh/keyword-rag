@@ -1318,6 +1318,38 @@ def test_run_page_says_one_question_s_evidence_in_the_singular(page, seeded):
     expect(page.locator("#setup")).to_contain_text("1 question's evidence is switched off")
 
 
+def test_run_page_shows_the_search_settings_and_rerun_repeats_them(page, seeded):
+    search = {
+        "weights": {"meaning": 1, "words": 1, "keywords": 2},
+        "query_tags": "classifier",
+        "example": "abstracted",
+        "program": False,
+    }
+    sent: list[dict] = []
+
+    def with_search(route):
+        data = route.fetch().json()
+        data["setup"]["search"] = search
+        route.fulfill(json=data)
+
+    def capture(route):
+        if route.request.method == "POST":
+            sent.append(route.request.post_data_json)
+        route.continue_()
+
+    page.route(f"**/eval/{seeded.run_id}", with_search)
+    page.route("**/eval", capture)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Setup this ran with").click()
+    setup = page.locator("#setup")
+    expect(setup).to_contain_text("weights (meaning 1 · words 1 · keywords 2)")
+    expect(setup).to_contain_text("query_tags classifier")
+    expect(setup).not_to_contain_text("[object Object]")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    assert sent and sent[0]["search"] == search
+
+
 def test_run_page_lists_what_the_run_left_out(page, seeded):
     def left_out(route):
         data = route.fetch().json()

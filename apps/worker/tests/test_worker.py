@@ -152,7 +152,10 @@ def test_exceptions_map_to_statuses(env, exc, status):
         "failed": repr(exc),
         "stopped_budget": str(exc),
         "stopped_replies": f"{exc}: export them with `python -m ragqa_core.replies export`,"
-        " import the replies, then resume the run or load again",
+        " import the replies, then resume the run or start the job again; replies already"
+        " imported stay cached",
+        "stopped_no_key": "no AI model is set up for the 'answer' job; choose one on the"
+        " Settings page",
     }.get(status)
     assert job["error"] == expected
 

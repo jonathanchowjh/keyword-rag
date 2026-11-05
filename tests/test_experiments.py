@@ -201,6 +201,19 @@ def test_report_names_each_method_of_a_one_run_experiment(monkeypatch, capsys):
     assert {(r[0], r[2]) for r in rows} == {("vector", "0.250"), ("hybrid", "0.750")}
 
 
+def test_report_marks_a_run_that_has_not_finished(monkeypatch, capsys):
+    def handler(request: httpx.Request) -> httpx.Response:
+        cell = {"mean": 0.5, "lo": 0.1, "hi": 0.9, "n": 4}
+        setup = {"methods": ["hybrid"], "rrf_k": 60, "search": {}}
+        body = {"status": "stopped_budget", "setup": setup, "methods": {"hybrid": {"f1": cell}}}
+        return httpx.Response(200, json=body)
+
+    client = httpx.Client(base_url="http://api", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(experiments, "make_client", lambda api: client)
+    assert experiments.main(["report", "job1"]) == 0
+    assert "hybrid [stopped_budget]" in capsys.readouterr().out
+
+
 def test_report_prints_paired_differences(monkeypatch, capsys):
     monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.0, []))
     assert experiments.main(["report", "job1"]) == 0

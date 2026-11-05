@@ -179,6 +179,30 @@ def test_an_entry_built_with_other_settings_is_not_applied(tmp_path, monkeypatch
     assert result["hub"] == {"skipped": "the entry was built with other build settings"}
 
 
+def test_an_entry_never_replaces_a_vocabulary_the_collection_has(tmp_path, monkeypatch):
+    # A vocabulary built, authored or edited here stays: the new items are built under it.
+    conn, ix, ld, job, asked = hub_load(tmp_path, monkeypatch)
+    own = ld.builder.save_vocabulary(ix.spec("aops"), ["my own term"])
+    db.set_vocabulary_version(conn, "aops", own)
+    estimate = ld.estimate_load(ix.spec("aops"), "bright_aops", 2)
+    assert estimate["hub"] == {"skipped": "the collection has a vocabulary of its own"}
+    result = ld.run(job, lambda p: None)
+    assert result["hub"] == estimate["hub"] and asked == []
+    assert db.get_vocabulary(conn, "aops") == ["my own term"]
+
+
+def test_an_apply_that_stops_part_way_leaves_no_vocabulary_switched_to(tmp_path, monkeypatch):
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch)
+
+    def stop(*args, **kwargs):
+        raise RuntimeError("stopped while writing tags")
+
+    ld.builder._write_tags = stop
+    with pytest.raises(RuntimeError):
+        ld.run(job, lambda p: None)
+    assert not db.get_vocabulary(conn, "aops")  # a later load reads the Hub again
+
+
 def test_an_entry_with_an_unusable_row_is_skipped_before_anything_is_added(tmp_path, monkeypatch):
     # d1 has a solution, so it needs an abstracted form; finding that only after the add
     # would fail the load instead of building locally.

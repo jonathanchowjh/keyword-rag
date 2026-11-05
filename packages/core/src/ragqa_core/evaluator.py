@@ -425,7 +425,8 @@ class Evaluator:
                 return "this run predates version tracking; start a new run"
             return None
         old, new = setup["keyword_version"], spec.keyword_version
-        if old != new:
+        # As changes_since: only the keyword methods search with the lists.
+        if old != new and any(m in KEYWORD_METHODS for m in setup["methods"]):
             return f"keyword lists changed since this run ({old} → {new}); start a new run"
         old, new = setup.get("vocabulary_version"), spec.vocabulary_version
         if "vocabulary_version" in setup and old != new and "keyword_rag" in setup["methods"]:
@@ -925,7 +926,7 @@ def no_ai(role: str) -> str:
 def awaiting(e: AwaitingReplies) -> str:
     return (
         f"{e}: export them with `python -m ragqa_core.replies export`, import the replies,"
-        " then resume the run or load again"
+        " then resume the run or start the job again; replies already imported stay cached"
     )
 
 
@@ -935,6 +936,10 @@ def avg(values) -> float:
 
 
 def score(spec: CollectionSpec, q: Question, pred: str) -> dict:
+    """The answer metrics of one prediction; none for a question with no gold answer
+    (BRIGHT's), which is then unmeasured rather than wrong."""
+    if not q.gold_answers:
+        return {}
     if spec.qa_type == "mcq":
         return {"accuracy": float(pred == q.gold_answers[0])}
     if spec.qa_type == "science":

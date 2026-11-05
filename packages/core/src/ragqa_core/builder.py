@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from aiconnect.ai import AI, NoConnection
+from aiconnect.ai import AI, BATCH_THRESHOLD, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import BATCH, Indexer
@@ -37,7 +37,6 @@ INDUCE_TOKENS = 300
 TAG_TOKENS = 100
 ABSTRACT_TOKENS = 300
 CUTOFF_MOST = 10  # a cut-off keeps at most this many tags
-AI_BATCH_OVER = 50  # more calls than this go to a provider's Batch API, as summaries do
 # BEFORE INDUCTION THE TERMS ARE UNKNOWN: AI tagging is priced as if the vocabulary had
 # as many terms as an induced one keeps, each as long as a term may be, so the estimate
 # errs high, never low.
@@ -126,7 +125,7 @@ class Builder:
     def estimate_induce_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
         """Raises NoConnection("keywords") when no model can price it."""
         prompts = self._induce_prompts(spec, items)
-        batch = len(prompts) > AI_BATCH_OVER
+        batch = len(prompts) > BATCH_THRESHOLD
         return sum(
             self.ai.estimate_usd(len(p), INDUCE_TOKENS, role="keywords", batch=batch)
             for p in prompts
@@ -238,7 +237,7 @@ class Builder:
         build = build_of(spec)
         if build.tagging != "ai":
             return 0.0
-        batch = len(items) > AI_BATCH_OVER
+        batch = len(items) > BATCH_THRESHOLD
         return sum(
             self.ai.estimate_usd(
                 len(tag_prompt(terms, describe_text(i, build.describes), build.tag_k)),
@@ -328,10 +327,11 @@ class Builder:
             spec, self.stored_items(spec.name), terms, outputs
         )
         version = self.save_vocabulary(spec, vocabulary)
-        db.set_vocabulary_version(self.conn, spec.name, version)
         order = sorted(tags)
         self._write_tags(spec, order, [tags[i] for i in order])
         self.store.set_payloads(spec.name, abstracted)
+        # Switched to last, as a retag does: a stop part-way leaves the old one in force.
+        db.set_vocabulary_version(self.conn, spec.name, version)
         self.refresh_profile(spec)
         return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
 
@@ -398,7 +398,7 @@ class Builder:
     def estimate_abstract_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
         """Raises NoConnection("keywords") when no model can price it."""
         prompts = self._abstract_prompts(spec, items)
-        batch = len(prompts) > AI_BATCH_OVER
+        batch = len(prompts) > BATCH_THRESHOLD
         return sum(
             self.ai.estimate_usd(len(p), ABSTRACT_TOKENS, role="keywords", batch=batch)
             for p in prompts

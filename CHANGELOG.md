@@ -20,7 +20,7 @@
   `jonathanmiro97/keyword-rag-builds`), applies the entry's vocabulary, tags and
   abstracted examples with no AI call. That happens only when the entry was built with
   the collection's build settings and covers exactly its items, each usable, which is
-  checked before anything is added. Otherwise the load builds locally. Either way its
+  checked before anything is added, and never replaces a vocabulary the collection already has. Otherwise the load builds locally. Either way its
   estimate and result say which (`hub`). A load that the entry made free fails,
   adding nothing, if the entry is no longer usable when it runs. Only the owner
   publishes, with `python -m ragqa_core.publish` (a dry run unless `--publish`).
@@ -30,6 +30,12 @@
   resumable status `stopped_replies`; `python -m ragqa_core.replies export` writes the
   waiting prompts out and `import` records the replies, ledgered at the model's price.
   The job then resumes from them. A query or Lab method reports the wait as its error.
+- Fixes from a full review: a question with no gold answer (BRIGHT's) is unmeasured in
+  an answering run, not wrong; a resume is refused for changed keyword lists only when the
+  run used a keyword method; the Run page shows a run's search settings and Re-run repeats
+  them; a provider error in `/query` is that method's error, with what the others spent;
+  a reply typed for a model answered by hand is never served as another connection's
+  answer; `experiments.py report` marks a run that has not finished.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare
@@ -80,10 +86,10 @@
   a keyword method, and also when the lists were set after a run that had none.
 - A load that makes the keyword lists reports progress while it re-keys (adding
   is the first half) and can be cancelled then; the old lists stay in force.
-- The Lab's cost per method counts every Claude call that method made: the
+- The Lab's cost per method counts every AI call that method made: the
   query summary and iterative hops as well as the answer.
-- A confirmed eval or resume that would spend returns 503 `needs
-  ANTHROPIC_API_KEY` at once when no key is set, as a load does, instead of
+- A confirmed eval or resume that would spend returns 503 at once when no AI
+  model is set up for its job, as a load does, instead of
   queueing a run that stops straight away.
 - `POST /collections/{name}/documents` is also refused while a load on the
   collection is queued or running. Saving keyword lists is refused with 409
@@ -100,7 +106,7 @@
   Collection page lists them and can load an old version into the editor. A
   version is a hash of the lists' content, so saving an old version unchanged
   reuses its version, moves it to the top of the history and re-keys as usual.
-- Paid methods and the "Have Claude answer" box carry a muted "uses credit" mark
+- Paid methods and the "Have the AI answer" box carry a muted "costs money" mark
   in the run form and the Lab. A keyword method carries it only on a collection
   with summaries.
 - A load job's log shows its progress at each 10% step, as a re-key's does, and a
@@ -126,11 +132,11 @@
   queues a `rekey` job instead of re-keying in the request. `DELETE
   /collections/{name}` and `DELETE /eval/{id}` are new.
 - Breaking: `POST /collections/{name}/keyword-lists/propose` now needs
-  `confirm: true` to call Claude; without it, it returns the estimate
+  `confirm: true` to make the AI call; without it, it returns the estimate
   `{est_usd, calls}`.
 - `POST /collections/{name}/load` now returns `200 {estimate: {est_usd, items,
-  calls}}` first whenever the load would spend (summaries, or a Claude keyword
-  proposal because a key is set and there are no lists yet), and queues only
+  calls}}` first whenever the load would spend (summaries, or an AI keyword
+  proposal because a model is set up and there are no lists yet), and queues only
   with `confirm: true`. A load that spends nothing still returns 202 `{job_id}`.
 - Known gap: The Lab still spends on answers, hops and query summaries without
   showing an estimate first; spend stays capped and ledgered.

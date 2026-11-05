@@ -260,8 +260,9 @@ unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
   estimate and the load read the repo's `manifest.json` at one commit, then that
   entry's files at the same commit. Each file must match its sha256. The entry is
   applied only when it was built with the collection's build settings, and covers
-  exactly the items the collection will hold, each one usable. This is checked
-  before anything is added. Otherwise, and whenever the Hub cannot be reached, the
+  exactly the items the collection will hold, each one usable, and only while the
+  collection has no vocabulary in force: an entry never replaces a vocabulary built,
+  authored or edited here. This is checked before anything is added. Otherwise, and whenever the Hub cannot be reached, the
   load builds locally as usual, and its estimate and result say why
   (`hub: {skipped: ...}`). A load that applies one reports `hub: {entry, items}`.
   There is one exception. A load the entry made free is queued without `confirm`, so
@@ -343,16 +344,19 @@ asked to cite them as `[n]`.
 With `program` on, a question without choices is answered by a program: the
 model writes a short Python block that prints the answer, and the service runs
 it locally and takes the last line it printed. A program that fails, times out
-or prints nothing falls back to the model's `Answer:` line. The run gets a
-fresh temp directory and no secrets in its environment, 10 s, 512 MB of memory
-(on Linux), 1 MB of file writes, 2,000 characters of output, and no new
-processes or threads (unless the service runs as root).
+or prints nothing falls back to the model's `Answer:` line. The run starts in a
+fresh temp directory with no secrets in its environment, and gets 10 s, 512 MB of
+memory (on Linux), files of at most 1 MB each, 2,000 characters of output, and no new
+processes or threads. A limit the platform refuses (any of them when the service
+runs as root, the memory limit off Linux) is skipped.
 
 `program` is on by default for new science and table collections; collections
 made before recipes keep it off. Turn it off with `PUT
 /collections/{name}/search` `{"program": false}` for any corpus you did not
-write. The program is not network-isolated and can read any file the service
-can read, including the database that holds stored API keys. Its code comes
+write. The program is not network-isolated. It can read any file the service
+can read, including the database that holds stored API keys, and write, truncate or
+delete any file the service can write, such as that database or Qdrant's store: the
+temp directory is where it starts, not a boundary. Its code comes
 from the AI model set up for the `answer` job, but that model reads the
 question and the passages, so text planted in a corpus can steer what it
 writes.
@@ -544,7 +548,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 |---|---|
 | `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
 | `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize, recipe?: worked_examples\|reference\|paper_2024}`; no `recipe` means paper 2024, as before |
-| `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (`loading`, `rekeying`, `evaluating`, `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
+| `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503 |
 | `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
@@ -587,8 +591,9 @@ Loads, re-keys and evaluations run one at a time, oldest first, on a worker
 thread inside the service. A resumed run keeps its original place in that
 order. A job that was running when the service stopped comes back
 `interrupted`; queued jobs stay queued. A method that cannot run inside
-`/query`, for example a keyword method before lists exist, reports its own
-`error`, and the other methods still return.
+`/query`, for example a keyword method before lists exist or one whose provider
+fails, reports its own `error` (a provider's with any key masked) and what it
+spent, and the other methods still return.
 
 ## Reading a run
 
@@ -610,7 +615,7 @@ service:
   picked after the fact, so its gap is likely overstated. It is never the
   answer.
 - **`since`** says what changed after the run: `{untracked, changes}`, where
-  `changes` lists `keyword lists`, `dense model` and `sources`. A migrated run
+  `changes` lists `keyword lists`, `vocabulary`, `dense model` and `sources`. A migrated run
   that recorded no versions is `untracked: true`.
 - **`methods`** holds each method's own score as `mean [low, high]`, and
   **`pairs`** every pair compared.

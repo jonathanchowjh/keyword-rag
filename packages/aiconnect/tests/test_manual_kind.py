@@ -30,7 +30,7 @@ def test_a_miss_waits_and_a_reply_is_then_cached(tmp_path):
         ("one", "hand/m", "sys", "j1"),
         ("two", "hand/m", "sys", "j1"),
     ]
-    assert waiting[0]["key"] == cache_key("m", "sys", "one", 50)
+    assert waiting[0]["key"] == cache_key("hand/m", "sys", "one", 50)
     assert ai.answer({w["key"]: f"re {w['prompt']}" for w in waiting}) == 2
     assert [c.text for c in ask(ai, ["one", "two"])] == ["re one", "re two"]
     assert ai.waiting() == []
@@ -67,6 +67,29 @@ def test_a_prompt_two_jobs_ask_waits_for_each_and_one_reply_answers_both(tmp_pat
     assert [w["prompt"] for w in ai.waiting("j1")] == ["one"]
     assert [w["prompt"] for w in ai.waiting("j2")] == ["three"]
     assert [r[0] for r in ai.sql("select job_id from ai_ledger")] == ["j1"]
+
+
+def test_a_typed_reply_is_never_served_as_a_providers_answer(tmp_path):
+    # The same model id on a real connection must still be sent, not read from the reply.
+    ai = by_hand(tmp_path)
+    with pytest.raises(AwaitingReplies):
+        ask(ai, ["one"])
+    ai.answer({ai.waiting()[0]["key"]: "typed"})
+    ai.add_connection("real", "openai", "Real", base_url="http://x/v1")
+    ai.add_model("real", "m", price_in=1.0, price_out=1.0)
+    ai._send = lambda connection, model_id, system, prompt, max_tokens: ("sent", 3, 1)
+    [done] = ai.complete_many(["one"], model="real/m", system="sys", max_tokens=50, purpose="t")
+    assert done.text == "sent" and not done.cached
+
+
+def test_a_reply_whose_model_lost_its_price_records_nothing(tmp_path):
+    ai = by_hand(tmp_path)
+    with pytest.raises(AwaitingReplies):
+        ask(ai, ["one", "two"])
+    ai.update_model("hand", "m", price_in=None, price_out=None)
+    with pytest.raises(UnknownPrice):
+        ai.answer({w["key"]: "r" for w in ai.waiting()})
+    assert len(ai.waiting()) == 2 and ai.sql("select count(*) from ai_cache")[0][0] == 0
 
 
 def test_replies_to_nothing_waiting_or_empty_are_refused_whole(tmp_path):

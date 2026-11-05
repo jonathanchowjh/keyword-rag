@@ -1201,7 +1201,8 @@ def test_resume_flow_estimates_then_requeues(client):
     add_collection(client)
     conn = client.app.state.conn
     client.app.state.worker.stop()
-    j = client.post("/eval", json={**EVAL, "answer": True, "confirm": True}).json()["job_id"]
+    body = {**EVAL, "methods": ["kw_individual"], "answer": True, "confirm": True}
+    j = client.post("/eval", json=body).json()["job_id"]
     db.update_job(conn, j, status="interrupted")
     r = client.post(f"/jobs/{j}/resume", json={})
     assert r.status_code == 200 and r.json()["estimate"]["questions"] == 1
@@ -1214,7 +1215,7 @@ def test_resume_flow_estimates_then_requeues(client):
     assert wait(client, j)["status"] == "done"
     r = client.post(f"/jobs/{j}/resume", json={"confirm": True})
     assert r.status_code == 409 and r.json()["detail"] == "a done run cannot be resumed"
-    # A run whose keyword lists changed since it ran is refused.
+    # A keyword run whose lists changed since it ran is refused.
     db.update_job(conn, j, status="failed")
     put = client.put("/collections/c/keyword-lists", json=asdict(OTHER_LISTS)).json()
     assert wait(client, put["job_id"])["status"] == "done"
@@ -2160,7 +2161,8 @@ def test_unknown_role_is_422(client):
     assert r.status_code == 422
 
 
-def test_unreachable_provider_is_502(client):
+def test_an_unreachable_provider_is_one_methods_error_in_a_query(client):
+    # Each method reports its own error, so what the others spent is still shown.
     add_collection(client)
 
     def down(*args, **kwargs):
@@ -2171,7 +2173,8 @@ def test_unreachable_provider_is_502(client):
         "/query",
         json={"collection": "c", "question": "enzyme rate", "methods": ["hybrid"], "answer": True},
     )
-    assert r.status_code == 502, r.text
+    assert r.status_code == 200, r.text
+    assert "connection refused" in r.json()["results"]["hybrid"]["error"]
 
 
 def test_role_with_disabled_model_is_503_naming_job(client):

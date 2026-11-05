@@ -20,7 +20,7 @@ from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
-from ragqa_core.types import Item, KeywordLists, Question
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
 TOPICS = ["enzyme", "market", "volcano", "optics", "genetics"]
 ITEMS = [
@@ -155,6 +155,16 @@ def test_a_run_answered_by_hand_stops_for_replies_and_resumes_on_them(env):
     ev.run(job)
     t = ev.table(job)
     assert t["status"] == "done" and t["methods"]["hybrid"]["accuracy"]["mean"] == 1.0
+
+
+@pytest.mark.parametrize("qa_type", ["mcq", "science", "multihop", "table"])
+def test_a_question_with_no_gold_answer_is_unmeasured_not_wrong(qa_type):
+    # BRIGHT's questions have none: an answering run on them must not read "0% right".
+    from ragqa_core.evaluator import score
+
+    spec = CollectionSpec("c", qa_type, False, "fake/dense", 4)
+    q = Question(id="q", text="?", choices=None, gold_answers=[], gold_ids=[])
+    assert score(spec, q, "42") == {}
 
 
 def test_run_records_failure(env):
@@ -388,15 +398,18 @@ def test_resume_estimate_counts_a_method_with_no_rows(env):
 
 def test_resume_refused_when_lists_changed(env):
     conn, ev = env
-    job = ev.queue("c", "dev", ["hybrid"], False, None)
-    ev.run(job)
-    db.update_job(conn, job, status="interrupted")
+    job = ev.queue("c", "dev", ["kw_individual"], False, None)
+    other = ev.queue("c", "dev", ["hybrid"], False, None)
+    for j in (job, other):
+        ev.run(j)
+        db.update_job(conn, j, status="interrupted")
     assert ev.resume_refusal(job) is None
     old = ev.retriever.spec("c").keyword_version
     new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
     assert ev.resume_refusal(job) == (
         f"keyword lists changed since this run ({old} → {new}); start a new run"
     )
+    assert ev.resume_refusal(other) is None  # hybrid never searches the lists
 
 
 def test_resume_refused_when_dense_model_changed(env):
@@ -491,11 +504,11 @@ def test_table_with_question_only_and_two_answered_methods(env):
 
 def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
     conn, ev = env
-    job = ev.queue("c", "dev", ["hybrid", "vector"], True, None)
+    job = ev.queue("c", "dev", ["kw_individual", "vector"], True, None)
 
     def stop_after_first_method():
-        hybrid = run_items(conn, job, "hybrid")
-        if hybrid and all(r["complete"] for r in hybrid):
+        first = run_items(conn, job, "kw_individual")
+        if first and all(r["complete"] for r in first):
             raise Cancelled()
 
     ev.run(job, check=stop_after_first_method)
@@ -528,7 +541,7 @@ def test_resume_refused_when_judge_model_changed(env):
 def legacy_job(conn, ev):
     """An eval from before question ids were recorded: versions, rows, no ids."""
     setup = {
-        **setup_for(["hybrid"]),
+        **setup_for(["kw_individual"]),
         "dense_model": "fake/dense",
         "judge_model": "fake/judge",
         "keyword_version": ev.retriever.spec("c").keyword_version,
@@ -537,7 +550,7 @@ def legacy_job(conn, ev):
     }
     job = create_job(conn, "eval", "c", setup)
     for qid in ("q-market", "q-enzyme"):
-        db.upsert_run_item(conn, job, "hybrid", qid, {"retrieval": {}}, complete=False)
+        db.upsert_run_item(conn, job, "kw_individual", qid, {"retrieval": {}}, complete=False)
     db.update_job(conn, job, status="interrupted")
     return job, setup
 

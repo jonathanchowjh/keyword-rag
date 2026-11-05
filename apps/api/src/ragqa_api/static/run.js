@@ -22,7 +22,11 @@ const metric = (m) => metricLabel(m, qaType, cat);
 const says = (m) => metricSays(m, qaType, cat);
 const method = (m) => methodLabel(m, cat);
 const isControl = (m) => cat.methods[m]?.group === "control";
-const show = (v) => (Array.isArray(v) ? v.join(" · ") : v == null || v === "" ? "–" : String(v));
+// Lists joined; settings (a run's search) as "name value" pairs, a nested one in brackets.
+const show = (v) =>
+  Array.isArray(v) ? v.join(" · ")
+  : v && typeof v === "object" ? Object.entries(v).map(([k, x]) => `${k} ${typeof x === "object" && x ? `(${show(x)})` : show(x)}`).join(" · ")
+  : v == null || v === "" ? "–" : String(v);
 const busy = () => BUSY.has(run.status);
 // The headline is the reasoning match shown raw: this run has no random example to set 0 by.
 const rawScale = () => run.scale?.unit === "raw";
@@ -356,8 +360,9 @@ async function cancel() {
 
 async function rerun() {
   say("");
-  const { collection, split, methods, answer, model, k, rrf_k } = run.setup;
-  const request = { collection, split, methods, answer, model, k, rrf_k };
+  // The recorded search settings too, so the repeat is this run, not today's defaults.
+  const { collection, split, methods, answer, model, k, rrf_k, search } = run.setup;
+  const request = { collection, split, methods, answer, model, k, rrf_k, ...(search ? { search } : {}) };
   try {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
     confirmSpend($("act-confirm"), estimate, async () => {

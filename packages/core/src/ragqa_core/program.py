@@ -4,9 +4,11 @@ it runs here, and its last printed line is the answer.
 The sandbox bounds time, memory, file size and output, stops the program starting any
 process or thread, and gives it a fresh temp dir and no secrets in its environment.
 
-It is NOT network-isolated and it can read what the service can read, the database of
-stored API keys included. The code comes from the user's configured model, but that model
-reads the question and the passages, so text in a corpus can steer what it writes."""
+It is NOT network-isolated, it can read what the service can read (the database of stored
+API keys included), and it can write or delete what the service can write: the temp dir is
+where it starts, not a boundary. Limits the platform refuses are skipped. The code comes
+from the user's configured model, but that model reads the question and the passages, so
+text in a corpus can steer what it writes."""
 
 import os
 import re

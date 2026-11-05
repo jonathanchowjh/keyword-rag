@@ -16,17 +16,19 @@ python scripts/experiments.py report JOB_ID [JOB_ID ...]
 - `run` needs `--confirm`. It prices the arms first and refuses (exit 2, nothing
   queued) when any arm costs money unless you also pass `--paid`.
 - `report` prints one table: arm, metric, value, 95% bootstrap CI. Arms are named
-  by method and the settings that differ (`keyword_rag tags=oracle`, `w=1/1/2`,
-  `rrf_k=30`, `ex=abstracted`). Take the job ids from the `run` output.
+  by method and their search settings (`keyword_rag w=1/1/2 tags=oracle
+  ex=abstracted`, `rrf_k=30`). A run that has not finished is marked with its status. Take the job ids from the `run` output.
 - X1 is one run of four methods, so `report` prints its paired differences (marked
   "paired"). X2, X3 and X4 vary the search settings per run, so each arm is a
-  separate run and they compare unpaired: per-arm means with CIs. Overlapping CIs
+  separate run and they compare unpaired: per-arm means with CIs. The exception is
+  X2's `model` arm, which runs `hybrid` beside it and so prints a paired row; X4's
+  arms share their questions, so their rows can be paired by question id. Overlapping CIs
   are not a verdict; the Run page shows the pairs inside a run.
 - `--model` (X4) picks the answer model; the default is the one set up for the
   `answer` job.
 
 Everything is stdlib plus `httpx`, and `run` only queues jobs: the service does the
-work, and a run can be cancelled or resumed from the Runs page.
+work, and a run can be cancelled or resumed from its Run page.
 
 ## Datasets and Qdrant
 
@@ -38,7 +40,8 @@ filter on chunk searches is a linear scan, and every BRIGHT question has exclude
 ids. For embedded mode, pass a load `limit` (for example `{"limit": 2000}`) and
 read the results as a smoke test, not a measurement.
 
-BRIGHT has no gold answers (all "N/A"), so an answering run on it scores 0. That is
+BRIGHT has no gold answers (all "N/A"), so an answering run on it measures no accuracy:
+its answers are unmeasured, not wrong. That is
 why X4 uses a dataset with answers: **scibench** (small, worked solutions; the
 default here) or scienceqa.
 
@@ -186,6 +189,7 @@ curl -X PUT localhost:8080/collections/aops/search -H 'content-type: application
 ```
 
 Keys: `weights` (`meaning`, `words`, `keywords`; not all zero), `query_tags`
-(`classifier`, `similarity`; `oracle` is for evals), `example` (`abstracted`, `full`,
+(`classifier`, `similarity`, `model`, which costs a query-job call per question;
+`oracle` is for evals), `example` (`abstracted`, `full`,
 `off`) and `program` (true or false). Differences under about 6 points on a few
 hundred questions are inside the noise; trust the CI column, not the mean.

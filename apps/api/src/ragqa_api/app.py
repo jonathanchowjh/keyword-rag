@@ -74,6 +74,7 @@ PER_METHOD_ERRORS = (
     BudgetExceeded,
     ModelMismatch,
     AwaitingReplies,
+    ProviderError,  # a method's provider failing must not hide what the others spent
 )
 BUSY_STATE = {
     "load": "loading",
