@@ -14,7 +14,7 @@ import secrets
 import shutil
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -64,7 +64,14 @@ from ragqa_core.retriever import (
 )
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, KeywordLists, QaType, SearchSettings
+from ragqa_core.types import (
+    CollectionSpec,
+    Item,
+    KeywordLists,
+    QaType,
+    Question,
+    SearchSettings,
+)
 from ragqa_core.vocabulary import clean_terms
 from ragqa_worker.worker import Worker
 
@@ -106,6 +113,35 @@ class NewCollection(BaseModel):
     qa_type: QaType
     summarize: bool = False
     recipe: str | None = None
+
+
+class NewEvalSet(BaseModel):
+    name: str
+    qa_type: QaType
+
+
+class QuestionIn(BaseModel):
+    id: str
+    text: str
+    choices: list[str] | None = None
+    gold_answers: list[str] = Field(default_factory=list)
+    gold_ids: list[str] = Field(default_factory=list)
+    meta: dict = Field(default_factory=dict)
+
+
+class QuestionsPut(BaseModel):
+    questions: list[QuestionIn]
+    base_version: str | None = None
+
+
+class EvalSetPatch(BaseModel):
+    include_leaked: bool
+
+
+class EvalSetImport(BaseModel):
+    upload_id: str
+    mapping: dict[str, str | None] | None = None
+    source_name: str
 
 
 class ItemIn(BaseModel):
@@ -384,15 +420,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def source_rows(name: str) -> list[dict]:
         counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
-        asked = db.question_sources(state.conn, name)
         return [
-            {
-                "source": s,
-                "items": counts.get(s, 0),
-                "questions": asked.get(s, 0),
-                "enabled": s not in disabled,
-            }
-            for s in sorted(set(counts) | set(disabled) | set(asked))
+            {"source": s, "items": counts.get(s, 0), "enabled": s not in disabled}
+            for s in sorted(set(counts) | set(disabled))
         ]
 
     def open_upload(name: str, upload_id: str) -> tuple[Path, dict]:
@@ -415,7 +445,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def owner_of(ids: list[str]) -> dict[str, str | None]:
             if kind == "items":
                 return state.store.sources_of(spec.name, ids)
-            asked = {q.id: q.meta.get("source") for q in db.get_questions(state.conn, spec.name)}
+            default = db.default_eval_set(state.conn, spec.name) or spec.name
+            asked = {q.id: q.meta.get("source") for q in db.get_questions(state.conn, default)}
             return {i: asked[i] for i in ids if i in asked}
 
         try:
@@ -438,8 +469,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         return state.loader.estimate_import(spec, setup)
 
-    def leaked_count(name: str) -> int:
-        return sum(1 for q in db.get_questions(state.conn, name) if q.meta.get("leaked"))
+    def store_questions(name: str) -> tuple[str | None, list]:
+        """The store's default eval set and its questions (none, with no default)."""
+        eval_set = db.default_eval_set(state.conn, name)
+        return eval_set, db.get_questions(state.conn, eval_set) if eval_set else []
+
+    def leaked_count(questions: list) -> int:
+        return sum(1 for q in questions if q.meta.get("leaked"))
 
     def field_report(name: str, questions: list) -> dict:
         have = state.store.field_counts(name)
@@ -486,9 +522,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
         busy, job = collection_state(jobs, count, lists is not None)
-        questions = runnable(
-            db.get_questions(state.conn, name), db.get_include_leaked(state.conn, name)
-        )
+        eval_set, everything = store_questions(name)
+        include_leaked = db.get_include_leaked(state.conn, eval_set) if eval_set else False
+        questions = runnable(everything, include_leaked)
         fields = field_report(name, questions)
         return {
             **spec_json(spec),
@@ -504,8 +540,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "runs": sum(1 for j in jobs if j["kind"] == "eval"),
             "sources": source_rows(name),
             "unlabelled": state.store.unsourced(name),
-            "leaked": leaked_count(name),
-            "include_leaked": db.get_include_leaked(state.conn, name),
+            "leaked": leaked_count(everything),
+            "include_leaked": include_leaked,
+            "eval_set": eval_set,
             "fields": fields,
             "measurable": measurable(spec.qa_type, fields),
         }
@@ -637,6 +674,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             need_ai("summary")
         if estimate["est_usd"] != 0 and builds(spec):
             need_ai("keywords")
+        if body.kind == "questions":
+            state.loader.questions_set(spec)  # a clash of types is refused before queueing
         setup = {
             "upload_id": body.upload_id,
             "kind": body.kind,
@@ -687,7 +726,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if left and not any(r["enabled"] for r in left):
             raise HTTPException(409, "at least one source must stay on")
         state.store.delete_source(name, source)
-        db.delete_source_questions(state.conn, name, source)
         db.set_source_enabled(state.conn, name, source, True)
         state.retriever.forget(name)
         return Response(status_code=204)
@@ -696,14 +734,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_questions(
         name: str, leaked: bool | None = None, limit: int = 50, offset: int = 0
     ) -> dict:
-        state.retriever.spec(name)
-        everything = db.get_questions(state.conn, name)
+        spec = state.retriever.spec(name)
+        eval_set = state.loader.questions_set(spec)
+        everything = db.get_questions(state.conn, eval_set)
         shown = [q for q in everything if leaked is None or bool(q.meta.get("leaked")) == leaked]
         page = shown[max(offset, 0) : max(offset, 0) + max(limit, 0)]
         return {
             "total": len(shown),
-            "leaked": sum(1 for q in everything if q.meta.get("leaked")),
-            "include_leaked": db.get_include_leaked(state.conn, name),
+            "leaked": leaked_count(everything),
+            "include_leaked": db.get_include_leaked(state.conn, eval_set),
             "questions": [
                 {
                     "id": q.id,
@@ -719,9 +758,151 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.patch("/collections/{name}/questions/leaked")
     def switch_leaked(name: str, body: LeakedSwitch) -> dict:
-        state.retriever.spec(name)
-        db.set_include_leaked(state.conn, name, body.include)
+        spec = state.retriever.spec(name)
+        db.set_include_leaked(state.conn, state.loader.questions_set(spec), body.include)
         return {"include_leaked": body.include}
+
+    # -- eval sets -------------------------------------------------------------
+
+    def known_set(name: str) -> dict:
+        row = db.get_eval_set(state.conn, name)
+        if row is None:
+            raise HTTPException(404, f"no eval set {name!r}")
+        return row
+
+    def eval_runs(name: str) -> list[dict]:
+        return [
+            j
+            for j in db.list_jobs(state.conn, kind="eval", limit=db.ALL)
+            if j["setup"].get("eval_set") == name
+        ]
+
+    def set_is_loading(name: str) -> bool:
+        """Whether a load or a question import is queued or running on a store whose default
+        is this set: it would write to the set while it is saved."""
+        stores = [c.name for c in db.list_collections(state.conn)]
+        for store in (s for s in stores if db.default_eval_set(state.conn, s) == name):
+            for job in db.list_jobs(state.conn, collection=store, limit=db.ALL):
+                asks = job["kind"] == "load" or (
+                    job["kind"] == "import" and job["setup"].get("kind") == "questions"
+                )
+                if asks and job["status"] in ("queued", "running"):
+                    return True
+        return False
+
+    @app.get("/eval-sets")
+    def list_eval_sets() -> list[dict]:
+        return db.list_eval_sets(state.conn)
+
+    @app.post("/eval-sets", status_code=201)
+    def create_eval_set(body: NewEvalSet) -> dict:
+        try:
+            db.create_eval_set(state.conn, body.name, body.qa_type)
+        except ValueError as e:
+            if "already exists" in str(e):
+                raise HTTPException(409, str(e)) from None
+            raise
+        return {"name": body.name}
+
+    @app.get("/eval-sets/{name}")
+    def get_eval_set(name: str) -> dict:
+        return {
+            **known_set(name),
+            "questions": [asdict(q) for q in db.get_questions(state.conn, name)],
+            "versions": db.eval_set_versions(state.conn, name),
+        }
+
+    @app.put("/eval-sets/{name}/questions")
+    def put_eval_questions(name: str, body: QuestionsPut) -> dict:
+        row = known_set(name)
+        questions = [Question(**q.model_dump()) for q in body.questions]
+        seen: set[str] = set()
+        for q in questions:
+            if q.id in seen:
+                raise HTTPException(422, f"question id '{q.id}' appears more than once")
+            seen.add(q.id)
+            if problem := imports.question_problem(q, row["qa_type"]):
+                raise HTTPException(422, f"question '{q.id}': {problem}")
+        if set_is_loading(name):
+            raise HTTPException(
+                409, f"a load or question import is under way on a store of '{name}'"
+            )
+        try:
+            version = db.replace_questions(state.conn, name, questions, body.base_version)
+        except ValueError as e:  # the questions were checked above: only a stale base is left
+            raise HTTPException(409, str(e)) from None
+        return {"version": version}
+
+    @app.patch("/eval-sets/{name}")
+    def patch_eval_set(name: str, body: EvalSetPatch) -> dict:
+        known_set(name)
+        db.set_include_leaked(state.conn, name, body.include_leaked)
+        return known_set(name)
+
+    @app.delete("/eval-sets/{name}")
+    def delete_eval_set(name: str, confirm: bool = False):
+        known_set(name)
+        runs = eval_runs(name)
+        if busy := next((j for j in runs if j["status"] in ("queued", "running")), None):
+            raise HTTPException(409, f"an eval that uses '{name}' is {busy['status']}; wait")
+        if not confirm:
+            return {"runs": len(runs)}
+        db.delete_eval_set(state.conn, name)
+        imports.delete_uploads(state.settings.home, f"eval-set:{name}")
+        return Response(status_code=204)
+
+    @app.post("/eval-sets/{name}/uploads")
+    def add_eval_set_upload(name: str, request: Request, filename: str):
+        """The raw file as the body, questions only; answers with a preview."""
+        row = known_set(name)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
+            raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
+        owner = f"eval-set:{name}"
+        upload_id = imports.save_upload(state.settings.home, owner, filename, body_chunks(request))
+        path, _ = imports.open_upload(state.settings.home, owner, upload_id)
+        stem = Path(filename).stem
+        source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
+        try:
+            shown = imports.preview(path, filename, "questions", row["qa_type"], None, None, source)
+        except ValueError:
+            shutil.rmtree(path.parent, ignore_errors=True)
+            raise
+        return {"upload_id": upload_id, "filename": filename, "preview": shown}
+
+    @app.post("/eval-sets/{name}/imports")
+    def import_eval_set_questions(name: str, body: EvalSetImport) -> dict:
+        row = known_set(name)
+        try:
+            path, meta = imports.open_upload(
+                state.settings.home, f"eval-set:{name}", body.upload_id
+            )
+        except KeyError:
+            raise HTTPException(404, f"no upload {body.upload_id!r} on eval set '{name}'") from None
+        if not SOURCE_NAME.match(body.source_name):
+            raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
+        check_mapping("questions", body.mapping)
+        source = "upload:" + body.source_name
+        shown = imports.preview(
+            path, meta["filename"], "questions", row["qa_type"], body.mapping, None, source
+        )
+        if not shown["ready"]:
+            raise HTTPException(
+                422,
+                f"map these fields first: {shown['missing']}"
+                if shown["missing"]
+                else "no usable rows",
+            )
+        _, rows, _ = imports.read_rows(path, meta["filename"])
+        built, _ = imports.build_questions(rows, shown["mapping"], row["qa_type"])
+        built = [replace(q, meta={**q.meta, "source": source}) for q in built]
+        counts, todo = state.loader.question_counts(name, built)
+        db.save_questions(state.conn, name, todo)
+        return {
+            **counts,
+            "skipped": len(rows) - len(built),
+            "version": known_set(name)["version"],
+        }
 
     @app.put("/collections/{name}/search")
     def put_search(name: str, body: dict) -> dict:

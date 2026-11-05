@@ -93,6 +93,7 @@ class Loader:
         if spec is None:
             raise ValueError(f"unknown collection {name!r}")
 
+        eval_set = self.questions_set(spec)  # a type clash fails here, before anything is added
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
         limit = job["setup"].get("limit")
         items, questions = limited(items, questions, limit)
@@ -114,7 +115,7 @@ class Loader:
         # EVERY LOAD RE-READS THE DATASET'S FULL EXCLUDED LISTS, so a later, larger load
         # brings back an excluded id it now stores; the rest only slow every search.
         stored = set(self.indexer.store.ids(name))
-        db.save_questions(conn, name, [stored_exclusions(q, stored) for q in questions])
+        db.save_questions(conn, eval_set, [stored_exclusions(q, stored) for q in questions])
         fresh = db.get_collection(conn, name)
         return {
             "added": counts["new"] + counts["updated"],
@@ -248,9 +249,19 @@ class Loader:
             built = [replace(q, meta={**q.meta, "source": setup["source"]}) for q in built]
         return built, len(rows) - len(built)
 
-    def _question_counts(self, name: str, questions: list[Question]) -> tuple[dict, list[Question]]:
-        """New, updated, unchanged against the stored ones; a leaked mark is ours."""
-        stored = {q.id: q for q in db.get_questions(self.conn, name)}
+    def questions_set(self, spec: CollectionSpec) -> str:
+        """The store's default eval set, made (named after the store) when it has none. Raises
+        ValueError when that set is of another type than the store."""
+        name = db.default_eval_set(self.conn, spec.name) or spec.name
+        db.ensure_eval_set(self.conn, name, spec.qa_type)
+        db.set_default_eval_set(self.conn, spec.name, name)
+        return name
+
+    def question_counts(
+        self, eval_set: str, questions: list[Question]
+    ) -> tuple[dict, list[Question]]:
+        """New, updated, unchanged against the eval set's questions; a leaked mark is ours."""
+        stored = {q.id: q for q in db.get_questions(self.conn, eval_set)}
         counts, todo = {"new": 0, "updated": 0, "unchanged": 0}, []
         for q in questions:
             old = stored.get(q.id)
@@ -267,7 +278,9 @@ class Loader:
     def estimate_import(self, spec: CollectionSpec, setup: dict) -> dict:
         built, skipped = self._read_upload(spec, setup)
         if setup["kind"] == "questions":
-            counts, _ = self._question_counts(spec.name, built)
+            counts, _ = self.question_counts(
+                db.default_eval_set(self.conn, spec.name) or spec.name, built
+            )
             return {"est_usd": 0.0, "calls": 0, **counts, "skipped": skipped}
         _, counts = self.indexer.changed(spec, built, setup["source"])
         return {**self._estimate(spec, built, setup["source"]), **counts, "skipped": skipped}
@@ -283,8 +296,9 @@ class Loader:
         if setup["kind"] == "items":
             lists_source, build_result, counts = self._add(spec, built, setup["source"], progress)
         else:
-            counts, todo = self._question_counts(name, built)
-            db.save_questions(conn, name, todo)
+            eval_set = self.questions_set(spec)
+            counts, todo = self.question_counts(eval_set, built)
+            db.save_questions(conn, eval_set, todo)
         progress(1.0)
         return {
             **counts,
@@ -318,17 +332,16 @@ class Loader:
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 
     def start_copy(self, source: str, target: CollectionSpec) -> str:
-        """Make the target with the source's questions, switched-off sources and leaked
-        setting, and queue the copy job that fills it. Returns the job's id."""
+        """Make the target with the source's eval set, switched-off sources, and queue the
+        copy job that fills it. Returns the job's id."""
         conn = self.conn
         self.indexer.create(
             target.name, target.qa_type, target.summarize, target.recipe, target.build
         )
-        # Meta as it is: the copy stores the same item ids, so gold and excluded ids hold.
-        db.save_questions(conn, target.name, db.get_questions(conn, source))
+        # The copy stores the same item ids, so the source's eval set holds for it as it is.
+        db.set_default_eval_set(conn, target.name, db.default_eval_set(conn, source))
         for off in db.disabled_sources(conn, source):
             db.set_source_enabled(conn, target.name, off, False)
-        db.set_include_leaked(conn, target.name, db.get_include_leaked(conn, source))
         return db.create_job(conn, "copy", target.name, {"source": source})
 
     def run_copy(self, job: dict, progress: Callable[[float], None]) -> dict:
@@ -362,11 +375,15 @@ class Loader:
         return {"added": added, "sources": sorted(by_source), **build_result}
 
     def mark_leaked(self, name: str) -> int:
-        """Mark the imported or hand-written questions whose text sits inside an item of the
-        collection; the built-in datasets' questions are never checked. Returns the leaked count."""
+        """Mark the default eval set's imported or hand-written questions whose text sits inside
+        an item of the collection; the built-in datasets' questions are never checked.
+        Returns the leaked count."""
+        eval_set = db.default_eval_set(self.conn, name)
+        if eval_set is None:
+            return 0
         questions = [
             q
-            for q in db.get_questions(self.conn, name)
+            for q in db.get_questions(self.conn, eval_set)
             if str(q.meta.get("source", "")).startswith("upload:") or q.meta.get("source") == "hand"
         ]
         if not questions:
@@ -381,5 +398,5 @@ class Loader:
                     if q.id in leaked
                     else without_leaked(q)
                 )
-        db.save_questions(self.conn, name, changed)
+        db.save_questions(self.conn, eval_set, changed)
         return len(leaked)

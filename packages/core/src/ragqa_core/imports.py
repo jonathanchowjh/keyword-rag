@@ -292,6 +292,21 @@ def build_items(rows: list[dict], mapping: dict) -> tuple[list[Item], dict]:
     return list(items.values()), report
 
 
+def question_problem(q: Question, qa_type: QaType) -> str | None:
+    """Why the question is not usable, or None. No gold answer is fine for every type: it
+    leaves the answers unmeasured, as with BRIGHT."""
+    if not q.text.strip():
+        return "no text"
+    if qa_type == "mcq":
+        choices = q.choices or []
+        if len(choices) < 2:
+            return "an mcq question needs at least 2 choices"
+        letters = LETTERS[: len(choices)]
+        if any(a not in letters for a in q.gold_answers):
+            return f"the answer must be one of {', '.join(letters)}"
+    return None
+
+
 def build_questions(
     rows: list[dict], mapping: dict, qa_type: QaType
 ) -> tuple[list[Question], dict]:
@@ -331,7 +346,11 @@ def build_questions(
             continue
         meta = {k: v for k in ("solution", "skill", "scale") if (v := cell_text(row, mapping, k))}
         gold_ids = split_list(cell(row, mapping, "gold_ids"))
-        questions[id_] = Question(id_, text, choices, gold, gold_ids, meta)
+        question = Question(id_, text, choices, gold, gold_ids, meta)
+        if question_problem(question, qa_type):
+            report["unreadable_answers"] += 1
+            continue
+        questions[id_] = question
     return list(questions.values()), report
 
 

@@ -1753,12 +1753,7 @@ def test_import_estimate_then_confirm_then_reimport_unchanged(client):
     assert again["result"]["new"] == 0 and again["result"]["updated"] == 0
     assert again["result"]["unchanged"] == 3
     sources = {s["source"]: s for s in client.get("/collections/c/sources").json()}
-    assert sources["upload:notes"] == {
-        "source": "upload:notes",
-        "items": 3,
-        "questions": 0,
-        "enabled": True,
-    }
+    assert sources["upload:notes"] == {"source": "upload:notes", "items": 3, "enabled": True}
 
 
 def test_import_not_ready_is_422(client):
@@ -1804,7 +1799,6 @@ def test_sources_list_switch_and_query_skips_disabled(client):
     assert r.status_code == 200 and r.json() == {
         "source": "upload:notes",
         "items": 3,
-        "questions": 0,
         "enabled": False,
     }
     for method in ("hybrid", "random_example"):
@@ -1847,7 +1841,7 @@ def test_last_source_cannot_be_switched_off(client):
     assert r.status_code == 409 and "at least one source" in r.json()["detail"]
 
 
-def test_delete_source_removes_items_chunks_and_questions(client):
+def test_store_sources_count_items_and_deleting_one_keeps_questions(client):
     add_collection(client)
     import_items(client)
     qs = jsonl(
@@ -1861,8 +1855,10 @@ def test_delete_source_removes_items_chunks_and_questions(client):
     assert client.delete("/collections/c/sources/upload:notes").status_code == 204
     assert store.count("c") == 3 and "upload:notes" not in store.source_counts("c")
     ids = [q.id for q in db.get_questions(client.app.state.conn, "c")]
-    assert ids == ["q1"]
-    assert [s["source"] for s in client.get("/collections/c/sources").json()] == ["hand"]
+    assert ids == ["q1", "uq"]  # the questions are the eval set's, not the store's
+    assert client.get("/collections/c/sources").json() == [
+        {"source": "hand", "items": 3, "enabled": True}
+    ]
 
 
 def test_delete_source_refused_while_a_job_is_queued(client):
@@ -1877,7 +1873,7 @@ def test_disabled_source_without_items_still_lists(client):
     add_collection(client)
     db.set_source_enabled(client.app.state.conn, "c", "gone", False)
     sources = client.get("/collections/c/sources").json()
-    assert {"source": "gone", "items": 0, "questions": 0, "enabled": False} in sources
+    assert {"source": "gone", "items": 0, "enabled": False} in sources
 
 
 def test_questions_list_and_include_leaked(client):
@@ -1936,7 +1932,7 @@ def test_collection_reports_fields_and_measurable(client):
     m = detail["measurable"]
     assert m["solution_sim@1"] == {"measurable": False, "note": "no question has a worked solution"}
     assert m["accuracy"]["measurable"] is True
-    assert detail["sources"] == [{"source": "hand", "items": 3, "questions": 0, "enabled": True}]
+    assert detail["sources"] == [{"source": "hand", "items": 3, "enabled": True}]
     assert detail["unlabelled"] == 0 and detail["leaked"] == 0
 
 
@@ -1969,24 +1965,11 @@ def import_questions_only(client):
     assert wait(client, r.json()["job_id"])["status"] == "done"
 
 
-def test_question_only_source_is_listed_and_deleted(client):
+def test_a_question_import_adds_no_source_row(client):
     add_collection(client)
     import_questions_only(client)
-    row = {"source": "upload:qs", "items": 0, "questions": 1, "enabled": True}
-    assert row in client.get("/collections/c/sources").json()
-    assert row in client.get("/collections/c").json()["sources"]
-    assert client.delete("/collections/c/sources/upload:qs").status_code == 204
-    assert [q.id for q in db.get_questions(client.app.state.conn, "c")] == ["q1"]
-    assert all(s["source"] != "upload:qs" for s in client.get("/collections/c/sources").json())
-
-
-def test_switching_a_question_only_source_is_not_the_last_item_source(client):
-    add_collection(client)
-    import_questions_only(client)
-    r = client.patch("/collections/c/sources/upload:qs", json={"enabled": False})
-    assert r.status_code == 200 and r.json()["enabled"] is False
-    r = client.patch("/collections/c/sources/hand", json={"enabled": False})
-    assert r.status_code == 409
+    assert [s["source"] for s in client.get("/collections/c/sources").json()] == ["hand"]
+    assert [q.id for q in db.get_questions(client.app.state.conn, "c")] == ["q1", "uq"]
 
 
 def test_queued_documents_need_a_key_when_they_cost(tmp_path):
@@ -2411,14 +2394,13 @@ def test_copy_estimate_then_build(tmp_path):
         assert w["vocabulary_version"] and w["profile"] == {"kinematics": w["count"]}
         conn, store = client.app.state.conn, client.app.state.store
         assert sorted(store.ids("w")) == sorted(store.ids("p"))
-        assert db.get_questions(conn, "w") == db.get_questions(conn, "p")
+        assert db.default_eval_set(conn, "w") == "p" and db.get_questions(conn, "w") == []
         assert set(ledger_purposes(client)) == {"induce", "tag", "abstract"}
 
 
 def test_copy_keeps_sources_and_disabled_state(tmp_path):
     with make_client(tmp_path, reply=building) as client:
         scibench_source(client)
-        db.set_include_leaked(client.app.state.conn, "p", True)
         r = client.post(
             "/collections/p/copy", json={"name": "r", "recipe": "reference", "confirm": True}
         )
@@ -2430,7 +2412,7 @@ def test_copy_keeps_sources_and_disabled_state(tmp_path):
             ("hand", False),
             ("scibench", True),
         ]
-        assert client.get("/collections/r").json()["include_leaked"] is True
+        assert client.get("/collections/r").json()["eval_set"] == "p"
 
 
 def test_copy_to_existing_name_is_409(client):
@@ -2597,3 +2579,151 @@ def test_a_stopped_copy_resumes_in_place_and_prices_only_what_is_left(tmp_path):
         assert any(abstracted for _, _, abstracted in built("w"))  # the tags were not paid twice
         r = client.post(f"/jobs/{job_id}/resume")
         assert r.status_code == 409 and r.json()["detail"] == "a done copy cannot be resumed"
+
+
+# -- eval sets -------------------------------------------------------------------
+
+MCQ = {"id": "a", "text": "which one?", "choices": ["x", "y"], "gold_answers": ["A"]}
+
+
+def put_questions(client, name, questions, base=None):
+    body = {"questions": questions, "base_version": base}
+    return client.put(f"/eval-sets/{name}/questions", json=body)
+
+
+def test_eval_set_crud_and_versions(client):
+    assert client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"}).json() == {"name": "e"}
+    assert client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"}).status_code == 409
+    assert (
+        client.post("/eval-sets", json={"name": "bad name!", "qa_type": "mcq"}).status_code == 422
+    )
+    first = {**MCQ, "meta": {"skill": "s", "odd": [1]}, "gold_ids": []}
+    r = put_questions(client, "e", [first, {**MCQ, "id": "b", "gold_answers": ["B"]}])
+    assert r.status_code == 200, r.text
+    version = r.json()["version"]
+    got = client.get("/eval-sets/e").json()
+    assert got["version"] == version and got["qa_type"] == "mcq"
+    assert [q["id"] for q in got["questions"]] == ["a", "b"]
+    assert got["questions"][0]["meta"] == {"skill": "s", "odd": [1]}
+    assert [v["version"] for v in got["versions"]] == [version]
+    assert client.get("/eval-sets").json()[0]["questions"] == 2
+    bad = put_questions(client, "e", [{**MCQ, "id": "z", "gold_answers": ["Z"]}], version)
+    assert bad.status_code == 422 and "'z'" in bad.json()["detail"]
+    repeated = put_questions(client, "e", [MCQ, MCQ], version)
+    assert repeated.status_code == 422 and "'a'" in repeated.json()["detail"]
+    client.post("/eval-sets", json={"name": "s", "qa_type": "science"})
+    plain = {"id": "p", "text": "how warm?", "choices": None, "gold_answers": []}
+    assert put_questions(client, "s", [plain]).status_code == 200
+    r = client.patch("/eval-sets/e", json={"include_leaked": True})
+    assert r.status_code == 200 and r.json()["include_leaked"] is True
+    assert client.get("/eval-sets/e").json()["include_leaked"] is True
+    assert client.get("/eval-sets/nope").status_code == 404
+
+
+def test_a_stale_or_busy_save_is_refused_and_writes_nothing(client):
+    add_collection(client, questions=False)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    version = put_questions(client, "e", [MCQ]).json()["version"]
+    stale = put_questions(client, "e", [MCQ, {**MCQ, "id": "b"}], "old")
+    assert stale.status_code == 409
+    client.app.state.worker.stop()
+    db.set_default_eval_set(client.app.state.conn, "c", "e")
+    db.create_job(client.app.state.conn, "load", "c", {"dataset": "scibench"})
+    busy = put_questions(client, "e", [MCQ, {**MCQ, "id": "b"}], version)
+    assert busy.status_code == 409
+    assert client.get("/eval-sets/e").json()["version"] == version
+    assert [q.id for q in db.get_questions(client.app.state.conn, "e")] == ["a"]
+
+
+def test_eval_set_import_runs_in_the_request(client):
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    client.post("/collections", json={"name": "e", "qa_type": "mcq"})
+    rows = jsonl(
+        *(
+            {"id": f"u{i}", "text": f"question {i}?", "choices": ["x", "y"], "answer": "A"}
+            for i in range(3)
+        )
+    )
+    r = client.post("/eval-sets/e/uploads", params={"filename": "quiz.jsonl"}, content=rows)
+    assert r.status_code == 200, r.text
+    up = r.json()
+    assert up["preview"]["ready"] and up["preview"]["usable"] == 3
+    body = {
+        "upload_id": up["upload_id"],
+        "mapping": up["preview"]["mapping"],
+        "source_name": "quiz",
+    }
+    done = client.post("/eval-sets/e/imports", json=body)
+    assert done.status_code == 200, done.text
+    out = done.json()
+    assert {k: out[k] for k in ("new", "updated", "unchanged", "skipped")} == {
+        "new": 3,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+    }
+    assert out["version"] == client.get("/eval-sets/e").json()["version"]
+    assert client.get("/jobs").json() == []
+    got = client.get("/eval-sets/e").json()["questions"]
+    assert {q["meta"]["source"] for q in got} == {"upload:quiz"} and len(got) == 3
+    again = client.post("/eval-sets/e/imports", json=body).json()
+    assert again["unchanged"] == 3 and again["new"] == 0
+    # a store of the same name does not see the upload
+    r = client.post(
+        "/collections/e/imports",
+        json={**body, "kind": "questions"},
+    )
+    assert r.status_code == 404
+
+
+def test_deleting_an_eval_set_deletes_its_runs_and_a_store_keeps_its_sets(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    run = db.create_job(conn, "eval", "c", {"eval_set": "c"})
+    db.update_job(conn, run, status="done")
+    r = client.delete("/eval-sets/c")
+    assert r.status_code == 200 and r.json() == {"runs": 1}
+    assert db.get_job(conn, run) is not None and db.get_eval_set(conn, "c") is not None
+    assert client.delete("/eval-sets/c", params={"confirm": True}).status_code == 204
+    assert db.get_job(conn, run) is None and db.get_eval_set(conn, "c") is None
+    assert client.get("/collections/c").json()["eval_set"] is None
+    assert client.delete("/eval-sets/c", params={"confirm": True}).status_code == 404
+    add_collection(client, name="d")
+    assert client.delete("/collections/d").status_code == 204
+    assert db.get_eval_set(conn, "d") is not None
+
+
+def test_deleting_an_eval_set_is_refused_while_its_run_is_queued(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    conn = client.app.state.conn
+    run = db.create_job(conn, "eval", "c", {"eval_set": "c"})
+    assert client.delete("/eval-sets/c", params={"confirm": True}).status_code == 409
+    assert db.get_job(conn, run) is not None and db.get_eval_set(conn, "c") is not None
+
+
+def test_store_question_routes_use_the_default_eval_set(client):
+    add_collection(client, questions=False)
+    conn = client.app.state.conn
+    assert client.get("/collections/c").json()["eval_set"] is None
+    assert client.get("/collections/c").json()["questions"] == 0
+    rows = jsonl({"id": "u1", "text": "do tides follow?", "choices": ["y", "n"], "answer": "A"})
+    up = upload(client, rows, kind="questions").json()
+    r = do_import(client, up, "qs", kind="questions", confirm=True)
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    assert db.default_eval_set(conn, "c") == "c"
+    assert [q.id for q in db.get_questions(conn, "c")] == ["u1"]
+    assert client.get("/eval-sets/c").json()["qa_type"] == "mcq"
+    page = client.get("/collections/c/questions").json()
+    assert [q["id"] for q in page["questions"]] == ["u1"]
+    client.post("/eval-sets", json={"name": "other", "qa_type": "mcq"})
+    db.set_default_eval_set(conn, "c", "other")
+    put_questions(client, "other", [MCQ])
+    assert [q["id"] for q in client.get("/collections/c/questions").json()["questions"]] == ["a"]
+    detail = client.get("/collections/c").json()
+    assert detail["eval_set"] == "other" and detail["questions"] == 1
+    r = client.patch("/collections/c/questions/leaked", json={"include": True})
+    assert r.json() == {"include_leaked": True}
+    assert (
+        db.get_include_leaked(conn, "other") is True and db.get_include_leaked(conn, "c") is False
+    )

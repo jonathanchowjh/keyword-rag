@@ -1,10 +1,12 @@
 import json
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from ragqa_core import imports
+from ragqa_core.imports import question_problem
 from ragqa_core.types import Question
 
 
@@ -372,3 +374,17 @@ def test_preview_names_the_required_fields(tmp_path):
     shown = imports.preview(p, "a.csv", "questions", "mcq")
     assert shown["required"] == ["text", "choices", "answer"]
     assert imports.preview(p, "a.csv", "questions", "science")["required"] == ["text", "answer"]
+
+
+def test_question_problem():
+    ok = Question("a", "which one?", ["x", "y"], ["B"], [], {})
+    assert question_problem(ok, "mcq") is None
+    assert question_problem(replace(ok, text="  "), "mcq") == "no text"
+    assert "choices" in question_problem(replace(ok, choices=["x"]), "mcq")
+    assert "choices" in question_problem(replace(ok, choices=None), "mcq")
+    assert "answer" in question_problem(replace(ok, gold_answers=["Z"]), "mcq")
+    # Unmeasured answers are fine for every type.
+    assert question_problem(replace(ok, gold_answers=[]), "mcq") is None
+    plain = Question("b", "how warm?", None, [], [], {})
+    assert question_problem(plain, "science") is None
+    assert question_problem(replace(plain, gold_answers=["28 C"]), "multihop") is None

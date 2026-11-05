@@ -273,6 +273,23 @@ def test_import_questions_marks_leaked(tmp_path, monkeypatch):
     assert again["unchanged"] == 2 and again["leaked"] == 1
 
 
+def test_a_load_refuses_a_default_eval_set_of_another_type(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ix.create("x", "multihop", False)
+    db.create_eval_set(conn, "x", "mcq")
+    job = get_job(conn, create_job(conn, "load", "x", {"dataset": "musique", "limit": None}))
+    with pytest.raises(ValueError, match="eval set 'x' is mcq, not multihop"):
+        ld.run(job, lambda p: None)
+    assert ix.store.count("x") == 0 and get_questions(conn, "x") == []
+
+
+def test_a_load_makes_the_default_eval_set(tmp_path, monkeypatch):
+    conn, ix, ld, job = build(tmp_path, monkeypatch)
+    ld.run(job, lambda p: None)
+    assert db.get_eval_set(conn, "m")["qa_type"] == "multihop"
+    assert db.default_eval_set(conn, "m") == "m" and len(get_questions(conn, "m")) == 1
+
+
 def test_dataset_load_never_marks_builtin_questions(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
     ld.ai.update_connection("anthropic", api_key=None)
@@ -471,7 +488,8 @@ def test_copy_rebuilds_the_items_under_another_recipe(tmp_path):
     assert estimate["est_usd"] > 0 and purposes(conn) == [] and ix.spec("w") is None
     job = get_job(conn, ld.start_copy("p", target))
     assert job is not None and (job["kind"], job["collection"]) == ("copy", "w")
-    assert get_questions(conn, "w") == get_questions(conn, "p")  # meta as it is
+    assert db.default_eval_set(conn, "w") == "p"  # points to the source's set, copies nothing
+    assert db.get_eval_set(conn, "w") is None
     seen: list[float] = []
     result = ld.run_copy(job, seen.append)
     spec = ix.spec("w")
@@ -488,6 +506,13 @@ def test_copy_rebuilds_the_items_under_another_recipe(tmp_path):
     assert all(h.tags == ["kinematics"] for h in copied.values())
     assert set(purposes(conn)) == {"induce", "tag", "abstract"}
     assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
+
+
+def test_copy_points_to_the_source_eval_set(tmp_path):
+    conn, ix, ld, items = scibench_paper(tmp_path)
+    ld.start_copy("p", ld.copy_spec(ix.spec("p"), "w", "worked_examples", None))
+    assert db.default_eval_set(conn, "w") == "p"
+    assert get_questions(conn, "w") == []
 
 
 def test_copy_into_paper_2024_takes_the_source_lists(tmp_path, monkeypatch):
