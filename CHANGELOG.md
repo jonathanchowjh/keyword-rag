@@ -45,6 +45,8 @@
 - Build and summary estimates price only the calls not already cached, with the batch
   discount only when the uncached calls are enough to be sent as a batch, so a
   re-run or resumed build is priced at what it will spend (`AI.estimate_many`).
+- The Lab shows Keyword-RAG's tags for the question, each hit's tags (lit where the
+  question shares them) and the channels that found it.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

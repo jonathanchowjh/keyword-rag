@@ -32,23 +32,40 @@ async function loadMethods() {
     .join("");
 }
 
+function chipsHtml(words, on = new Set()) {
+  return words.map((w) => `<span class="chip ${on.has(w) ? "on" : ""}">${esc(w)}</span>`).join("");
+}
+
+// A hit's keywords (lists) or tags (a vocabulary), lit where they match the question, and,
+// for Keyword-RAG, the channels that found it.
 function hitCard(hit) {
   const matched = new Set(hit.matched || []);
-  const chips = Object.entries(hit.keywords || {})
+  const words = Object.entries(hit.keywords || {})
     .filter(([facet]) => facet !== "all")
-    .flatMap(([, words]) => words)
-    .map((w) => `<span class="chip ${matched.has(w) ? "on" : ""}">${esc(w)}</span>`)
-    .join("");
+    .flatMap(([, list]) => list);
+  const chips = chipsHtml([...words, ...(hit.tags || [])], matched);
+  const found = hit.channels?.length
+    ? `<div class="muted" data-channels>found by ${esc(hit.channels.join(", "))}</div>` : "";
   const gold = hit.answer ? `<span class="muted">example answer ${esc(hit.answer)}</span>` : "";
   return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>score ${hit.score.toFixed(2)}</span></div>
     <div>${esc(hit.text.slice(0, 300))}${hit.text.length > 300 ? "…" : ""}</div>
-    <div>${chips}</div>${gold}</div>`;
+    <div>${chips}</div>${found}${gold}</div>`;
+}
+
+// Keyword-RAG's tags for the question: what its keywords channel searched with.
+function queryTagsHtml(v) {
+  if (!("query_tags" in v) || v.error) return "";
+  const tags = v.query_tags || [];
+  const shown = tags.length ? chipsHtml(tags, new Set(tags))
+    : '<span class="muted">none, so the keywords channel found nothing</span>';
+  return `<div data-query-tags><span class="muted">Question tags</span> ${shown}</div>`;
 }
 
 function column(method, v) {
   return `<section class="col">
     <h2><span>${named(method)}</span><span class="muted">${usd(v.usd)}</span></h2>
     ${v.error ? `<div class="err">${esc(v.error)}</div>` : ""}
+    ${queryTagsHtml(v)}
     ${v.hits.map(hitCard).join("") || (v.error ? "" : '<div class="muted">no retrieval</div>')}
     ${v.answer !== null ? `<div class="answer">Answer: ${esc(v.answer)}</div>` : ""}
   </section>`;

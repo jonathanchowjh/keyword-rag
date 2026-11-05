@@ -671,6 +671,30 @@ def test_lab_marks_paid_methods_and_the_answer_box(page, seeded):
     )
 
 
+def test_lab_shows_keyword_rags_question_tags_hit_tags_and_channels(page, seeded):
+    hit = {
+        "id": "i1", "text": "A ball falls.", "score": 0.5, "keywords": {}, "matched": ["drag"],
+        "answer": None, "explanation": None, "meta": {}, "tags": ["drag", "energy"],
+        "channels": ["meaning", "keywords"],
+    }  # fmt: skip
+    empty = {"hits": [], "answer": None, "usd": 0.0, "error": None, "query_tags": []}
+    results = {"keyword_rag": {**empty, "hits": [hit], "query_tags": ["drag"]}}
+    page.route("**/query", lambda route: route.fulfill(json={"results": results}))
+    page.goto(seeded.url + "/lab")
+    page.locator("#question").fill("how fast does it fall")
+    page.locator("#run").click()
+    tags = page.locator("[data-query-tags]")
+    expect(tags).to_contain_text("Question tags")
+    expect(tags.locator(".chip.on")).to_have_text(["drag"])
+    card = page.locator(".hit")
+    expect(card.locator(".chip")).to_have_text(["drag", "energy"])
+    expect(card.locator(".chip.on")).to_have_text(["drag"])  # the tag the question shares
+    expect(card.locator("[data-channels]")).to_have_text("found by meaning, keywords")
+    results["keyword_rag"] = empty  # a question with no tags says what that means
+    page.locator("#run").click()
+    expect(tags).to_contain_text("none, so the keywords channel found nothing")
+
+
 def test_lab_marks_keyword_methods_on_a_summarising_collection(page, seeded):
     seeded.build("labsum", summarize=True)
     page.goto(seeded.url + "/lab")
