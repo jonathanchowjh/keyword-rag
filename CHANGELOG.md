@@ -42,6 +42,9 @@
   new items.
 - The Run page marks the answer of a run that stopped, failed or was cancelled as
   partial: it is from the questions the run reached.
+- Build and summary estimates price only the calls not already cached, with the batch
+  discount only when the uncached calls are enough to be sent as a batch, so a
+  re-run or resumed build is priced at what it will spend (`AI.estimate_many`).
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

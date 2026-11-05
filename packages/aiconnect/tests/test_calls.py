@@ -140,6 +140,24 @@ def test_estimate(tmp_path):
     assert c.estimate_usd(4000, 400, batch=True) == pytest.approx(full / 2)
 
 
+def test_estimate_many_prices_only_the_misses_and_batches_as_the_send_would(tmp_path):
+    c = fake_ai(tmp_path / "ai.db", lambda p: "ok")
+    prompts = [f"prompt {n:03d}" for n in range(60)]
+
+    def full(ps):
+        return sum(c.estimate_usd(len(p), 100) for p in ps)
+
+    # 60 misses: more than the threshold, so the send is a batch at half price
+    assert c.estimate_many(prompts, 100) == pytest.approx(full(prompts) / 2)
+    c.complete_many(prompts[:20], max_tokens=100, purpose="t")
+    # 40 misses left: sent one by one at full price, and the 20 cached ones are free
+    assert c.estimate_many(prompts, 100) == pytest.approx(full(prompts[20:]))
+    assert c.estimate_many(prompts[:20], 100) == 0
+    # the key is the send's: another max_tokens or system is another call
+    assert c.estimate_many(prompts[:1], 200) > 0
+    assert c.estimate_many(prompts[:1], 100, system="s") > 0
+
+
 def test_estimate_has_no_batch_discount_where_batches_do_not_exist(tmp_path):
     c = fake_ai(tmp_path / "ai.db", lambda p: "")
     c.add_connection("oa", "openai", "OpenAI-compatible", api_key="k")

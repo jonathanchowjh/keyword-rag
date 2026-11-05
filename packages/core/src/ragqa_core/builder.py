@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from aiconnect.ai import AI, BATCH_THRESHOLD, NoConnection
+from aiconnect.ai import AI, NoConnection
 from ragqa_core import db
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import BATCH, Indexer
@@ -124,11 +124,8 @@ class Builder:
 
     def estimate_induce_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
         """Raises NoConnection("keywords") when no model can price it."""
-        prompts = self._induce_prompts(spec, items)
-        batch = len(prompts) > BATCH_THRESHOLD
-        return sum(
-            self.ai.estimate_usd(len(p), INDUCE_TOKENS, role="keywords", batch=batch)
-            for p in prompts
+        return self.ai.estimate_many(
+            self._induce_prompts(spec, items), INDUCE_TOKENS, role="keywords"
         )
 
     def induce(
@@ -237,16 +234,8 @@ class Builder:
         build = build_of(spec)
         if build.tagging != "ai":
             return 0.0
-        batch = len(items) > BATCH_THRESHOLD
-        return sum(
-            self.ai.estimate_usd(
-                len(tag_prompt(terms, describe_text(i, build.describes), build.tag_k)),
-                TAG_TOKENS,
-                role="keywords",
-                batch=batch,
-            )
-            for i in items
-        )
+        prompts = [tag_prompt(terms, describe_text(i, build.describes), build.tag_k) for i in items]
+        return self.ai.estimate_many(prompts, TAG_TOKENS, role="keywords")
 
     def _tag(
         self,
@@ -397,11 +386,8 @@ class Builder:
 
     def estimate_abstract_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
         """Raises NoConnection("keywords") when no model can price it."""
-        prompts = self._abstract_prompts(spec, items)
-        batch = len(prompts) > BATCH_THRESHOLD
-        return sum(
-            self.ai.estimate_usd(len(p), ABSTRACT_TOKENS, role="keywords", batch=batch)
-            for p in prompts
+        return self.ai.estimate_many(
+            self._abstract_prompts(spec, items), ABSTRACT_TOKENS, role="keywords"
         )
 
     def abstract(

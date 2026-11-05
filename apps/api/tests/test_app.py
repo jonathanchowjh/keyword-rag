@@ -2316,6 +2316,10 @@ def test_worked_documents_are_built_in_the_request(tmp_path):
         hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
         assert all(h.tags == ["rates"] and h.abstracted for h in hits)
         assert ledger_purposes(client) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3
+        # Tagging again with the same terms is answered from the cache: priced at nothing.
+        same = client.put("/collections/w/vocabulary", json={"terms": ["rates"]}).json()
+        other = client.put("/collections/w/vocabulary", json={"terms": ["rates", "speed"]}).json()
+        assert same["estimate"]["est_usd"] == 0 and other["estimate"]["est_usd"] > 0
 
 
 def test_worked_documents_whose_build_failed_are_built_by_sending_them_again(tmp_path):

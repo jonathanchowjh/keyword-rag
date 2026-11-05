@@ -659,7 +659,9 @@ print(reply.text, reply.usd, reply.cached)
 ```
 
 `complete_many` batches where the provider supports it, `estimate_usd` prices
-a call before it is made, and `month_spend` reports the ledger. Errors are the
+a call before it is made, `estimate_many` prices a set of prompts as
+`complete_many` would send them (cached ones free, the rest batched only when
+the misses are), and `month_spend` reports the ledger. Errors are the
 package's own: `BudgetExceeded`, `NoConnection`, `UnknownModel`,
 `UnknownPrice`, `ProviderError`, `Conflict`, `Cancelled`.
 

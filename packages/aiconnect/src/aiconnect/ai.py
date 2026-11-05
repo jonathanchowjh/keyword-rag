@@ -595,11 +595,7 @@ class AI:
         cache: bool = True,
     ) -> list[Completion]:
         connection_id, model_id = self.resolve(model or self.model_for(role))
-        # A model reached through two connections shares its answers, but one answered by
-        # hand is keyed by its ref: a typed reply is never served as a provider's answer.
-        by_hand = self.need_connection(connection_id)["kind"] == "manual"
-        keyed = f"{connection_id}/{model_id}" if by_hand else model_id
-        keys = [cache_key(keyed, system, p, max_tokens) for p in prompts]
+        keys = self._keys(connection_id, model_id, system, prompts, max_tokens)
         results: dict[str, Completion] = {}
         if cache:
             self.load_cached(keys, results)
@@ -619,12 +615,7 @@ class AI:
             misses = {k: p for k, p in misses.items() if k not in results}
         if misses:
             batch = len(misses) > BATCH_THRESHOLD and connection["kind"] in BATCH
-            estimate = sum(
-                usd_for(
-                    rates, estimate_tokens(len(system) + len(p)), math.ceil(max_tokens * 1.3), batch
-                )
-                for p in misses.values()
-            )
+            estimate = self._usd(rates, system, list(misses.values()), max_tokens, batch)
             with self._lock:
                 committed = self.month_spend() + self._reserved + self._pending_usd()
                 if committed + estimate > self.cap_usd:
@@ -670,6 +661,22 @@ class AI:
                 if total is not None:  # what was paid for, even when a later send failed
                     total["usd"] += sum(results[k].usd for k in misses if k in results)
         return [results[k] for k in keys]
+
+    def _keys(
+        self, connection_id: str, model_id: str, system: str, prompts: list[str], max_tokens: int
+    ) -> list[str]:
+        # A model reached through two connections shares its answers, but one answered by
+        # hand is keyed by its ref: a typed reply is never served as a provider's answer.
+        by_hand = self.need_connection(connection_id)["kind"] == "manual"
+        keyed = f"{connection_id}/{model_id}" if by_hand else model_id
+        return [cache_key(keyed, system, p, max_tokens) for p in prompts]
+
+    @staticmethod
+    def _usd(rates, system: str, prompts: list[str], max_tokens: int, batch: bool) -> float:
+        out = math.ceil(max_tokens * 1.3)
+        return sum(
+            usd_for(rates, estimate_tokens(len(system) + len(p)), out, batch) for p in prompts
+        )
 
     def load_cached(self, keys: list[str], results: dict[str, Completion]) -> None:
         for key in dict.fromkeys(keys):
@@ -945,6 +952,29 @@ class AI:
         # Only a kind with a Batch API sends batches; the others pay full price.
         batch = batch and self.need_connection(connection_id)["kind"] in BATCH
         return usd_for(rates, estimate_tokens(prompt_chars), math.ceil(output_tokens * 1.3), batch)
+
+    def estimate_many(
+        self,
+        prompts: list[str],
+        max_tokens: int,
+        *,
+        role: str = "default",
+        model: str | None = None,
+        system: str = "",
+    ) -> float:
+        """What complete_many would spend on these prompts: a cached one is free, and the
+        rest are priced batched exactly when it would send them as a batch (more than
+        BATCH_THRESHOLD misses, on a kind with a Batch API). Raises as estimate_usd does."""
+        connection_id, model_id = self.resolve(model or self.model_for(role))
+        rates = self.need_rates(connection_id, model_id)
+        keys = self._keys(connection_id, model_id, system, prompts, max_tokens)
+        cached: dict[str, Completion] = {}
+        self.load_cached(keys, cached)
+        misses = {k: p for k, p in zip(keys, prompts, strict=True) if k not in cached}
+        batch = (
+            len(misses) > BATCH_THRESHOLD and self.need_connection(connection_id)["kind"] in BATCH
+        )
+        return self._usd(rates, system, list(misses.values()), max_tokens, batch)
 
     def month_spend(self) -> float:
         month = datetime.now(UTC).strftime("%Y-%m")
