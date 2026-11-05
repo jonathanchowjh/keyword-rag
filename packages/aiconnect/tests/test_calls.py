@@ -422,7 +422,7 @@ def test_cache_key_formula_is_unchanged(tmp_path):
 def test_unpriced_model_refused_before_sending(tmp_path):
     sent = []
     ai = fake_ai(tmp_path / "ai.db", lambda p: sent.append(p) or "ok")
-    ai.add_model("anthropic", "claude-new")
+    ai.add_model("anthropic", "claude-new", price_in=None, price_out=None)
     with pytest.raises(UnknownPrice):
         ai.complete("hi", model="anthropic/claude-new", purpose="t")
     assert sent == []

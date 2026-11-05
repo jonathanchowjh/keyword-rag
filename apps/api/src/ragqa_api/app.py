@@ -211,8 +211,8 @@ class ConnectionEdit(BaseModel):
 class NewModel(BaseModel):
     model_id: str
     label: str | None = None
-    price_in: float | None = None
-    price_out: float | None = None
+    price_in: float | None = 0.0  # $0 unless given; null leaves it unpriced
+    price_out: float | None = 0.0
 
 
 class ModelEdit(BaseModel):
@@ -1125,6 +1125,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "presets": [
                 {k: p[k] for k in ("label", "kind", "base_url")} | {"id": id}
                 for id, p in PRESETS.items()
+            ],
+            # The list prices a model can be given on the Settings page, besides $0 and typed.
+            "prices": [
+                {"label": label, "price_in": price_in, "price_out": price_out}
+                for p in PRESETS.values()
+                for label, price_in, price_out in p["models"].values()
             ],
         }
 

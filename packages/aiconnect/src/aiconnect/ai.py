@@ -258,9 +258,11 @@ class AI:
         model_id: str,
         *,
         label: str | None = None,
-        price_in: float | None = None,
-        price_out: float | None = None,
+        price_in: float | None = 0.0,
+        price_out: float | None = 0.0,
     ) -> None:
+        """Priced $0 unless prices are given (None leaves it unpriced, refused until priced).
+        At $0 its calls are free to the budget: the cap does not stop them."""
         self.need_connection(connection_id)
         check_price(price_in)
         check_price(price_out)
@@ -314,15 +316,15 @@ class AI:
         return False
 
     def fetch_models(self, connection_id: str) -> list[str]:
-        """Adds the connection's models that are not stored yet and returns their ids.
-        Every model has no price until one is entered, so none is free by default."""
+        """Adds the connection's models that are not stored yet, priced $0 until a price is
+        entered, and returns their ids."""
         connection = self._connection(connection_id)
         if connection["kind"] == "manual":
             raise Conflict(f"{connection_id} is answered by hand: add its models by hand")
         known = {m["model_id"] for m in self.models() if m["connection_id"] == connection_id}
         added = [m for m in dict.fromkeys(self._list_models(connection)) if m not in known]
         for model_id in added:
-            self.add_model(connection_id, model_id, price_in=None, price_out=None)
+            self.add_model(connection_id, model_id)
         return added
 
     def test_connection(self, connection_id: str) -> dict:
@@ -455,8 +457,8 @@ class AI:
 
         model names a stored model (a ref, or a bare id one enabled model has) and is used
         as it resolves. Any other value is a model id on the "anthropic" connection (that
-        prefix may lead): added, unpriced, when the connection exists, and the default
-        either way, so jobs refuse until that model exists and has a price.
+        prefix may lead): added, priced $0, when the connection exists, and the default
+        either way, so jobs refuse until that model exists.
         """
         preset = PRESETS["anthropic"]
         if api_key:

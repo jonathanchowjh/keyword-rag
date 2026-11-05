@@ -417,10 +417,12 @@ is needed in `.env`.
 - **Two kinds cover every provider:** Anthropic's Messages API, and the
   OpenAI-compatible Chat Completions API. A third, **Answered by hand**, sends
   nothing (see below).
-- **Prices.** Every model needs a price per million input and output tokens
-  before it can be used, and a call to an unpriced model is refused before
-  anything is sent. Fetched models start unpriced, so nothing is free unless you
-  enter a price of 0 yourself.
+- **Prices.** A model's price is per million input and output tokens. A model
+  that is fetched or added by id starts at $0; on the Settings page choose $0,
+  a listed price (the Anthropic presets' rates), "No price" or "Enter by hand…".
+  At $0 a model's calls cost the budget nothing, so the cap does not stop them,
+  and the page says so: price a paid model before you spend with it. A model
+  with no price is refused before anything is sent.
 - **Jobs.** Each job picks a model, with `default` for any job left alone.
 
   | Job | Used for |
@@ -483,7 +485,7 @@ All are optional.
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Becomes the Anthropic connection: stored, shown read-only on the Settings page, applied at every start |
-| `RAGQA_MODEL` | The `default` job's model: `<connection>/<model id>`, or a bare model id that one enabled model has, e.g. `claude-haiku-5-5`. A value that names no stored model is taken as an Anthropic model id and added, unpriced, to the Anthropic connection when there is one; price it on the Settings page before use. Read-only on the Settings page while set. With only a key set, the default starts as `claude-haiku-5-5` and stays editable |
+| `RAGQA_MODEL` | The `default` job's model: `<connection>/<model id>`, or a bare model id that one enabled model has, e.g. `claude-haiku-5-5`. A value that names no stored model is taken as an Anthropic model id and added, at $0, to the Anthropic connection when there is one; price it on the Settings page. Read-only on the Settings page while set. With only a key set, the default starts as `claude-haiku-5-5` and stays editable |
 | `RAGQA_MONTHLY_CAP_USD` | The monthly cap. Read-only on the Settings page while set; unset, the stored cap stands (default `20`) |
 | `RAGQA_USERNAME`, `RAGQA_PASSWORD` | HTTP basic auth over every route. Set both or neither; exactly one set is a 503 on every request |
 | `RAGQA_DENSE_MODEL` | Retrieval embedding model (fastembed). Default `Qwen/Qwen3-Embedding-0.6B-Q` |
@@ -509,7 +511,7 @@ A collection remembers the dense model it was built with. Changing
   cross the cap is refused before it is sent, and an evaluation that hits the
   cap stops with `stopped_budget` and keeps its rows.
 - **No price, no call.** A model with no price is refused before anything is
-  sent.
+  sent. A model priced $0 is free to the budget, so price paid models.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
   imports and keyword-list proposals return the estimate unless
   `confirm: true` is set. The Lab (`/query`) is the exception: it spends at

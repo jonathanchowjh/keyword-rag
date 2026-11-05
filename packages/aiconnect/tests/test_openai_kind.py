@@ -112,13 +112,17 @@ def test_no_preset_is_a_local_server_and_no_connection_is_free_by_default():
     assert all("local" not in p for p in PRESETS.values())
 
 
-def test_fetch_models_leaves_every_model_unpriced_and_adds_only_new(tmp_path):
+def test_fetch_models_prices_new_models_at_zero_and_adds_only_new(tmp_path):
     ai = gateway_ai(tmp_path)
     ai._list_models = lambda connection: ["a", "b"]
     assert ai.fetch_models("gw") == ["a", "b"]
-    prices = [m["price_in"] for m in ai.models() if m["connection_id"] == "gw"]
-    assert prices == [None, None]
-    assert ai.fetch_models("gw") == []
+    prices = [(m["price_in"], m["price_out"]) for m in ai.models() if m["connection_id"] == "gw"]
+    assert prices == [(0, 0), (0, 0)]
+    ai.update_model("gw", "a", price_in=1.0, price_out=2.0)
+    assert ai.fetch_models("gw") == []  # a fetch again keeps the price entered
+    assert next(m for m in ai.models() if m["ref"] == "gw/a")["price_in"] == 1.0
+    ai.add_model("gw", "c", price_in=None, price_out=None)  # null: unpriced, refused
+    assert next(m for m in ai.models() if m["ref"] == "gw/c")["price_in"] is None
 
 
 def test_fetch_models_unknown_connection(tmp_path):
@@ -168,7 +172,7 @@ def test_provider_error_hides_key(tmp_path):
 
 def test_test_connection_without_priced_model_says_so(tmp_path):
     ai = gateway_ai(tmp_path)
-    ai.add_model("gw", "llama")
+    ai.add_model("gw", "llama", price_in=None, price_out=None)
     out = ai.test_connection("gw")
     assert out["ok"] is False and "price" in out["error"] and out["model"] is None
 

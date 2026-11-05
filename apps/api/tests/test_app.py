@@ -2083,11 +2083,12 @@ def test_ai_settings_round_trip(client):
     body = client.get("/ai").json()
     router = next(c for c in body["connections"] if c["id"] == "router")
     assert router["kind"] == "openai" and router["label"] == "OpenRouter" and "local" not in router
-    # Fetched models start unpriced: nothing is free unless a price of 0 is entered.
+    # Fetched models start at $0 until a price is entered.
     assert {m["ref"]: m["price_in"] for m in body["models"] if m["connection_id"] == "router"} == {
-        "router/llama3.1": None,
-        "router/qwen2": None,
+        "router/llama3.1": 0,
+        "router/qwen2": 0,
     }
+    assert {"label": "Haiku 5.5", "price_in": 0.10, "price_out": 0.50} in body["prices"]
     assert body["roles"]["answer"] == "router/llama3.1"
     assert body["known_roles"] == ["default", "answer", "summary", "keywords", "query"]
     assert body["budget"] == {"cap_usd": 20.0, "spent_usd": 0.0, "from_env": False}

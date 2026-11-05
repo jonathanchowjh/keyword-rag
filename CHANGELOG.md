@@ -47,6 +47,9 @@
   re-run or resumed build is priced at what it will spend (`AI.estimate_many`).
 - The Lab shows Keyword-RAG's tags for the question, each hit's tags (lit where the
   question shares them) and the channels that found it.
+- A model fetched or added by id starts at $0 instead of unpriced. Settings gives
+  each model a price list ($0, the preset rates, no price, or typed by hand) and
+  marks a $0 model, which the budget does not limit.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

@@ -134,14 +134,40 @@ const priceBox = (name, value) =>
   `<label>${name === "price_in" ? "Input" : "Output"} <input class="price" name="${name}" type="number" min="0" step="any"
     value="${value ?? ""}"></label>`;
 
+// The price choices, in USD per million tokens: $0, the list prices, none, or typed by hand.
+const HAND = "hand";
+const NONE = "none";
+const priceKey = (i, o) => `${i}/${o}`;
+function priceOptions() {
+  const listed = (ai.prices || []).map((p) => ({ value: priceKey(p.price_in, p.price_out),
+    label: `${p.label} rates: $${p.price_in} in, $${p.price_out} out` }));
+  return [{ value: priceKey(0, 0), label: "$0 (free)" }, ...listed,
+    { value: NONE, label: "No price (can't be used)" }, { value: HAND, label: "Enter by hand…" }];
+}
+
+function priceChoice(m) {
+  if (m.price_in == null || m.price_out == null) return NONE;
+  const key = priceKey(m.price_in, m.price_out);
+  return priceOptions().some((o) => o.value === key) ? key : HAND;
+}
+
 function modelHtml(m) {
   const unpriced = m.price_in == null || m.price_out == null;
+  const byHand = ai.connections.find((c) => c.id === m.connection_id)?.kind === "manual";
+  const choice = priceChoice(m);
+  const options = priceOptions()
+    .map((o) => `<option value="${esc(o.value)}" ${o.value === choice ? "selected" : ""}>${esc(o.label)}</option>`)
+    .join("");
+  const note = unpriced ? '<span class="warn">needs a price before use</span>'
+    : m.price_in === 0 && m.price_out === 0 && !byHand
+      ? '<span class="warn" data-free>$0: the budget does not limit it</span>' : "";
   return `<div class="model" data-model="${esc(m.ref)}" data-connection="${esc(m.connection_id)}" data-id="${esc(m.model_id)}">
     <span class="name">${esc(m.label)}<code>${esc(m.model_id)}</code></span>
     <label><input type="checkbox" name="enabled" ${m.enabled ? "checked" : ""}> Enabled</label>
-    ${priceBox("price_in", m.price_in)}${priceBox("price_out", m.price_out)}
+    <label title="USD per million tokens">Price <select name="price">${options}</select></label>
+    <span data-hand ${choice === HAND ? "" : "hidden"}>${priceBox("price_in", m.price_in)}${priceBox("price_out", m.price_out)}</span>
     <button type="button" class="secondary" data-save>Save</button>
-    ${unpriced ? '<span class="warn">needs a price before use</span>' : ""}</div>`;
+    ${note}</div>`;
 }
 
 function drawModels() {
@@ -163,10 +189,14 @@ async function saveRow(row) {
     const v = row.querySelector(`[name=${name}]`).value;
     return v === "" ? null : Number(v);
   };
-  const body = { enabled: row.querySelector("[name=enabled]").checked, price_in: number("price_in"), price_out: number("price_out") };
+  const choice = row.querySelector("[name=price]").value;
+  const [chosenIn, chosenOut] = choice === NONE ? [null, null] : choice.split("/").map(Number);
+  const typed = choice === HAND;
+  const body = { enabled: row.querySelector("[name=enabled]").checked,
+    price_in: typed ? number("price_in") : chosenIn, price_out: typed ? number("price_out") : chosenOut };
   say("");
-  if ((body.price_in === null) !== (body.price_out === null)) {
-    say("Give both prices, or leave both empty.");
+  if (typed && (body.price_in === null || body.price_out === null)) {
+    say("Give both prices, or choose one from the list.");
     return;
   }
   try {
@@ -178,6 +208,12 @@ async function saveRow(row) {
     say(e.message);
   }
 }
+
+// "Enter by hand…" shows the two price boxes; any other choice hides them.
+$("models").addEventListener("change", (event) => {
+  if (event.target.name !== "price") return;
+  event.target.closest(".model").querySelector("[data-hand]").hidden = event.target.value !== HAND;
+});
 
 $("models").addEventListener("click", (event) => {
   const save = event.target.closest("[data-save]");

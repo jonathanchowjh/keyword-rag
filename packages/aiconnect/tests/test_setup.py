@@ -166,7 +166,7 @@ def test_env_model_named_nowhere_is_added_to_the_anthropic_connection(tmp_path, 
     ai.apply_env(api_key="k-1234567890ab", model=value, cap_usd=None)
     assert ai.role_model("default") == "anthropic/claude-opus-9"
     added = next(m for m in ai.models() if m["ref"] == "anthropic/claude-opus-9")
-    assert added["price_in"] is None  # needs a price before use
+    assert (added["price_in"], added["price_out"]) == (0, 0)  # $0 until a price is entered
     assert "anthropic/anthropic/claude-opus-9" not in {m["ref"] for m in ai.models()}
 
 

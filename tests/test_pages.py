@@ -1431,8 +1431,7 @@ def test_settings_page_adds_a_connection_whose_models_need_a_price(page, seeded,
     expect(row).to_contain_text("OpenRouter")
     row.get_by_role("button", name="Fetch models").click()
     expect(page.locator('#models [data-model="router/llama3"]')).to_be_visible()
-    # Fetched unpriced; the Test call needs the price a person enters.
-    ai.update_model("router", "llama3", price_in=1, price_out=1)
+    # Fetched at $0, so the Test call can go at once.
     row.get_by_role("button", name="Test").click()
     expect(row.locator(".result")).to_contain_text("Worked with llama3")
 
@@ -1454,27 +1453,43 @@ def test_settings_page_never_shows_key(page, seeded):
     assert "SECRET" not in page.content()
 
 
-def test_unpriced_model_is_flagged_and_not_offered(page, seeded, monkeypatch):
-    monkeypatch.setattr(seeded.app.state.ai, "_list_models", lambda connection: ["gpt-unpriced"])
+def test_a_fetched_model_starts_at_zero_and_takes_a_listed_typed_or_no_price(
+    page, seeded, monkeypatch
+):
+    monkeypatch.setattr(seeded.app.state.ai, "_list_models", lambda connection: ["gpt-new"])
     row = add_connection(page, seeded, "OpenAI", "remote", key="sk-remote-key-0000")
     row.get_by_role("button", name="Fetch models").click()
-    model = page.locator('#models [data-model="remote/gpt-unpriced"]')
-    expect(model).to_contain_text("needs a price before use")
-    options = page.locator("#roles select option").all_inner_texts()
-    assert "gpt-unpriced" not in " ".join(options)
-    assert "Haiku 5.5" in options
+    model = page.locator('#models [data-model="remote/gpt-new"]')
+    price = model.locator("select[name=price]")
+    expect(price).to_have_value("0/0")  # $0 by default, and usable at once
+    expect(model.locator("[data-free]")).to_contain_text("the budget does not limit it")
+    expect(model.locator("input[name=price_in]")).to_be_hidden()
+    roles = page.locator("#roles select").first
+    expect(roles.locator("option", has_text="gpt-new")).to_have_count(1)
+
+    def save():
+        with page.expect_response(
+            lambda r: r.request.method == "PUT" and "remote/gpt-new" in r.url
+        ):
+            model.get_by_role("button", name="Save").click()
+        return next(m for m in ai_state(seeded)["models"] if m["ref"] == "remote/gpt-new")
+
+    price.select_option(label="Haiku 5.5 rates: $0.1 in, $0.5 out")
+    stored = save()
+    assert (stored["price_in"], stored["price_out"]) == (0.1, 0.5)
+    expect(model.locator("[data-free]")).to_have_count(0)
+    price.select_option(label="Enter by hand…")
+    expect(model.locator("input[name=price_in]")).to_be_visible()
     model.locator("input[name=price_in]").fill("1")
     model.locator("input[name=price_out]").fill("2")
-    with page.expect_response(
-        lambda r: r.request.method == "PUT" and "remote/gpt-unpriced" in r.url
-    ):
-        model.get_by_role("button", name="Save").click()
-    expect(model).not_to_contain_text("needs a price before use")
-    expect(
-        page.locator("#roles select").first.locator("option", has_text="gpt-unpriced")
-    ).to_have_count(1)
-    row = next(m for m in ai_state(seeded)["models"] if m["ref"] == "remote/gpt-unpriced")
-    assert (row["price_in"], row["price_out"]) == (1, 2)
+    stored = save()
+    assert (stored["price_in"], stored["price_out"]) == (1, 2)
+    expect(price).to_have_value("hand")  # a typed price that is not listed stays typed
+    price.select_option(label="No price (can't be used)")
+    stored = save()
+    assert stored["price_in"] is None
+    expect(model).to_contain_text("needs a price before use")
+    expect(roles.locator("option", has_text="gpt-new")).to_have_count(0)
 
 
 def test_half_a_price_is_not_sent_and_typing_is_kept(page, seeded, monkeypatch):
@@ -1484,16 +1499,18 @@ def test_half_a_price_is_not_sent_and_typing_is_kept(page, seeded, monkeypatch):
     model = page.locator('#models [data-model="half/gpt-half"]')
     expect(model).to_be_visible()
     page.locator('#models [data-connection="anthropic"] input[name=new-id]').fill("typed-id")
+    model.locator("select[name=price]").select_option(label="Enter by hand…")
     model.locator("input[name=price_in]").fill("1")
+    model.locator("input[name=price_out]").fill("")  # the boxes start at the price in force
     model.get_by_role("button", name="Save").click()
-    expect(page.locator("#msg")).to_contain_text("both prices")
+    expect(page.locator("#msg")).to_contain_text("Give both prices")
     assert model.locator("input[name=price_in]").input_value() == "1"
     assert (
         page.locator('#models [data-connection="anthropic"] input[name=new-id]').input_value()
         == "typed-id"
     )
     stored = next(m for m in ai_state(seeded)["models"] if m["ref"] == "half/gpt-half")
-    assert stored["price_in"] is None
+    assert stored["price_in"] == 0  # still the default
 
 
 def test_env_connection_has_no_remove(page, seeded):
@@ -1541,7 +1558,9 @@ def test_run_form_models_come_from_settings(page, seeded):
 def test_a_job_on_a_model_it_can_no_longer_use_shows_it_and_can_be_cleared(page, seeded):
     ai = seeded.app.state.ai
     ai.add_model("anthropic", "pinned-off", label="Pinned off", price_in=1, price_out=1)
-    ai.add_model("anthropic", "pinned-unpriced", label="Pinned unpriced")
+    ai.add_model(
+        "anthropic", "pinned-unpriced", label="Pinned unpriced", price_in=None, price_out=None
+    )
     ai.set_role("answer", "anthropic/pinned-off")
     ai.set_role("summary", "anthropic/pinned-unpriced")
     ai.update_model("anthropic", "pinned-off", enabled=False)
