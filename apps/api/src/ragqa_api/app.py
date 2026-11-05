@@ -1033,6 +1033,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/jobs/{job_id}/resume", status_code=202)
     def resume(job_id: str, body: ResumeRequest | None = None):
         """Without confirm, what resuming would cost (spec §5.4); with it, requeued."""
+        row = db.get_job(state.conn, job_id)
+        if row is not None and row["kind"] == "copy":
+            return resume_copy(row, body is not None and body.confirm)
         try:
             refusal = state.evaluator.resume_refusal(job_id)
         except KeyError:
@@ -1046,6 +1049,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
+
+    def resume_copy(row: dict, confirm: bool):
+        """A stopped copy runs again in place: adding skips the items it added, and the
+        build finishes what it left unbuilt, so only the rest is priced."""
+        if row["status"] not in db.JOBS_RESUMABLE:
+            raise HTTPException(409, f"a {row['status']} copy cannot be resumed")
+        source = row["setup"]["source"]
+        target = state.retriever.spec(row["collection"])
+        state.retriever.spec(source)  # 404 when the source is gone
+        busy = db.list_jobs(state.conn, collection=source, status="running", limit=1)
+        busy = busy or db.list_jobs(state.conn, collection=source, status="queued", limit=1)
+        if busy:
+            raise HTTPException(
+                409, f"a {busy[0]['kind']} job is {busy[0]['status']} on '{source}'; wait"
+            )
+        estimate = state.loader.estimate_copy(source, target)
+        if target.summarize and estimate["est_usd"] != 0:
+            need_ai("summary")
+        if builds(target) and estimate["est_usd"] != 0:
+            need_ai("keywords")
+        if not confirm:
+            return JSONResponse({"estimate": estimate}, 200)
+        with not_adding(source):
+            if not db.requeue(state.conn, row["id"]):  # moved since the check
+                raise HTTPException(409, "the job is no longer resumable")
+        return {"job_id": row["id"]}
 
     @app.get("/status")
     def status() -> dict:

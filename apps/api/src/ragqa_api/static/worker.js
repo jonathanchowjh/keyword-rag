@@ -86,7 +86,7 @@ function finishedHtml(finished) {
   if (!finished.length) return '<p class="muted">Nothing has finished yet.</p>';
   const rows = finished
     .map((j) => {
-      const resume = j.kind === "eval" && RESUMABLE.has(j.status)
+      const resume = (j.kind === "eval" || j.kind === "copy") && RESUMABLE.has(j.status)
         ? `<button type="button" class="secondary" data-resume="${esc(j.id)}">Resume</button>` : "";
       const error = j.error ? ` <span class="err">${esc(j.error)}</span>` : "";
       const row = `<tr data-finished-job="${esc(j.id)}"><td>${named(j)}</td>

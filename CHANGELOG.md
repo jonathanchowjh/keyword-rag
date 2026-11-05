@@ -36,6 +36,10 @@
   them; a provider error in `/query` is that method's error, with what the others spent;
   a reply typed for a model answered by hand is never served as another connection's
   answer; `experiments.py report` marks a run that has not finished.
+- A copy that stopped or failed resumes in place (`POST /jobs/{id}/resume`, or Resume on
+  the Worker page), priced for what it left. While a sync add (20 items or fewer) runs,
+  a job queued on that collection is refused (409), so a retag or rekey can't miss the
+  new items.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

@@ -550,7 +550,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize, recipe?: worked_examples\|reference\|paper_2024}`; no `recipe` means paper 2024, as before |
 | `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
-| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503 |
+| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
 | `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
 | `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up |
 | `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
@@ -574,7 +574,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
-| `POST /jobs/{job_id}/resume` | Resume a stopped run. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run or copy. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt |
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
 | `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
 | `GET /budget` | This service's spend this month against its cap |

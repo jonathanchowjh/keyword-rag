@@ -2556,3 +2556,39 @@ def test_a_sync_add_holds_off_jobs_on_its_collection_until_it_ends(client):
         client.put("/collections/w/vocabulary", json={"terms": ["x"], "confirm": True}).status_code
         == 202
     )
+
+
+def test_a_stopped_copy_resumes_in_place_and_prices_only_what_is_left(tmp_path):
+    broken = {"abstract": True}
+
+    def reply(prompt: str) -> str:
+        if '"principle"' in prompt and broken["abstract"]:
+            raise RuntimeError("provider down")
+        return building(prompt)
+
+    with make_client(tmp_path, reply=reply) as client:
+        scibench_source(client)
+        body = {"name": "w", "recipe": "worked_examples", "confirm": True}
+        job_id = client.post("/collections/p/copy", json=body).json()["job_id"]
+        assert wait(client, job_id)["status"] == "failed"
+        whole = client.post("/collections/p/copy", json={**body, "name": "w2", "confirm": False})
+        r = client.post(f"/jobs/{job_id}/resume")
+        assert r.status_code == 200, r.text
+        left = r.json()["estimate"]
+        assert left["items"] == 0  # every item was added; only abstraction is left
+        assert 0 < left["calls"] < whole.json()["estimate"]["calls"]
+        broken["abstract"] = False
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+        assert r.status_code == 202 and r.json() == {"job_id": job_id}
+        assert wait(client, job_id)["status"] == "done"
+        clean = client.post("/collections/p/copy", json={**body, "name": "w2"}).json()["job_id"]
+        assert wait(client, clean)["status"] == "done"
+        store = client.app.state.store
+
+        def built(name: str) -> list:
+            return sorted((h.id, h.tags, h.abstracted) for h in store.get(name, store.ids("p")))
+
+        assert built("w") == built("w2")  # as a copy that never stopped
+        assert any(abstracted for _, _, abstracted in built("w"))  # the tags were not paid twice
+        r = client.post(f"/jobs/{job_id}/resume")
+        assert r.status_code == 409 and r.json()["detail"] == "a done copy cannot be resumed"

@@ -304,9 +304,13 @@ class Loader:
         return self.indexer.new_spec(name, source.qa_type, False, recipe, build)
 
     def estimate_copy(self, source: str, target: CollectionSpec) -> dict:
-        """What copying the source's items into the target, not yet made, would spend.
+        """What copying the source's items into the target would spend: all of them for a
+        target not yet made; for one a stopped copy left, only what it did not finish.
         Embedding is free: the target's summaries and build steps are what cost."""
         items = self.builder.stored_items(source)
+        if self.indexer.store.exists(target.name):
+            have = {h.id for batch in self.indexer.store.scroll(target.name) for h in batch}
+            items = [i for i in items if i.id not in have]  # unbuilt stored ones: build's own
         estimate = self.indexer.estimate_summaries_usd(items) if target.summarize else 0.0
         build_usd = self.builder.estimate_build_usd(target, items)
         estimate = None if estimate is None or build_usd is None else estimate + build_usd
