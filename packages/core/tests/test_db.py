@@ -1,12 +1,14 @@
 import hashlib
 import json
 import sqlite3
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import pytest
 
 from aiconnect import fakes
 from ragqa_core import db
+from ragqa_core.builder import Builder
 from ragqa_core.db import (
     JOBS_RESUMABLE,
     claim_next_job_id,
@@ -41,7 +43,11 @@ from ragqa_core.db import (
     update_job,
     upsert_run_item,
 )
-from ragqa_core.fakes import fake_ai
+from ragqa_core.evaluator import Evaluator, changes_since
+from ragqa_core.fakes import fake_ai, fake_models
+from ragqa_core.indexer import Indexer
+from ragqa_core.retriever import Retriever
+from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, KeywordLists, Question, SearchSettings
 
 SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
@@ -88,6 +94,7 @@ def test_questions_round_trip_sorted_by_id(tmp_path):
         Question("b", "Q2?", None, ["x"], ["i1"], {}),
         Question("a", "Q1?", ["p", "q"], ["A"], [], {"skill": "s"}),
     ]
+    save_collection(conn, SPEC)
     save_questions(conn, "arc", qs)
     assert get_questions(conn, "arc") == [qs[1], qs[0]]
 
@@ -448,7 +455,6 @@ def test_delete_collection_rows_removes_its_jobs_and_rows(conn):
     delete_collection_rows(conn, "c")
     assert get_collection(conn, "c") is None
     assert get_keyword_lists(conn, "c", "v1") is None
-    assert get_questions(conn, "c") == []
     assert get_job(conn, gone) is None and run_items(conn, gone) == []
     assert get_collection(conn, "keep") is not None
     assert get_keyword_lists(conn, "keep", "v1") is not None
@@ -675,3 +681,204 @@ def test_include_leaked_defaults_false_and_survives_migration(tmp_path):
     save_collection(conn, CollectionSpec("old", "mcq", True, "m", 64))
     assert db.get_include_leaked(conn, "old") is True  # a re-save keeps the switch
     assert [c.name for c in list_collections(conn)] == ["new", "old"]
+
+
+def questions_of(*texts: str) -> list[Question]:
+    return [Question(f"q{i}", t, None, ["a"], []) for i, t in enumerate(texts)]
+
+
+def test_saving_questions_snapshots_a_version_only_when_they_change(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", questions_of("one", "two"))
+    v1 = db.get_eval_set(conn, "e")["version"]
+    assert len(v1) == 12 and int(v1, 16) >= 0
+    save_questions(conn, "e", questions_of("one", "two"))
+    assert db.get_eval_set(conn, "e")["version"] == v1
+    assert len(conn.execute("select * from eval_set_versions")) == 1
+    save_questions(conn, "e", questions_of("one", "changed"))
+    v2 = db.get_eval_set(conn, "e")["version"]
+    assert v2 != v1
+    assert [q.text for q in get_questions(conn, "e", v1)] == ["one", "two"]
+    assert [v["version"] for v in db.eval_set_versions(conn, "e")] == [v2, v1]
+    with pytest.raises(KeyError):
+        get_questions(conn, "e", "nope")
+
+
+def test_save_questions_on_a_store_name_creates_its_eval_set_and_refuses_an_unknown_name(conn):
+    save_collection(conn, CollectionSpec("c", "table", False, "d", 4))
+    save_questions(conn, "c", questions_of("one"))
+    found = db.get_eval_set(conn, "c")
+    assert found["qa_type"] == "table" and found["questions"] == 1
+    assert [e["name"] for e in db.list_eval_sets(conn)] == ["c"]
+    with pytest.raises(ValueError):
+        save_questions(conn, "nowhere", questions_of("one"))
+
+
+def test_create_eval_set_refuses_a_bad_or_taken_name(conn):
+    with pytest.raises(ValueError):
+        db.create_eval_set(conn, "bad name", "mcq")
+    db.create_eval_set(conn, "e", "mcq")
+    with pytest.raises(ValueError, match="eval set 'e' already exists"):
+        db.create_eval_set(conn, "e", "mcq")
+
+
+def test_replace_questions_refuses_a_stale_base_and_writes_nothing(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", questions_of("one", "two"))
+    v1 = db.get_eval_set(conn, "e")["version"]
+    v2 = db.replace_questions(conn, "e", questions_of("three"), v1)
+    assert v2 != v1 and [q.text for q in get_questions(conn, "e")] == ["three"]
+    with pytest.raises(ValueError, match=f"changed since it was read \\(now {v2}\\)"):
+        db.replace_questions(conn, "e", questions_of("four"), v1)
+    assert [q.text for q in get_questions(conn, "e")] == ["three"]
+    assert db.get_eval_set(conn, "e")["version"] == v2
+    assert db.replace_questions(conn, "e", questions_of("four"), None) != v2
+
+
+def test_ensure_eval_set_refuses_another_type(conn):
+    db.ensure_eval_set(conn, "e", "mcq")
+    db.ensure_eval_set(conn, "e", "mcq")
+    with pytest.raises(ValueError, match="eval set 'e' is mcq, not table"):
+        db.ensure_eval_set(conn, "e", "table")
+
+
+def test_default_eval_set_falls_back_to_the_set_named_after_the_store(conn):
+    save_collection(conn, CollectionSpec("c", "mcq", False, "d", 4))
+    assert db.default_eval_set(conn, "c") is None
+    db.create_eval_set(conn, "c", "mcq")
+    db.create_eval_set(conn, "other", "mcq")
+    assert db.default_eval_set(conn, "c") == "c"
+    db.set_default_eval_set(conn, "c", "other")
+    assert db.default_eval_set(conn, "c") == "other"
+    db.set_default_eval_set(conn, "c", None)
+    assert db.default_eval_set(conn, "c") == "c"
+
+
+def test_deleting_a_collection_keeps_its_eval_set(conn):
+    save_collection(conn, CollectionSpec("c", "mcq", False, "d", 4))
+    save_questions(conn, "c", questions_of("one"))
+    delete_collection_rows(conn, "c")
+    assert len(get_questions(conn, "c")) == 1 and db.get_eval_set(conn, "c") is not None
+
+
+def test_delete_eval_set_returns_the_runs_it_deleted_and_clears_pointers(conn):
+    save_collection(conn, CollectionSpec("c", "mcq", False, "d", 4))
+    db.create_eval_set(conn, "e", "mcq")
+    db.create_eval_set(conn, "f", "mcq")
+    save_questions(conn, "e", questions_of("one"))
+    db.set_default_eval_set(conn, "c", "e")
+    a = create_job(conn, "eval", "c", {"eval_set": "e"})
+    create_job(conn, "eval", "c", {"eval_set": "e"})
+    kept = create_job(conn, "eval", "c", {"eval_set": "f"})
+    upsert_run_item(conn, a, "hybrid", "q0", {}, complete=False)
+    assert db.delete_eval_set(conn, "e") == 2
+    assert db.get_eval_set(conn, "e") is None and get_questions(conn, "e") == []
+    assert run_items(conn, a) == [] and get_job(conn, kept) is not None
+    assert conn.execute("select * from eval_set_versions where eval_set = 'e'") == []
+    assert conn.execute("select eval_set from collections")[0]["eval_set"] is None
+    assert db.default_eval_set(conn, "c") is None
+
+
+def evaluator_for(conn):
+    store, models = Store(None, None), fake_models()
+    ai = fake_ai(conn, lambda p: "Answer: A")
+    ix = Indexer(conn, store, models, ai)
+    return Evaluator(
+        conn,
+        Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix)),
+        models,
+        ai,
+    )
+
+
+def test_migration_pins_old_runs_to_the_migrated_snapshot(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    setup = json.dumps(
+        {
+            "collection": "c",
+            "split": "full",
+            "methods": ["hybrid"],
+            "answer": False,
+            "k": 5,
+            "rrf_k": 60,
+            "search": {},
+            "keyword_version": "kv",
+            "vocabulary_version": None,
+            "dense_model": "d",
+            "disabled_sources": [],
+            "question_ids": ["q0", "q1"],
+        }
+    )
+    old.executescript(
+        f"""
+        create table collections (
+          name text primary key, qa_type text not null, summarize integer not null,
+          dense_model text not null, dense_dim integer not null, keyword_version text,
+          created_at text not null, include_leaked integer not null default 1
+        );
+        insert into collections values ('c', 'mcq', 0, 'd', 4, 'kv', 't', 1);
+        create table questions (collection text not null, id text not null, json text not null,
+          primary key (collection, id));
+        create table jobs (id text primary key, kind text not null, collection text not null,
+          status text not null, progress real not null default 0, setup_json text not null,
+          result_json text, error text, created_at text not null, updated_at text not null,
+          cancel_requested integer not null default 0, log_json text);
+        create table run_items (job_id text not null, method text not null,
+          question_id text not null, row_json text not null, complete integer not null default 0);
+        insert into jobs (id, kind, collection, status, setup_json, created_at, updated_at)
+          values ('done', 'eval', 'c', 'done', '{setup}', 't', 't'),
+                 ('stopped', 'eval', 'c', 'stopped_budget', '{setup}', 't', 't');
+        """
+    )
+    for q in questions_of("one", "two"):
+        old.execute("insert into questions values ('c', ?, ?)", (q.id, json.dumps(asdict(q))))
+    for job in ("done", "stopped"):
+        for q in ("q0", "q1"):
+            row = json.dumps(
+                {"hit_ids": ["i1"], "retrieval": {"solution_sim@1": 0.5, "same_skill@1": 1.0}}
+            )
+            old.execute("insert into run_items values (?, 'hybrid', ?, ?, 1)", (job, q, row))
+    old.commit()
+    old.close()
+
+    def seen(conn, ev):
+        spec = get_collection(conn, "c")
+        return {
+            j: (
+                ev.table(j),
+                ev.items(j, "hybrid", False),
+                ev.questions(j, False),
+                changes_since(db.get_job(conn, j)["setup"], spec, [], None),
+            )
+            for j in ("done", "stopped")
+        }
+
+    conn = connect(path)
+    ev = evaluator_for(conn)
+    first = seen(conn, ev)
+    conn.close()
+    conn = connect(path)
+    ev = evaluator_for(conn)
+    assert seen(conn, ev) == first
+    version = db.get_eval_set(conn, "c")["version"]
+    assert db.get_eval_set(conn, "c")["include_leaked"] is True
+    for j in ("done", "stopped"):
+        got = db.get_job(conn, j)["setup"]
+        assert got["eval_set"] == "c" and got["eval_set_version"] == version
+    db.replace_questions(conn, "c", questions_of("one edited", "two"), version)
+    for j in ("done", "stopped"):
+        assert [r["question"] for r in ev.items(j, "hybrid", False)] == ["one", "two"]
+        assert "one" in json.dumps(ev.questions(j, False))
+        assert "one edited" not in json.dumps(ev.questions(j, False))
+        got = changes_since(
+            db.get_job(conn, j)["setup"],
+            get_collection(conn, "c"),
+            [],
+            db.get_eval_set(conn, "c")["version"],
+        )
+        assert got["changes"] == ["eval set"]
+    before = [tuple(r) for r in conn.execute("select * from jobs order by id")]
+    conn.close()
+    again = connect(path)
+    assert [tuple(r) for r in again.execute("select * from jobs order by id")] == before

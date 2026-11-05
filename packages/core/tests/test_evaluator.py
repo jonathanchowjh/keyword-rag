@@ -302,8 +302,12 @@ def test_queue_stores_only_the_request(env):
         "k": 3,
         "rrf_k": 10,
         "search": search,  # the override as asked; the effective settings are recorded on run
+        "eval_set": "c",
     }
     assert get_job(conn, job)["status"] == "queued"
+    ev.run(job)
+    version = db.get_eval_set(conn, "c")["version"]
+    assert get_job(conn, job)["setup"]["eval_set_version"] == version
 
 
 def test_run_skips_recorded_ids_whose_question_is_gone(env):

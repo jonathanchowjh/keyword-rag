@@ -1,6 +1,6 @@
-"""The SQLite file: catalog, questions and jobs. The AI connections, ledger,
-response cache and pending batches live in the same file, in aiconnect's ai_*
-tables, through the AI class's own connection.
+"""The SQLite file: catalog, eval sets (questions, with versioned snapshots) and jobs.
+The AI connections, ledger, response cache and pending batches live in the same file,
+in aiconnect's ai_* tables, through the AI class's own connection.
 
 The jobs table is the work queue: create_job queues, claim_next_job_id takes the
 oldest queued job by insertion order, and the worker reports through
@@ -12,11 +12,14 @@ runs each statement under one lock and returns its rows as a list.
 
 The lock covers one statement. log_job, request_cancel, delete_job,
 delete_collection_rows and the migration in connect are several statements and
-are not atomic (move_ai_tables is one transaction); log_job also reads then
+are not atomic (move_ai_tables is one transaction). The eval set writes (save_questions,
+replace_questions, delete_eval_set) hold the lock for the whole write; log_job also reads then
 writes, so it assumes a single writer (the worker).
 """
 
+import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import asdict, replace
@@ -29,9 +32,12 @@ from ragqa_core.types import (
     BuildSettings,
     CollectionSpec,
     KeywordLists,
+    QaType,
     Question,
     SearchSettings,
 )
+
+NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # a collection's or an eval set's name
 
 SCHEMA = """
 create table if not exists collections (
@@ -53,6 +59,14 @@ create table if not exists disabled_sources (
 create table if not exists questions (
   collection text not null, id text not null, json text not null,
   primary key (collection, id)
+);
+create table if not exists eval_sets (
+  name text primary key, qa_type text not null, version text,
+  include_leaked integer not null default 0, created_at text not null
+);
+create table if not exists eval_set_versions (
+  eval_set text not null, version text not null, questions_json text not null,
+  created_at text not null, primary key (eval_set, version)
 );
 create table if not exists jobs (
   id text primary key, kind text not null, collection text not null,
@@ -93,6 +107,7 @@ def connect(path: Path) -> Connection:
             conn.execute(f"alter table collections add column {column} text")
     _migrate_collections(conn)
     _migrate_run_items(conn)
+    _migrate_eval_sets(conn)
     return conn
 
 
@@ -103,6 +118,7 @@ NEW_COLLECTION_COLUMNS = (
     "search_json",
     "vocabulary_version",
     "profile_json",
+    "eval_set",
 )
 
 
@@ -207,6 +223,33 @@ def _migrate_run_items(conn: Connection) -> None:
             set_job_setup(conn, row["id"], {**setup, "question_ids": ids})
 
 
+def _migrate_eval_sets(conn: Connection) -> None:
+    """Questions used to belong to a collection. Each such collection gets an eval set of its
+    name, and its runs are pinned to that set's first snapshot: their questions stay as they
+    were when the set is edited."""
+    rows = conn.execute(
+        "select name, qa_type, include_leaked from collections where name in"
+        " (select collection from questions) and name not in (select name from eval_sets)"
+    )
+    for row in rows:
+        name = row["name"]
+        with conn.lock:
+            create_eval_set(conn, name, row["qa_type"])
+            conn.execute(
+                "update eval_sets set include_leaked = ? where name = ?",
+                (row["include_leaked"], name),
+            )
+            version = snapshot_eval_set(conn, name)
+            for job in conn.execute(
+                "select id, setup_json from jobs where kind = 'eval' and collection = ?", (name,)
+            ):
+                setup = json.loads(job["setup_json"])
+                if "eval_set" not in setup and "eval_set_version" not in setup:
+                    set_job_setup(
+                        conn, job["id"], {**setup, "eval_set": name, "eval_set_version": version}
+                    )
+
+
 def save_collection(conn: Connection, spec: CollectionSpec) -> None:
     build = spec.build or build_for("paper_2024", spec.summarize)
     search = spec.search or default_search(spec.qa_type, build)
@@ -270,12 +313,14 @@ def get_collection(conn: Connection, name: str) -> CollectionSpec | None:
 
 
 def get_include_leaked(conn: Connection, name: str) -> bool:
-    row = first(conn.execute("select include_leaked from collections where name = ?", (name,)))
-    return bool(row["include_leaked"]) if row else False
+    eval_set = get_eval_set(conn, name)
+    return eval_set["include_leaked"] if eval_set else False
 
 
 def set_include_leaked(conn: Connection, name: str, include: bool) -> None:
-    conn.execute("update collections set include_leaked = ? where name = ?", (int(include), name))
+    with conn.lock:
+        _ensure_for_write(conn, name)
+        conn.execute("update eval_sets set include_leaked = ? where name = ?", (int(include), name))
 
 
 def list_collections(conn: Connection) -> list[CollectionSpec]:
@@ -392,16 +437,166 @@ def list_vocabularies(conn: Connection, name: str) -> list[dict]:
     ]
 
 
-def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
-    conn.executemany(
-        "insert or replace into questions values (?, ?, ?)",
-        [(name, q.id, json.dumps(asdict(q))) for q in questions],
+def create_eval_set(conn: Connection, name: str, qa_type: QaType) -> None:
+    if not NAME.match(name):
+        raise ValueError(f"eval set name {name!r} must match {NAME.pattern}")
+    with conn.lock:
+        if get_eval_set(conn, name):
+            raise ValueError(f"eval set '{name}' already exists")
+        conn.execute(
+            "insert into eval_sets (name, qa_type, created_at) values (?, ?, ?)",
+            (name, qa_type, now()),
+        )
+
+
+def ensure_eval_set(conn: Connection, name: str, qa_type: QaType) -> None:
+    with conn.lock:
+        old = get_eval_set(conn, name)
+        if old is None:
+            create_eval_set(conn, name, qa_type)
+        elif old["qa_type"] != qa_type:
+            raise ValueError(f"eval set '{name}' is {old['qa_type']}, not {qa_type}")
+
+
+def _ensure_for_write(conn: Connection, name: str) -> None:
+    """A write to an eval set that does not exist yet creates it with the qa_type of the
+    collection of that name, so a store's questions can be saved under the store's name."""
+    if get_eval_set(conn, name):
+        return
+    spec = get_collection(conn, name)
+    if spec is None:
+        raise ValueError(f"no eval set or collection named '{name}'")
+    create_eval_set(conn, name, spec.qa_type)
+
+
+def _eval_set(row: sqlite3.Row, questions: int) -> dict:
+    return {
+        "name": row["name"],
+        "qa_type": row["qa_type"],
+        "version": row["version"],
+        "include_leaked": bool(row["include_leaked"]),
+        "created_at": row["created_at"],
+        "questions": questions,
+    }
+
+
+EVAL_SET_SQL = (
+    "select e.*, (select count(*) from questions q where q.collection = e.name) as n"
+    " from eval_sets e"
+)
+
+
+def get_eval_set(conn: Connection, name: str) -> dict | None:
+    row = first(conn.execute(f"{EVAL_SET_SQL} where e.name = ?", (name,)))
+    return None if row is None else _eval_set(row, row["n"])
+
+
+def list_eval_sets(conn: Connection) -> list[dict]:
+    return [_eval_set(r, r["n"]) for r in conn.execute(f"{EVAL_SET_SQL} order by e.name")]
+
+
+def eval_set_versions(conn: Connection, name: str) -> list[dict]:
+    rows = conn.execute(
+        "select version, created_at, questions_json from eval_set_versions"
+        " where eval_set = ? order by rowid desc",
+        (name,),
     )
+    return [
+        {
+            "version": r["version"],
+            "created_at": r["created_at"],
+            "questions": len(json.loads(r["questions_json"])),
+        }
+        for r in rows
+    ]
 
 
-def get_questions(conn: Connection, name: str) -> list[Question]:
-    rows = conn.execute("select json from questions where collection = ? order by id", (name,))
-    return [Question(**json.loads(r["json"])) for r in rows]
+def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
+    with conn.lock:
+        _ensure_for_write(conn, name)
+        conn.executemany(
+            "insert or replace into questions values (?, ?, ?)",
+            [(name, q.id, json.dumps(asdict(q))) for q in questions],
+        )
+        snapshot_eval_set(conn, name)
+
+
+def snapshot_eval_set(conn: Connection, name: str) -> str:
+    """Saves the eval set's questions as a version when that content is new, makes it the
+    current one and returns it. The same content always has the same version."""
+    with conn.lock:
+        rows = conn.execute("select json from questions where collection = ? order by id", (name,))
+        text = json.dumps([json.loads(r["json"]) for r in rows], sort_keys=True)
+        version = hashlib.sha256(text.encode()).hexdigest()[:12]
+        conn.execute(
+            "insert or ignore into eval_set_versions values (?, ?, ?, ?)",
+            (name, version, text, now()),
+        )
+        conn.execute("update eval_sets set version = ? where name = ?", (version, name))
+        return version
+
+
+def replace_questions(
+    conn: Connection, name: str, questions: list[Question], base_version: str | None
+) -> str:
+    """Makes the eval set's questions exactly `questions`; refuses when `base_version` is
+    given and the set has moved on since it was read."""
+    with conn.lock:
+        _ensure_for_write(conn, name)
+        current = (get_eval_set(conn, name) or {})["version"]
+        if base_version is not None and base_version != current:
+            raise ValueError(f"eval set '{name}' changed since it was read (now {current})")
+        conn.execute("delete from questions where collection = ?", (name,))
+        conn.executemany(
+            "insert into questions values (?, ?, ?)",
+            [(name, q.id, json.dumps(asdict(q))) for q in questions],
+        )
+        return snapshot_eval_set(conn, name)
+
+
+def get_questions(conn: Connection, name: str, version: str | None = None) -> list[Question]:
+    if version is None:
+        rows = conn.execute("select json from questions where collection = ? order by id", (name,))
+        return [Question(**json.loads(r["json"])) for r in rows]
+    row = first(
+        conn.execute(
+            "select questions_json from eval_set_versions where eval_set = ? and version = ?",
+            (name, version),
+        )
+    )
+    if row is None:
+        raise KeyError(version)
+    return [Question(**q) for q in json.loads(row["questions_json"])]
+
+
+def default_eval_set(conn: Connection, collection: str) -> str | None:
+    """The set the store names, else the set named after it, else none."""
+    row = first(conn.execute("select eval_set from collections where name = ?", (collection,)))
+    if row and row["eval_set"]:
+        return row["eval_set"]
+    return collection if get_eval_set(conn, collection) else None
+
+
+def set_default_eval_set(conn: Connection, collection: str, eval_set: str | None) -> None:
+    conn.execute("update collections set eval_set = ? where name = ?", (eval_set, collection))
+
+
+def delete_eval_set(conn: Connection, name: str) -> int:
+    """Deletes the set with its versions and the runs made on it; stores that pointed to it
+    point to nothing. Returns the number of runs deleted."""
+    with conn.lock:
+        runs = [
+            r["id"]
+            for r in conn.execute("select id, setup_json from jobs where kind = 'eval'")
+            if json.loads(r["setup_json"]).get("eval_set") == name
+        ]
+        for job_id in runs:
+            delete_job(conn, job_id)
+        conn.execute("delete from questions where collection = ?", (name,))
+        conn.execute("delete from eval_set_versions where eval_set = ?", (name,))
+        conn.execute("delete from eval_sets where name = ?", (name,))
+        conn.execute("update collections set eval_set = null where eval_set = ?", (name,))
+        return len(runs)
 
 
 def create_job(conn: Connection, kind: str, collection: str, setup: dict) -> str:
@@ -654,16 +849,18 @@ def question_sources(conn: Connection, name: str) -> dict[str, int]:
 
 
 def delete_source_questions(conn: Connection, name: str, source: str) -> None:
-    conn.execute(
-        "delete from questions where collection = ? and json_extract(json, '$.meta.source') = ?",
-        (name, source),
-    )
+    with conn.lock:
+        conn.execute(
+            "delete from questions where collection = ?"
+            " and json_extract(json, '$.meta.source') = ?",
+            (name, source),
+        )
+        snapshot_eval_set(conn, name)
 
 
 def delete_collection_rows(conn: Connection, name: str) -> None:
     for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])
-    conn.execute("delete from questions where collection = ?", (name,))
     conn.execute("delete from disabled_sources where collection = ?", (name,))
     conn.execute("delete from keyword_lists where collection = ?", (name,))
     conn.execute("delete from vocabularies where collection = ?", (name,))

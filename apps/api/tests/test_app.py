@@ -1140,7 +1140,7 @@ def test_delete_collection_cancels_queued_and_refuses_running(client):  # Review
     assert client.get(f"/jobs/{j}").status_code == 404
     assert client.get("/collections/c").status_code == 404
     assert not client.app.state.store.client.collection_exists("c")
-    assert db.get_questions(client.app.state.conn, "c") == []
+    assert len(db.get_questions(client.app.state.conn, "c")) == 1  # the eval set stays
     add_collection(client, name="d", lists=False)
     running = db.create_job(client.app.state.conn, "load", "d", {})
     set_running(client.app.state.conn, running)

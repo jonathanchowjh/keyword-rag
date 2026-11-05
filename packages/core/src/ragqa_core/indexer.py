@@ -1,6 +1,5 @@
 """Builds and refreshes every representation of a collection's items."""
 
-import re
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -17,7 +16,7 @@ from ragqa_core.recipes import build_for, corpus_type_for, default_search
 from ragqa_core.store import Store, item_hash
 from ragqa_core.types import FACETS, BuildSettings, CollectionSpec, Item, KeywordLists, QaType
 
-NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NAME = db.NAME
 BATCH = 64
 
 

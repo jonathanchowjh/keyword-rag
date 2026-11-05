@@ -160,7 +160,9 @@ def untracked(setup: dict) -> bool:
     return "keyword_version" not in setup and "question_ids" in setup
 
 
-def changes_since(setup: dict, spec: CollectionSpec, disabled: list[str]) -> dict:
+def changes_since(
+    setup: dict, spec: CollectionSpec, disabled: list[str], eval_set_version: str | None = None
+) -> dict:
     """What differs between a run's recorded setup and the collection now, in plain terms.
     A migrated run records no versions, so it is untracked rather than unchanged."""
     if untracked(setup):
@@ -185,6 +187,9 @@ def changes_since(setup: dict, spec: CollectionSpec, disabled: list[str]) -> dic
         changes.append("dense model")
     if "keyword_version" in setup and setup.get("disabled_sources", []) != disabled:
         changes.append("sources")
+    recorded = setup.get("eval_set_version")
+    if recorded is not None and recorded != eval_set_version:
+        changes.append("eval set")
     return {"untracked": False, "changes": changes}
 
 
@@ -196,8 +201,10 @@ class Evaluator:
         self.ai = ai
 
     def _questions(self, spec: CollectionSpec, split: str) -> list[Question]:
+        eval_set = db.default_eval_set(self.conn, spec.name)
         questions = runnable(
-            db.get_questions(self.conn, spec.name), db.get_include_leaked(self.conn, spec.name)
+            db.get_questions(self.conn, eval_set) if eval_set else [],
+            db.get_include_leaked(self.conn, eval_set) if eval_set else False,
         )
         return dev_slice(questions) if split == "dev" else questions
 
@@ -212,8 +219,22 @@ class Evaluator:
 
     def _run_questions(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
         """The run's questions in recorded order; ids since deleted are skipped."""
-        by_id = {q.id: q for q in db.get_questions(self.conn, spec.name)}
+        by_id = {q.id: q for q in self._set_questions(spec, setup)}
         return [by_id[i] for i in self._question_ids(job_id, spec, setup) if i in by_id]
+
+    def _set_questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """The questions of the run's eval set, as of the version it recorded (the set's
+        current ones before it recorded any)."""
+        name = setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
+        if name is None:
+            return []
+        return db.get_questions(self.conn, name, setup.get("eval_set_version"))
+
+    def _eval_set_version(self, spec: CollectionSpec, setup: dict) -> str | None:
+        """The current version of the run's eval set."""
+        name = setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
+        found = db.get_eval_set(self.conn, name) if name else None
+        return found["version"] if found else None
 
     def _todo(self, job_id: str, method: str, questions: list[Question]) -> list[Question]:
         # A (method, question) pair with no row at all is incomplete too.
@@ -361,6 +382,7 @@ class Evaluator:
             "k": k,
             "rrf_k": rrf_k,
             "search": search or {},
+            "eval_set": db.default_eval_set(self.conn, collection),
         }
         return db.create_job(self.conn, "eval", collection, setup)
 
@@ -377,7 +399,13 @@ class Evaluator:
         leaked = (
             0
             if include
-            else sum(1 for q in db.get_questions(self.conn, spec.name) if q.meta.get("leaked"))
+            else sum(1 for q in self._set_questions(spec, setup) if q.meta.get("leaked"))
+        )
+        eval_set = setup.get("eval_set")
+        recorded = (
+            {"eval_set_version": self._eval_set_version(spec, setup)}
+            if eval_set and "eval_set_version" not in setup
+            else {}
         )
         setup = {
             "dense_model": spec.dense_model,
@@ -394,6 +422,7 @@ class Evaluator:
             "disabled_sources": disabled,
             "leaked_excluded": leaked,
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
+            **recorded,
             **setup,
             # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
             # with any other's. Merging a full recorded set over the defaults gives it back.
@@ -785,7 +814,12 @@ class Evaluator:
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
-            "since": changes_since(setup, spec, db.disabled_sources(self.conn, spec.name)),
+            "since": changes_since(
+                setup,
+                spec,
+                db.disabled_sources(self.conn, spec.name),
+                self._eval_set_version(spec, setup),
+            ),
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
@@ -796,6 +830,7 @@ class Evaluator:
     def collection_answer(self, name: str) -> dict | None:
         """The collection's answer: the newest answered run that has the pair, else the
         newest run that has it (spec §7.3: a run lacking the pair gives no answer)."""
+        spec = self.retriever.spec(name)
         done = self._done_evals(name)
         paired = [j for j in done if set(ANSWER_PAIR) <= set(j["setup"]["methods"])]
         answered_runs = [j for j in paired if j["setup"].get("answer")]
@@ -816,7 +851,10 @@ class Evaluator:
             "proxy_trusted": summary["proxy_trusted"],
             "scale": summary["scale"],
             "since": changes_since(
-                job["setup"], self.retriever.spec(name), db.disabled_sources(self.conn, name)
+                job["setup"],
+                spec,
+                db.disabled_sources(self.conn, name),
+                self._eval_set_version(spec, job["setup"]),
             ),
             **summary["answer"],
         }
@@ -848,7 +886,7 @@ class Evaluator:
         if job is None:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
-        questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
+        questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
         out = []
         for row in db.run_items(self.conn, job_id, method):
@@ -875,7 +913,7 @@ class Evaluator:
         if job is None:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
-        questions = {q.id: q for q in db.get_questions(self.conn, spec.name)}
+        questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
         by_question: dict[str, dict[str, dict]] = {}
         for r in db.run_items(self.conn, job_id):
