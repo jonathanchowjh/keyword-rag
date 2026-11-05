@@ -65,6 +65,13 @@ curl -X POST localhost:8080/collections/sci/load -H 'content-type: application/j
   -d '{"dataset": "scibench", "confirm": true}'
 ```
 
+A load writes its dataset's questions into the store's default eval set (the one
+named by its `eval_set`, else the one named like the store), creating it when there is
+none. Every arm of an experiment asks that default set unless the arm's body gives an
+`eval_set`, and each run records the set's version, so editing the questions later
+does not change a finished run. Reloading a dataset upserts its questions by id, which
+overwrites hand edits to them.
+
 To run the same items under another recipe (`worked_examples`, `reference`,
 `paper_2024`), copy instead of loading again:
 

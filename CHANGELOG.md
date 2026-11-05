@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Stores and eval sets: a store (the API still says collection) is what is retrieved
+  on; an eval set is a named, typed, versioned list of questions, with pages at
+  `/eval-sets` and `/e/{name}` and endpoints under `/eval-sets`. A store's default
+  eval set is its `eval_set`, else the set named like it. Loads write their questions
+  into the default set; a copy points at the source's set and copies none. Every write
+  saves a snapshot (12 hex digits of a SHA-256); a run records the version it first
+  ran and always reads it, and the migration pinned existing runs. `/eval` takes
+  `eval_set`. Evidence counts only where the store holds it (none held: recall is
+  unmeasured, not 0), leaked questions are worked out per store and eval set at run
+  setup, deleting a store keeps its eval sets, and deleting an eval set deletes the
+  runs that used it after a confirm. Reloading a dataset upserts its questions by id,
+  so it overwrites hand edits and restores deleted questions.
 - Method v2: collections get a recipe (`worked_examples`, `reference`, `paper_2024`),
   chosen at creation or by copying a collection's items under another recipe. Build
   steps (induced vocabulary, AI tagging, abstracted examples) are estimated before

@@ -108,7 +108,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open http://localhost:8080/ for the collections and their evaluations,
+Open http://localhost:8080/ for the stores and their evaluations,
 http://localhost:8080/lab to compare methods on one question, and
 http://localhost:8080/docs for every endpoint (see [Pages](#pages)).
 
@@ -139,11 +139,21 @@ works, and calls that would spend return 503 `no AI model is set up for the
 
 ## First run
 
-On the home page, **Set up the four benchmark collections** creates and loads
-ScienceQA, MuSiQue, TAT-QA and SciBench, asking before anything that would
-spend. Or do it over the API, one collection per QA type. Loading
-downloads the data, embeds it locally and saves keyword lists. It runs as a
-background job; poll `GET /jobs/<job_id>`.
+A *store* is what is retrieved on: items, their chunks and keyword lists. An
+*eval set* is what is asked: a named, versioned list of questions of one QA type.
+They are separate, so one eval set can be asked against several stores. (The API
+paths still say `collections` for stores; the pages and this text say store.)
+
+The default eval set of a store `X` is the one its `eval_set` names, else the eval
+set called `X`, else none. A run uses the default unless you pick another.
+
+On the home page, **Add a default store** loads any built-in dataset in one click,
+and **Set up the four benchmark stores** creates and loads ScienceQA, MuSiQue,
+TAT-QA and SciBench, asking before anything that would spend. Or do it over the API,
+one store per QA type. Loading downloads the data, embeds it locally and saves
+keyword lists, and writes the dataset's questions into the store's default eval set,
+creating one named after the store when there is none. A default set of another QA
+type stops the load. It runs as a background job; poll `GET /jobs/<job_id>`.
 
 ```sh
 api=http://localhost:8080
@@ -175,7 +185,14 @@ curl -X POST $api/collections/tq/load -H 'content-type: application/json' \
   -d '{"dataset":"tatqa"}'
 ```
 
-Then start a run from a collection's page, or with `POST /eval`.
+Then start a run from a store's page, choosing the eval set, or with `POST /eval`
+(`eval_set` defaults to the store's default; 422 `has no eval set; choose one` when
+there is none, 409 when its QA type is not the store's). A run that would measure
+nothing, for example retrieval only on questions that name no evidence the store
+holds, is refused.
+
+Reloading a dataset upserts its questions by id. It overwrites any hand edit to
+those ids and brings back questions you deleted.
 
 Docker on macOS cannot use the Apple GPU, so embedding runs on the CPU. The
 first load of MuSiQue's 11,656 passages takes roughly 10–20 minutes. After
@@ -183,10 +200,11 @@ that, everything is kept in the `ragqa` and `qdrant` volumes.
 
 ## Your own corpus
 
-Any collection takes your own items (what is retrieved) and your own questions
-(what is asked). On the collection page choose a file, check the preview, fix
-the field mapping if the guess is wrong, and import. Nothing is queued, and
-nothing is spent, until you confirm the estimate.
+Any store takes your own items (what is retrieved). Your own questions (what is
+asked) go into an eval set. On the store page (items) or the eval set page
+(`/e/{name}`, questions) choose a file, check the preview, fix the field mapping if
+the guess is wrong, and import. Item imports queue a job and spend nothing until you
+confirm the estimate; a question import runs in the request.
 
 - **Formats:** JSONL, a JSON array, CSV, TSV, plain text (`.txt`), Markdown
   (`.md`), or a `.zip` of `.txt` and `.md` files. Text and Markdown files become
@@ -199,21 +217,45 @@ nothing is spent, until you confirm the estimate.
 - **Sources:** every import is a source named `upload:<name>`. Switch a source
   off and retrieval ignores it (the last item source must stay on); a run
   records which were off, and resuming a run after a switch is refused.
-  Deleting a source removes its items, chunks and imported questions.
+  Deleting a source removes its items and chunks. The Sources table counts items
+  only, and deleting a source never deletes questions.
 - **Re-import updates:** items are matched by id (the hash of their content
   only decides whether one changed), so importing the same file again reports
   "N new, N updated, N unchanged" and adds no duplicates. A load that died is
   finished with "Finish loading", which embeds only what is missing.
-- **Leaked questions:** an imported question whose text also appears in the
-  items is flagged as leaked, and is left out of runs unless you include it.
-  The Run page says how many were left out.
+- **Leaked questions:** an `upload:` or hand-written question whose text is inside
+  the store's items is leaked: the answer is in what is retrieved. It is worked out
+  per store and eval set when a run is set up, before the dev slice, so the same
+  eval set can have leaks against one store and none against another. Leaked
+  questions are left out of runs unless the eval set includes them (a setting of the
+  eval set, `PATCH /eval-sets/{name}`). The Run page says how many were left out.
+  Questions saved before this change may still carry an old `meta.leaked` mark; the
+  first re-import of the same file counts them as updated and saves one new version.
 - **Partial gold:** recall is measured only on questions that name their
   evidence (`gold_ids`). A recall cell reads "on n of N questions" when some
   questions have none. A question with no evidence is still asked, but it
   does not count toward recall.
+- **Evidence across stores:** a question's evidence ids count only where the store
+  holds them. If the store holds none of a question's evidence, its recall is
+  unmeasured, not 0. If it holds some, the metric reads "on n of N". The run's
+  estimate returns `evidence_named` and `evidence_held`, and the Run page says so
+  when a store holds none.
+- **Eval sets:** `/eval-sets` lists and creates them (a name and a QA type). On
+  `/e/{name}` edit questions in place, add or delete them, and Save; import a file;
+  switch "include leaked"; read the versions; or delete the set.
+- **Versions:** every write that changes the questions saves a snapshot. Its id is
+  the first 12 hex digits of the SHA-256 of the questions' canonical JSON, sorted by
+  id. Save sends the `base_version` it started from and is refused with 409 when the
+  set has moved on. A run records its eval set when queued and the version at its
+  first run, and always reads that version, so later edits never change a run and a
+  resume asks the same questions. The migration made a set for every existing
+  collection that had questions, and pinned every existing run to that snapshot.
+- **Deletes:** deleting a store keeps its eval sets. Deleting an eval set deletes the
+  runs that used it, after a confirm that gives their count; it is refused (409) while
+  an eval or a load uses the set.
+- **Copies:** a copy points at the source's default eval set and copies no questions.
 - **Existing collections** are labelled with their sources in place on first
   start (the `backfill` job, shown as "labelling"); nothing is re-embedded.
-
 ```sh
 curl -X POST "http://localhost:8080/collections/notes/uploads?filename=notes.jsonl&kind=items" \
   --data-binary @notes.jsonl
@@ -221,6 +263,15 @@ curl -X POST "http://localhost:8080/collections/notes/uploads?filename=notes.jso
 curl -X POST http://localhost:8080/collections/notes/imports \
   -H 'content-type: application/json' \
   -d '{"upload_id": "...", "kind": "items", "mapping": {"text": "body"}, "source_name": "notes", "confirm": true}'
+
+# questions go to an eval set
+curl -X POST http://localhost:8080/eval-sets -H 'content-type: application/json' \
+  -d '{"name": "notes", "qa_type": "science"}'
+curl -X POST "http://localhost:8080/eval-sets/notes/uploads?filename=qs.jsonl" \
+  --data-binary @qs.jsonl
+curl -X POST http://localhost:8080/eval-sets/notes/imports \
+  -H 'content-type: application/json' \
+  -d '{"upload_id": "...", "mapping": {"text": "q", "answer": "a"}, "source_name": "qs"}'
 ```
 
 ## Recipes
@@ -532,11 +583,15 @@ much.
 
 ## Pages
 
+The side nav reads Stores, Eval sets, Lab, Settings. The store pages live under `/c/` and the API under `/collections`; both mean a store.
+
 | Route | What it shows |
 |---|---|
-| `/` | Every collection with its answer (does keyword retrieval help?), the run it came from and its state; create a collection or set up the benchmarks |
-| `/c/{name}` | One collection: the answer with its gap bar, its runs and a form to start one, its items, questions and sources, imports, the three keyword lists (edit, propose, save), delete |
-| `/c/{name}/runs/{id}` | One run |
+| `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store, create a store or set up the benchmarks |
+| `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, the three keyword lists (edit, propose, save), delete |
+| `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
+| `/eval-sets` | Every eval set; create one |
+| `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions, delete the set |
 | `/lab` | One question, methods side by side |
 | `/worker` | The worker, its queue and what needs a person |
 | `/settings` | AI connections, models and prices, the model each job uses, the monthly cap |
@@ -550,26 +605,34 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 |---|---|
 | `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
 | `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize, recipe?: worked_examples\|reference\|paper_2024}`; no `recipe` means paper 2024, as before |
-| `GET /collections`, `GET /collections/{name}` | Specs; one collection's count, keyword lists, available methods, `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
-| `DELETE /collections/{name}` | Delete a collection, its items, questions, lists and runs. Its queued jobs are cancelled; 409 while one of its jobs runs |
+| `GET /eval-sets` | Every eval set (the page, for a browser that asks for `text/html`; JSON otherwise) |
+| `POST /eval-sets` | `{name, qa_type}`; 409 when the name is taken |
+| `GET /eval-sets/{name}` | The set, its questions and its versions |
+| `PUT /eval-sets/{name}/questions` | `{questions, base_version}`: replace the set's questions, all or nothing; returns `{version}`. 409 when `base_version` is stale, or while a load or question import writes to the set; 422 for a bad or repeated id |
+| `PATCH /eval-sets/{name}` | `{include_leaked}`: whether leaked questions are used by runs |
+| `DELETE /eval-sets/{name}` | Without `?confirm=true`, `{runs}`: how many runs would go. With it, deletes the set and those runs. 409 while an eval or load uses the set |
+| `POST /eval-sets/{name}/uploads?filename=` | The raw file as the body; returns `{upload_id, preview}` |
+| `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
+| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
+| `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
 | `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
-| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up |
+| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`; `kind=questions` goes to the store's default eval set. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up |
 | `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
 | `PATCH /collections/{name}/sources/{source}` | `{enabled}`: switch a source on or off for retrieval. 409 while an eval runs, or to switch off the last item source |
-| `DELETE /collections/{name}/sources/{source}` | Remove a source's items, chunks and imported questions; 409 while a job is queued or running on the collection |
-| `GET /collections/{name}/questions?leaked=` | The collection's questions, with how many are leaked; `leaked=true` or `false` filters |
-| `PATCH /collections/{name}/questions/leaked` | `{include}`: whether leaked imported questions are used by runs |
+| `DELETE /collections/{name}/sources/{source}` | Remove a source's items and chunks; questions stay; 409 while a job is queued or running on the collection |
+| `GET /collections/{name}/questions?leaked=` | The questions of the store's default eval set, with how many are leaked against this store; `leaked=true` or `false` filters |
+| `PATCH /collections/{name}/questions/leaked` | `{include}`: the same setting as `PATCH /eval-sets/{name}`, on the store's default set |
 | `PUT /collections/{name}/search` | Set the collection's default search settings, in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`), and return all of them; `/query` and `/eval` override them per request. 422 for an unknown key or value |
-| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench`. When it would spend (summaries; an AI keyword proposal because an AI model is set up and a recipe that uses keyword lists has none; or the build steps of the other recipes: inducing a vocabulary while there is none, AI tagging and abstracted examples), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}`. 503 when the build would spend and no model is set up for `keywords` |
-| `POST /collections/{name}/copy` | `{name, recipe, build, confirm}`: a new collection of this one's items under another recipe, with its questions (meta as it is), switched-off sources and leaked setting. `build` overrides the recipe's build settings in part; the recipe keeps its vocabulary, `chunk_overlap` stays below `chunk_words`, and `added_text: "summary"` needs keyword lists. Without `confirm`, returns `{estimate}` (embedding is free; summaries, and the build steps of the recipes other than paper 2024); with `confirm: true`, makes the collection and queues a `copy` job, which adds every item under its source, then builds (a paper 2024 copy takes the source's keyword lists in force instead of proposing any); returns `{name, job_id}`. 409 when the name is taken or a job is queued or running on the source; 404 for an unknown source; 422 for a bad name, recipe or build setting; 503 when it would spend and no model is set up for the job |
+| `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench` (`GET /catalog` lists them as `datasets`); its questions go to the store's default eval set, upserted by id. When it would spend (summaries; an AI keyword proposal because an AI model is set up and a recipe that uses keyword lists has none; or the build steps of the other recipes: inducing a vocabulary while there is none, AI tagging and abstracted examples), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}`. 503 when the build would spend and no model is set up for `keywords` |
+| `POST /collections/{name}/copy` | `{name, recipe, build, confirm}`: a new store of this one's items under another recipe, with its switched-off sources. It points at the source's default eval set and copies no questions. `build` overrides the recipe's build settings in part; the recipe keeps its vocabulary, `chunk_overlap` stays below `chunk_words`, and `added_text: "summary"` needs keyword lists. Without `confirm`, returns `{estimate}` (embedding is free; summaries, and the build steps of the recipes other than paper 2024); with `confirm: true`, makes the collection and queues a `copy` job, which adds every item under its source, then builds (a paper 2024 copy takes the source's keyword lists in force instead of proposing any); returns `{name, job_id}`. 409 when the name is taken or a job is queued or running on the source; 404 for an unknown source; 422 for a bad name, recipe or build setting; 503 when it would spend and no model is set up for the job |
 | `POST /collections/{name}/keyword-lists/propose` | The AI proposes the topic, method and common lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists`, `GET …/keyword-lists/{version}` | Every saved version of the lists, newest first; one version with its lists |
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
-| `POST /eval` | Without `confirm`: the estimate. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
+| `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome`; `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
@@ -578,7 +641,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
 | `POST /jobs/{job_id}/resume` | Resume a stopped run or copy. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt |
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
-| `GET /catalog` | Plain names and descriptions of methods, metrics and QA types |
+| `GET /catalog` | Plain names and descriptions of methods, metrics and QA types, and the built-in `datasets` |
 | `GET /budget` | This service's spend this month against its cap |
 | `GET /ai` | Connections (keys masked), models with prices, jobs (`default_from_env` when `RAGQA_MODEL` sets the default), budget and presets |
 | `POST /ai/connections`, `PATCH`/`DELETE /ai/connections/{id}` | Add, edit, remove a connection; 409 when a job uses it, or the field or connection is set by the environment. A new `base_url` without a new `api_key` clears the stored key |
@@ -616,8 +679,12 @@ service:
 - **`best_of_each`** (best keyword method against best other method) is
   picked after the fact, so its gap is likely overstated. It is never the
   answer.
+- **`eval_set`** and **`eval_set_version`**: which questions the run asked. The Run
+  page shows "eval set <name> · version <v>". Edits to the set after the run never
+  change it; `since` says so.
 - **`since`** says what changed after the run: `{untracked, changes}`, where
-  `changes` lists `keyword lists`, `vocabulary`, `dense model` and `sources`. A migrated run
+  `changes` lists `keyword lists`, `vocabulary`, `dense model`, `sources` and `eval set`
+  (shown as "eval set changed after this run"). A migrated run
   that recorded no versions is `untracked: true`.
 - **`methods`** holds each method's own score as `mean [low, high]`, and
   **`pairs`** every pair compared.
@@ -626,6 +693,10 @@ service:
   more methods, leaves out No retrieval and the controls, and passes only if
   the rank correlation is at least 0.5 and the declared pair points the same
   way on both.
+- Evidence: when the store holds none of the eval set's evidence, recall is unmeasured
+  (never 0) and the Run page explains why; when it holds some, a metric reads "on n of N".
+  Leaked questions are worked out for the run's store and eval set, and the page says how
+  many were left out.
 - Every run records its full setup: models, keyword-list version, `k`,
   `rrf_k`, seed, dataset filter, sources and question ids. `log` holds the
   run's last 50 events.

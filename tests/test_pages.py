@@ -454,7 +454,7 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     paying = {"sqa": 0.10, "tq": 0.25}
     seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq", "sb")}
     page.goto(seeded.url + "/")
-    page.get_by_role("button", name="Set up the four benchmark collections").click()
+    page.get_by_role("button", name="Set up the four benchmark stores").click()
     expect(page.get_by_text("5 AI calls")).to_be_visible()
     expect(page.get_by_text("$0.35")).to_be_visible()
     expect(page.get_by_role("button", name="Start")).to_have_count(1)
