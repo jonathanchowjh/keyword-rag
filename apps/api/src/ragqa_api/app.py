@@ -12,7 +12,8 @@ import base64
 import json
 import secrets
 import shutil
-from contextlib import asynccontextmanager
+import threading
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -311,6 +312,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     state.worker = Worker(
         state.conn, state.ai, state.indexer, state.loader, state.evaluator, state.builder
     )
+    # Collections a sync add is writing to now. It runs outside the worker, so the jobs
+    # table can't show it: a job queued under it is refused instead (one lock for both).
+    state.adding = set()
+    state.adding_lock = threading.Lock()
+
+    @contextmanager
+    def not_adding(name: str):
+        """Held while a job on the collection is queued; refused while items are added."""
+        with state.adding_lock:
+            if name in state.adding:
+                raise HTTPException(409, f"items are being added to '{name}'; try again shortly")
+            yield
 
     # -- auth ------------------------------------------------------------------
 
@@ -519,12 +532,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/documents", status_code=202)
     def add_documents(name: str, body: Documents):
         spec = state.retriever.spec(name)
-        # An item added now would be keyed under mixed lists, miss a version or skew a run.
-        for kind in ("load", "rekey", "retag", "copy", "eval", "import", "backfill"):
-            if db.job_waiting_or_running(state.conn, kind, name):
-                raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
-        if len(body.items) > SYNC_ITEMS:
-            return queue_documents(spec, body)
+        # An item added now would be keyed under mixed lists, miss a version or skew a run;
+        # under the lock, so no job is queued between this check and the add's end.
+        now = len(body.items) <= SYNC_ITEMS
+        with state.adding_lock:
+            for kind in ("load", "rekey", "retag", "copy", "eval", "import", "backfill"):
+                if db.job_waiting_or_running(state.conn, kind, name):
+                    raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+            if name in state.adding:
+                raise HTTPException(409, f"items are being added to '{name}'; try again shortly")
+            if now:
+                state.adding.add(name)
+        if not now:
+            return queue_documents(spec, body)  # queued as an import, which not_adding guards
+        try:
+            return add_now(spec, body)
+        finally:
+            with state.adding_lock:
+                state.adding.discard(name)
+
+    def add_now(spec: CollectionSpec, body: Documents):
         items = [Item(**i.model_dump()) for i in body.items]
         todo, _ = state.indexer.changed(spec, items, "hand")
         estimate = state.indexer.estimate_add_usd(spec, items, "hand")
@@ -555,7 +582,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.confirm:
                     raise NoConnection(role)
                 return JSONResponse({"estimate": estimate}, 200)
-            job_id = db.create_job(state.conn, "import", spec.name, setup)
+            with not_adding(spec.name):
+                job_id = db.create_job(state.conn, "import", spec.name, setup)
             queued = True
             return {"job_id": job_id}
         finally:
@@ -615,7 +643,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mapping": shown["mapping"],
             "source": source,
         }
-        return {"job_id": db.create_job(state.conn, "import", name, setup)}
+        with not_adding(name):
+            return {"job_id": db.create_job(state.conn, "import", name, setup)}
 
     @app.get("/collections/{name}/sources")
     def list_sources(name: str) -> list[dict]:
@@ -729,7 +758,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not body.confirm and estimate["hub"].get("entry"):
                 # Free only because of this entry: the run fails rather than spend unasked.
                 setup["hub_entry"] = estimate["hub"]["entry"]
-        job_id = db.create_job(state.conn, "load", name, setup)
+        with not_adding(name):
+            job_id = db.create_job(state.conn, "load", name, setup)
         return {"job_id": job_id}
 
     @app.post("/collections/{name}/copy", status_code=202)
@@ -753,7 +783,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             need_ai("keywords")
         if not body.confirm:
             return JSONResponse({"estimate": estimate}, 200)
-        return {"name": body.name, "job_id": state.loader.start_copy(name, target)}
+        with not_adding(name):  # the copy reads the source's items
+            return {"name": body.name, "job_id": state.loader.start_copy(name, target)}
 
     @app.post("/collections/{name}/keyword-lists/propose")
     def propose(name: str, body: ProposeRequest | None = None):
@@ -799,8 +830,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(name)
         if db.job_running(state.conn, "eval", name):
             raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
-        version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
-        job_id = db.create_job(state.conn, "rekey", name, {"version": version})
+        with not_adding(name):  # a refused rekey saves no version either
+            version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
+            job_id = db.create_job(state.conn, "rekey", name, {"version": version})
         return {"version": version, "job_id": job_id}
 
     @app.get("/collections/{name}/vocabulary")
@@ -841,8 +873,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse(
                 {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
             )
-        version = state.builder.save_vocabulary(spec, terms)
-        job_id = db.create_job(state.conn, "retag", name, {"version": version})
+        with not_adding(name):
+            version = state.builder.save_vocabulary(spec, terms)
+            job_id = db.create_job(state.conn, "retag", name, {"version": version})
         return {"version": version, "job_id": job_id}
 
     @app.post("/query")
@@ -909,16 +942,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         need_models(estimate, body.model)
         if "keyword_rag" in body.methods:
             state.retriever.vocabulary(spec)  # refused here, not after the other methods spent
-        job_id = state.evaluator.queue(
-            body.collection,
-            body.split,
-            body.methods,
-            body.answer,
-            body.model,
-            body.k,
-            body.rrf_k,
-            body.search,
-        )
+        with not_adding(body.collection):
+            job_id = state.evaluator.queue(
+                body.collection,
+                body.split,
+                body.methods,
+                body.answer,
+                body.model,
+                body.k,
+                body.rrf_k,
+                body.search,
+            )
         return {"job_id": job_id, "estimate": estimate}
 
     @app.get("/eval")

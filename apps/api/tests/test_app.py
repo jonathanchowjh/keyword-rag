@@ -2513,3 +2513,46 @@ def test_copy_state_and_problem_wording(client):
     assert r.status_code == 409 and "copy" in r.json()["detail"]
     r = client.put("/collections/w/vocabulary", json={"terms": ["x"]})
     assert r.status_code == 409 and "copy" in r.json()["detail"]
+
+
+def test_a_sync_add_holds_off_jobs_on_its_collection_until_it_ends(client):
+    """A sync add runs outside the worker, so the jobs table can't show it: a retag claimed
+    during it would leave the new items tagged under the old vocabulary."""
+    add_collection(client)
+    client.post("/collections", json=WORKED)
+    state = client.app.state
+    state.worker.stop()
+    seen = []
+    build = state.builder.build
+    state.builder.build = lambda spec, todo: (seen.append(set(state.adding)), build(spec, todo))
+    r = client.post("/collections/c/documents", json={"items": ITEMS[:1], "confirm": True})
+    assert r.status_code == 200 and seen == [{"c"}] and state.adding == set()
+
+    state.adding.update({"c", "w"})  # as while each one's add runs
+
+    def versions():
+        lists = state.conn.execute("select count(*) as n from keyword_lists")[0]["n"]
+        return lists, db.list_vocabularies(state.conn, "w")
+
+    before = versions()
+    refused = {
+        "rekey": client.put("/collections/c/keyword-lists", json=asdict(LISTS)),
+        "retag": client.put("/collections/w/vocabulary", json={"terms": ["x"], "confirm": True}),
+        "load": client.post("/collections/c/load", json={"dataset": "scienceqa", "confirm": True}),
+        "copy": client.post(
+            "/collections/c/copy", json={"name": "c2", "recipe": "paper_2024", "confirm": True}
+        ),
+        "eval": client.post(
+            "/eval", json={"collection": "c", "methods": ["vector"], "confirm": True}
+        ),
+        "add": client.post("/collections/c/documents", json={"items": ITEMS[:1], "confirm": True}),
+    }
+    for kind, r in refused.items():
+        assert r.status_code == 409 and "being added" in r.json()["detail"], (kind, r.text)
+    assert db.list_jobs(state.conn, status="queued", limit=db.ALL) == []
+    assert versions() == before  # a refused rekey or retag saves no version
+    state.adding.clear()
+    assert (
+        client.put("/collections/w/vocabulary", json={"terms": ["x"], "confirm": True}).status_code
+        == 202
+    )

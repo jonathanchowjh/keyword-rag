@@ -488,16 +488,8 @@ class Evaluator:
                 self._run_method(job_id, spec, todo, method, setup, check, report)
                 db.update_job(self.conn, job_id, progress=n / len(methods))
             db.update_job(self.conn, job_id, status="done")
-        except Cancelled:
-            db.update_job(self.conn, job_id, status="cancelled")
-        except BudgetExceeded as e:
-            db.update_job(self.conn, job_id, status="stopped_budget", error=str(e))
-        except NoConnection as e:
-            db.update_job(self.conn, job_id, status="stopped_no_key", error=no_ai(e.role))
-        except AwaitingReplies as e:
-            db.update_job(self.conn, job_id, status="stopped_replies", error=awaiting(e))
         except Exception as e:  # recorded on the job; the thread must not die silently
-            db.update_job(self.conn, job_id, status="failed", error=repr(e))
+            db.update_job(self.conn, job_id, **ended(e))
 
     def _run_method(
         self,
@@ -917,6 +909,20 @@ class Evaluator:
                 }
             )
         return out
+
+
+def ended(e: Exception) -> dict:
+    """The status and error a job that raised e ends with: stopped (resumable) when it ran
+    out of budget, a model or replies; cancelled; otherwise failed."""
+    if isinstance(e, Cancelled):
+        return {"status": "cancelled"}
+    if isinstance(e, BudgetExceeded):
+        return {"status": "stopped_budget", "error": str(e)}
+    if isinstance(e, NoConnection):
+        return {"status": "stopped_no_key", "error": no_ai(e.role)}
+    if isinstance(e, AwaitingReplies):
+        return {"status": "stopped_replies", "error": awaiting(e)}
+    return {"status": "failed", "error": repr(e)}
 
 
 def no_ai(role: str) -> str:
