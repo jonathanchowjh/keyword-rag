@@ -546,6 +546,9 @@ def replace_questions(
         current = (get_eval_set(conn, name) or {})["version"]
         if base_version is not None and base_version != current:
             raise ValueError(f"eval set '{name}' changed since it was read (now {current})")
+        ids = [q.id for q in questions]
+        if repeated := next((i for i in ids if ids.count(i) > 1), None):
+            raise ValueError(f"question id '{repeated}' appears more than once")
         conn.execute("delete from questions where collection = ?", (name,))
         conn.executemany(
             "insert into questions values (?, ?, ?)",

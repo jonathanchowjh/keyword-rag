@@ -999,8 +999,9 @@ def test_run_records_sources_and_resume_is_refused_after_a_switch(env):
     db.set_source_enabled(conn, "c", "x", False)
     assert "sources switched" in (ev.resume_refusal(job) or "")
     spec = ev.retriever.spec("c")
-    assert changes_since(setup, spec, ["x"])["changes"] == ["sources"]
-    assert changes_since(setup, spec, [])["changes"] == []
+    version = db.get_eval_set(conn, "c")["version"]
+    assert changes_since(setup, spec, ["x"], version)["changes"] == ["sources"]
+    assert changes_since(setup, spec, [], version)["changes"] == []
 
 
 def test_untracked_run_shows_no_source_change(env):
@@ -1429,3 +1430,22 @@ def test_bright_run_pairs_methods_on_ndcg(env, tmp_path):
     (pair,) = table["pairs"]
     assert pair["metric"] == "ndcg@10" and {pair["a"], pair["b"]} == {"hybrid", "keyword"}
     assert pair["lo"] is not None and pair["hi"] is not None and pair["lo"] <= pair["hi"]
+
+
+def test_run_asks_the_stores_default_set_when_it_has_another_name(env):
+    conn, ev = env
+    leaked = Question("lk", "leaked q", ["a"], ["A"], [], {"skill": "x", "leaked": True})
+    other = [Question("o1", "other one", ["a"], ["A"], [], {"skill": "x"}), leaked]
+    db.create_eval_set(conn, "other", "mcq")
+    save_questions(conn, "other", other)
+    db.set_include_leaked(conn, "other", True)
+    db.set_default_eval_set(conn, "c", "other")
+    job = ev.queue("c", "full", ["hybrid"], False, None)
+    assert get_job(conn, job)["setup"]["eval_set"] == "other"
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["eval_set"] == "other"
+    assert setup["eval_set_version"] == db.get_eval_set(conn, "other")["version"]
+    assert sorted(setup["question_ids"]) == ["lk", "o1"]  # include_leaked of "other" is on
+    assert setup["leaked_excluded"] == 0
+    assert {r["question_id"] for r in run_items(conn, job)} == {"lk", "o1"}

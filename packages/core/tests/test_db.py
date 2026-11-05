@@ -842,25 +842,31 @@ def test_migration_pins_old_runs_to_the_migrated_snapshot(tmp_path):
     old.commit()
     old.close()
 
-    def seen(conn, ev):
-        spec = get_collection(conn, "c")
-        return {
-            j: (
-                ev.table(j),
-                ev.items(j, "hybrid", False),
-                ev.questions(j, False),
-                changes_since(db.get_job(conn, j)["setup"], spec, [], None),
-            )
-            for j in ("done", "stopped")
-        }
+    def current(conn):
+        return db.get_eval_set(conn, "c")["version"]
 
-    conn = connect(path)
+    conn = connect(path)  # migrates
     ev = evaluator_for(conn)
-    first = seen(conn, ev)
+    done_table = ev.table("done")
+    spec = get_collection(conn, "c")
+    assert spec is not None
+    for j in ("done", "stopped"):
+        table = ev.table(j)
+        assert table["question_count"] == 2
+        hybrid = table["methods"]["hybrid"]
+        assert hybrid["n"] == 2
+        assert hybrid["solution_sim@1"]["mean"] == 0.5 and hybrid["same_skill@1"]["mean"] == 1.0
+        assert [(r["question"], r["gold_answers"]) for r in ev.items(j, "hybrid", False)] == [
+            ("one", ["a"]),
+            ("two", ["a"]),
+        ]
+        assert sorted(q["question"] for q in ev.questions(j, False)) == ["one", "two"]
+        got = changes_since(db.get_job(conn, j)["setup"], spec, [], current(conn))
+        assert got == {"untracked": False, "changes": []}
     conn.close()
-    conn = connect(path)
+    conn = connect(path)  # a second connect changes nothing
     ev = evaluator_for(conn)
-    assert seen(conn, ev) == first
+    assert ev.table("done") == done_table
     version = db.get_eval_set(conn, "c")["version"]
     assert db.get_eval_set(conn, "c")["include_leaked"] is True
     for j in ("done", "stopped"):
@@ -875,10 +881,21 @@ def test_migration_pins_old_runs_to_the_migrated_snapshot(tmp_path):
             db.get_job(conn, j)["setup"],
             get_collection(conn, "c"),
             [],
-            db.get_eval_set(conn, "c")["version"],
+            current(conn),
         )
         assert got["changes"] == ["eval set"]
     before = [tuple(r) for r in conn.execute("select * from jobs order by id")]
     conn.close()
     again = connect(path)
     assert [tuple(r) for r in again.execute("select * from jobs order by id")] == before
+
+
+def test_replace_questions_with_a_repeated_id_changes_nothing(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", questions_of("one", "two"))
+    v1 = db.get_eval_set(conn, "e")["version"]
+    twice = [Question("x", "a", None, ["a"], []), Question("x", "b", None, ["a"], [])]
+    with pytest.raises(ValueError, match="'x'"):
+        db.replace_questions(conn, "e", twice, v1)
+    assert [q.text for q in get_questions(conn, "e")] == ["one", "two"]
+    assert db.get_eval_set(conn, "e")["version"] == v1

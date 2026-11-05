@@ -200,8 +200,14 @@ class Evaluator:
         self.models = models
         self.ai = ai
 
-    def _questions(self, spec: CollectionSpec, split: str) -> list[Question]:
-        eval_set = db.default_eval_set(self.conn, spec.name)
+    def _set_name(self, spec: CollectionSpec, setup: dict) -> str | None:
+        """The eval set the run asks: the one it recorded, else the store's default."""
+        return setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
+
+    def _questions(
+        self, spec: CollectionSpec, split: str, eval_set: str | None = None
+    ) -> list[Question]:
+        eval_set = eval_set or db.default_eval_set(self.conn, spec.name)
         questions = runnable(
             db.get_questions(self.conn, eval_set) if eval_set else [],
             db.get_include_leaked(self.conn, eval_set) if eval_set else False,
@@ -214,7 +220,7 @@ class Evaluator:
         # Not recorded yet: an old run's are the ones it has rows for; a new
         # run's are its split's, as its first run will record them.
         return db.run_item_question_ids(self.conn, job_id) or [
-            q.id for q in self._questions(spec, setup["split"])
+            q.id for q in self._questions(spec, setup["split"], self._set_name(spec, setup))
         ]
 
     def _run_questions(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
@@ -225,14 +231,14 @@ class Evaluator:
     def _set_questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """The questions of the run's eval set, as of the version it recorded (the set's
         current ones before it recorded any)."""
-        name = setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
+        name = self._set_name(spec, setup)
         if name is None:
             return []
         return db.get_questions(self.conn, name, setup.get("eval_set_version"))
 
     def _eval_set_version(self, spec: CollectionSpec, setup: dict) -> str | None:
         """The current version of the run's eval set."""
-        name = setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
+        name = self._set_name(spec, setup)
         found = db.get_eval_set(self.conn, name) if name else None
         return found["version"] if found else None
 
@@ -391,21 +397,20 @@ class Evaluator:
 
         Whatever the setup already records wins: an old run keeps its versions,
         and its question ids are the ones it has rows for."""
+        name = self._set_name(spec, setup)
+        if name:  # resolved once: a run queued before the store had a default set
+            setup = {**setup, "eval_set": name}
+            if "eval_set_version" not in setup:
+                setup["eval_set_version"] = self._eval_set_version(spec, setup)
         ids = self._question_ids(job_id, spec, setup)
         disabled = db.disabled_sources(self.conn, spec.name)
         questions = self._run_questions(job_id, spec, {**setup, "question_ids": ids})
         off = self._gold_off(spec, questions, disabled)
-        include = db.get_include_leaked(self.conn, spec.name)
+        include = db.get_include_leaked(self.conn, name) if name else False
         leaked = (
             0
             if include
             else sum(1 for q in self._set_questions(spec, setup) if q.meta.get("leaked"))
-        )
-        eval_set = setup.get("eval_set")
-        recorded = (
-            {"eval_set_version": self._eval_set_version(spec, setup)}
-            if eval_set and "eval_set_version" not in setup
-            else {}
         )
         setup = {
             "dense_model": spec.dense_model,
@@ -422,7 +427,6 @@ class Evaluator:
             "disabled_sources": disabled,
             "leaked_excluded": leaked,
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
-            **recorded,
             **setup,
             # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
             # with any other's. Merging a full recorded set over the defaults gives it back.
