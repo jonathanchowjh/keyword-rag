@@ -61,10 +61,6 @@ def stored_exclusions(q: Question, stored: set[str]) -> Question:
     return replace(q, meta={**q.meta, "excluded_ids": kept})
 
 
-def without_leaked(q: Question) -> Question:
-    return replace(q, meta={k: v for k, v in q.meta.items() if k != "leaked"})
-
-
 class Loader:
     def __init__(
         self,
@@ -121,7 +117,6 @@ class Loader:
             "added": counts["new"] + counts["updated"],
             **counts,
             "questions": len(questions),
-            "leaked": self.mark_leaked(name),
             "lists_source": source,
             "keyword_version": fresh.keyword_version if fresh else None,
             **build_result,
@@ -252,22 +247,23 @@ class Loader:
     def questions_set(self, spec: CollectionSpec) -> str:
         """The store's default eval set, made (named after the store) when it has none. Raises
         ValueError when that set is of another type than the store."""
-        name = db.default_eval_set(self.conn, spec.name) or spec.name
-        db.ensure_eval_set(self.conn, name, spec.qa_type)
-        db.set_default_eval_set(self.conn, spec.name, name)
+        with self.conn.lock:  # no other write between reading the default and setting it
+            name = db.default_eval_set(self.conn, spec.name) or spec.name
+            db.ensure_eval_set(self.conn, name, spec.qa_type)
+            db.set_default_eval_set(self.conn, spec.name, name)
         return name
 
     def question_counts(
         self, eval_set: str, questions: list[Question]
     ) -> tuple[dict, list[Question]]:
-        """New, updated, unchanged against the eval set's questions; a leaked mark is ours."""
+        """New, updated, unchanged against the eval set's questions."""
         stored = {q.id: q for q in db.get_questions(self.conn, eval_set)}
         counts, todo = {"new": 0, "updated": 0, "unchanged": 0}, []
         for q in questions:
             old = stored.get(q.id)
             if old is None:
                 counts["new"] += 1
-            elif asdict(q) == asdict(without_leaked(old)):
+            elif asdict(q) == asdict(old):
                 counts["unchanged"] += 1
                 continue
             else:
@@ -303,7 +299,6 @@ class Loader:
         return {
             **counts,
             "skipped": skipped,
-            "leaked": self.mark_leaked(name),
             "lists_source": lists_source,
             **build_result,
         }
@@ -373,30 +368,3 @@ class Loader:
         build_result = self.builder.build(spec, items, lambda p: progress(share + (1 - share) * p))
         progress(1.0)
         return {"added": added, "sources": sorted(by_source), **build_result}
-
-    def mark_leaked(self, name: str) -> int:
-        """Mark the default eval set's imported or hand-written questions whose text sits inside
-        an item of the collection; the built-in datasets' questions are never checked.
-        Returns the leaked count."""
-        eval_set = db.default_eval_set(self.conn, name)
-        if eval_set is None:
-            return 0
-        questions = [
-            q
-            for q in db.get_questions(self.conn, eval_set)
-            if str(q.meta.get("source", "")).startswith("upload:") or q.meta.get("source") == "hand"
-        ]
-        if not questions:
-            return 0
-        texts = [h.text for batch in self.indexer.store.scroll(name) for h in batch]
-        leaked = imports.leaked_ids(questions, texts)
-        changed = []
-        for q in questions:
-            if (q.id in leaked) != bool(q.meta.get("leaked")):
-                changed.append(
-                    replace(q, meta={**q.meta, "leaked": True})
-                    if q.id in leaked
-                    else without_leaked(q)
-                )
-        db.save_questions(self.conn, eval_set, changed)
-        return len(leaked)

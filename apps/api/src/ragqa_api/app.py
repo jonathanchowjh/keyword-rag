@@ -41,6 +41,7 @@ from ragqa_core.builder import Builder, builds
 from ragqa_core.catalog import catalog
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import (
+    EvalSetMismatch,
     Evaluator,
     answer_hits,
     answer_tokens,
@@ -222,6 +223,7 @@ class EvalRequest(BaseModel):
     k: int = Field(5, ge=1, le=50)
     rrf_k: int = Field(60, ge=0)
     search: dict | None = None  # overrides the collection's search settings in part
+    eval_set: str | None = None  # the store's default eval set when None
     confirm: bool = False
 
 
@@ -391,7 +393,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(TooLarge, error(413))
     for exc in (UnknownModel, UnknownPrice):
         app.add_exception_handler(exc, error(422))
-    for exc in (MethodUnavailable, ModelMismatch, ListsBusy, Conflict, AwaitingReplies):
+    for exc in (
+        MethodUnavailable,
+        ModelMismatch,
+        ListsBusy,
+        Conflict,
+        AwaitingReplies,
+        EvalSetMismatch,
+    ):
         app.add_exception_handler(exc, error(409))
     app.add_exception_handler(ProviderError, error(502))
     app.add_exception_handler(BudgetExceeded, error(402))
@@ -474,8 +483,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         eval_set = db.default_eval_set(state.conn, name)
         return eval_set, db.get_questions(state.conn, eval_set) if eval_set else []
 
-    def leaked_count(questions: list) -> int:
-        return sum(1 for q in questions if q.meta.get("leaked"))
+    def leaked_ids(spec: CollectionSpec, eval_set: str | None) -> set[str]:
+        """The eval set's questions whose text is inside the store's items."""
+        return state.evaluator.leaked_ids(spec, eval_set) if eval_set else set()
 
     def field_report(name: str, questions: list) -> dict:
         have = state.store.field_counts(name)
@@ -524,7 +534,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         busy, job = collection_state(jobs, count, lists is not None)
         eval_set, everything = store_questions(name)
         include_leaked = db.get_include_leaked(state.conn, eval_set) if eval_set else False
-        questions = runnable(everything, include_leaked)
+        leaked = leaked_ids(spec, eval_set)
+        questions = runnable(everything, leaked, include_leaked)
         fields = field_report(name, questions)
         return {
             **spec_json(spec),
@@ -540,7 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "runs": sum(1 for j in jobs if j["kind"] == "eval"),
             "sources": source_rows(name),
             "unlabelled": state.store.unsourced(name),
-            "leaked": leaked_count(everything),
+            "leaked": len(leaked),
             "include_leaked": include_leaked,
             "eval_set": eval_set,
             "fields": fields,
@@ -737,18 +748,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(name)
         eval_set = state.loader.questions_set(spec)
         everything = db.get_questions(state.conn, eval_set)
-        shown = [q for q in everything if leaked is None or bool(q.meta.get("leaked")) == leaked]
+        inside = leaked_ids(spec, eval_set)
+        shown = [q for q in everything if leaked is None or (q.id in inside) == leaked]
         page = shown[max(offset, 0) : max(offset, 0) + max(limit, 0)]
         return {
             "total": len(shown),
-            "leaked": leaked_count(everything),
+            "leaked": len(inside),
             "include_leaked": db.get_include_leaked(state.conn, eval_set),
             "questions": [
                 {
                     "id": q.id,
                     "text": q.text,
                     "source": q.meta.get("source"),
-                    "leaked": bool(q.meta.get("leaked")),
+                    "leaked": q.id in inside,
                     "has_gold": bool(q.gold_ids),
                     "has_solution": bool(q.meta.get("solution")),
                 }
@@ -782,13 +794,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         is this set: it would write to the set while it is saved."""
         stores = [c.name for c in db.list_collections(state.conn)]
         for store in (s for s in stores if db.default_eval_set(state.conn, s) == name):
-            for job in db.list_jobs(state.conn, collection=store, limit=db.ALL):
-                asks = job["kind"] == "load" or (
-                    job["kind"] == "import" and job["setup"].get("kind") == "questions"
-                )
-                if asks and job["status"] in ("queued", "running"):
-                    return True
+            for status in ("queued", "running"):
+                for job in db.list_jobs(state.conn, collection=store, status=status, limit=db.ALL):
+                    if job["kind"] == "load" or (
+                        job["kind"] == "import" and job["setup"].get("kind") == "questions"
+                    ):
+                        return True
         return False
+
+    def not_loading(name: str) -> None:
+        if set_is_loading(name):
+            raise HTTPException(
+                409, f"a load or question import is under way on a store of '{name}'"
+            )
 
     @app.get("/eval-sets")
     def list_eval_sets() -> list[dict]:
@@ -823,10 +841,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             seen.add(q.id)
             if problem := imports.question_problem(q, row["qa_type"]):
                 raise HTTPException(422, f"question '{q.id}': {problem}")
-        if set_is_loading(name):
-            raise HTTPException(
-                409, f"a load or question import is under way on a store of '{name}'"
-            )
+        not_loading(name)
         try:
             version = db.replace_questions(state.conn, name, questions, body.base_version)
         except ValueError as e:  # the questions were checked above: only a stale base is left
@@ -845,6 +860,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runs = eval_runs(name)
         if busy := next((j for j in runs if j["status"] in ("queued", "running")), None):
             raise HTTPException(409, f"an eval that uses '{name}' is {busy['status']}; wait")
+        not_loading(name)
         if not confirm:
             return {"runs": len(runs)}
         db.delete_eval_set(state.conn, name)
@@ -873,6 +889,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/eval-sets/{name}/imports")
     def import_eval_set_questions(name: str, body: EvalSetImport) -> dict:
         row = known_set(name)
+        not_loading(name)
         try:
             path, meta = imports.open_upload(
                 state.settings.home, f"eval-set:{name}", body.upload_id
@@ -1114,7 +1131,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(body.collection)
         search_settings(spec.search or SearchSettings(), body.search)  # 422 before an estimate
         estimate = state.evaluator.estimate(
-            body.collection, body.split, body.methods, body.answer, body.model, body.search
+            body.collection,
+            body.split,
+            body.methods,
+            body.answer,
+            body.model,
+            body.search,
+            body.eval_set,
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
@@ -1131,6 +1154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body.k,
                 body.rrf_k,
                 body.search,
+                body.eval_set,
             )
         return {"job_id": job_id, "estimate": estimate}
 
@@ -1155,6 +1179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"no run {job_id}")
         return {
             **state.evaluator.table(job_id),
+            **eval_set_fields(job["setup"]),
             "log": job["log"],
             "created_at": job["created_at"],
         }
@@ -1437,6 +1462,13 @@ def collection_state(jobs: list[dict], count: int, has_lists: bool) -> tuple[str
     return ("ready" if has_lists else "no_lists"), None
 
 
+def eval_set_fields(setup: dict) -> dict:
+    """What a run asked: its eval set at a version, and how many of its questions name
+    evidence and how many the store holds any of (None before it first runs)."""
+    keys = ("eval_set", "eval_set_version", "evidence_named", "evidence_held")
+    return {k: setup.get(k) for k in keys}
+
+
 def run_summary(job: dict, summary: dict) -> dict:
     setup = job["setup"]
     return {
@@ -1450,6 +1482,7 @@ def run_summary(job: dict, summary: dict) -> dict:
         "answer": setup.get("answer"),
         "model": setup.get("model"),
         "question_count": summary["question_count"],
+        **eval_set_fields(setup),
         "usd_total": summary["usd_total"],
         # The verdict with what its notes need: the proxy check and the headline's scale.
         "answer_summary": summary["answer"]

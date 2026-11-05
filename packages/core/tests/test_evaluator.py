@@ -6,6 +6,7 @@ import pytest
 from aiconnect.ai import Cancelled
 from ragqa_core import db
 from ragqa_core.builder import Builder
+from ragqa_core.datasets import DEV_SLICE, dev_slice
 from ragqa_core.db import (
     connect,
     create_job,
@@ -15,7 +16,7 @@ from ragqa_core.db import (
     run_items,
     save_questions,
 )
-from ragqa_core.evaluator import Evaluator
+from ragqa_core.evaluator import EvalSetMismatch, Evaluator, changes_since
 from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.retriever import Retriever
@@ -77,7 +78,15 @@ def test_estimate_counts_calls(env):
 def test_estimate_free_retrieval_is_zero(env):
     _, ev = env
     est = ev.estimate("c", "dev", ["hybrid"], answer=False, model=None)
-    assert est == {"questions": 5, "calls": 0, "est_usd": 0.0, "roles": []}
+    assert est == {
+        "questions": 5,
+        "dev_questions": 5,
+        "evidence_named": 0,
+        "evidence_held": 0,
+        "calls": 0,
+        "est_usd": 0.0,
+        "roles": [],
+    }
 
 
 def test_estimate_counts_iterative_hops(env):
@@ -385,7 +394,9 @@ def test_resume_estimate_of_a_run_that_never_started_is_the_full_estimate(env):
     _, ev = env
     job = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
     full = ev.estimate("c", "dev", ["hybrid", "kw_individual"], answer=True, model=None)
-    assert ev.estimate_resume(job) == full
+    assert ev.estimate_resume(job) == {
+        k: full[k] for k in ("questions", "calls", "est_usd", "roles")
+    }
 
 
 def test_resume_estimate_counts_a_method_with_no_rows(env):
@@ -491,7 +502,8 @@ def test_question_only_answers_are_scored(env):
 def test_queue_refuses_an_empty_split(env):
     conn, ev = env
     ev.retriever.indexer.create("e", "mcq", False)
-    with pytest.raises(ValueError, match="collection 'e' has no questions"):
+    db.create_eval_set(conn, "e", "mcq")
+    with pytest.raises(ValueError, match="eval set 'e' has no questions"):
         ev.queue("e", "dev", ["hybrid"], False, None)
     assert list_jobs(conn) == []
 
@@ -664,7 +676,7 @@ def test_summary_matches_the_table_without_building_it(env, monkeypatch):
 
 def finished_run(conn, scores):
     """A done answered run with given {method: (solution_sim, accuracy)} for one question."""
-    job = create_job(conn, "eval", "c", {**setup_for(list(scores), answer=True)})
+    job = create_job(conn, "eval", "c", {**setup_for(list(scores), answer=True), "eval_set": "c"})
     for method, (sim, acc) in scores.items():
         row = {"retrieval": {"solution_sim@1": sim}, "answer": {"accuracy": acc}, "usd": 0.0}
         db.upsert_run_item(conn, job, method, "q-enzyme", row, complete=True)
@@ -999,9 +1011,8 @@ def test_run_records_sources_and_resume_is_refused_after_a_switch(env):
     db.set_source_enabled(conn, "c", "x", False)
     assert "sources switched" in (ev.resume_refusal(job) or "")
     spec = ev.retriever.spec("c")
-    version = db.get_eval_set(conn, "c")["version"]
-    assert changes_since(setup, spec, ["x"], version)["changes"] == ["sources"]
-    assert changes_since(setup, spec, [], version)["changes"] == []
+    assert changes_since(setup, spec, ["x"])["changes"] == ["sources"]
+    assert changes_since(setup, spec, [])["changes"] == []
 
 
 def test_untracked_run_shows_no_source_change(env):
@@ -1045,9 +1056,14 @@ def test_recall_unchanged_for_questions_with_gold(tmp_path):
             assert r["retrieval"]["recall@5"] == recall_at(r["hit_ids"], gold, 5)
 
 
+LONG = "the enzyme rate rose sharply after the temperature was raised"
+
+
 def test_leaked_questions_are_left_out_unless_included(env):
     conn, ev = env
-    leaked = replace(QUESTIONS[0], meta={**QUESTIONS[0].meta, "leaked": True})
+    ix = ev.retriever.indexer
+    ix.add(ix.spec("c"), [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
+    leaked = replace(QUESTIONS[0], text=LONG, meta={**QUESTIONS[0].meta, "source": "hand"})
     save_questions(conn, "c", [leaked])
     assert ev.estimate("c", "full", ["hybrid"], False, None)["questions"] == 4
     job = create_job(conn, "eval", "c", setup_for(["hybrid"], split="full"))
@@ -1434,8 +1450,8 @@ def test_bright_run_pairs_methods_on_ndcg(env, tmp_path):
 
 def test_run_asks_the_stores_default_set_when_it_has_another_name(env):
     conn, ev = env
-    leaked = Question("lk", "leaked q", ["a"], ["A"], [], {"skill": "x", "leaked": True})
-    other = [Question("o1", "other one", ["a"], ["A"], [], {"skill": "x"}), leaked]
+    second = Question("lk", "second q", ["a"], ["A"], [], {"skill": "x"})
+    other = [Question("o1", "other one", ["a"], ["A"], [], {"skill": "x"}), second]
     db.create_eval_set(conn, "other", "mcq")
     save_questions(conn, "other", other)
     db.set_include_leaked(conn, "other", True)
@@ -1446,6 +1462,155 @@ def test_run_asks_the_stores_default_set_when_it_has_another_name(env):
     setup = get_job(conn, job)["setup"]
     assert setup["eval_set"] == "other"
     assert setup["eval_set_version"] == db.get_eval_set(conn, "other")["version"]
-    assert sorted(setup["question_ids"]) == ["lk", "o1"]  # include_leaked of "other" is on
+    assert sorted(setup["question_ids"]) == ["lk", "o1"]
     assert setup["leaked_excluded"] == 0
     assert {r["question_id"] for r in run_items(conn, job)} == {"lk", "o1"}
+
+
+def test_eval_refuses_an_eval_set_of_another_qa_type(env):
+    conn, ev = env
+    db.create_eval_set(conn, "s", "science")
+    save_questions(conn, "s", [Question("s1", "how warm is it?", None, ["3"], [], {})])
+    with pytest.raises(EvalSetMismatch, match="eval set 's' is science; store 'c' is mcq"):
+        ev.queue("c", "full", ["hybrid"], False, None, eval_set="s")
+    with pytest.raises(EvalSetMismatch):
+        ev.estimate("c", "full", ["hybrid"], False, None, eval_set="s")
+    assert list_jobs(conn, kind="eval") == []
+
+
+def test_a_run_keeps_its_eval_set_version_after_an_edit(env):
+    conn, ev = env
+    done = ev.queue("c", "full", ["hybrid"], False, None)
+    ev.run(done)
+    ev.ai = fake_ai(conn, lambda p: "Answer: A", cap_usd=1e-9)
+    stopped = ev.queue("c", "full", ["hybrid"], True, None)
+    ev.run(stopped)
+    assert get_job(conn, stopped)["status"] == "stopped_budget"
+    queued = ev.queue("c", "full", ["hybrid"], False, None)
+    old = db.get_eval_set(conn, "c")["version"]
+    edited = [replace(q, text=f"edited {q.text}") for q in QUESTIONS]
+    new = db.replace_questions(conn, "c", edited, old)
+    texts = {q["question_id"]: q["question"] for q in ev.questions(done, False)}
+    assert texts["q-enzyme"] == "a enzyme question"
+    assert ev.table(done)["since"]["changes"] == ["eval set"]
+    spec = ev.retriever.spec("c")
+    assert changes_since(get_job(conn, done)["setup"], spec, [], new)["changes"] == ["eval set"]
+    sent: list[str] = []
+    ev.ai = fake_ai(conn, lambda p: sent.append(p) or "Answer: A")
+    requeue(conn, stopped)
+    ev.run(stopped)
+    assert get_job(conn, stopped)["status"] == "done"
+    assert sent and not any("edited" in p for p in sent)
+    assert any("a enzyme question" in p for p in sent)
+    ev.run(queued)
+    assert get_job(conn, queued)["setup"]["eval_set_version"] == new
+    texts = {q["question_id"]: q["question"] for q in ev.questions(queued, False)}
+    assert texts["q-enzyme"] == "edited a enzyme question"
+    assert ev.table(queued)["since"]["changes"] == []
+
+
+def evidence_env(tmp_path):
+    """Multihop store c holding g1 and g2 (set c), store far holding neither, store half
+    holding g1 only, and set mq asking for g1 and g2."""
+    conn, ev = multihop_env(tmp_path)
+    ix = ev.retriever.indexer
+    ix.add(ix.create("far", "multihop", False), [Item("f1", "glacier ice moved", "C")], "x")
+    half = ix.create("half", "multihop", False)
+    ix.add(half, [Item("g1", "enzyme rate rose", "A"), Item("f1", "glacier ice moved", "C")], "x")
+    db.create_eval_set(conn, "mq", "multihop")
+    save_questions(
+        conn,
+        "mq",
+        [
+            Question("m1", "enzyme rate", None, ["A"], ["g1"], {}),
+            Question("m2", "market price", None, ["B"], ["g2"], {}),
+        ],
+    )
+    return conn, ev
+
+
+def test_evidence_counts_only_where_the_store_holds_it(tmp_path):
+    conn, ev = evidence_env(tmp_path)
+    est = ev.estimate("far", "full", ["hybrid"], True, None, eval_set="mq")
+    assert (est["questions"], est["evidence_named"], est["evidence_held"]) == (2, 2, 0)
+    far = ev.queue("far", "full", ["hybrid"], True, None, eval_set="mq")
+    ev.run(far)
+    setup = get_job(conn, far)["setup"]
+    assert (setup["evidence_named"], setup["evidence_held"]) == (2, 0)
+    assert all(r["retrieval"] == {} for r in run_items(conn, far))
+    table = ev.table(far)
+    assert "recall@2" not in table["methods"]["hybrid"] and table["headline"] == "f1"
+    half = ev.queue("half", "full", ["hybrid"], False, None, eval_set="mq")
+    ev.run(half)
+    setup = get_job(conn, half)["setup"]
+    assert (setup["evidence_named"], setup["evidence_held"]) == (2, 1)
+    rows = {r["question_id"]: r for r in run_items(conn, half)}
+    assert rows["m2"]["retrieval"] == {} and "recall@2" in rows["m1"]["retrieval"]
+    table = ev.table(half)
+    assert table["methods"]["hybrid"]["recall@2"]["n"] == 1 and table["question_count"] == 2
+    held = ev.estimate("half", "full", ["hybrid"], False, None, eval_set="mq")
+    assert (held["evidence_named"], held["evidence_held"]) == (2, 1)
+
+
+def test_retrieval_only_run_that_measures_nothing_is_refused(tmp_path):
+    conn, ev = evidence_env(tmp_path)
+    nothing = "nothing to measure: this store holds none of the eval set's evidence"
+    with pytest.raises(ValueError, match=nothing):
+        ev.queue("far", "full", ["hybrid"], False, None, eval_set="mq")
+    assert list_jobs(conn, kind="eval") == []
+    assert ev.estimate("far", "full", ["hybrid"], False, None, eval_set="mq")["calls"] == 0
+    assert ev.queue("far", "full", ["hybrid"], True, None, eval_set="mq")
+    assert ev.queue("half", "full", ["hybrid"], False, None, eval_set="mq")
+
+
+def test_leaked_is_worked_out_against_the_run_store_before_the_dev_slice(env):
+    conn, ev = env
+    ix = ev.retriever.indexer
+    a, b = ix.create("a", "mcq", False), ix.create("b", "mcq", False)
+    ix.add(a, [*ITEMS, Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
+    ix.add(b, ITEMS, "x")
+    others = [
+        Question(f"o{n:03}", f"other question {n}", ["y", "n"], ["A"], [], {"skill": "s"})
+        for n in range(DEV_SLICE)
+    ]
+    # A hand question that a slice taken before the leak check would hold.
+    hand = next(
+        h
+        for n in range(1000)
+        if (h := Question(f"h{n}", LONG, ["y", "n"], ["A"], [], {"source": "hand"}))
+        in dev_slice([*others, h])
+    )
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", [*others, hand])
+    assert ev.leaked_ids(a, "e") == {hand.id} and ev.leaked_ids(b, "e") == set()
+    on_a = ev.queue("a", "dev", ["hybrid"], False, None, eval_set="e")
+    setup = ev._record_setup(on_a, a, get_job(conn, on_a)["setup"])
+    assert setup["leaked_excluded"] == 1 and setup["leaked_ids"] == [hand.id]
+    assert setup["question_ids"] == [q.id for q in others]
+    assert ev.estimate("a", "dev", ["hybrid"], False, None, eval_set="e")["dev_questions"] == 200
+    on_b = ev.queue("b", "dev", ["hybrid"], False, None, eval_set="e")
+    setup = ev._record_setup(on_b, b, get_job(conn, on_b)["setup"])
+    assert setup["leaked_excluded"] == 0 and hand.id in setup["question_ids"]
+
+
+def test_leaked_ids_skips_the_store_scan_without_hand_or_uploaded_questions(env):
+    _, ev = env
+
+    def no_scan(*args, **kwargs):
+        raise AssertionError("scanned the store")
+
+    ev.retriever.store.scroll = no_scan
+    assert ev.leaked_ids(ev.retriever.spec("c"), "c") == set()
+
+
+def test_store_answer_counts_only_its_default_eval_set_runs(env):
+    conn, ev = env
+    mine = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None)
+    ev.run(mine)
+    db.create_eval_set(conn, "other", "mcq")
+    save_questions(conn, "other", QUESTIONS[:2])
+    theirs = ev.queue("c", "dev", ["hybrid", "kw_individual"], True, None, eval_set="other")
+    ev.run(theirs)
+    assert get_job(conn, theirs)["setup"]["eval_set"] == "other"
+    a = ev.collection_answer("c")
+    assert a is not None and a["run_id"] == mine and a["runs"] == 1

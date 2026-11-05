@@ -4,7 +4,7 @@ with intervals so a gap that is noise is shown as noise."""
 import itertools
 import math
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Literal
 
 from aiconnect.ai import (
@@ -15,7 +15,7 @@ from aiconnect.ai import (
     Cancelled,
     NoConnection,
 )
-from ragqa_core import db, verdict
+from ragqa_core import db, imports, verdict
 from ragqa_core.builder import TAG_TOKENS, build_of
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
@@ -115,9 +115,20 @@ def retrieval_depth(qa_type: QaType, q: Question, k: int) -> int:
     return max(k, GOLD_DEPTH) if qa_type in EXAMPLE_TYPES and q.gold_ids else k
 
 
-def runnable(questions: list[Question], include_leaked: bool) -> list[Question]:
-    """The questions a run may ask: leaked ones (also in the corpus) only when included."""
-    return questions if include_leaked else [q for q in questions if not q.meta.get("leaked")]
+NOTHING_TO_MEASURE = (
+    "nothing to measure: this store holds none of the eval set's evidence;"
+    " have the AI answer, or choose another store"
+)
+
+
+class EvalSetMismatch(Exception):
+    """An eval set and a store of different question types: a run cannot ask one of the other."""
+
+
+def runnable(questions: list[Question], leaked: set[str], include_leaked: bool) -> list[Question]:
+    """The questions a run may ask: leaked ones (text inside the store's items) only when
+    included."""
+    return questions if include_leaked else [q for q in questions if q.id not in leaked]
 
 
 def measurable(qa_type: QaType, fields: dict) -> dict[str, dict]:
@@ -188,7 +199,8 @@ def changes_since(
     if "keyword_version" in setup and setup.get("disabled_sources", []) != disabled:
         changes.append("sources")
     recorded = setup.get("eval_set_version")
-    if recorded is not None and recorded != eval_set_version:
+    # None on either side: nothing recorded, or no version to compare it with.
+    if None not in (recorded, eval_set_version) and recorded != eval_set_version:
         changes.append("eval set")
     return {"untracked": False, "changes": changes}
 
@@ -204,15 +216,49 @@ class Evaluator:
         """The eval set the run asks: the one it recorded, else the store's default."""
         return setup.get("eval_set") or db.default_eval_set(self.conn, spec.name)
 
-    def _questions(
-        self, spec: CollectionSpec, split: str, eval_set: str | None = None
-    ) -> list[Question]:
-        eval_set = eval_set or db.default_eval_set(self.conn, spec.name)
+    def _chosen_set(self, spec: CollectionSpec, eval_set: str | None) -> str:
+        """The eval set a new run asks: the one named, else the store's default. Refuses a
+        store with neither, and a set of another question type."""
+        name = eval_set or db.default_eval_set(self.conn, spec.name)
+        if name is None:
+            raise ValueError(f"store '{spec.name}' has no eval set; choose one")
+        found = db.get_eval_set(self.conn, name)
+        if found is None:
+            raise ValueError(f"no eval set '{name}'")
+        if found["qa_type"] != spec.qa_type:
+            raise EvalSetMismatch(
+                f"eval set '{name}' is {found['qa_type']}; store '{spec.name}' is {spec.qa_type}"
+            )
+        return name
+
+    def leaked_ids(self, spec: CollectionSpec, eval_set: str) -> set[str]:
+        """The set's imported or hand-written questions whose text sits inside one of the
+        store's items; the built-in datasets' questions are never checked, so a set of only
+        those needs no scan of the store."""
+        checked = [
+            q
+            for q in db.get_questions(self.conn, eval_set)
+            if str(q.meta.get("source", "")).startswith("upload:") or q.meta.get("source") == "hand"
+        ]
+        if not checked:
+            return set()
+        texts = [h.text for batch in self.retriever.store.scroll(spec.name) for h in batch]
+        return imports.leaked_ids(checked, texts)
+
+    def _questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """What a run that has not recorded its questions asks: its set's, less those leaked
+        into this store unless the set includes them, then the dev slice of the rest. Leaked
+        go first, so the slice is what is asked."""
+        name = self._set_name(spec, setup)
+        if name is None:
+            return []
+        leaked = setup.get("leaked_ids")
         questions = runnable(
-            db.get_questions(self.conn, eval_set) if eval_set else [],
-            db.get_include_leaked(self.conn, eval_set) if eval_set else False,
+            self._set_questions(spec, setup),
+            set(self.leaked_ids(spec, name) if leaked is None else leaked),
+            db.get_include_leaked(self.conn, name),
         )
-        return dev_slice(questions) if split == "dev" else questions
+        return dev_slice(questions) if setup["split"] == "dev" else questions
 
     def _question_ids(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[str]:
         if "question_ids" in setup:
@@ -220,13 +266,46 @@ class Evaluator:
         # Not recorded yet: an old run's are the ones it has rows for; a new
         # run's are its split's, as its first run will record them.
         return db.run_item_question_ids(self.conn, job_id) or [
-            q.id for q in self._questions(spec, setup["split"], self._set_name(spec, setup))
+            q.id for q in self._questions(spec, setup)
         ]
 
-    def _run_questions(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
-        """The run's questions in recorded order; ids since deleted are skipped."""
+    def _asked(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """The run's questions in recorded order, as its eval set version has them; ids
+        since deleted are skipped."""
         by_id = {q.id: q for q in self._set_questions(spec, setup)}
         return [by_id[i] for i in self._question_ids(job_id, spec, setup) if i in by_id]
+
+    def _run_questions(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[Question]:
+        """The run's questions with their evidence cut to what the store holds: every
+        metric reads these."""
+        return self._held(spec, self._asked(job_id, spec, setup))
+
+    def _held(self, spec: CollectionSpec, questions: list[Question]) -> list[Question]:
+        """Each question with its evidence ids cut to those the store holds. Evidence the
+        store lacks cannot be found in it, so it is unmeasured there, never missed."""
+        wanted = sorted({g for q in questions for g in q.gold_ids})
+        if not wanted:
+            return questions
+        held = {h.id for h in self.retriever.store.get(spec.name, wanted)}
+        return [replace(q, gold_ids=[g for g in q.gold_ids if g in held]) for q in questions]
+
+    def _evidence(self, spec: CollectionSpec, questions: list[Question]) -> tuple[int, int]:
+        """How many questions name evidence, and how many of those the store holds any of."""
+        held = self._held(spec, questions)
+        return sum(1 for q in questions if q.gold_ids), sum(1 for q in held if q.gold_ids)
+
+    def _measures_nothing(self, spec: CollectionSpec, questions: list[Question]) -> bool:
+        """Whether a retrieval-only run of these questions would measure nothing: the store
+        holds none of their evidence, and no other retrieval metric of the type applies (a
+        worked solution against item explanations, or a skill against item skills)."""
+        if self._evidence(spec, questions)[1]:
+            return False
+        if spec.qa_type not in EXAMPLE_TYPES:
+            return True
+        have = self.retriever.store.field_counts(spec.name)
+        solution = have["explanation"] and any(q.meta.get("solution") for q in questions)
+        skill = have["skill"] and any(q.meta.get("skill") for q in questions)
+        return not (solution or skill)
 
     def _set_questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """The questions of the run's eval set, as of the version it recorded (the set's
@@ -255,10 +334,18 @@ class Evaluator:
         answer: bool,
         model: str | None,
         search: dict | None = None,
+        eval_set: str | None = None,
     ) -> dict:
+        """What the run would spend, with the counts the run form shows for this (store,
+        eval set): its questions, its dev slice, and of the questions asked, those naming
+        evidence and those whose evidence the store holds."""
         spec = self.retriever.spec(collection)
         self.retriever.indexer.check_model(spec)
-        questions = self._questions(spec, split)
+        every = self._questions(
+            spec, {"split": "full", "eval_set": self._chosen_set(spec, eval_set)}
+        )
+        questions = dev_slice(every) if split == "dev" else every
+        named, held = self._evidence(spec, questions)
         parts = self._estimate_parts(
             spec,
             {m: len(questions) for m in methods},
@@ -267,7 +354,13 @@ class Evaluator:
             questions[:ESTIMATE_SAMPLE],
             search_settings(spec.search or SearchSettings(), search),
         )
-        return {"questions": len(questions), **parts}
+        return {
+            "questions": len(every),
+            "dev_questions": len(dev_slice(every)),
+            "evidence_named": named,
+            "evidence_held": held,
+            **parts,
+        }
 
     def estimate_resume(self, job_id: str) -> dict:
         """What resuming would cost: only the incomplete (method, question) pairs."""
@@ -368,16 +461,21 @@ class Evaluator:
         k: int = 5,
         rrf_k: int = 60,
         search: dict | None = None,
+        eval_set: str | None = None,
     ) -> str:
-        """Queue a run with the request only; the rest of its setup is recorded when it runs.
-        `search` overrides the collection's search settings in part; a bad one raises
-        ValueError."""
+        """Queue a run of the eval set (the store's default when None) with the request only;
+        the rest of its setup is recorded when it runs. `search` overrides the collection's
+        search settings in part; a bad one raises ValueError."""
         spec = self.retriever.spec(collection)
         if not methods:
             raise ValueError("choose at least one method")
         search_settings(spec.search or SearchSettings(), search)
-        if not self._questions(spec, split):
-            raise ValueError(f"collection '{collection}' has no questions")
+        name = self._chosen_set(spec, eval_set)
+        questions = self._questions(spec, {"split": split, "eval_set": name})
+        if not questions:
+            raise ValueError(f"eval set '{name}' has no questions")
+        if not answer and self._measures_nothing(spec, questions):
+            raise ValueError(NOTHING_TO_MEASURE)
         setup = {
             "collection": collection,
             "split": split,
@@ -388,7 +486,7 @@ class Evaluator:
             "k": k,
             "rrf_k": rrf_k,
             "search": search or {},
-            "eval_set": db.default_eval_set(self.conn, collection),
+            "eval_set": name,
         }
         return db.create_job(self.conn, "eval", collection, setup)
 
@@ -402,16 +500,14 @@ class Evaluator:
             setup = {**setup, "eval_set": name}
             if "eval_set_version" not in setup:
                 setup["eval_set_version"] = self._eval_set_version(spec, setup)
+            if "leaked_ids" not in setup:
+                setup["leaked_ids"] = sorted(self.leaked_ids(spec, name))
         ids = self._question_ids(job_id, spec, setup)
         disabled = db.disabled_sources(self.conn, spec.name)
-        questions = self._run_questions(job_id, spec, {**setup, "question_ids": ids})
+        asked = self._asked(job_id, spec, {**setup, "question_ids": ids})
+        questions = self._held(spec, asked)
         off = self._gold_off(spec, questions, disabled)
         include = db.get_include_leaked(self.conn, name) if name else False
-        leaked = (
-            0
-            if include
-            else sum(1 for q in self._set_questions(spec, setup) if q.meta.get("leaked"))
-        )
         setup = {
             "dense_model": spec.dense_model,
             "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
@@ -425,7 +521,9 @@ class Evaluator:
             or "items you added or imported",
             "question_ids": ids,
             "disabled_sources": disabled,
-            "leaked_excluded": leaked,
+            "leaked_excluded": 0 if include else len(setup.get("leaked_ids", [])),
+            "evidence_named": sum(1 for q in asked if q.gold_ids),
+            "evidence_held": sum(1 for q in questions if q.gold_ids),
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
             **setup,
             # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
@@ -827,9 +925,13 @@ class Evaluator:
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
-        return db.list_jobs(
+        """The store's done runs of its default eval set, newest first: a run of another set
+        asks other questions, so it is not the store's answer."""
+        default = db.default_eval_set(self.conn, collection)
+        done = db.list_jobs(
             self.conn, kind="eval", collection=collection, status="done", limit=db.ALL
         )
+        return [j for j in done if j["setup"].get("eval_set") == default]
 
     def collection_answer(self, name: str) -> dict | None:
         """The collection's answer: the newest answered run that has the pair, else the

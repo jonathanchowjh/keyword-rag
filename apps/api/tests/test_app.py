@@ -284,8 +284,9 @@ def test_eval_needs_confirm_when_it_costs(client):
 
 def test_eval_of_an_empty_split_is_422(client):
     add_collection(client, questions=False)
+    client.post("/eval-sets", json={"name": "c", "qa_type": "mcq"})
     r = client.post("/eval", json={**EVAL, "confirm": True})
-    assert r.status_code == 422 and r.json()["detail"] == "collection 'c' has no questions"
+    assert r.status_code == 422 and r.json()["detail"] == "eval set 'c' has no questions"
 
 
 def test_eval_flow(client):
@@ -1169,6 +1170,10 @@ def test_runs_list_and_delete(client):
         "answer",
         "model",
         "question_count",
+        "eval_set",
+        "eval_set_version",
+        "evidence_named",
+        "evidence_held",
         "usd_total",
         "answer_summary",
     }
@@ -1528,7 +1533,8 @@ def test_questions_lists_every_methods_row_per_question(client):
 
 def test_questions_disagree_filter_ignores_controls_and_absent_outcomes(client):
     add_collection(client)
-    qs = [Question(f"q{i}", f"enzyme {i}", ["x", "y"], ["A"], [], {}) for i in range(1, 5)]
+    skill = {"skill": "enzymes"}  # measurable without evidence ids, so a free run is allowed
+    qs = [Question(f"q{i}", f"enzyme {i}", ["x", "y"], ["A"], [], skill) for i in range(1, 5)]
     db.save_questions(client.app.state.conn, "c", qs)
     job_id = run_pair(client)
     seed_rows(
@@ -1881,7 +1887,7 @@ def test_questions_list_and_include_leaked(client):
     rows = jsonl(
         {
             "id": "u1",
-            "text": "tides follow the moon",
+            "text": "the tides follow the moon each day",
             "choices": ["x", "y"],
             "answer": "A",
             "gold_ids": ["n1"],
@@ -1893,14 +1899,13 @@ def test_questions_list_and_include_leaked(client):
             "answer": "B",
         },
     )
-    import_items(client)
+    tides = jsonl({"id": "n1", "text": "so the tides follow the moon each day we saw"})
+    import_items(client, body=tides)
     up = upload(client, rows, kind="questions").json()
     r = do_import(client, up, "qs", kind="questions", confirm=True)
-    wait(client, r.json()["job_id"])
-    # mark one by hand: the leak check itself is covered in the core tests
+    assert "leaked" not in wait(client, r.json()["job_id"])["result"]
     conn = client.app.state.conn
-    qs = {q.id: q for q in db.get_questions(conn, "c")}
-    db.save_questions(conn, "c", [replace(qs["u1"], meta={**qs["u1"].meta, "leaked": True})])
+    assert all("leaked" not in q.meta for q in db.get_questions(conn, "c"))
     page = client.get("/collections/c/questions").json()
     assert page["total"] == 3 and page["leaked"] == 1 and page["include_leaked"] is False
     row = next(q for q in page["questions"] if q["id"] == "u1")
@@ -2727,3 +2732,60 @@ def test_store_question_routes_use_the_default_eval_set(client):
     assert (
         db.get_include_leaked(conn, "other") is True and db.get_include_leaked(conn, "c") is False
     )
+
+
+def test_eval_refuses_an_eval_set_of_another_qa_type(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    client.post("/eval-sets", json={"name": "s", "qa_type": "science"})
+    sci = {"id": "s1", "text": "how warm is it?", "gold_answers": ["3"]}
+    assert put_questions(client, "s", [sci]).status_code == 200
+    for confirm in (False, True):
+        r = client.post("/eval", json={**EVAL, "eval_set": "s", "confirm": confirm})
+        assert r.status_code == 409
+        assert r.json()["detail"] == "eval set 's' is science; store 'c' is mcq"
+    assert db.list_jobs(client.app.state.conn, kind="eval") == []
+
+
+def test_estimate_counts_the_chosen_eval_set(client):
+    add_collection(client)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    questions = [
+        {**MCQ, "id": "a", "gold_ids": ["enzyme-item"]},
+        {**MCQ, "id": "b", "gold_ids": ["nowhere"]},
+        {**MCQ, "id": "c"},
+    ]
+    assert put_questions(client, "e", questions).status_code == 200
+    est = client.post("/eval", json={**EVAL, "eval_set": "e"}).json()["estimate"]
+    assert (est["questions"], est["dev_questions"]) == (3, 3)
+    assert (est["evidence_named"], est["evidence_held"]) == (2, 1)
+    own = client.post("/eval", json=EVAL).json()["estimate"]
+    assert (own["questions"], own["dev_questions"], own["evidence_named"]) == (1, 1, 0)
+
+
+def test_eval_without_eval_set_uses_the_default_and_says_when_there_is_none(client):
+    add_collection(client)
+    r = client.post("/eval", json={**EVAL, "confirm": True})
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done" and job["setup"]["eval_set"] == "c"
+    version = db.get_eval_set(client.app.state.conn, "c")["version"]
+    (summary,) = client.get("/eval", params={"collection": "c"}).json()
+    detail = client.get(f"/eval/{job['id']}").json()
+    for run in (summary, detail):
+        assert run["eval_set"] == "c" and run["eval_set_version"] == version
+        assert (run["evidence_named"], run["evidence_held"]) == (0, 0)
+    add_collection(client, name="d", questions=False)
+    r = client.post("/eval", json={**EVAL, "collection": "d", "confirm": True})
+    assert r.status_code == 422 and r.json()["detail"] == "store 'd' has no eval set; choose one"
+
+
+def test_an_eval_set_is_not_deleted_or_imported_into_while_a_load_writes_to_it(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    conn = client.app.state.conn
+    db.create_job(conn, "load", "c", {"dataset": "musique", "limit": None})
+    assert client.delete("/eval-sets/c", params={"confirm": True}).status_code == 409
+    assert db.get_eval_set(conn, "c") is not None
+    body = {"upload_id": "0" * 32, "source_name": "qs"}
+    assert client.post("/eval-sets/c/imports", json=body).status_code == 409

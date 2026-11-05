@@ -251,7 +251,7 @@ def test_import_items_without_ai_makes_no_lists(tmp_path, monkeypatch):
 LONG = "the enzyme rate rose sharply after the temperature was raised"
 
 
-def test_import_questions_marks_leaked(tmp_path, monkeypatch):
+def test_import_questions_keeps_their_source_and_marks_nothing(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch)
     ld.ai.update_connection("anthropic", api_key=None)
     ld.run_import(
@@ -265,12 +265,12 @@ def test_import_questions_marks_leaked(tmp_path, monkeypatch):
     mapping = {"id": "id", "text": "text", "answer": "answer"}
     job = import_job(conn, tmp_path, "questions", rows, mapping, source="upload:qs")
     result = ld.run_import(job, lambda p: None)
-    assert result["leaked"] == 1 and result["new"] == 2
+    assert result["new"] == 2 and "leaked" not in result
     got = {q.id: q for q in get_questions(conn, "m")}
-    assert got["q1"].meta["leaked"] is True and "leaked" not in got["q2"].meta
+    assert all("leaked" not in q.meta for q in got.values())  # worked out per run instead
     assert got["q1"].meta["source"] == "upload:qs"
     again = ld.run_import(job, lambda p: None)
-    assert again["unchanged"] == 2 and again["leaked"] == 1
+    assert again["unchanged"] == 2
 
 
 def test_a_load_refuses_a_default_eval_set_of_another_type(tmp_path, monkeypatch):
@@ -297,7 +297,7 @@ def test_dataset_load_never_marks_builtin_questions(tmp_path, monkeypatch):
     questions = [Question("q1", LONG, None, ["x"], ["a"], {})]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
     result = ld.run(job, lambda p: None)
-    assert result["leaked"] == 0
+    assert "leaked" not in result
     assert "leaked" not in get_questions(conn, "m")[0].meta
 
 
@@ -472,9 +472,7 @@ def scibench_paper(tmp_path):
     spec = ix.create("p", "science", False)
     items = scibench_items(tmp_path)
     ix.add(spec, items, "scibench")
-    question = Question(
-        "q1", "x", None, ["3"], [items[0].id], {"excluded_ids": [items[1].id], "leaked": True}
-    )
+    question = Question("q1", "x", None, ["3"], [items[0].id], {"excluded_ids": [items[1].id]})
     db.save_questions(conn, "p", [question])
     return conn, ix, loader_for(ix, tmp_path), items
 
