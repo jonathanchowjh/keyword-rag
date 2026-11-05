@@ -211,6 +211,9 @@ class Evaluator:
         self.retriever = retriever
         self.models = models
         self.ai = ai
+        # leaked_ids by (store, eval set): the store's item count and the set's version it was
+        # worked out at, and the ids. A count or version that differs means scan again.
+        self._leaked: dict[tuple[str, str], tuple[int, str | None, set[str]]] = {}
 
     def _set_name(self, spec: CollectionSpec, setup: dict) -> str | None:
         """The eval set the run asks: the one it recorded, else the store's default."""
@@ -234,16 +237,25 @@ class Evaluator:
     def leaked_ids(self, spec: CollectionSpec, eval_set: str) -> set[str]:
         """The set's imported or hand-written questions whose text sits inside one of the
         store's items; the built-in datasets' questions are never checked, so a set of only
-        those needs no scan of the store."""
+        those needs no scan of the store. The scan is kept until the store's item count or the
+        set's version changes: the store page asks for it on every poll."""
+        found = db.get_eval_set(self.conn, eval_set)
+        version = found["version"] if found else None
         checked = [
             q
-            for q in db.get_questions(self.conn, eval_set)
+            for q in db.get_questions(self.conn, eval_set, version)
             if str(q.meta.get("source", "")).startswith("upload:") or q.meta.get("source") == "hand"
         ]
         if not checked:
             return set()
+        count = self.retriever.store.count(spec.name)
+        kept = self._leaked.get((spec.name, eval_set))
+        if kept is not None and kept[:2] == (count, version):
+            return set(kept[2])
         texts = [h.text for batch in self.retriever.store.scroll(spec.name) for h in batch]
-        return imports.leaked_ids(checked, texts)
+        leaked = imports.leaked_ids(checked, texts)
+        self._leaked[(spec.name, eval_set)] = (count, version, leaked)
+        return set(leaked)
 
     def _questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """What a run that has not recorded its questions asks: its set's, less those leaked
@@ -252,12 +264,11 @@ class Evaluator:
         name = self._set_name(spec, setup)
         if name is None:
             return []
-        leaked = setup.get("leaked_ids")
-        questions = runnable(
-            self._set_questions(spec, setup),
-            set(self.leaked_ids(spec, name) if leaked is None else leaked),
-            db.get_include_leaked(self.conn, name),
-        )
+        questions = self._set_questions(spec, setup)
+        if not db.get_include_leaked(self.conn, name):  # included: nothing to drop, no scan
+            leaked = setup.get("leaked_ids")
+            leaked = self.leaked_ids(spec, name) if leaked is None else leaked
+            questions = runnable(questions, set(leaked), False)
         return dev_slice(questions) if setup["split"] == "dev" else questions
 
     def _question_ids(self, job_id: str, spec: CollectionSpec, setup: dict) -> list[str]:

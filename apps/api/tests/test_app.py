@@ -2789,3 +2789,31 @@ def test_an_eval_set_is_not_deleted_or_imported_into_while_a_load_writes_to_it(c
     assert db.get_eval_set(conn, "c") is not None
     body = {"upload_id": "0" * 32, "source_name": "qs"}
     assert client.post("/eval-sets/c/imports", json=body).status_code == 409
+
+
+def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
+    add_collection(client)
+    tides = jsonl({"id": "n1", "text": "so the tides follow the moon each day we saw"})
+    import_items(client, body=tides)
+    rows = jsonl(
+        {
+            "id": "u1",
+            "text": "the tides follow the moon each day",
+            "choices": ["x", "y"],
+            "answer": "A",
+        }
+    )
+    up = upload(client, rows, kind="questions").json()
+    wait(client, do_import(client, up, "qs", kind="questions", confirm=True).json()["job_id"])
+    store, scans = client.app.state.store, []
+    scroll = store.scroll
+    store.scroll = lambda *a, **kw: scans.append(1) or scroll(*a, **kw)
+    assert client.get("/collections/c").json()["leaked"] == 1
+    assert client.get("/collections/c").json()["leaked"] == 1
+    assert client.get("/collections/c/questions").json()["leaked"] == 1
+    assert len(scans) == 1
+    import_items(
+        client, body=jsonl({"id": "n2", "text": "glaciers carve valleys"}), source_name="more"
+    )
+    scans.clear()
+    assert client.get("/collections/c").json()["leaked"] == 1 and len(scans) == 1

@@ -1614,3 +1614,25 @@ def test_store_answer_counts_only_its_default_eval_set_runs(env):
     assert get_job(conn, theirs)["setup"]["eval_set"] == "other"
     a = ev.collection_answer("c")
     assert a is not None and a["run_id"] == mine and a["runs"] == 1
+
+
+def test_leaked_ids_scan_once_until_the_store_or_the_set_changes(env):
+    conn, ev = env
+    ix, store = ev.retriever.indexer, ev.retriever.store
+    spec = ix.spec("c")
+    ix.add(spec, [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
+    hand = Question("h1", LONG, ["y", "n"], ["A"], [], {"source": "hand"})
+    save_questions(conn, "c", [hand])
+    scans = []
+    scroll = store.scroll
+    store.scroll = lambda *a, **kw: scans.append(1) or scroll(*a, **kw)
+    assert ev.leaked_ids(spec, "c") == {"h1"} and ev.leaked_ids(spec, "c") == {"h1"}
+    assert len(scans) == 1
+    ix.add(spec, [Item("more-item", "another item text", "A", "x", {})], "x")
+    assert ev.leaked_ids(spec, "c") == {"h1"} and len(scans) == 2
+    save_questions(conn, "c", [replace(hand, text="a text that sits in no item at all")])
+    assert ev.leaked_ids(spec, "c") == set() and len(scans) == 3
+    db.set_include_leaked(conn, "c", True)
+    ev._leaked.clear()
+    ev.queue("c", "full", ["hybrid"], False, None)  # included: nothing to drop, so no scan
+    assert len(scans) == 3
