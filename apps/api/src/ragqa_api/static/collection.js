@@ -1,6 +1,6 @@
 import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, costMark, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
-  upload, verdictNotes, wordHtml } from "/static/ui.js";
+  importBox, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
@@ -25,8 +25,6 @@ let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
-const uploads = { items: null, questions: null }; // per kind: the upload being previewed, or null
-const previewing = { items: 0, questions: 0 }; // per kind: the newest preview request, so an older answer is ignored
 
 shell(`c/${name}`);
 
@@ -50,7 +48,7 @@ function headHtml() {
   const stale = staleNotes().map((n) => ` · <span class="warn">${esc(n)}</span>`).join("");
   return head({
     title: name,
-    crumb: [{ label: "Collections", href: "/" }],
+    crumb: [{ label: "Stores", href: "/" }],
     sub: `${type?.label ?? col.qa_type}: retrieves ${type?.retrieves ?? "items"}`,
     aside: `${status} · ${pill(col.state)}${esc(progress)}${stale}`,
   });
@@ -65,7 +63,7 @@ function answerHtml() {
     ${legendHtml()}
     <p class="muted">From <a href="/c/${enc}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
       short(a.run_id))}</a> at ${esc(clock(a.at))}${a.answered ? "" : ", retrieval only"} ·
-      run ${esc(a.runs)} on this collection</p>`;
+      run ${esc(a.runs)} on this store</p>`;
 }
 
 // -- runs --------------------------------------------------------------------------
@@ -97,7 +95,8 @@ function runsHtml() {
 }
 
 // What a run on this collection can score, and what it cannot, in the catalog's labels.
-function measureHtml() {
+function measureHtml(counts) {
+  if (counts !== col) return evidenceHtml(counts);
   const label = (id) => metricLabel(id, col.qa_type, cat);
   const rows = Object.entries(col.measurable ?? {});
   const yes = rows.filter(([, m]) => m.measurable).map(([id, m]) => label(id) + (m.note ? ` (${m.note})` : ""));
@@ -106,7 +105,23 @@ function measureHtml() {
     (no.length ? `<p class="muted">Not measurable here: ${esc(no.join("; "))}.</p>` : "");
 }
 
-function runFormHtml(ai) {
+// For an eval set other than the store's default, only the estimate knows what it holds here.
+function evidenceHtml(counts) {
+  const held = counts.evidence_named > 0
+    ? `<p>Evidence ids: ${esc(count(counts.evidence_held))} of ${esc(count(counts.evidence_named))} named are in this store.</p>`
+    : "";
+  return `<p>${esc(plural(counts.questions, "question"))} in this eval set.</p>${held}`;
+}
+
+function setOptions(sets) {
+  const blank = col.eval_set ? "" : '<option value="">(choose one)</option>';
+  const options = sets
+    .map((e) => `<option value="${esc(e.name)}"${e.name === col.eval_set ? " selected" : ""}>${esc(e.name)}</option>`)
+    .join("");
+  return blank + options;
+}
+
+function runFormHtml(ai, sets) {
   const groups = GROUPS.map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
@@ -123,10 +138,11 @@ function runFormHtml(ai) {
   return `<div class="card form">${groups}
     <label class="check"><input type="checkbox" id="rf-answer" checked> Have the AI answer the questions <span class="cost muted">costs money</span></label>
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
+      <label>Eval set<select id="rf-set">${setOptions(sets)}</select></label>
       <label>Questions<select id="rf-split">
         <option value="dev">Dev slice (${esc(count(col.dev_questions))})</option>
         <option value="full">All (${esc(count(col.questions))})</option></select></label></div>
-    ${measureHtml()}
+    <div id="rf-measure">${measureHtml(col)}</div>
     <div class="row"><button type="button" id="rf-estimate">Estimate</button>
       <span id="rf-confirm"></span><span id="rf-msg" class="err" role="status"></span></div></div>`;
 }
@@ -139,11 +155,27 @@ function bindRunForm() {
     answer: $("rf-answer").checked,
     model: $("rf-model").value || null,
     split: $("rf-split").value,
+    eval_set: $("rf-set").value || null,
     k: 5,
     rrf_k: 60,
   });
   const forget = () => ($("rf-confirm").innerHTML = "");
   form.addEventListener("change", forget);
+  // The counts follow the chosen eval set: re-read from the estimate, which is free.
+  $("rf-set").addEventListener("change", async () => {
+    $("rf-msg").textContent = "";
+    const request = body();
+    if (!request.methods.length) request.methods = ["hybrid"];
+    try {
+      const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
+      const chosen = $("rf-set").value;
+      $("rf-split").querySelector("[value=dev]").textContent = `Dev slice (${count(estimate.dev_questions)})`;
+      $("rf-split").querySelector("[value=full]").textContent = `All (${count(estimate.questions)})`;
+      $("rf-measure").innerHTML = measureHtml(chosen === col.eval_set ? col : estimate);
+    } catch (e) {
+      $("rf-msg").textContent = e.message;
+    }
+  });
   $("rf-estimate").addEventListener("click", async () => {
     $("rf-msg").textContent = "";
     forget();
@@ -178,7 +210,8 @@ async function toggleRunForm() {
     return;
   }
   try {
-    form.innerHTML = runFormHtml(await api("/ai")); // the model list is whatever Settings holds now
+    const [ai, sets] = await Promise.all([api("/ai"), api("/eval-sets")]); // the models are whatever Settings holds now
+    form.innerHTML = runFormHtml(ai, sets.filter((e) => e.qa_type === col.qa_type));
   } catch (e) {
     form.innerHTML = `<p class="err">${esc(e.message)}</p>`;
   }
@@ -288,7 +321,7 @@ function bindSources() {
     const source = button.dataset.delete;
     const row = (col.sources ?? []).find((r) => r.source === source);
     askDelete($("sources-confirm"), {
-      question: `Delete source ${source}: its ${count(row?.items ?? 0)} items and the questions imported with it?`,
+      question: `Delete source ${source}: its ${count(row?.items ?? 0)} items?`,
       yes: `Yes, delete ${source}`,
       path: `/collections/${enc}/sources/${encodeURIComponent(source)}`,
       gone: `/c/${enc}`,
@@ -296,179 +329,15 @@ function bindSources() {
   });
 }
 
-// -- importing a file ---------------------------------------------------------------------
-
-// The file's name as a source name: other characters become "-", at most 64 long.
-function sourceFor(file) {
-  return file.name.replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64) || "upload";
-}
-
-function buildImport(kind) {
-  const accept = ".jsonl,.json,.csv,.tsv,.txt,.md,.zip";
-  $(`imp-${kind}`).innerHTML = `<div class="card form">
-    <label>File<input type="file" id="imp-${kind}-file" accept="${accept}"></label>
-    <label>Source name<input id="imp-${kind}-source" maxlength="64"></label>
-    <div class="row"><button type="button" id="imp-${kind}-go">Upload</button>
-      <span id="imp-${kind}-msg" class="err" role="status"></span></div>
-    <div id="imp-${kind}-preview"></div></div>`;
-  $(`imp-${kind}-file`).addEventListener("change", (e) => {
-    const file = e.target.files[0];
-    uploads[kind] = null; // the old preview belongs to the old file
-    previewing[kind]++; // and no answer still on its way may paint it back
-    $(`imp-${kind}-preview`).innerHTML = "";
-    $(`imp-${kind}-msg`).textContent = "";
-    if (file) $(`imp-${kind}-source`).value = sourceFor(file);
-  });
-  $(`imp-${kind}-go`).addEventListener("click", () => uploadFile(kind));
-  // The estimate is priced under the source name, so a new name needs a new estimate.
-  $(`imp-${kind}-source`).addEventListener("input", () => {
-    if (uploads[kind]) previewAgain(kind);
-  });
-  $(`imp-${kind}-preview`).addEventListener("change", (e) => {
-    if (e.target.closest("select[data-field]")) previewAgain(kind);
-  });
-}
-
-async function uploadFile(kind) {
-  const file = $(`imp-${kind}-file`).files[0];
-  const msg = $(`imp-${kind}-msg`);
-  msg.textContent = "";
-  if (!file) {
-    msg.textContent = "Pick a file first.";
-    return;
-  }
-  try {
-    const path = `/collections/${enc}/uploads?filename=${encodeURIComponent(file.name)}&kind=${kind}`;
-    const got = await upload(path, file);
-    uploads[kind] = got.upload_id;
-    showPreview(kind, got.preview, got.estimate);
-  } catch (e) {
-    uploads[kind] = null;
-    $(`imp-${kind}-preview`).innerHTML = "";
-    msg.textContent = e.message;
-  }
-}
-
-function mappingOf(kind) {
-  const out = {};
-  for (const select of $(`imp-${kind}-preview`).querySelectorAll("select[data-field]")) {
-    out[select.dataset.field] = select.value || null;
-  }
-  return out;
-}
-
-function importBody(kind, confirm) {
-  return {
-    upload_id: uploads[kind],
-    kind,
-    mapping: mappingOf(kind),
-    source_name: $(`imp-${kind}-source`).value,
-    confirm,
-  };
-}
-
-async function previewAgain(kind) {
-  const msg = $(`imp-${kind}-msg`);
-  const ticket = ++previewing[kind];
-  msg.textContent = "";
-  $(`imp-${kind}-import`)?.setAttribute("disabled", ""); // until the fresh estimate is in
-  try {
-    const got = await api(`/collections/${enc}/imports`, { method: "POST", body: importBody(kind, false) });
-    if (ticket === previewing[kind]) showPreview(kind, got.preview, got.estimate);
-  } catch (e) {
-    if (ticket === previewing[kind]) msg.textContent = e.message;
-  }
-}
-
-function previewHtml(kind, p, estimate) {
-  const problems = p.problems.length
-    ? `<ul class="warn">${p.problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
-    : "";
-  const sample = p.sample.length
-    ? `<div class="scroll"><table><thead><tr>${p.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
-        <tbody>${p.sample.map((row) => `<tr>${p.columns.map((c) => `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
-    : "";
-  const selects = Object.keys(p.mapping)
-    .map((field) => {
-      const options = ['<option value="">(none)</option>']
-        .concat(p.columns.map((c) => `<option value="${esc(c)}"${p.mapping[field] === c ? " selected" : ""}>${esc(c)}</option>`))
-        .join("");
-      const star = p.required.includes(field) ? " (required)" : "";
-      return `<label>${esc(field)}${star}<select data-field="${esc(field)}">${options}</select></label>`;
-    })
-    .join("");
-  const cost = estimate
-    ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "AI call"))}</span>`
-    : "";
-  const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
-  return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}
-    <div class="row">${selects}</div>${missing}
-    <div class="row"><button type="button" id="imp-${kind}-import" ${p.ready ? "" : "disabled"}>Import</button>
-      ${cost}<span id="imp-${kind}-confirm"></span></div>`;
-}
-
-function showPreview(kind, preview, estimate) {
-  $(`imp-${kind}-preview`).innerHTML = previewHtml(kind, preview, estimate);
-  $(`imp-${kind}-import`).addEventListener("click", () => startImport(kind, estimate));
-}
-
-async function startImport(kind, estimate) {
-  const msg = $(`imp-${kind}-msg`);
-  msg.textContent = "";
-  const queue = async () => {
-    try {
-      const job = await api(`/collections/${enc}/imports`, { method: "POST", body: importBody(kind, true) });
-      $(`imp-${kind}-preview`).innerHTML = `<p class="ok">Queued (job ${esc(short(job.job_id))})</p>`;
-      uploads[kind] = null;
-      $(`imp-${kind}-file`).value = "";
-      refreshSpend();
-      await refresh();
-    } catch (e) {
-      msg.textContent = e.message;
-    }
-  };
-  if (estimate && estimate.est_usd > 0) confirmSpend($(`imp-${kind}-confirm`), estimate, queue);
-  else await queue();
-}
-
-// -- what it gets asked ----------------------------------------------------------------------
-
-// "n of total", or a dash when there are no questions.
-function ofTotal(n, total) {
-  return total > 0 ? `${count(n)} of ${count(total)}` : "—";
-}
-
-function fieldsHtml() {
-  const q = col.fields.questions;
-  const evidence = q.gold_ids > 0 ? `${count(q.gold_ids)} of ${count(q.total)}` : "—";
-  return `<p class="muted">Worked solutions: ${esc(ofTotal(q.solution, q.total))} · Skills: ${esc(
-    ofTotal(q.skill, q.total))} · Evidence ids: ${esc(evidence)}</p>`;
-}
+// -- its eval set -----------------------------------------------------------------------------------
 
 function askedHtml() {
-  const n = col.leaked;
-  const leaked = n > 0
-    ? `<p class="warn">${esc(n === 1 ? "1 question appears" : `${count(n)} questions appear`)} among the items
-      (leaked) and ${n === 1 ? "is" : "are"} left out of runs.
-      <label class="check"><input type="checkbox" id="leaked-include" ${col.include_leaked ? "checked" : ""}>
-      Include them anyway</label></p><p id="leaked-msg" class="err" role="status"></p>`
-    : "";
-  return `<p>${esc(plural(col.questions, "question"))}, of which ${esc(count(col.dev_questions))} in the dev
-    slice that runs use by default.</p>${leaked}${fieldsHtml()}`;
-}
-
-function bindAsked() {
-  $("asked").addEventListener("change", async (e) => {
-    const input = e.target.closest("#leaked-include");
-    if (!input) return;
-    try {
-      await api(`/collections/${enc}/questions/leaked`, { method: "PATCH", body: { include: input.checked } });
-      await refresh();
-    } catch (err) {
-      input.checked = !input.checked;
-      $("leaked-msg").textContent = err.message;
-    }
-  });
+  if (!col.eval_set) {
+    return '<p>No eval set yet. <a href="/eval-sets">Create one</a> to ask this store questions.</p>';
+  }
+  return `<p><a href="/e/${encodeURIComponent(col.eval_set)}">${esc(col.eval_set)}</a>:
+    ${esc(plural(col.questions, "question"))}, of which ${esc(count(col.dev_questions))} in the dev slice
+    that runs use by default.</p>`;
 }
 
 // -- keyword lists ----------------------------------------------------------------------
@@ -593,7 +462,7 @@ function buildDelete() {
     <div id="del-confirm"></div>`;
   $("del-ask").addEventListener("click", () =>
     askDelete($("del-confirm"), {
-      question: `Delete ${name}, with its items, questions, lists and runs? This cannot be undone.`,
+      question: `Delete ${name}, with its items, lists and runs? Its eval sets stay. This cannot be undone.`,
       yes: `Yes, delete ${name}`,
       path: `/collections/${enc}`,
       gone: "/",
@@ -625,7 +494,7 @@ async function refresh() {
     if (paint("benchmark", benchmarkHtml())) bindLoad();
     syncLists();
   } catch (e) {
-    $("head").innerHTML = head({ title: name, crumb: [{ label: "Collections", href: "/" }] }) +
+    $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }
   timer = setTimeout(refresh, col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS);
@@ -635,7 +504,11 @@ $("new-run").addEventListener("click", toggleRunForm);
 buildLists();
 buildDelete();
 bindSources();
-bindAsked();
-buildImport("items");
-buildImport("questions");
+importBox($("imp-items"), {
+  uploadPath: `/collections/${enc}/uploads`,
+  importPath: `/collections/${enc}/imports`,
+  kind: "items",
+  qaType: null,
+  done: () => refresh(),
+});
 refresh();

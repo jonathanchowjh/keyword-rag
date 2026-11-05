@@ -14,8 +14,8 @@ let lastList = "";
 
 shell("collections");
 $("head").innerHTML = head({
-  title: "Collections",
-  sub: "Each question bank, and whether keyword retrieval helps on it.",
+  title: "Stores",
+  sub: "What questions are answered from, and whether keyword retrieval helps on it.",
 });
 
 // -- the list ------------------------------------------------------------------
@@ -44,9 +44,9 @@ async function refresh() {
     const [specs] = await Promise.all([api("/collections"), catalog().then((c) => (cat = c))]);
     const full = await Promise.all(specs.map((s) => api(`/collections/${encodeURIComponent(s.name)}`)));
     const html = full.length
-      ? `<div class="table"><div class="th"><div>Collection</div><div>Do keywords help?</div>
+      ? `<div class="table"><div class="th"><div>Store</div><div>Do keywords help?</div>
           <div>Ready?</div></div>${full.map(rowHtml).join("")}</div>`
-      : '<p class="muted">No collections yet. Create one, or set up the four benchmarks.</p>';
+      : '<p class="muted">No stores yet. Create one, or set up the four benchmarks.</p>';
     if (html !== lastList) {
       $("list").innerHTML = html;
       lastList = html;
@@ -57,17 +57,24 @@ async function refresh() {
   }
 }
 
-// -- new collection ------------------------------------------------------------
+const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// -- new store ------------------------------------------------------------
 
 async function showForm() {
   cat = await catalog();
   const types = Object.entries(cat.qa_types)
     .map(([id, t]) => `<option value="${esc(id)}">${esc(t.label)}: retrieves ${esc(t.retrieves)}</option>`)
     .join("");
+  const recipes = Object.entries(cat.recipes)
+    .sort(([a], [b]) => (b === "paper_2024") - (a === "paper_2024"))
+    .map(([id, r]) => `<option value="${esc(id)}">${esc(capital(r.label))}: ${esc(r.says)}</option>`)
+    .join("");
   $("form").hidden = false;
   $("form").innerHTML = `<div class="card form">
     <label>Name<input id="f-name" autocomplete="off"></label>
     <label>Type<select id="f-type">${types}</select></label>
+    <label>Kind<select id="f-recipe">${recipes}</select></label>
     <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with AI <span class="cost muted">costs money</span></label>
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
@@ -81,7 +88,7 @@ async function create() {
   try {
     await api("/collections", {
       method: "POST",
-      body: { name, qa_type: $("f-type").value, summarize: $("f-sum").checked },
+      body: { name, qa_type: $("f-type").value, summarize: $("f-sum").checked, recipe: $("f-recipe").value },
     });
     $("form").hidden = true;
     await refresh();
@@ -89,6 +96,54 @@ async function create() {
     $("f-msg").textContent = e.message;
   }
 }
+
+// -- a default store ----------------------------------------------------------------------------
+
+function drawDefaults() {
+  $("defaults").innerHTML = Object.entries(cat.datasets)
+    .map(([id, type]) => `<div class="row"><button type="button" class="secondary" data-dataset="${esc(id)}">Add ${esc(id)}</button>
+      <span class="muted">${esc(cat.qa_types[type]?.label ?? type)}</span></div>`)
+    .join("");
+}
+
+// Creates the store named after the dataset, then asks to load it: the estimate first, and a
+// free load (a Hub build applies) queues at once.
+async function addDefault(dataset) {
+  const type = cat.datasets[dataset];
+  $("defaults-msg").textContent = "";
+  $("defaults-confirm").textContent = "";
+  try {
+    const existing = (await api("/collections")).some((c) => c.name === dataset);
+    if (!existing) await api("/collections", { method: "POST", body: { name: dataset, qa_type: type, summarize: false } });
+    await refresh();
+    const path = `/collections/${encodeURIComponent(dataset)}/load`;
+    const first = await api(path, { method: "POST", body: { dataset, confirm: false } });
+    if (!first.estimate) {
+      $("defaults-confirm").textContent = `Queued (job ${short(first.job_id)})`;
+      return;
+    }
+    const slot = document.createElement("span");
+    const free = first.estimate.est_usd === 0 && first.estimate.hub?.entry;
+    $("defaults-confirm").replaceChildren(free ? "Free: built from the Hub. " : "", slot);
+    confirmSpend(slot, first.estimate, async () => {
+      try {
+        const job = await api(path, { method: "POST", body: { dataset, confirm: true } });
+        $("defaults-confirm").textContent = `Queued (job ${short(job.job_id)})`;
+        refreshSpend();
+        await refresh();
+      } catch (e) {
+        $("defaults-msg").textContent = e.message;
+      }
+    });
+  } catch (e) {
+    $("defaults-msg").textContent = e.message;
+  }
+}
+
+$("defaults").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-dataset]");
+  if (button) addDefault(button.dataset.dataset);
+});
 
 // -- the four benchmarks ------------------------------------------------------
 
@@ -159,6 +214,10 @@ function confirmLoads(paying) {
 }
 
 $("new").addEventListener("click", showForm);
+catalog().then((c) => {
+  cat = c;
+  drawDefaults();
+});
 $("setup").addEventListener("click", setup);
 refresh();
 setInterval(refresh, REFRESH_MS);

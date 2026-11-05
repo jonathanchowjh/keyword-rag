@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-qa · Eval set</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/ui.css">
+</head>
+<body>
+<aside id="side"></aside>
+<main id="main">
+  <div id="head"></div>
+  <h2>Questions</h2>
+  <p id="fields" class="muted"></p>
+  <div id="questions" class="scroll"></div>
+  <div id="pager" class="row"></div>
+  <div class="actions">
+    <button type="button" id="add">Add question</button>
+    <button type="button" id="save">Save changes</button>
+    <span id="dirty" class="warn"></span>
+  </div>
+  <p id="save-msg" role="status"></p>
+  <h2>Import questions</h2>
+  <div id="imp-questions"></div>
+  <h2>Leaked questions</h2>
+  <p class="muted">A question is leaked when its text is inside a store's items. Runs leave leaked questions out unless this is on.</p>
+  <label class="check"><input type="checkbox" id="leaked-include"> Include leaked questions</label>
+  <p id="leaked-msg" class="err" role="status"></p>
+  <h2>Versions</h2>
+  <ul id="versions" class="history"></ul>
+  <h2>Delete this eval set</h2>
+  <div class="actions"><button type="button" id="del-ask" class="secondary">Delete eval set…</button></div>
+  <div id="del-confirm"></div>
+</main>
+<script type="module" src="/static/eval_set.js"></script>
+</body>
+</html>

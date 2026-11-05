@@ -28,7 +28,7 @@ def test_collections_page_shows_the_answer(page, seeded):
 
 def test_collections_page_new_collection_form(page, seeded):
     page.goto(seeded.url + "/")
-    page.get_by_role("button", name="+ New collection").click()
+    page.get_by_role("button", name="+ New store").click()
     page.get_by_label("Name").fill("fresh")
     page.get_by_role("button", name="Create").click()
     expect(page.locator("main a.row-link", has_text="fresh")).to_be_visible()
@@ -42,17 +42,17 @@ def test_collection_page_sections_in_order(page, seeded):
         "What's the answer?",
         "Runs",
         "What's in it?",
-        "What does it get asked?",
+        "Eval set",
         "How are items described?",
     ]
-    assert titles[-1] == "Delete this collection"
+    assert titles[-1] == "Delete this store"
 
 
 def test_collection_page_shows_verdict_gap_bar_and_runs(page, seeded):
     page.goto(seeded.url + "/c/c")
     expect(page.locator("main svg[role=img]").first).to_be_visible()
     expect(page.locator("#runs tbody tr")).to_have_count(1)
-    expect(page.get_by_text("run 1 on this collection", exact=False)).to_be_visible()
+    expect(page.get_by_text("run 1 on this store", exact=False)).to_be_visible()
 
 
 def test_lists_save_shows_rekey_count_and_keeps_edits(page, seeded):
@@ -391,7 +391,7 @@ def test_worker_page_poll_error_clears_when_it_recovers(page, seeded):
 
 def test_one_path_end_to_end(page, seeded):
     page.goto(seeded.url + "/")
-    page.get_by_role("button", name="+ New collection").click()
+    page.get_by_role("button", name="+ New store").click()
     page.get_by_label("Name").fill("e2e")
     page.get_by_role("button", name="Create").click()
     page.locator("main a.row-link", has_text="e2e").click()
@@ -469,7 +469,7 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
 
 def test_new_collection_form_defaults_to_science(page, seeded):
     page.goto(seeded.url + "/")
-    page.get_by_role("button", name="+ New collection").click()
+    page.get_by_role("button", name="+ New store").click()
     select = page.locator("#f-type")
     expect(select).to_have_value("science")
     expect(select.locator("option:checked")).to_contain_text("Science problems")
@@ -1163,60 +1163,40 @@ def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_p
     # delete asks first, with the question in the brief's words
     page.locator("#sources tbody tr", has_text="upload:notes").get_by_role("button").click()
     expect(page.locator("#sources-confirm")).to_contain_text(
-        "Delete source upload:notes: its 3 items and the questions imported with it?"
+        "Delete source upload:notes: its 3 items?"
     )
     page.get_by_role("button", name="Yes, delete upload:notes").click()
     expect(page.locator("#sources tbody tr", has_text="upload:notes")).to_have_count(0)
 
 
-def test_import_questions_shows_leaked_and_include(page, seeded, tmp_path):
+def test_import_questions_on_the_eval_set_page_then_include_leaked(page, seeded, tmp_path):
     httpx.post(f"{seeded.url}/collections", json={"name": "qimp", "qa_type": "mcq"})
-    item = {
-        "id": "tide",
-        "text": "the tides of the ocean follow the moon every single day",
-        "answer": "A",
-        "explanation": "",
-        "meta": {},
-    }
-    r = httpx.post(
-        f"{seeded.url}/collections/qimp/documents", json={"items": [item], "confirm": True}
-    )
-    assert r.status_code == 200, r.text
+    httpx.post(f"{seeded.url}/eval-sets", json={"name": "qimp", "qa_type": "mcq"})
     rows = [
-        {
-            "id": "u1",
-            "text": "tides of the ocean follow the moon",
-            "choices": ["x", "y"],
-            "answer": "A",
-        },
+        {"id": "u1", "text": "tides follow the moon", "choices": ["x", "y"], "answer": "A"},
         {"id": "u2", "text": "an unrelated one", "choices": ["x", "y"], "answer": "B"},
     ]
     qs = tmp_path / "qs.jsonl"
     qs.write_text("\n".join(json.dumps(x) for x in rows))
-    page.goto(seeded.url + "/c/qimp")
+    page.goto(seeded.url + "/e/qimp")
     upload_and_preview(page, "questions", qs)
     expect(page.locator("#imp-questions-preview")).to_contain_text("2 rows")
     page.locator("#imp-questions-import").click()
-    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
-    jobs_done(seeded, "qimp")
-    page.reload()
-    asked = page.locator("#asked")
-    expect(asked).to_contain_text("1 question")
-    expect(asked).to_contain_text(
-        "1 question appears among the items (leaked) and is left out of runs"
-    )
-    expect(asked).to_contain_text("Worked solutions: 0 of 1")
-    expect(asked).to_contain_text("Evidence ids: —")
-    page.get_by_label("Include them anyway").check()
-    expect(asked).to_contain_text("2 questions")
-    assert httpx.get(f"{seeded.url}/collections/qimp").json()["include_leaked"] is True
+    expect(page.locator("#imp-questions-preview")).to_contain_text("2 new")
+    expect(page.locator("#questions tbody tr")).to_have_count(2)
+    expect(page.locator("#fields")).to_contain_text("Worked solutions: 0 of 2")
+    expect(page.locator("#fields")).to_contain_text("Evidence ids: —")
+    page.get_by_label("Include leaked questions").check()
+    expect(page.locator("#leaked-msg")).to_have_text("")
+    expect(page.get_by_label("Include leaked questions")).to_be_checked()
+    assert httpx.get(f"{seeded.url}/eval-sets/qimp").json()["include_leaked"] is True
 
 
 def test_own_science_collection_offers_import_and_benchmark(page, seeded, tmp_path):
     httpx.post(f"{seeded.url}/collections", json={"name": "own", "qa_type": "science"})
     page.goto(seeded.url + "/c/own")
     expect(page.locator("#imp-items-file")).to_be_visible()
-    expect(page.locator("#imp-questions-file")).to_be_visible()
+    expect(page.locator("#imp-questions-file")).to_have_count(0)
     expect(page.get_by_text("Or load the built-in benchmark, scibench")).to_be_visible()
     expect(page.get_by_role("button", name="Load scibench")).to_be_visible()
     notes = tmp_path / "own notes!.csv"
@@ -1604,3 +1584,259 @@ def test_add_form_id_follows_the_server_rule(page, seeded):
 
     assert valid("gateway-2") and valid("a" * 32)
     assert not valid("a_b") and not valid("-a") and not valid("a" * 33)
+
+
+# -- stores, eval sets and the run form -----------------------------------------------------
+
+
+def mcq_set(seeded, name, n):
+    """An mcq eval set of `n` questions (ids s0..), made through the API."""
+    r = httpx.post(f"{seeded.url}/eval-sets", json={"name": name, "qa_type": "mcq"})
+    assert r.status_code == 201, r.text
+    qs = [
+        {"id": f"s{i}", "text": f"question {i}", "choices": ["x", "y"], "gold_answers": ["A"]}
+        for i in range(n)
+    ]
+    r = httpx.put(f"{seeded.url}/eval-sets/{name}/questions", json={"questions": qs})
+    assert r.status_code == 200, r.text
+
+
+def test_nav_says_stores_and_eval_sets(page, seeded):
+    page.goto(seeded.url + "/")
+    links = page.locator("#side a:not(.problem)")
+    expect(links.first).to_have_text("Stores")
+    texts = links.all_inner_texts()
+    assert "Collections" not in texts
+    assert texts.index("Stores") < texts.index("c") < texts.index("Eval sets")
+    assert texts.index("Eval sets") < texts.index("Lab") < texts.index("Settings")
+    expect(page.get_by_role("link", name="Eval sets")).to_have_attribute("href", "/eval-sets")
+    expect(page.locator("main h1")).to_have_text("Stores")
+
+
+def test_create_store_form_offers_the_recipes(page, seeded):
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New store").click()
+    kind = page.locator("#f-recipe")
+    options = kind.locator("option")
+    expect(options.first).to_have_attribute("value", "paper_2024")
+    expect(options.first).to_contain_text("Paper 2024")
+    expect(options.first).to_contain_text("your three keyword lists")
+    expect(kind.locator("option[value=worked_examples]")).to_contain_text("Worked examples")
+    kind.select_option("worked_examples")
+    page.get_by_label("Name").fill("recipe-store")
+    page.get_by_role("button", name="Create").click()
+    expect(page.locator("main a.row-link", has_text="recipe-store")).to_be_visible()
+    assert httpx.get(f"{seeded.url}/collections/recipe-store").json()["recipe"] == "worked_examples"
+
+
+def test_add_a_default_store_lists_every_dataset_and_loads_one(page, seeded):
+    datasets = httpx.get(f"{seeded.url}/catalog").json()["datasets"]
+    seen = route_load(page, "gpqa", lambda b: (202, {"job_id": "dd11ee22"}))
+    page.goto(seeded.url + "/")
+    expect(page.get_by_role("heading", name="Add a default store")).to_be_visible()
+    buttons = page.locator("#defaults button")
+    expect(buttons).to_have_count(len(datasets))
+    expect(page.locator("#defaults")).to_contain_text("Exam multiple choice")
+    page.get_by_role("button", name="Add gpqa").click()
+    expect(page.get_by_text("Queued (job dd11ee22)")).to_be_visible()
+    assert [b.get("dataset") for b in seen] == ["gpqa"]
+    store = httpx.get(f"{seeded.url}/collections/gpqa").json()
+    assert store["qa_type"] == "mcq"
+
+
+def test_add_a_default_store_asks_before_it_spends(page, seeded):
+    estimate = {"est_usd": 0.2, "items": 5, "calls": 7, "hub": {}}
+    seen = route_load(
+        page,
+        "tatqa",
+        lambda b: (
+            (202, {"job_id": "ff00aa11"}) if b.get("confirm") else (200, {"estimate": estimate})
+        ),
+    )
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="Add tatqa").click()
+    expect(page.get_by_text("7 AI calls")).to_be_visible()
+    assert [b.get("confirm") for b in seen] == [False]
+    page.locator("#defaults-confirm").get_by_role("button", name="Start").click()
+    expect(page.get_by_text("Queued (job ff00aa11)")).to_be_visible()
+
+
+def test_add_a_default_store_shows_a_hub_build_as_free(page, seeded):
+    estimate = {"est_usd": 0, "items": 5, "calls": 0, "hub": {"entry": "x/y"}}
+    route_load(page, "musique", lambda b: (200, {"estimate": estimate}))
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="Add musique").click()
+    expect(page.locator("#defaults-confirm")).to_contain_text("Free")
+
+
+def test_store_page_links_its_eval_set_or_offers_to_make_one(page, seeded):
+    page.goto(seeded.url + "/c/c")
+    link = page.locator('#asked a[href="/e/c"]')
+    expect(link).to_be_visible()
+    expect(page.locator("#asked")).to_contain_text("40 questions")
+    expect(page.locator("#imp-questions")).to_have_count(0)
+    httpx.post(f"{seeded.url}/collections", json={"name": "noset", "qa_type": "mcq"})
+    page.goto(seeded.url + "/c/noset")
+    expect(page.locator("#asked")).to_contain_text("No eval set yet")
+    expect(page.locator('#asked a[href="/eval-sets"]')).to_be_visible()
+
+
+def test_eval_sets_page_lists_and_creates(page, seeded):
+    page.goto(seeded.url + "/eval-sets")
+    expect(page.locator("main h1")).to_have_text("Eval sets")
+    expect(page.locator('main a.row-link[href="/e/c"]')).to_contain_text("40 questions")
+    page.get_by_role("button", name="+ New eval set").click()
+    page.get_by_label("Name").fill("made-here")
+    page.locator("#f-type").select_option("science")
+    page.get_by_role("button", name="Create").click()
+    expect(page.locator("main a.row-link", has_text="made-here")).to_be_visible()
+    got = httpx.get(f"{seeded.url}/eval-sets/made-here").json()
+    assert got["qa_type"] == "science"
+
+
+def question_map(seeded, name):
+    return {q["id"]: q for q in httpx.get(f"{seeded.url}/eval-sets/{name}").json()["questions"]}
+
+
+def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
+    seeded.build("edit")
+    before = httpx.get(f"{seeded.url}/eval-sets/edit").json()
+    page.goto(seeded.url + "/e/edit")
+    rows = page.locator("#questions tbody tr")
+    expect(rows).to_have_count(40)
+    row = rows.filter(has=page.locator("td", has_text="q0")).first
+    row.get_by_role("button", name="Edit").click()
+    row.locator("[data-field=text]").fill("enzyme question zero, reworded")
+    row.get_by_role("button", name="Done").click()
+    q1 = rows.filter(has=page.locator("td", has_text="q1")).first
+    q1.get_by_role("button", name="Delete").click()
+    page.get_by_role("button", name="Add question").click()
+    fresh = rows.last
+    fresh.locator("[data-field=text]").fill("a brand new question")
+    fresh.locator("[data-field=choices]").fill("one\ntwo")
+    fresh.locator("[data-field=gold_answers]").fill("B")
+    fresh.get_by_role("button", name="Done").click()
+    assert httpx.get(f"{seeded.url}/eval-sets/edit").json() == before  # nothing written yet
+    page.get_by_role("button", name="Save changes").click()
+    expect(page.locator("#save-msg")).to_contain_text("Saved as version")
+    got = httpx.get(f"{seeded.url}/eval-sets/edit").json()
+    by_id = {q["id"]: q for q in got["questions"]}
+    assert len(got["questions"]) == 40
+    assert "q1" not in by_id
+    assert by_id["q0"]["text"] == "enzyme question zero, reworded"
+    assert by_id["q0"]["meta"] == next(q for q in before["questions"] if q["id"] == "q0")["meta"]
+    added = [q for q in got["questions"] if q["text"] == "a brand new question"]
+    assert [q["gold_answers"] for q in added] == [["B"]]
+    assert len(got["versions"]) == len(before["versions"]) + 1
+    expect(page.locator("#versions li").first).to_contain_text(got["version"][:8])
+
+
+def test_eval_set_page_keeps_edits_on_a_stale_save(page, seeded):
+    seeded.build("stalee")
+    page.goto(seeded.url + "/e/stalee")
+    expect(page.locator("#questions tbody tr")).to_have_count(40)
+    now = httpx.get(f"{seeded.url}/eval-sets/stalee").json()
+    qs = [q for q in now["questions"] if q["id"] != "q5"]
+    r = httpx.put(
+        f"{seeded.url}/eval-sets/stalee/questions",
+        json={"questions": qs, "base_version": now["version"]},
+    )
+    assert r.status_code == 200, r.text
+    row = page.locator("#questions tbody tr").first
+    row.get_by_role("button", name="Edit").click()
+    row.locator("[data-field=text]").fill("my edit survives")
+    page.expected = ["409"]
+    page.get_by_role("button", name="Save changes").click()
+    expect(page.locator("#save-msg")).to_contain_text("changed")
+    expect(page.locator("[data-field=text]").first).to_have_value("my edit survives")
+    assert question_map(seeded, "stalee")["q0"]["text"] != "my edit survives"
+
+
+def test_eval_set_page_pages_fifty_at_a_time(page, seeded):
+    mcq_set(seeded, "many", 60)
+    page.goto(seeded.url + "/e/many")
+    expect(page.locator("#questions tbody tr")).to_have_count(50)
+    page.get_by_role("button", name="Next").click()
+    expect(page.locator("#questions tbody tr")).to_have_count(10)
+
+
+def test_eval_set_page_deletes_after_saying_how_many_runs(page, seeded):
+    run_id = seeded.build("gonee", run=True)
+    assert run_id
+    page.goto(seeded.url + "/e/gonee")
+    page.get_by_role("button", name="Delete eval set…").click()
+    expect(page.locator("#del-confirm")).to_contain_text("Delete eval set gonee and its 1 run?")
+    page.get_by_role("button", name="Yes, delete gonee").click()
+    expect(page).to_have_url(seeded.url + "/eval-sets")
+    assert httpx.get(f"{seeded.url}/eval-sets/gonee").status_code == 404
+
+
+def test_run_form_picks_an_eval_set_of_the_store_type_and_shows_its_counts(page, seeded):
+    seeded.build("rf1")
+    mcq_set(seeded, "rf2", 3)
+    httpx.post(f"{seeded.url}/eval-sets", json={"name": "rfsci", "qa_type": "science"})
+    page.goto(seeded.url + "/c/rf1")
+    expect(page.locator("#runs")).not_to_be_empty()
+    page.get_by_role("button", name="New run").click()
+    pick = page.locator("#rf-set")
+    expect(pick).to_have_value("rf1")
+    values = pick.locator("option").evaluate_all("o => o.map(x => x.value)")
+    assert "rf2" in values and "rfsci" not in values
+    first = httpx.post(
+        f"{seeded.url}/eval",
+        json={"collection": "rf1", "methods": ["hybrid"], "answer": True, "eval_set": "rf2"},
+    ).json()["estimate"]
+    assert first["questions"] == 3
+    pick.select_option("rf2")
+    dev = first["dev_questions"]
+    expect(page.locator("#rf-split option[value=dev]")).to_have_text(f"Dev slice ({dev})")
+    expect(page.locator("#rf-split option[value=full]")).to_have_text("All (3)")
+    page.get_by_role("button", name="Estimate").click()
+    page.get_by_role("button", name="Start").click()
+    expect(page.locator("#runs tbody tr")).to_have_count(1)
+    runs = httpx.get(f"{seeded.url}/eval?collection=rf1").json()
+    assert [r["eval_set"] for r in runs] == ["rf2"]
+
+
+def test_run_form_says_when_the_estimate_refuses_a_set(page, seeded):
+    seeded.build("rf3")
+    httpx.post(f"{seeded.url}/eval-sets", json={"name": "rf3e", "qa_type": "mcq"})
+    page.goto(seeded.url + "/c/rf3")
+    expect(page.locator("#runs")).not_to_be_empty()
+    page.get_by_role("button", name="New run").click()
+    page.expected = ["409", "422"]
+    page.locator("#rf-set").select_option("rf3e")
+    expect(page.locator("#rf-split option[value=full]")).to_have_text("All (0)")
+
+
+def test_run_page_names_its_eval_set_and_says_when_retrieval_is_not_measured(page, seeded):
+    detail = httpx.get(f"{seeded.url}/eval/{seeded.run_id}").json()
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    version = detail["eval_set_version"][:8]
+    expect(page.locator("#head")).to_contain_text(f"eval set c · version {version}")
+    expect(page.locator("#gaps")).not_to_contain_text("holds none of the eval set's evidence")
+
+    def none_held(route):
+        body = route.fetch().json()
+        body.update(headline="recall@5", evidence_named=3, evidence_held=0)
+        route.fulfill(json=body)
+
+    page.route(f"**/eval/{seeded.run_id}", none_held)
+    page.reload()
+    expect(page.locator("#gaps")).to_contain_text(
+        "This store holds none of the eval set's evidence, "
+        "so retrieval isn't measured; the answers are."
+    )
+
+
+def test_run_page_says_the_eval_set_changed_after_the_run(page, seeded):
+    run_id = seeded.build("chg", run=True)
+    now = httpx.get(f"{seeded.url}/eval-sets/chg").json()
+    qs = [q for q in now["questions"] if q["id"] != "q3"]
+    r = httpx.put(
+        f"{seeded.url}/eval-sets/chg/questions",
+        json={"questions": qs, "base_version": now["version"]},
+    )
+    assert r.status_code == 200, r.text
+    page.goto(f"{seeded.url}/c/chg/runs/{run_id}")
+    expect(page.locator("#head")).to_contain_text("eval set changed after this run")

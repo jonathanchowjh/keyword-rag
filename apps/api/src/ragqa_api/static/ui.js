@@ -357,11 +357,12 @@ function link(href, label, cls, active, key) {
 }
 
 function sideHtml(active, names) {
-  const collections = names
+  const stores = names
     .map((n) => link(`/c/${encodeURIComponent(n)}`, esc(n), "sub", active, `c/${n}`))
     .join("");
   return `<div class="brand">rag-qa</div><div class="tag">keyword RAG test bench</div>
-    ${link("/", "Collections", "", active, "collections")}${collections}
+    ${link("/", "Stores", "", active, "collections")}${stores}
+    ${link("/eval-sets", "Eval sets", "", active, "eval-sets")}
     ${link("/lab", "Lab", "", active, "lab")}
     ${link("/settings", "Settings", "", active, "settings")}
     <div class="group">BEHIND THE NUMBERS</div>
@@ -403,8 +404,8 @@ function refreshDot() {
     .catch(() => {});
 }
 
-// Renders the sidebar into <aside id="side">. `active` is "collections", "lab", "settings", "worker",
-// or "c/<name>" for a collection's page.
+// Renders the sidebar into <aside id="side">. `active` is "collections" (the stores), "eval-sets",
+// "lab", "settings", "worker", or "c/<name>" for a store's page.
 export function shell(active) {
   const side = document.getElementById("side");
   let names = [];
@@ -424,4 +425,157 @@ export function shell(active) {
     refreshSpend();
     refreshDot();
   }, POLL_MS);
+}
+
+// -- importing a file ----------------------------------------------------------------------------
+
+// The file's name as a source name: other characters become "-", at most 64 long.
+function sourceFor(file) {
+  return file.name.replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64) || "upload";
+}
+
+// The upload-preview-import widget for a store's items (queues a job, priced first) or an eval set's
+// questions (imported in the request, no estimate). Fills `el`; `done` runs after an import.
+class ImportBox {
+  constructor(el, { uploadPath, importPath, kind, qaType, done }) {
+    this.el = el;
+    this.uploadPath = uploadPath;
+    this.importPath = importPath;
+    this.kind = kind;
+    this.done = done;
+    this.uploadId = null; // the upload being previewed, or null
+    this.ticket = 0; // the newest preview request, so an older answer is ignored
+    this.own = (what) => el.querySelector(`#imp-${kind}-${what}`);
+    const accept = ".jsonl,.json,.csv,.tsv,.txt,.md,.zip";
+    const hint = kind === "questions" && qaType ? `<p class="muted">Questions for a ${esc(qaType)} eval set.</p>` : "";
+    el.innerHTML = `<div class="card form">${hint}
+      <label>File<input type="file" id="imp-${kind}-file" accept="${accept}"></label>
+      <label>Source name<input id="imp-${kind}-source" maxlength="64"></label>
+      <div class="row"><button type="button" id="imp-${kind}-go">Upload</button>
+        <span id="imp-${kind}-msg" class="err" role="status"></span></div>
+      <div id="imp-${kind}-preview"></div></div>`;
+    this.own("file").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      this.uploadId = null; // the old preview belongs to the old file
+      this.ticket++; // and no answer still on its way may paint it back
+      this.own("preview").innerHTML = "";
+      this.own("msg").textContent = "";
+      if (file) this.own("source").value = sourceFor(file);
+    });
+    this.own("go").addEventListener("click", () => this.upload());
+    // Items are priced under the source name, so a new name or mapping needs a new estimate.
+    // Questions have no estimate to redo.
+    if (kind === "items") {
+      this.own("source").addEventListener("input", () => this.uploadId && this.previewAgain());
+      this.own("preview").addEventListener("change", (e) => {
+        if (e.target.closest("select[data-field]")) this.previewAgain();
+      });
+    }
+  }
+
+  async upload() {
+    const file = this.own("file").files[0];
+    const msg = this.own("msg");
+    msg.textContent = "";
+    if (!file) {
+      msg.textContent = "Pick a file first.";
+      return;
+    }
+    try {
+      const path = `${this.uploadPath}?filename=${encodeURIComponent(file.name)}&kind=${this.kind}`;
+      const got = await upload(path, file);
+      this.uploadId = got.upload_id;
+      this.show(got.preview, got.estimate);
+    } catch (e) {
+      this.uploadId = null;
+      this.own("preview").innerHTML = "";
+      msg.textContent = e.message;
+    }
+  }
+
+  mapping() {
+    const out = {};
+    for (const select of this.own("preview").querySelectorAll("select[data-field]")) {
+      out[select.dataset.field] = select.value || null;
+    }
+    return out;
+  }
+
+  body(confirm) {
+    const body = { upload_id: this.uploadId, mapping: this.mapping(), source_name: this.own("source").value };
+    return this.kind === "items" ? { ...body, kind: "items", confirm } : body;
+  }
+
+  async previewAgain() {
+    const msg = this.own("msg");
+    const ticket = ++this.ticket;
+    msg.textContent = "";
+    this.own("import")?.setAttribute("disabled", ""); // until the fresh estimate is in
+    try {
+      const got = await api(this.importPath, { method: "POST", body: this.body(false) });
+      if (ticket === this.ticket) this.show(got.preview, got.estimate);
+    } catch (e) {
+      if (ticket === this.ticket) msg.textContent = e.message;
+    }
+  }
+
+  html(p, estimate) {
+    const problems = p.problems.length
+      ? `<ul class="warn">${p.problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
+      : "";
+    const sample = p.sample.length
+      ? `<div class="scroll"><table><thead><tr>${p.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+          <tbody>${p.sample.map((row) => `<tr>${p.columns.map((c) => `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+      : "";
+    const selects = Object.keys(p.mapping)
+      .map((field) => {
+        const options = ['<option value="">(none)</option>']
+          .concat(p.columns.map((c) => `<option value="${esc(c)}"${p.mapping[field] === c ? " selected" : ""}>${esc(c)}</option>`))
+          .join("");
+        const star = p.required.includes(field) ? " (required)" : "";
+        return `<label>${esc(field)}${star}<select data-field="${esc(field)}">${options}</select></label>`;
+      })
+      .join("");
+    const cost = estimate
+      ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "AI call"))}</span>`
+      : "";
+    const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
+    // A questions import cannot be previewed again under a new mapping: the server judges it.
+    const open = p.ready || this.kind === "questions";
+    return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}
+      <div class="row">${selects}</div>${missing}
+      <div class="row"><button type="button" id="imp-${this.kind}-import" ${open ? "" : "disabled"}>Import</button>
+        ${cost}<span id="imp-${this.kind}-confirm"></span></div>`;
+  }
+
+  show(preview, estimate) {
+    this.own("preview").innerHTML = this.html(preview, estimate);
+    this.own("import").addEventListener("click", () => this.start(estimate));
+  }
+
+  async start(estimate) {
+    const msg = this.own("msg");
+    msg.textContent = "";
+    const queue = async () => {
+      try {
+        const got = await api(this.importPath, { method: "POST", body: this.body(true) });
+        this.own("preview").innerHTML = this.kind === "items"
+          ? `<p class="ok">Queued (job ${esc(short(got.job_id))})</p>`
+          : `<p class="ok">Imported: ${esc(got.new)} new, ${esc(got.updated)} updated, ${esc(got.unchanged)} unchanged, ${esc(
+            got.skipped)} skipped. Version ${esc(short(got.version))}.</p>`;
+        this.uploadId = null;
+        this.own("file").value = "";
+        refreshSpend();
+        await this.done?.();
+      } catch (e) {
+        msg.textContent = e.message;
+      }
+    };
+    if (estimate && estimate.est_usd > 0) confirmSpend(this.own("confirm"), estimate, queue);
+    else await queue();
+  }
+}
+
+export function importBox(el, options) {
+  return new ImportBox(el, options);
 }

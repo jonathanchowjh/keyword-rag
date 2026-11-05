@@ -43,11 +43,14 @@ function headHtml() {
   const failed = run.error ? `<p class="err">${esc(run.error)}</p>` : "";
   // A run that has not started has asked no questions yet: "–", not "0".
   const asked = busy() && !run.question_count ? "– questions" : plural(run.question_count, "question");
+  const evalSet = run.eval_set
+    ? ` · eval set <a href="/e/${encodeURIComponent(run.eval_set)}">${esc(run.eval_set)}</a> · version ${esc(short(run.eval_set_version))}`
+    : "";
   return head({
     title: `Run ${short(id)}`,
-    crumb: [{ label: "Collections", href: "/" }, { label: name, href: `/c/${enc}` }, "Runs"],
+    crumb: [{ label: "Stores", href: "/" }, { label: name, href: `/c/${enc}` }, "Runs"],
     aside: [clock(run.created_at), model, asked, usd(run.usd_total)].map(esc).join(" · ") +
-      ` · ${pill(run.status)}${esc(progress)}${since}`,
+      `${evalSet} · ${pill(run.status)}${esc(progress)}${since}`,
   }) + failed;
 }
 
@@ -133,6 +136,15 @@ function gapRow(g, span) {
     <td>${esc(STATE_TEXT[g.state] ?? g.state)}</td></tr>`;
 }
 
+// The headline measures how well methods found the evidence, but the store holds none of it.
+const EVIDENCE_METRIC = /^(recall|ndcg)@/;
+
+function unmeasuredHtml() {
+  return run.evidence_named > 0 && run.evidence_held === 0 && EVIDENCE_METRIC.test(run.headline ?? "")
+    ? `<p class="warn" data-no-evidence>This store holds none of the eval set's evidence, so retrieval isn't measured; the answers are.</p>`
+    : "";
+}
+
 function gapsHtml() {
   if (busy()) return '<p class="muted">The gaps appear when the run finishes.</p>';
   const ref = method(run.reference);
@@ -140,7 +152,7 @@ function gapsHtml() {
     const why = run.setup.methods.includes(run.reference)
       ? `no other method has results to set against ${ref}`
       : `this run has no ${ref} to compare against`;
-    return `<p class="muted">No gaps to draw: ${esc(why)}.</p>`;
+    return `${unmeasuredHtml()}<p class="muted">No gaps to draw: ${esc(why)}.</p>`;
   }
   const span = gapSpan(run.gaps.flatMap((g) => [g.lo, g.hi, g.diff]));
   const row = (g) => gapRow(g, span);
@@ -158,7 +170,7 @@ function gapsHtml() {
   const meaning = rawScale()
     ? "This run has no random example, so the score is raw similarity with no chance level to set 0 by."
     : says(run.headline);
-  return `<p>${esc(metric(run.headline) + raw)}, compared with ${esc(ref)}</p>
+  return `${unmeasuredHtml()}<p>${esc(metric(run.headline) + raw)}, compared with ${esc(ref)}</p>
     ${meaning ? `<p class="muted">${esc(meaning)}</p>` : ""}
     <table><thead><tr><th>Method</th><th>${axisHtml(span)}</th><th class="num">Gap</th><th>Result</th></tr></thead>
     <tbody>${rows.join("")}</tbody></table>`;
@@ -202,7 +214,7 @@ function proxyHtml() {
       score (checked on ${esc(plural(p.methods, "method"))}). With so few methods this is a hint, not proof.</p>`;
   }
   if (run.proxy_trusted != null) {
-    return `<p>From this collection's latest answered run, the free score is
+    return `<p>From this store's latest answered run, the free score is
       ${run.proxy_trusted ? "" : "not "}trusted.</p>`;
   }
   return '<p class="muted">Not checked here: it needs an answered run of at least 4 retrieval methods.</p>';
@@ -366,8 +378,9 @@ async function cancel() {
 async function rerun() {
   say("");
   // The recorded search settings too, so the repeat is this run, not today's defaults.
-  const { collection, split, methods, answer, model, k, rrf_k, search } = run.setup;
-  const request = { collection, split, methods, answer, model, k, rrf_k, ...(search ? { search } : {}) };
+  const { collection, split, methods, answer, model, k, rrf_k, search, eval_set } = run.setup;
+  const request = { collection, split, methods, answer, model, k, rrf_k, ...(search ? { search } : {}),
+    ...(eval_set ? { eval_set } : {}) };
   try {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
     confirmSpend($("act-confirm"), estimate, async () => {
@@ -435,7 +448,7 @@ async function refresh() {
     // Opened before the run arrived: it could not load then, so it loads now.
     if (was === undefined && $("questions-box").open) loadQuestions();
   } catch (e) {
-    $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Collections", href: "/" }] }) +
+    $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }
   if (run && BUSY.has(run.status)) timer = setTimeout(refresh, POLL_MS);

@@ -808,9 +808,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 409, f"a load or question import is under way on a store of '{name}'"
             )
 
-    @app.get("/eval-sets")
-    def list_eval_sets() -> list[dict]:
-        return db.list_eval_sets(state.conn)
+    @app.get("/eval-sets", response_model=None)
+    def list_eval_sets(request: Request):
+        # The API's list and the console's page share this path: a browser asks for HTML. Vary
+        # keeps the browser from answering one with the other from its cache.
+        vary = {"Vary": "Accept"}
+        if "text/html" in request.headers.get("accept", ""):
+            return FileResponse(STATIC / "eval_sets.html", media_type="text/html", headers=vary)
+        return JSONResponse(db.list_eval_sets(state.conn), headers=vary)
 
     @app.post("/eval-sets", status_code=201)
     def create_eval_set(body: NewEvalSet) -> dict:
@@ -1302,7 +1307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/catalog")
     def get_catalog() -> dict:
-        return catalog()
+        return {**catalog(), "datasets": DATASETS}
 
     @app.get("/budget")
     def budget() -> dict:
@@ -1411,6 +1416,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     pages = {
         "/": "collections",
         "/c/{name}": "collection",
+        "/e/{name}": "eval_set",
         "/c/{name}/runs/{id}": "run",
         "/worker": "worker",
         "/lab": "lab",

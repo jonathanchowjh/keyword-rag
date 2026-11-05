@@ -811,6 +811,7 @@ def test_half_set_auth_is_503(tmp_path):
 STATIC = Path(__file__).resolve().parents[1] / "src/ragqa_api/static"
 PUBLIC = {
     "/collections",
+    "/eval-sets",
     "/query",
     "/eval",
     "/jobs",
@@ -820,7 +821,7 @@ PUBLIC = {
     "/status",
     "/ai",
 }
-PAGES = ("/", "/c/x", "/c/x/runs/abc", "/worker", "/lab")
+PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab")
 
 
 def test_pages_are_served(client):
@@ -832,6 +833,14 @@ def test_pages_are_served(client):
     for path in PAGES:  # /favicon.ico is not served, so every page opts out of asking for it
         assert 'rel="icon"' in client.get(path).text, path
     assert not (STATIC / "board.html").exists()
+
+
+def test_eval_sets_path_is_a_page_for_a_browser_and_the_list_for_the_api(client):
+    page = client.get("/eval-sets", headers={"accept": "text/html,application/xhtml+xml"})
+    assert page.headers["content-type"].startswith("text/html")
+    assert page.headers["vary"] == "Accept"
+    api = client.get("/eval-sets")
+    assert api.json() == [] and api.headers["vary"] == "Accept"
 
 
 def test_static_assets_are_served(client):
