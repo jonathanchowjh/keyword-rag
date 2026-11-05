@@ -59,7 +59,7 @@ def run(tmp_path, hub, builder, **kw):
         builder,
         hub,
         "aops",
-        authored_by="Claude Opus 5.5, in-session",
+        authored_by="Jonathan Chow",
         out=tmp_path / "out",
         home=tmp_path,
         **kw,
@@ -83,7 +83,7 @@ def test_dry_run_sends_nothing(tmp_path):
     entry = done["entry"]
     assert entry["id"] == "bright_aops-2-worked_examples" and entry["items"] == 2
     assert entry["limit"] == 2 and entry["source"]["repo"] == "xlangai/BRIGHT"
-    assert entry["authored_by"] == "Claude Opus 5.5, in-session"
+    assert entry["authored_by"] == "Jonathan Chow"
     assert entry["build"]["tagging"] == "ai" and entry["build"]["abstracted"] is True
     assert entry["vocabulary_version"] == db.get_collection(conn, "aops").vocabulary_version
     assert done["sent"] is False and done["parent"] is None and sent == []
@@ -263,14 +263,14 @@ def test_card_lists_entries_columns_and_attribution():
         "dataset": "bright_aops",
         "limit": 2000,
         "recipe": "worked_examples",
-        "authored_by": "Claude Opus 5.5, in-session; vocabulary reviewed",
+        "authored_by": "Jonathan Chow; vocabulary reviewed",
         "items": 2000,
         "files": {"builds/bright_aops-2000-worked_examples/outputs.parquet": "x"},
     }
     card = dataset_card({"entries": [entry]}, "owner/builds")
     assert card.startswith("---\nlicense: cc-by-4.0\n")
     assert "data_files: builds/bright_aops-2000-worked_examples/outputs.parquet" in card
-    assert "Claude Opus 5.5, in-session" in card
+    assert "Jonathan Chow; vocabulary reviewed" in card
     for column in ("position", "term", "definition", "doc_id", "tags", "principle", "method"):
         assert f"`{column}`" in card
     assert (
