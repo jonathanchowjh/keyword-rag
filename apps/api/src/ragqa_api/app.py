@@ -46,14 +46,14 @@ from ragqa_core.evaluator import (
     answer_tokens,
     measurable,
     no_ai,
+    read_answer,
     runnable,
 )
 from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
-from ragqa_core.program import program_answer
-from ragqa_core.prompts import answer_prompt, parse_answer
+from ragqa_core.prompts import answer_prompt
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     KEYWORD_METHODS,
@@ -918,11 +918,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             max_tokens=answer_tokens(spec.qa_type, program),
                             purpose="query",
                         )
-                        answer = parse_answer(spec.qa_type, done.text, bool(body.choices))
-                        if program:
-                            printed, out["program"] = program_answer(done.text)
-                            answer = printed or answer
-                        out["answer"] = answer
+                        out["answer"], out["program"] = read_answer(
+                            spec.qa_type, done.text, bool(body.choices), program
+                        )
                 except PER_METHOD_ERRORS as e:
                     out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
             out["usd"] = spent["usd"]

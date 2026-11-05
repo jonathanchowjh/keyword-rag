@@ -575,11 +575,7 @@ class Evaluator:
             if n % 10 == 0:
                 report(span + (0.99 - span) * n / len(questions))
                 check()
-            pred = parse_answer(spec.qa_type, completion.text, bool(q.choices))
-            record = None
-            if program:
-                printed, record = program_answer(completion.text)
-                pred = printed or pred
+            pred, record = read_answer(spec.qa_type, completion.text, bool(q.choices), program)
             row.update(
                 {
                     "pred": pred,
@@ -909,6 +905,18 @@ class Evaluator:
                 }
             )
         return out
+
+
+def read_answer(
+    qa_type: QaType, text: str, has_choices: bool, program: bool
+) -> tuple[str, dict | None]:
+    """The prediction in an answer reply, and the record of its program when one was asked
+    for: the program's printed answer wins over the reply's own line. Runs and /query both."""
+    pred = parse_answer(qa_type, text, has_choices)
+    if not program:
+        return pred, None
+    printed, record = program_answer(text)
+    return printed or pred, record
 
 
 def ended(e: Exception) -> dict:
