@@ -40,6 +40,8 @@
   the Worker page), priced for what it left. While a sync add (20 items or fewer) runs,
   a job queued on that collection is refused (409), so a retag or rekey can't miss the
   new items.
+- The Run page marks the answer of a run that stopped, failed or was cancelled as
+  partial: it is from the questions the run reached.
 - BRIGHT (`bright_aops`, `bright_theoremqa`) loads, with nDCG@10 and recall@1 for
   questions that name gold documents.
 - `scripts/experiments.py` and `scripts/experiments.md`: queue and compare

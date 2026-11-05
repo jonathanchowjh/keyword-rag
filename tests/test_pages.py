@@ -192,6 +192,19 @@ def test_run_head_says_what_changed_since_the_run(page, seeded):
     expect(page.get_by_text("keyword lists changed after this run")).to_be_visible()
 
 
+def test_a_stopped_runs_answer_is_marked_partial(page, seeded):
+    run_id = seeded.build("partial", run=True)
+    page.goto(f"{seeded.url}/c/partial/runs/{run_id}")
+    expect(page.locator(".verdict")).to_be_visible()
+    expect(page.locator("[data-partial]")).to_have_count(0)
+    db.update_job(seeded.app.state.conn, run_id, status="stopped_budget")
+    page.goto(f"{seeded.url}/c/partial/runs/{run_id}")
+    expect(page.locator("[data-partial]")).to_contain_text(
+        "Partial: the run stopped before it finished"
+    )
+    expect(page.locator("[data-partial]")).to_contain_text("resume it for the rest")
+
+
 def test_run_head_names_a_changed_dense_model(page, seeded):
     run_id = seeded.build("dense", run=True)
     conn = seeded.app.state.conn

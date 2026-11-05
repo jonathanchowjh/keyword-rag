@@ -65,8 +65,13 @@ function answerHtml() {
   const notes = verdictNotes({ ...a, proxy_trusted: run.proxy_trusted }, { raw: rawScale() })
     .map((n) => `${n.charAt(0).toUpperCase()}${n.slice(1)}.`)
     .join(" ");
+  // A run that ended early answers from the questions it reached, not the whole set.
+  const ended = run.status === "cancelled" ? "was cancelled" : "stopped";
+  const rest = RESUMABLE.has(run.status) ? "; resume it for the rest" : "";
+  const partial = run.status === "done" ? "" : `<p class="warn" data-partial>Partial: the run ${ended}
+    before it finished, so this is from the questions it reached${rest}.</p>`;
   return `<p class="verdict">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
-    plural(run.question_count, "question"))}.</p>
+    plural(run.question_count, "question"))}.</p>${partial}
     ${notes ? `<p class="muted">${esc(notes)}</p>` : ""}
     ${legendHtml("Ahead, behind and can't tell in the table below read the same way.")}`;
 }
