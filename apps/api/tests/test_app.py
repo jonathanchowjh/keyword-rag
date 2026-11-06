@@ -2969,3 +2969,75 @@ def test_a_deleted_store_leaves_no_leak_scan_behind(client):
     assert client.delete("/collections/c").status_code == 204
     # the same count of items and the same set version, but nothing leaks into these
     assert store_with(jsonl({"id": "n1", "text": "glaciers carve valleys"}))["leaked"] == 0
+
+
+def chat_body(question="enzyme rate", **extra):
+    return {"collection": "c", "messages": [{"role": "user", "content": question}], **extra}
+
+
+def test_chat_answers_with_citations(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Rates rise [1]. Answer: x") as client:
+        add_collection(client)
+        r = client.post("/chat", json=chat_body())
+        assert r.status_code == 200, r.text
+        got = r.json()
+        assert got["answer"].startswith("Rates rise") and got["error"] is None
+        assert got["citations"][0]["id"] == got["hit_ids"][0] == "enzyme-item"
+        assert got["citations"][0]["n"] == 1 and "enzyme" in got["citations"][0]["text"]
+        assert got["usd"] > 0 and got["method"] == "hybrid" and got["query_tags"] is None
+
+
+def test_chat_method_defaults_and_refusals(client):
+    add_collection(client)
+    assert client.post("/chat", json=chat_body()).json()["method"] == "hybrid"
+    allowed = client.post("/chat", json=chat_body(method="kw_individual"))
+    assert allowed.status_code == 200
+    add_collection(client, name="bare", lists=False)
+    r = client.post("/chat", json={**chat_body(method="kw_individual"), "collection": "bare"})
+    assert r.status_code == 409 and "needs keyword lists" in r.json()["detail"]
+    assert client.post("/chat", json=chat_body(method="nope")).status_code == 422
+    reference_with_vocabulary(client)
+    body = {**chat_body(), "collection": "r"}
+    got = client.post("/chat", json=body).json()
+    assert got["method"] == "keyword_rag" and got["query_tags"][0] == "enzyme"
+    client.put("/collections/r/search", json={"query_tags": "oracle"})
+    r = client.post("/chat", json=body)
+    assert r.status_code == 200 and r.json()["error"] is None and r.json()["query_tags"]
+
+
+def test_chat_over_budget_is_that_replys_error(tmp_path):
+    with make_client(tmp_path, cap_usd=0) as client:
+        add_collection(client)
+        r = client.post("/chat", json=chat_body())
+        assert r.status_code == 200
+        got = r.json()
+        assert got["answer"] is None and "cap" in got["error"]
+
+
+def test_chat_sends_only_the_last_six_turns(tmp_path):
+    seen = []
+
+    def reply(prompt):
+        seen.append(prompt)
+        return "ok"
+
+    with make_client(tmp_path, reply=reply) as client:
+        add_collection(client)
+        turns = [
+            {"role": "user" if i % 2 else "assistant", "content": f"turn {i}"} for i in range(1, 9)
+        ]
+        last = {"role": "user", "content": "enzyme rate"}
+        r = client.post("/chat", json={"collection": "c", "messages": [*turns, last]})
+        assert r.status_code == 200, r.text
+    prompt = seen[-1]
+    assert "turn 2" not in prompt and "turn 3" in prompt and "turn 8" in prompt
+
+
+def test_chat_needs_the_user_to_speak_last(client):
+    add_collection(client)
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    assert client.post("/chat", json={"collection": "c", "messages": messages}).status_code == 422
+    assert client.post("/chat", json={"collection": "c", "messages": []}).status_code == 422

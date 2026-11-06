@@ -10,6 +10,7 @@ Run with `uvicorn --factory ragqa_api.app:create_app`.
 
 import base64
 import json
+import re
 import secrets
 import shutil
 import threading
@@ -54,7 +55,7 @@ from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
-from ragqa_core.prompts import answer_prompt
+from ragqa_core.prompts import CHAT_TOKENS, CHAT_TURNS, answer_prompt, chat_prompt, edge_order
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     KEYWORD_METHODS,
@@ -67,6 +68,7 @@ from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import (
     CollectionSpec,
+    Hit,
     Item,
     KeywordLists,
     QaType,
@@ -216,6 +218,35 @@ class QueryRequest(BaseModel):
     answer: bool = False
     model: str | None = None
     search: dict | None = None  # overrides the collection's search settings in part
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    collection: str
+    messages: list[ChatTurn] = Field(min_length=1)  # the last is the user's question
+    method: str | None = None  # keyword_rag with a vocabulary, else hybrid
+    k: int = Field(5, ge=1, le=20)
+    model: str | None = None
+
+
+CITATION = re.compile(r"\[(\d+)\]")
+
+
+def available_methods(spec: CollectionSpec, has_lists: bool) -> dict[str, str | None]:
+    """Each method with why it can't run on the store, or None when it can."""
+    out: dict[str, str | None] = {}
+    for m in METHOD_NAMES:
+        if m in KEYWORD_METHODS and not has_lists:
+            out[m] = "needs keyword lists"
+        elif m == "keyword_rag" and spec.vocabulary_version is None:
+            out[m] = "needs a vocabulary"
+        else:
+            out[m] = None
+    return out
 
 
 class EvalRequest(BaseModel):
@@ -542,12 +573,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_collection(name: str) -> dict:
         spec = state.retriever.spec(name)
         lists = db.get_keyword_lists(state.conn, name)
-        available = [
-            m
-            for m in METHOD_NAMES
-            if (lists is not None or m not in KEYWORD_METHODS)
-            and (spec.vocabulary_version is not None or m != "keyword_rag")
-        ]
+        available = [m for m, why in available_methods(spec, lists is not None).items() if not why]
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
         busy, job = collection_state(jobs, count, lists is not None)
@@ -1134,6 +1160,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job_id = db.create_job(state.conn, "retag", name, {"version": version})
         return {"version": version, "job_id": job_id}
 
+    def run_method(
+        spec: CollectionSpec,
+        question: str,
+        method: str,
+        k: int,
+        rrf_k: int,
+        search: SearchSettings,
+        skip: tuple[str, ...],
+        answer=None,
+    ) -> dict:
+        """One method's reply to a question: its hits, the answer `answer(hits)` gives (a
+        dict merged into the reply) and every call's cost. A provider or budget failure is the
+        reply's `error`, so it does not hide what the other methods spent."""
+        out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None, "program": None}
+        with state.ai.tally() as spent:
+            try:
+                tags = None
+                if method == "keyword_rag":
+                    tags = state.retriever.query_tags(spec, question, search, skip)
+                    out["query_tags"] = tags
+                hits = state.retriever.retrieve(spec.name, question, method, k, rrf_k, search, tags)
+                out["hits"] = [asdict(h) for h in hits]
+                if answer:
+                    out.update(answer(hits))
+            except PER_METHOD_ERRORS as e:
+                out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
+        out["usd"] = spent["usd"]
+        return out
+
     @app.post("/query")
     def query(body: QueryRequest) -> dict:
         check_methods(body.methods)
@@ -1144,44 +1199,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         skip = tuple(db.disabled_sources(state.conn, body.collection))
         results = {}
         for method in body.methods:
-            out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None, "program": None}
-            # Every call the method makes: query summaries, hops and the answer.
-            with state.ai.tally() as spent:
-                try:
-                    tags = None
-                    if method == "keyword_rag":
-                        tags = state.retriever.query_tags(spec, body.question, search, skip)
-                        out["query_tags"] = tags
-                    hits = state.retriever.retrieve(
-                        body.collection, body.question, method, body.k, body.rrf_k, search, tags
-                    )
-                    out["hits"] = [asdict(h) for h in hits]
-                    if body.answer:
-                        program = search.program and not body.choices
-                        system, user = answer_prompt(
-                            spec.qa_type,
-                            body.question,
-                            body.choices,
-                            answer_hits(spec.qa_type, hits, search.example),
-                            search.example,
-                            search.program,
-                        )
-                        done = state.ai.complete(
-                            user,
-                            role="answer",
-                            system=system,
-                            model=body.model,
-                            max_tokens=answer_tokens(spec.qa_type, program),
-                            purpose="query",
-                        )
-                        out["answer"], out["program"] = read_answer(
-                            spec.qa_type, done.text, bool(body.choices), program
-                        )
-                except PER_METHOD_ERRORS as e:
-                    out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
-            out["usd"] = spent["usd"]
-            results[method] = out
+
+            def answer(hits: list[Hit]) -> dict:
+                program = search.program and not body.choices
+                system, user = answer_prompt(
+                    spec.qa_type,
+                    body.question,
+                    body.choices,
+                    answer_hits(spec.qa_type, hits, search.example),
+                    search.example,
+                    search.program,
+                )
+                done = state.ai.complete(
+                    user,
+                    role="answer",
+                    system=system,
+                    model=body.model,
+                    max_tokens=answer_tokens(spec.qa_type, program),
+                    purpose="query",
+                )
+                text, prog = read_answer(spec.qa_type, done.text, bool(body.choices), program)
+                return {"answer": text, "program": prog}
+
+            results[method] = run_method(
+                spec,
+                body.question,
+                method,
+                body.k,
+                body.rrf_k,
+                search,
+                skip,
+                answer if body.answer else None,
+            )
         return {"results": results}
+
+    @app.post("/chat")
+    def chat(body: ChatRequest) -> dict:
+        """An answer from a store's passages, citing them as [n]. Spends like the Lab: no
+        estimate, the cost is in the reply, the budget cap holds."""
+        *earlier, last = body.messages
+        if last.role != "user":
+            raise ValueError("the last message must be the user's")
+        spec = state.retriever.spec(body.collection)
+        reasons = available_methods(spec, db.get_keyword_lists(state.conn, spec.name) is not None)
+        method = body.method or ("keyword_rag" if reasons["keyword_rag"] is None else "hybrid")
+        check_methods([method])
+        if reasons[method]:
+            raise HTTPException(409, f"{method} {reasons[method]} on '{body.collection}'")
+        search = spec.search or SearchSettings()
+        if search.query_tags == "oracle":  # it needs a question's gold; chat has none
+            search = replace(search, query_tags="classifier")
+        skip = tuple(db.disabled_sources(state.conn, body.collection))
+        history = [t.model_dump() for t in earlier][-CHAT_TURNS:]
+        cited: list[dict] = []
+
+        def answer(hits: list[Hit]) -> dict:
+            system, user = chat_prompt(last.content, history, hits)
+            done = state.ai.complete(
+                user,
+                role="answer",
+                system=system,
+                model=body.model,
+                max_tokens=CHAT_TOKENS,
+                purpose="chat",
+            )
+            ordered = edge_order(hits)
+            for n in dict.fromkeys(int(m) for m in CITATION.findall(done.text)):
+                if 1 <= n <= len(ordered):
+                    hit = ordered[n - 1]
+                    source = hit.meta.get("source")
+                    cited.append({"n": n, "id": hit.id, "text": hit.text, "source": source})
+            return {"answer": done.text}
+
+        out = run_method(spec, last.content, method, body.k, 60, search, skip, answer)
+        return {
+            "answer": out["answer"],
+            "citations": cited,
+            "hit_ids": [h["id"] for h in out["hits"]],
+            "method": method,
+            "query_tags": out.get("query_tags"),
+            "usd": out["usd"],
+            "error": out["error"],
+        }
 
     @app.post("/eval", status_code=202)
     def evaluate(body: EvalRequest):

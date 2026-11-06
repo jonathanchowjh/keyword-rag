@@ -3,6 +3,7 @@ from dataclasses import replace
 from ragqa_core.prompts import (
     abstract_prompt,
     answer_prompt,
+    chat_prompt,
     edge_order,
     hop_prompt,
     induce_prompt,
@@ -212,3 +213,26 @@ def test_program_prompt_only_without_choices():
     assert "```python" in table and "Cite the passages you use as [n]." in table
     _, mcq = answer_prompt("mcq", "Q?", ["x", "y"], [HIT_WITH_ANSWER_B], program=True)
     assert "```python" not in mcq
+
+
+def chat_hits(n):
+    return [Hit(f"h{i}", f"passage {i}", 1.0, {}, [], None, None, {}) for i in range(1, n + 1)]
+
+
+def test_chat_prompt_numbers_passages_and_keeps_six_turns():
+    history = [
+        {"role": "user" if i % 2 else "assistant", "content": f"turn {i}"} for i in range(1, 9)
+    ]
+    system, user = chat_prompt("why?", history, chat_hits(4))
+    assert "Cite the passages you use as [n]" in system
+    assert "turn 2" not in user and "turn 3" in user and "Assistant: turn 8" in user
+    assert "User: turn 3" in user
+    assert user.index("[1] passage 1") < user.index("[2] passage 3")
+    assert user.index("[3] passage 4") < user.index("[4] passage 2")
+    assert user.endswith("Question: why?")
+
+
+def test_chat_prompt_cuts_long_passages():
+    long = Hit("h", "x" * 5000, 1.0, {}, [], None, None, {})
+    _, user = chat_prompt("q", [], [long])
+    assert "[1] " + "x" * 1500 + "\n" in user and "x" * 1501 not in user

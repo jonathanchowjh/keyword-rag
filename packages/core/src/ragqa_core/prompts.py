@@ -15,6 +15,9 @@ NAMED_CHOICE = re.compile(
     r"\b(?:answer|option|choice)\s+(?:is\s+)?\(?([A-Ha-h])\)?(?![A-Za-z])", re.I
 )
 SUMMARY_TOKENS = 120
+CHAT_TOKENS = 1024
+CHAT_TURNS = 6  # the history a chat reply sees
+CHAT_PASSAGE_CHARS = 1500  # an uploaded text file is one item, so a hit can be a whole document
 
 METHOD_HINT = {
     "mcq": "experiment or analysis types (e.g. tabular scrutiny, controlled experiment)",
@@ -172,6 +175,30 @@ def answer_prompt(
     final = "`Answer: <short answer>`"
     ask = finish(final, True) if program else f"Reason briefly, then finish with a line {final}."
     return system, f"{context}Question: {question}\n{cite}{ask}"
+
+
+def chat_prompt(question: str, history: list[dict], hits: list[Hit]) -> tuple[str, str]:
+    """A chat reply's prompt: the last CHAT_TURNS of the history, the passages numbered from 1
+    in edge order (each cut short), then the question."""
+    system = (
+        "You answer questions using the passages given. Cite the passages you use as [n]."
+        " If they don't hold the answer, say so."
+    )
+    parts = []
+    if history[-CHAT_TURNS:]:
+        turns = (
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in history[-CHAT_TURNS:]
+        )
+        parts.append("\n".join(turns))
+    if hits:
+        lines = (
+            f"[{n}] {hit.text[:CHAT_PASSAGE_CHARS]}"
+            for n, hit in enumerate(edge_order(hits), start=1)
+        )
+        parts.append("Passages:\n" + "\n".join(lines))
+    parts.append(f"Question: {question}")
+    return system, "\n\n".join(parts)
 
 
 def hop_prompt(question: str, passages: list[str]) -> str:
