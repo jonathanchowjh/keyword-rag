@@ -2470,6 +2470,20 @@ def test_copy_to_existing_name_is_409(client):
     assert client.get("/collections/x").status_code == 404
 
 
+def test_copy_to_a_name_whose_eval_set_is_another_type_is_409(client):
+    scibench_source(client)
+    client.app.state.worker.stop()
+    client.post("/collections", json={"name": "m", "qa_type": "mcq"})
+    client.post("/eval-sets", json={"name": "w", "qa_type": "science"})
+    for confirm in (False, True):
+        body = {"name": "w", "recipe": "reference", "confirm": confirm}
+        r = client.post("/collections/m/copy", json=body)
+        assert r.status_code == 409
+        assert r.json()["detail"] == "eval set 'w' is science; store 'w' is mcq"
+    assert client.get("/collections/w").status_code == 404
+    assert db.list_jobs(client.app.state.conn, kind="copy") == []
+
+
 def test_copy_build_override_validated(client):
     scibench_source(client)
     client.app.state.worker.stop()
@@ -2891,6 +2905,14 @@ def test_a_hand_written_question_is_checked_for_leaks_per_store(client):
         assert len(job["setup"]["question_ids"]) == asked
 
 
+def test_a_dataset_question_put_back_is_not_marked_hand_written(client):
+    add_collection(client, lists=False)  # its eval set c holds QUESTION, as a dataset left it
+    assert put_questions(client, "c", []).status_code == 200
+    restored = {**asdict(QUESTION), "meta": {"skill": "enzymes"}}
+    assert put_questions(client, "c", [restored]).status_code == 200
+    assert client.get("/eval-sets/c").json()["questions"][0]["meta"] == {"skill": "enzymes"}
+
+
 def test_patch_sets_and_clears_the_store_default_eval_set(client):
     add_collection(client)
     client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
@@ -3001,6 +3023,18 @@ def test_a_deleted_store_leaves_no_leak_scan_behind(client):
     assert store_with(jsonl({"id": "n1", "text": "glaciers carve valleys"}))["leaked"] == 0
 
 
+def test_a_deleted_source_leaves_no_leak_scan_behind(client):
+    add_collection(client, questions=False, lists=False)
+    import_items(client, body=TIDES)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    assert put_questions(client, "e", [HAND, OTHER]).status_code == 200
+    assert client.patch("/collections/c", json={"eval_set": "e"}).json()["leaked"] == 1
+    assert client.delete("/collections/c/sources/upload:notes").status_code == 204
+    # the same count of items and the same set version, but nothing leaks into these
+    import_items(client, body=jsonl({"id": "n1", "text": "glaciers carve valleys"}))
+    assert client.get("/collections/c").json()["leaked"] == 0
+
+
 def chat_body(question="enzyme rate", **extra):
     return {"collection": "c", "messages": [{"role": "user", "content": question}], **extra}
 
@@ -3026,6 +3060,9 @@ def test_chat_answers_with_citations(tmp_path):
         ("Rates rise [1]. Again [1].", [1]),
         ("Rates rise [9] and [3].", [3]),  # 3 passages: 9 is not one of them
         ("Rates rise [2] [1, 3].", [2, 1, 3]),
+        ("Rates rise [\u0661].", []),  # an Arabic-Indic one: not a digit to the page either
+        # too long a run to be a mark, and no raise
+        pytest.param("Rates rise [" + "1" * 5000 + "].", [], id="5000-digits"),
     ],
 )
 def test_chat_cites_lists_and_ranges(tmp_path, answer, cited):

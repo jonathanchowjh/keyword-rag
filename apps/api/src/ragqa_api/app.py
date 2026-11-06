@@ -241,7 +241,9 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
-CITE_PART = r"\d+(?:\s*[-\u2013]\s*\d+)?"  # n, or a range n-m with a hyphen or en dash
+# n, or a range n-m with a hyphen or en dash. ASCII digits only, as JavaScript's \d, and at
+# most 4 of them, so a long run can't make int() raise after the paid call.
+CITE_PART = r"[0-9]{1,4}(?:\s*[-\u2013]\s*[0-9]{1,4})?"
 CITATION = re.compile(rf"\[({CITE_PART}(?:\s*,\s*{CITE_PART})*)\]")  # [n], [n, m], [n-m]
 
 
@@ -816,6 +818,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row["items"] > 0 and not others:
                 raise HTTPException(409, "at least one source must stay on")
         db.set_source_enabled(state.conn, name, source, body.enabled)
+        state.evaluator.forget(name)  # what the store holds changed: scan for leaks again
         return {**row, "enabled": body.enabled}
 
     @app.delete("/collections/{name}/sources/{source}", status_code=204)
@@ -831,6 +834,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.store.delete_source(name, source)
         db.set_source_enabled(state.conn, name, source, True)
         state.retriever.forget(name)
+        state.evaluator.forget(name)  # a re-import of as many items must scan again
         return Response(status_code=204)
 
     @app.get("/collections/{name}/questions")
@@ -940,8 +944,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def put_eval_questions(name: str, body: QuestionsPut) -> dict:
         row = known_set(name)
         questions = [Question(**q.model_dump()) for q in body.questions]
-        # A question new to the set with no source is written by hand: checked for leaks.
+        # A question with no source whose id no version of the set has held is written by
+        # hand: checked for leaks. One the set held before (a restored older version) is not.
         held = {q.id for q in db.get_questions(state.conn, name)}
+        for saved in db.eval_set_versions(state.conn, name):
+            held |= {q.id for q in db.get_questions(state.conn, name, saved["version"])}
         questions = [
             q
             if q.id in held or "source" in q.meta
@@ -1088,6 +1095,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source = state.retriever.spec(name)
         if db.get_collection(state.conn, body.name):
             raise HTTPException(409, f"collection '{body.name}' already exists")
+        found = db.get_eval_set(state.conn, body.name)
+        if found and found["qa_type"] != source.qa_type:  # one name, one question type
+            raise type_clash(body.name, found["qa_type"], body.name, source.qa_type)
         target = state.loader.copy_spec(source, body.name, body.recipe, body.build)
         # A job on the source could change the items while the copy reads them.
         for status in ("running", "queued"):

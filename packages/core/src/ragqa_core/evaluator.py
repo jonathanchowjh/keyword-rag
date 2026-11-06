@@ -258,9 +258,10 @@ class Evaluator:
         return set(leaked)
 
     def forget(self, name: str) -> None:
-        """Drops the leak scans of a store that is gone."""
-        for key in [k for k in self._leaked if k[0] == name]:
-            del self._leaked[key]
+        """Drops the leak scans of a store that is gone or whose items changed. The keys are
+        copied first: a request thread may add a scan meanwhile."""
+        for key in [k for k in list(self._leaked) if k[0] == name]:
+            self._leaked.pop(key, None)
 
     def _questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """What a run that has not recorded its questions asks: its set's, less those leaked
