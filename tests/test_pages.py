@@ -2071,3 +2071,40 @@ def test_chat_reply_error_keeps_the_conversation(page, seeded):
     page.reload()
     expect(page.locator("#log .user")).to_have_count(2)
     expect(page.locator("#log .err")).to_have_count(2)
+
+
+def test_chat_sends_only_the_last_six_turns_and_the_new_message(page, seeded):
+    sent = []
+
+    def reply(route):
+        sent.append(json.loads(route.request.post_data))
+        route.fulfill(json=CHAT_REPLY)
+
+    chat_route(page, reply)
+    page.goto(seeded.url + "/chat")
+    for n in range(6):
+        chat_ask(page, f"question {n}")
+        expect(page.locator("#log .reply")).to_have_count(n + 1)
+    assert len(sent[-1]["messages"]) == 7
+    assert sent[-1]["messages"][-1] == {"role": "user", "content": "question 5"}
+    assert sent[-1]["messages"][0]["content"] == "question 2"  # 11 turns before it, cut to 6
+
+
+def test_chat_error_line_shows_what_it_cost(page, seeded):
+    spent = {**CHAT_REPLY, "answer": None, "citations": [], "error": "budget used up", "usd": 0.5}
+    chat_route(page, lambda route: route.fulfill(json=spent))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "pricey")
+    expect(page.locator("#log .err")).to_contain_text("budget used up")
+    expect(page.locator("#log .err")).to_contain_text("$0.50")
+
+
+def test_chat_without_stores_disables_send(page, seeded):
+    page.route(
+        "**/collections",
+        lambda r: r.fulfill(json=[]) if r.request.method == "GET" else r.fallback(),
+    )
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#note")).to_contain_text("No stores yet")
+    expect(page.locator("#note").get_by_role("link", name="Stores")).to_have_attribute("href", "/")
+    expect(page.locator("#send")).to_be_disabled()

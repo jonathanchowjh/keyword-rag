@@ -1,5 +1,6 @@
 import { $, api, catalog, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
 
+const TURNS = 6; // earlier turns sent with the new message; the route trims to the same
 const PASSAGE = 300; // characters of a source shown before it is expanded
 
 shell("chat");
@@ -71,7 +72,7 @@ function replyHtml(t, at) {
 
 function turnHtml(t, at) {
   if (t.role === "user") return `<div class="msg user">${esc(t.content)}</div>`;
-  if (t.role === "error") return `<div class="msg err" role="alert">${esc(t.content)}</div>`;
+  if (t.role === "error") return `<div class="msg err" role="alert">${esc(t.content)}${t.usd > 0 ? ` <span class="muted">(${usd(t.usd)})</span>` : ""}</div>`;
   return replyHtml(t, at);
 }
 
@@ -83,7 +84,7 @@ function draw() {
 
 function setBusy(busy) {
   answering = busy;
-  $("send").disabled = busy || !hasModel;
+  $("send").disabled = busy || !hasModel || !$("store").value;
   $("status").textContent = busy ? "thinking…" : "";
 }
 
@@ -91,13 +92,14 @@ function setBusy(busy) {
 
 async function ask() {
   const content = $("box").value.trim();
-  if (!content || answering || !hasModel) return;
+  if (!content || answering || !hasModel || !$("store").value) return;
   const store = $("store").value;
   turns.push({ role: "user", content });
   // The conversation the model sees: the user's turns and its own answers, never an error.
   const messages = turns
     .filter((t) => t.role !== "error")
-    .map((t) => (t.role === "user" ? { role: "user", content: t.content } : { role: "assistant", content: t.answer }));
+    .map((t) => (t.role === "user" ? { role: "user", content: t.content } : { role: "assistant", content: t.answer }))
+    .slice(-(TURNS + 1));
   $("box").value = "";
   save();
   draw();
@@ -108,16 +110,16 @@ async function ask() {
       body: { collection: store, messages, method: $("method").value, model: $("model").value || null },
     });
     if (store !== $("store").value) return; // the store moved on while this was thinking
-    turns.push(r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer" } : { role: "reply", ...r });
+    turns.push(r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer", usd: r.usd } : { role: "reply", ...r });
   } catch (e) {
     if (store !== $("store").value) return;
     turns.push({ role: "error", content: e.message });
   } finally {
     setBusy(false);
+    refreshSpend();
   }
   save();
   draw();
-  refreshSpend();
 }
 
 // -- the pickers -----------------------------------------------------------------------------
@@ -150,7 +152,8 @@ async function loadStores() {
   const list = await api("/collections");
   $("store").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
   if (list.length) await pickStore();
-  else $("status").textContent = "No stores yet. Create one from the Stores page.";
+  else $("note").innerHTML += ' No stores yet. Create one on the <a href="/">Stores</a> page.';
+  setBusy(false);
 }
 
 $("store").addEventListener("change", () => pickStore().catch((e) => ($("status").textContent = e.message)));
