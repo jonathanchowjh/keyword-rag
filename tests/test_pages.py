@@ -2,6 +2,8 @@
 
 import json
 import re
+import threading
+import time
 from contextlib import contextmanager
 
 import httpx
@@ -2300,6 +2302,89 @@ def test_switching_chats_while_a_reply_is_on_its_way_shows_it_in_its_own_chat(pa
     # Only the newest reply is read out; the log itself is not live.
     expect(page.locator("#spoken")).to_have_text("Answer: A")
     expect(page.locator("#log")).not_to_have_attribute("aria-live", re.compile(".*"))
+
+
+@contextmanager
+def held_answers(seeded, text):
+    """The fake AI answers `text`, but only once the yielded event is set: the server has
+    saved the message and is mid-attempt until then."""
+    ai = seeded.app.state.ai
+    go = threading.Event()
+    fake_replies(ai, lambda p: text if go.wait(20) else "too late")
+    try:
+        yield go
+    finally:
+        go.set()
+        fake_replies(ai, lambda p: "Answer: A")
+
+
+def saved_messages(seeded, chat_id, count):
+    """Waits until the server has saved `count` messages on the chat."""
+    for _ in range(200):
+        if len(httpx.get(f"{seeded.url}/chats/{chat_id}").json()["messages"]) == count:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"the server never saved {count} messages")
+
+
+def test_back_on_a_chat_whose_reply_the_server_is_making_shows_the_question_once(page, seeded):
+    chat_id = make_chat(seeded, ["c"], "mid-attempt chat")
+    other = make_chat(seeded, ["vo"], "mid-attempt other")
+    with held_answers(seeded, "The held reply.") as go:
+        page.goto(f"{seeded.url}/chat#{chat_id}")
+        expect(page.locator("#chips .chip")).to_have_count(1)
+        chat_ask(page, "asked while the server works")
+        saved_messages(seeded, chat_id, 1)  # saved, with no attempt yet
+        chat_link(page, other).click()
+        expect(page.locator("#log .msg")).to_have_count(0)
+        chat_link(page, chat_id).click()
+        expect(page.locator("#chat-title")).to_have_text("mid-attempt chat")
+        expect(page.locator("#log .user")).to_have_text(["asked while the server works"])
+        expect(page.locator("#send")).to_be_disabled()
+        with page.expect_response(lambda r: r.url.endswith(f"/chats/{chat_id}/messages")):
+            go.set()
+        expect(page.locator("#log .reply")).to_have_count(1)
+        expect(page.locator("#log .user")).to_have_text(["asked while the server works"])
+        expect(page.locator("#log .turn")).to_have_count(1)
+        expect(page.locator("#spoken")).to_have_text("The held reply.")
+        expect(page.locator("#send")).to_be_enabled()
+
+
+def test_a_reply_landing_while_its_chat_reopens_is_kept(page, seeded):
+    chat_id = make_chat(seeded, ["c"], "reopening chat")
+    other = make_chat(seeded, ["vo"], "reopening other")
+    reopen = {"hold": False, "held": []}
+
+    def get(route):
+        if not reopen["hold"] or route.request.method != "GET":
+            route.fallback()
+            return
+        reopen["held"].append((route, route.fetch()))  # read now, while the reply is pending
+
+    page.route(f"**/chats/{chat_id}", get)
+    with held_answers(seeded, "The late reply.") as go:
+        page.goto(f"{seeded.url}/chat#{chat_id}")
+        expect(page.locator("#chips .chip")).to_have_count(1)
+        chat_ask(page, "asked before reopening")
+        saved_messages(seeded, chat_id, 1)
+        chat_link(page, other).click()
+        expect(page.locator("#log .msg")).to_have_count(0)
+        reopen["hold"] = True
+        chat_link(page, chat_id).click()
+        for _ in range(200):
+            if reopen["held"]:
+                break
+            page.wait_for_timeout(20)
+        route, stale = reopen["held"][0]
+        assert stale.json()["messages"][0]["attempts"] == []  # the server was mid-attempt
+        with page.expect_response(lambda r: r.url.endswith(f"/chats/{chat_id}/messages")):
+            go.set()
+        expect(page.locator("#spoken")).to_have_text("The late reply.")
+        route.fulfill(response=stale)  # the reopen lands after the reply, and is older
+        expect(page.locator("#log .reply")).to_have_count(1)
+        expect(page.locator("#log .user")).to_have_text(["asked before reopening"])
+        expect(page.locator("#log .reply .md")).to_have_text("The late reply.")
+        expect(page.locator("#send")).to_be_enabled()
 
 
 def test_a_deleted_store_shows_as_deleted(page, seeded):

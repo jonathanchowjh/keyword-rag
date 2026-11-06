@@ -18,11 +18,19 @@ let hasModel = false;
 let adding = false; // files are being added
 const details = {}; // store -> its GET /collections/{name}, for its chip
 const pending = {}; // chat id -> the message still on its way there
+const arrived = {}; // chat id -> a reply that came while its chat was loading, merged once it has
 const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes
 
 // The chat's stores that still exist.
 const live = () => (chat ? chat.stores.filter((s) => !chat.deleted_stores.includes(s)) : []);
 const lastN = (c) => c.messages.at(-1)?.n ?? 0;
+
+// The chat's messages with `message` in place of any of the same n: the server saves a message
+// before its attempt, so a chat read meanwhile may already hold it with no attempt.
+function withMessage(c, message) {
+  const messages = [...c.messages.filter((m) => m.n !== message.n), message].sort((a, b) => a.n - b.n);
+  return { ...c, messages };
+}
 
 // -- drawing a reply ---------------------------------------------------------------------------
 
@@ -201,7 +209,9 @@ function drawLog() {
     const lines = local[chat.id] ?? [];
     const after = (n) => lines.filter((l) => l.after === n).map(lineHtml).join("");
     const waiting = pending[chat.id];
-    html = after(0) + chat.messages.map((m) => messageHtml(m) + after(m.n)).join("");
+    // While a reply is on its way, the message it answers is drawn once, as the waiting line.
+    const shown = waiting == null ? chat.messages : chat.messages.filter((m) => m.attempts.length);
+    html = after(0) + shown.map((m) => messageHtml(m) + after(m.n)).join("");
     if (waiting != null) html += `<div class="msg user">${esc(waiting)}</div>`;
   }
   $("log").innerHTML = html;
@@ -252,7 +262,8 @@ async function openChat(id) {
   try {
     const got = await api(`/chats/${encodeURIComponent(id)}`);
     if (mine !== opening) return;
-    chat = got;
+    chat = arrived[id] ? withMessage(got, arrived[id]) : got;
+    delete arrived[id];
   } catch (e) {
     if (mine === opening) $("status").textContent = e.message;
     return;
@@ -366,12 +377,16 @@ async function ask() {
   delete pending[id];
   refreshSpend();
   loadList().catch(() => {}); // the first message names the chat, and it is now the newest
-  if (chat?.id !== id) {
+  if (openId !== id) {
     setBusy(); // its own chat reads it from the server when opened
     return;
   }
-  if (message) chat.messages.push(message);
-  drawLog();
+  if (chat?.id === id) {
+    if (message) chat = withMessage(chat, message);
+    drawLog();
+  } else if (message) {
+    arrived[id] = message; // the chat is loading: merged when it has, as its read may be older
+  }
   setBusy();
   $("spoken").textContent = message ? spokenOf(message) : `Error: ${error}`;
 }
