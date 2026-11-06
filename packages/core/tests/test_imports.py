@@ -565,6 +565,34 @@ def test_chunk_text_drops_a_section_that_is_only_its_heading():
     assert body(kept[0]) == "# Guide\n\nwelcome"
 
 
+def test_a_heading_only_section_under_its_parent_makes_no_chunk():
+    chunks = imports.chunk_text(f"# A\n## B\n{sentences(40, 'b')}", "x.md")
+    assert len(chunks) > 1 and all(c.startswith("x.md › A › B\n\n") for c in chunks)
+    assert all("bbbb" in c for c in chunks)  # no chunk without a body
+    assert imports.sections("# A\n## B\nbody", True) == [(["A", "B"], ["## B", "body"])]
+
+
+def test_sibling_headings_with_no_body_keep_their_text():
+    assert imports.sections("## one\n## two\n## three\nbody", True) == [
+        (["three"], ["## one", "", "## two", "", "## three", "body"])
+    ]
+    rows = imports.text_rows("x.md", f"## one\n## two\n## three\n{sentences(40)}")
+    stored = "\n".join(r["text"] for r in rows)
+    assert len(rows) > 1 and all(f"## {h}" in stored for h in ("one", "two", "three"))
+    assert all(len(r["text"]) <= 1500 for r in rows)
+    # a trailing heading with nothing after it goes on the end of the last section
+    assert imports.sections("# A\nbody\n## B", True) == [(["A"], ["# A", "body", "", "## B"])]
+
+
+def test_a_file_of_headings_only_is_chunked_like_plain_text():
+    text = "\n".join(f"## Heading number {i:03d}" for i in range(100))
+    assert len(text) == 2199
+    rows = imports.text_rows("x.md", text)
+    assert len(rows) > 1 and all(len(r["text"]) <= 1500 for r in rows)
+    stored = "\n".join(r["text"] for r in rows)
+    assert all(f"## Heading number {i:03d}" in stored for i in range(100))
+
+
 def test_chunk_text_one_chunk_needs_no_room_for_a_breadcrumb():
     text = sentences(29)  # 1,478 characters
     assert len(text) == 1478

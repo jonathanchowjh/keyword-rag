@@ -222,8 +222,35 @@ def breadcrumb(filename: str, path: list[str]) -> str:
 
 def sections(text: str, markdown: bool) -> list[tuple[list[str], list[str]]]:
     """(heading path, lines) for each section; a heading of level L ends every open heading
-    of level L or deeper. A heading inside a code fence is text. A .txt is one section. A
-    section that is only its heading line is dropped: its children's breadcrumbs name it."""
+    of level L or deeper. A heading inside a code fence is text. A .txt is one section.
+
+    A section that is only its heading line makes no section of its own. Its line is
+    dropped when the section that follows with a body is under it (that breadcrumb names
+    it), else carried into that section as leading text; with no such section after it,
+    it goes on the end of the last one, and a file of headings only is one plain section."""
+    out: list[tuple[list[str], list[str]]] = []
+    carried: list[tuple[list[str], str]] = []  # (path, heading line) waiting for a body
+    for path, lines, headed in heading_sections(text, markdown):
+        if sum(1 for line in lines if line.strip()) == (1 if headed else 0):
+            if headed:
+                carried.append((path, next(line for line in lines if line.strip())))
+            continue
+        under = [p for p, _ in carried if len(p) < len(path) and path[: len(p)] == p]
+        # Each carried line its own paragraph, so packing never cuts one in two.
+        lead = [part for p, line in carried if p not in under for part in (line, "")]
+        out.append((path, [*lead, *lines]))
+        carried = []
+    rest = [part for _, line in carried for part in ("", line)]
+    if rest and out:
+        out[-1] = (out[-1][0], [*out[-1][1], *rest])
+    elif rest:
+        out.append(([], rest))
+    return out
+
+
+def heading_sections(text: str, markdown: bool) -> list[tuple[list[str], list[str], bool]]:
+    """(heading path, lines, headed) for each section, its heading line first, empty ones
+    included; the first is what comes before any heading."""
     out: list[tuple[list[str], list[str], bool]] = [([], [], False)]
     stack: list[tuple[int, str]] = []
     fenced = False
@@ -237,11 +264,7 @@ def sections(text: str, markdown: bool) -> list[tuple[list[str], list[str]]]:
             stack.append((level, heading.group(2).strip().rstrip("#").strip()))
             out.append(([t for _, t in stack], [], True))
         out[-1][1].append(line)
-    return [
-        (path, lines)
-        for path, lines, headed in out
-        if sum(1 for line in lines if line.strip()) > (1 if headed else 0)
-    ]
+    return out
 
 
 def units(lines: list[str]) -> list[tuple[str, str]]:
