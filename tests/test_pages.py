@@ -2045,17 +2045,56 @@ def test_chat_page_sends_shows_citations_and_cost(page, seeded):
 
 
 def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
-    chat_route(
-        page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": "Rates rise [1, 2]."})
-    )
+    answer = "Rates rise [1, 2], again [02]."
+    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
     page.goto(seeded.url + "/chat")
     chat_ask(page, "grouped?")
     reply_box = page.locator("#log .reply")
-    expect(reply_box).to_contain_text("Rates rise [1, 2].")
-    expect(reply_box.locator("a.cite")).to_have_text(["1", "2"])
+    expect(reply_box).to_contain_text(answer)
+    expect(reply_box.locator("a.cite")).to_have_text(["1", "2", "[02]"])
     expect(reply_box.locator(".sources li")).to_have_count(2)
     reply_box.locator("a.cite").nth(1).click()
     expect(page.locator("#log li:target")).to_contain_text("other")
+    reply_box.locator("a.cite").first.click()  # off source 2, so the next click must set it
+    expect(page.locator("#log li:target")).to_contain_text("enzyme-item")
+    reply_box.locator("a.cite").nth(2).click()  # [02] is source 2, not a missing "02"
+    expect(page.locator("#log li:target")).to_contain_text("other")
+
+
+def test_chat_new_chat_in_another_store_keeps_the_reply_on_its_way(page, seeded):
+    held = []
+    chat_route(page, held.append)
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#store")).to_have_value("c")
+
+    def ask_then_clear_vo(question):
+        count = len(held)
+        chat_ask(page, question)
+        for _ in range(100):
+            if len(held) > count:
+                break
+            page.wait_for_timeout(20)
+        assert len(held) == count + 1
+        page.locator("#store").select_option("vo")
+        page.get_by_role("button", name="New chat").click()
+
+    # The reply comes while the page is on vo: kept for c, not drawn on vo.
+    ask_then_clear_vo("asked of c")
+    held[-1].fulfill(json=CHAT_REPLY)
+    expect(page.locator("#send")).to_be_enabled()
+    expect(page.locator("#log .msg")).to_have_count(0)
+    page.locator("#store").select_option("c")
+    expect(page.locator("#log .user")).to_have_text("asked of c")
+    expect(page.locator("#log .reply")).to_have_count(1)
+    # The reply comes once the page is back on c: drawn there.
+    ask_then_clear_vo("asked again")
+    page.locator("#store").select_option("c")
+    held[-1].fulfill(json={**CHAT_REPLY, "answer": "The second reply."})
+    expect(page.locator("#log .reply")).to_have_count(2)
+    expect(page.locator("#log .user")).to_have_text(["asked of c", "asked again"])
+    # Only the newest reply is read out; the log itself is not live.
+    expect(page.locator("#spoken")).to_have_text("The second reply.")
+    expect(page.locator("#log")).not_to_have_attribute("aria-live", re.compile(".*"))
 
 
 def test_chat_new_chat_drops_the_reply_still_on_its_way(page, seeded):

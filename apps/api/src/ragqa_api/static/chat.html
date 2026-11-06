@@ -23,6 +23,7 @@
   .sources .full { margin-top:4px; white-space:pre-wrap; }
   #compose { display:grid; gap:8px; max-width:820px; }
   #box { min-height:60px; }
+  .spoken { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -41,7 +42,8 @@
   <p id="note" class="muted" role="status"></p>
 
   <div id="adding" class="muted" aria-live="polite"></div>
-  <div id="log" aria-live="polite"></div>
+  <div id="log"></div>
+  <div id="spoken" class="spoken" aria-live="polite"></div><!-- the newest reply, for screen readers: the log redraws whole -->
 
   <form id="compose">
     <label>Message <textarea id="box" placeholder="Ask about this store. Enter sends, Shift+Enter adds a line."></textarea></label>

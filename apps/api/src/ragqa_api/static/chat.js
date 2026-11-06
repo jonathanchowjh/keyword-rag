@@ -13,24 +13,24 @@ let turns = []; // what the log shows: {role: "user"} | {role: "reply", ...the /
 let answering = false;
 let hasModel = false;
 let adding = false; // files are being added: the store stays put until they are in
-let conversation = 0; // bumped by New chat, so a reply still on its way is dropped
+const cleared = {}; // New chat clicks per store, so a reply to a cleared conversation is dropped
 
 // -- the conversation, kept per store in sessionStorage; the page works without it ------------
 
-const key = () => `chat:${$("store").value}`;
+const key = (store) => `chat:${store}`;
 
-function load() {
+function load(store = $("store").value) {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(key()));
+    const saved = JSON.parse(sessionStorage.getItem(key(store)));
     return Array.isArray(saved) ? saved : [];
   } catch {
     return [];
   }
 }
 
-function save() {
+function save(store = $("store").value, list = turns) {
   try {
-    sessionStorage.setItem(key(), JSON.stringify(turns));
+    sessionStorage.setItem(key(store), JSON.stringify(list));
   } catch {
     // no storage: the chat lives until the page closes
   }
@@ -38,7 +38,7 @@ function save() {
 
 function forget() {
   try {
-    sessionStorage.removeItem(key());
+    sessionStorage.removeItem(key($("store").value));
   } catch {
     // nothing kept, nothing to clear
   }
@@ -46,14 +46,15 @@ function forget() {
 
 // -- drawing ---------------------------------------------------------------------------------
 
-// A citation mark, the route's rule: [n], [n, m, …] or [n-m] (hyphen or en dash).
-const CITATION = /\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\]/g;
+// A citation mark, the route's rule: [n], [n, m, …] or [n-m] (hyphen or en dash), each
+// number 1 to 4 ASCII digits.
+const CITATION = /\[([0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?(?:\s*,\s*[0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?)*)\]/g;
 
 // The reply's text, escaped, with each cited number linked to its source: a lone [n] as a
-// whole, each number of a grouped bracket on its own.
+// whole, each number of a grouped bracket on its own. A mark like [01] links to source 1.
 function textHtml(text, cited, at) {
   const have = new Set(cited.map((c) => c.n));
-  const link = (n, shown) => (have.has(+n) ? `<a class="cite" href="#src-${at}-${n}">${shown}</a>` : shown);
+  const link = (n, shown) => (have.has(Number(n)) ? `<a class="cite" href="#src-${at}-${Number(n)}">${shown}</a>` : shown);
   return esc(text).replace(CITATION, (mark, inner) =>
     /^\d+$/.test(inner) ? link(inner, mark) : `[${inner.replace(/\d+/g, (n) => link(n, n))}]`,
   );
@@ -103,8 +104,7 @@ async function ask() {
   const content = $("box").value.trim();
   if (!content || answering || !hasModel || !$("store").value) return;
   const store = $("store").value;
-  const mine = conversation;
-  const stale = () => store !== $("store").value || mine !== conversation; // moved on while thinking
+  const mine = cleared[store] ?? 0;
   turns.push({ role: "user", content });
   // The conversation the model sees: the user's turns and its own answers, never an error.
   const messages = turns
@@ -115,22 +115,28 @@ async function ask() {
   save();
   draw();
   setBusy(true);
+  let turn;
   try {
     const r = await api("/chat", {
       method: "POST",
       body: { collection: store, messages, method: $("method").value, model: $("model").value || null },
     });
-    if (stale()) return;
-    turns.push(r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer", usd: r.usd } : { role: "reply", ...r });
+    turn = r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer", usd: r.usd } : { role: "reply", ...r };
   } catch (e) {
-    if (stale()) return;
-    turns.push({ role: "error", content: e.message });
+    turn = { role: "error", content: e.message };
   } finally {
     setBusy(false);
     refreshSpend();
   }
+  if ((cleared[store] ?? 0) !== mine) return; // New chat cleared its conversation meanwhile
+  if (store !== $("store").value) {
+    save(store, [...load(store), turn]); // the page is on another store: kept for when it's back
+    return;
+  }
+  turns.push(turn);
   save();
   draw();
+  if (turn.role === "reply") $("spoken").textContent = turn.answer;
 }
 
 // -- adding documents -------------------------------------------------------------------------
@@ -257,7 +263,7 @@ async function loadStores() {
 // pickStore sets Send and Add before it fails, so the error line set here stays.
 $("store").addEventListener("change", () => pickStore().catch((e) => ($("status").textContent = e.message)));
 $("new").addEventListener("click", () => {
-  conversation++;
+  cleared[$("store").value] = (cleared[$("store").value] ?? 0) + 1;
   turns = [];
   forget();
   draw();
