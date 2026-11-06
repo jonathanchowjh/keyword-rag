@@ -2141,6 +2141,49 @@ def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
     expect(page.locator("#log li:target")).to_contain_text("other")
 
 
+def test_chat_renders_a_safe_subset_of_markdown(page, seeded):
+    answer = "**Rates** rise [1].\n\n- one\n- two\n\n```\n<b>x</b>\n```\n"
+    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "markdown?")
+    body = page.locator("#log .reply .md")
+    expect(body.locator("strong")).to_have_text("Rates")
+    expect(body.locator("ul li")).to_have_text(["one", "two"])
+    expect(body.locator("pre")).to_have_text("<b>x</b>")
+    assert body.locator("b").count() == 0
+    expect(body.locator("a.cite")).to_have_text(["[1]"])
+    expect(body).to_have_attribute("data-text", answer)
+
+
+def test_chat_markdown_makes_no_link_and_keeps_snake_case(page, seeded):
+    answer = "See [a](javascript:alert(1)) and snake_case_name [1]."
+    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "links?")
+    body = page.locator("#log .reply .md")
+    expect(body).to_have_text(answer)
+    expect(body.locator("a")).to_have_count(1)  # the citation only
+    expect(body.locator("a.cite")).to_have_text(["[1]"])
+    assert body.locator("em, strong").count() == 0
+
+
+def test_chat_markdown_headings_ordered_lists_italic_and_code(page, seeded):
+    answer = "## Plan\n1. *first* [1]\n2. __second__\n\nUse `x [1] **y**` here,\nthen _go_."
+    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "more?")
+    body = page.locator("#log .reply .md")
+    expect(body.locator("p").first.locator("strong")).to_have_text("Plan")
+    assert body.locator("h1, h2, h3").count() == 0
+    expect(body.locator("ol li")).to_have_text(["first [1]", "second"])
+    expect(body.locator("ol li em")).to_have_text("first")
+    expect(body.locator("ol li strong")).to_have_text("second")
+    expect(body.locator("code")).to_have_text("x [1] **y**")
+    expect(body.locator("a.cite")).to_have_count(1)  # none inside code
+    expect(body.locator("p br")).to_have_count(1)
+    expect(body.locator("p em")).to_have_text("go")
+
+
 def test_chat_new_chat_in_another_store_keeps_the_reply_on_its_way(page, seeded):
     held = []
     chat_route(page, held.append)

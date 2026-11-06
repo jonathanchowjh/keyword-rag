@@ -50,14 +50,74 @@ function forget() {
 // number 1 to 4 ASCII digits.
 const CITATION = /\[([0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?(?:\s*,\s*[0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?)*)\]/g;
 
-// The reply's text, escaped, with each cited number linked to its source: a lone [n] as a
-// whole, each number of a grouped bracket on its own. A mark like [01] links to source 1.
-function textHtml(text, cited, at) {
+// Escaped text with each cited number linked to its source: a lone [n] as a whole, each
+// number of a grouped bracket on its own. A mark like [01] links to source 1.
+function citeHtml(escaped, cited, at) {
   const have = new Set(cited.map((c) => c.n));
   const link = (n, shown) => (have.has(Number(n)) ? `<a class="cite" href="#src-${at}-${Number(n)}">${shown}</a>` : shown);
-  return esc(text).replace(CITATION, (mark, inner) =>
+  return escaped.replace(CITATION, (mark, inner) =>
     /^\d+$/.test(inner) ? link(inner, mark) : `[${inner.replace(/\d+/g, (n) => link(n, n))}]`,
   );
+}
+
+// One escaped line: `code` spans kept as typed, bold and italic, then citation links.
+// An underscore inside a word (snake_case_name) is no emphasis.
+function inlineHtml(line, cited, at) {
+  return line
+    .split(/(`[^`]+`)/)
+    .map((s, i) => {
+      if (i % 2) return `<code>${s.slice(1, -1)}</code>`;
+      const marked = s
+        .replace(/\*\*(\S(?:.*?\S)?)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|\W)__(\S(?:.*?\S)?)__(?!\w)/g, "$1<strong>$2</strong>")
+        .replace(/\*(\S(?:[^*]*?\S)?)\*/g, "<em>$1</em>")
+        .replace(/(^|\W)_(\S(?:[^_]*?\S)?)_(?!\w)/g, "$1<em>$2</em>");
+      return citeHtml(marked, cited, at);
+    })
+    .join("");
+}
+
+// The reply as a safe subset of markdown. The text is escaped first, so no tag or attribute
+// ever comes from the model: fenced code, `code`, bold, italic, - and 1. lists, # headings
+// as bold lines, blank lines as paragraphs. Links, images, tables and HTML stay as text.
+function textHtml(text, cited, at) {
+  const lines = esc(text).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let para = [];
+  const flush = () => {
+    if (para.length) out.push(`<p>${para.map((l) => inlineHtml(l, cited, at)).join("<br>")}</p>`);
+    para = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flush();
+      const code = [];
+      while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i]);
+      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      continue;
+    }
+    const heading = line.match(/^#{1,3} +(.*)$/);
+    if (heading) {
+      flush();
+      out.push(`<p><strong>${inlineHtml(heading[1], cited, at)}</strong></p>`);
+      continue;
+    }
+    const kind = /^\s*[-*] +\S/.test(line) ? "ul" : /^\s*\d+\. +\S/.test(line) ? "ol" : null;
+    if (kind) {
+      flush();
+      const items = [];
+      const mark = kind === "ul" ? /^\s*[-*] +(.*)$/ : /^\s*\d+\. +(.*)$/;
+      for (; i < lines.length && mark.test(lines[i]); i++) items.push(lines[i].match(mark)[1]);
+      i--;
+      out.push(`<${kind}>${items.map((s) => `<li>${inlineHtml(s, cited, at)}</li>`).join("")}</${kind}>`);
+      continue;
+    }
+    if (line.trim()) para.push(line);
+    else flush();
+  }
+  flush();
+  return out.join("");
 }
 
 function sourceHtml(c, at) {
@@ -74,7 +134,7 @@ function replyHtml(t, at) {
   const sources = t.citations.length
     ? `<div class="what muted">Sources</div><ul class="sources">${t.citations.map((c) => sourceHtml(c, at)).join("")}</ul>`
     : "";
-  return `<div class="msg reply"><div>${textHtml(t.answer, t.citations, at)}</div>${sources}
+  return `<div class="msg reply"><div class="md" data-text="${esc(t.answer)}">${textHtml(t.answer, t.citations, at)}</div>${sources}
     <div class="meta muted">${esc(methodLabel(t.method))}${tags} · ${usd(t.usd)}</div></div>`;
 }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Chat: a reply shows a safe subset of Markdown. The text is escaped first, then code
+  blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings (as bold lines) and
+  paragraphs are drawn; links, images, tables and HTML stay as typed text, and `[n]`
+  links work everywhere but in code.
 - Chat: a page at `/chat` (side nav, under Stores) and `POST /chat` answer from one
   store's passages and cite them as `[n]` (or `[n, m]`, `[n-m]`), with sources under
   each reply, the method, the query tags and the cost. It retrieves on the latest

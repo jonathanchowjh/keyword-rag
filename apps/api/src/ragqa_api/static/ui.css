@@ -109,3 +109,12 @@ main > details { margin:10px 0; } main summary { cursor:pointer; padding:4px 0; 
 .axis .zero { position:absolute; left:50%; transform:translateX(-50%); }
 tr.resume-row td { background:var(--card); }
 td.num, td[data-said] { white-space:nowrap; }
+/* A chat reply's markdown: tokens only, so light and dark both follow. */
+.md p, .md ul, .md ol, .md pre { margin:0 0 8px; }
+.md > :last-child { margin-bottom:0; }
+.md ul, .md ol { padding-left:22px; }
+.md code { font:12px ui-monospace, monospace; color:inherit; margin:0; padding:0 3px;
+  background:var(--card); border:1px solid var(--line); border-radius:4px; }
+.md pre { padding:8px 10px; overflow-x:auto; white-space:pre; overflow-wrap:normal;
+  background:var(--card); border:1px solid var(--line); border-radius:6px; }
+.md pre code { padding:0; border:0; background:none; }
