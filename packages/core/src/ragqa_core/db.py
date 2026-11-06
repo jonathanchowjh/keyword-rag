@@ -80,6 +80,11 @@ create table if not exists run_items (
   row_json text not null, complete integer not null default 0
 );
 create index if not exists run_items_job on run_items (job_id, method);
+create table if not exists store_bars (
+  collection text not null, kind text not null default 'gate', key text not null,
+  value real, n integer not null, computed_at text not null,
+  primary key (collection, kind)
+);
 """
 
 
@@ -120,6 +125,9 @@ NEW_COLLECTION_COLUMNS = (
     "vocabulary_version",
     "profile_json",
     "eval_set",
+    "chat_method",
+    "chat_bar",
+    "chat_k",
 )
 
 
@@ -611,6 +619,65 @@ def get_questions(conn: Connection, name: str, version: str | None = None) -> li
     return [Question(**q) for q in json.loads(row["questions_json"])]
 
 
+def get_store_bar(conn: Connection, name: str, kind: str) -> dict | None:
+    row = first(
+        conn.execute(
+            "select key, value, n, computed_at from store_bars where collection = ? and kind = ?",
+            (name, kind),
+        )
+    )
+    return dict(row) if row else None
+
+
+def save_store_bar(conn: Connection, name: str, kind: str, row: dict) -> None:
+    """row: key, value (or None) and n; computed_at is stamped here."""
+    with conn.lock:
+        conn.execute(
+            "insert or replace into store_bars (collection, kind, key, value, n, computed_at)"
+            " values (?, ?, ?, ?, ?, ?)",
+            (name, kind, row["key"], row["value"], row["n"], now()),
+        )
+
+
+def _chat_column(conn: Connection, name: str, column: str) -> str | None:
+    row = first(conn.execute(f"select {column} from collections where name = ?", (name,)))
+    return row[column] if row else None
+
+
+def _set_chat_column(conn: Connection, name: str, column: str, value: object) -> None:
+    with conn.lock:
+        conn.execute(
+            f"update collections set {column} = ? where name = ?",
+            (None if value is None else str(value), name),
+        )
+
+
+def get_chat_method(conn: Connection, name: str) -> str | None:
+    return _chat_column(conn, name, "chat_method")
+
+
+def set_chat_method(conn: Connection, name: str, method: str | None) -> None:
+    _set_chat_column(conn, name, "chat_method", method)
+
+
+def get_chat_bar(conn: Connection, name: str) -> float | None:
+    value = _chat_column(conn, name, "chat_bar")
+    return None if value is None else float(value)
+
+
+def set_chat_bar(conn: Connection, name: str, value: float | None) -> None:
+    _set_chat_column(conn, name, "chat_bar", value)
+
+
+def get_chat_k(conn: Connection, name: str) -> int | None:
+    value = _chat_column(conn, name, "chat_k")
+    return None if value is None else int(value)
+
+
+def set_chat_k(conn: Connection, name: str, k: int | None) -> None:
+    _set_chat_column(conn, name, "chat_k", k)
+
+
 def default_eval_set(conn: Connection, collection: str) -> str | None:
     """The set the store names, else the set named after it, else none."""
     row = first(conn.execute("select eval_set from collections where name = ?", (collection,)))
@@ -881,6 +948,7 @@ def set_source_enabled(conn: Connection, name: str, source: str, enabled: bool) 
 
 
 def delete_collection_rows(conn: Connection, name: str) -> None:
+    conn.execute("delete from store_bars where collection = ?", (name,))
     for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])
     conn.execute("delete from disabled_sources where collection = ?", (name,))
