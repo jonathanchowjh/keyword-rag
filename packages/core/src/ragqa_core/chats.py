@@ -52,6 +52,10 @@ OVERRIDE_FIELDS = ("method", "k", "search", "bar", "keep")
 ON_MERIT = ("search anyway", "clears its bar", "no bar")  # a store kept so is sticky
 
 
+class AlreadyAnswered(Exception):
+    """An attempt that already has an answer; it is not answered twice."""
+
+
 class UnknownChat(KeyError):
     """An unknown chat, message or attempt."""
 
@@ -242,10 +246,12 @@ class Chats:
         return self._attempt(chat, n, message["content"], False, None, first["search_text"])
 
     def answer(self, chat_id: str, n: int, attempt: int, model: str | None = None) -> dict:
-        """Answers an attempt from its evidence snapshot."""
+        """Answers an attempt from its evidence snapshot; one already answered is refused."""
         self._chat(chat_id)
         message = self._message(chat_id, n)
         found = self._attempt_row(chat_id, n, attempt)
+        if found["answer"] is not None:
+            raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
         answered = self._answer(chat_id, n, message["content"], found["evidence"], model)
         answered["usd"] += found["usd"]
         db.answer_chat_attempt(self.conn, chat_id, n, attempt, answered)

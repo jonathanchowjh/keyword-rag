@@ -39,6 +39,7 @@ from aiconnect.presets import PRESETS
 from ragqa_core import db, imports
 from ragqa_core.builder import Builder, builds
 from ragqa_core.catalog import catalog
+from ragqa_core.chats import MAX_EVIDENCE, AlreadyAnswered, Chats, UnknownChat
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import (
     EvalSetMismatch,
@@ -72,6 +73,7 @@ from ragqa_core.retriever import (
     UnknownCollection,
     available_methods,
 )
+from ragqa_core.router import Router
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import (
@@ -107,7 +109,7 @@ PROBLEM = {
     "stopped_no_key": "stopped: no AI model is set up for this job (see the Settings page)",
     "stopped_replies": "stopped: its prompts wait for replies by hand",
 }
-KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query"]
+KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query", "rewrite"]
 REKEY_PARTLY_DONE = ("failed", "cancelled", "interrupted")
 COPY_UNFINISHED = (*REKEY_PARTLY_DONE, "stopped_budget", "stopped_no_key", "stopped_replies")
 
@@ -231,6 +233,41 @@ class ChatRequest(BaseModel):
     messages: list[ChatTurn] = Field(min_length=1)  # the last is the user's question
     method: str | None = None  # keyword_rag with a vocabulary, else hybrid
     k: int = Field(5, ge=1, le=20)
+    model: str | None = None
+
+
+class NewChat(BaseModel):
+    stores: list[str]
+    title: str | None = None
+
+
+class ChatPatch(BaseModel):
+    title: str | None = None
+    stores: list[str] | None = None
+    evidence_size: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
+    rewrite: bool | None = None
+
+
+class NewMessage(BaseModel):
+    content: str = Field(min_length=1)
+    model: str | None = None
+
+
+class StoreOverride(BaseModel):
+    """null for method, k or bar means the store's own; an absent field changes nothing."""
+
+    method: str | None = None
+    k: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
+    search: dict | None = None
+    bar: float | None = Field(None, ge=-1, le=1)
+    keep: bool = False
+
+
+class NewAttempt(BaseModel):
+    overrides: dict[str, StoreOverride] = {}
+
+
+class AnswerRequest(BaseModel):
     model: str | None = None
 
 
@@ -368,6 +405,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.conn, state.store, state.models, state.ai, state.indexer, state.builder
     )
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
+    state.router = Router(state.conn, state.retriever, state.evaluator)
+    state.chats = Chats(state.conn, state.retriever, state.router, state.ai)
     state.loader = Loader(
         state.conn, state.indexer, state.builder, state.ai, settings.home, settings.build_hub
     )
@@ -417,7 +456,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(TooLarge, error(413))
     for exc in (UnknownModel, UnknownPrice):
         app.add_exception_handler(exc, error(422))
+    app.add_exception_handler(UnknownChat, error(404))
     for exc in (
+        AlreadyAnswered,
         MethodUnavailable,
         ModelMismatch,
         ListsBusy,
@@ -1193,6 +1234,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
         out["usd"] = spent["usd"]
         return out
+
+    # -- chats -----------------------------------------------------------------
+    # Chats tallies its own spending, so these routes never open a tally.
+
+    @app.get("/collections/{name}/bar")
+    def collection_bar(name: str) -> dict:
+        return asdict(state.router.bar(state.retriever.spec(name)))
+
+    @app.get("/chats")
+    def list_chats() -> list[dict]:
+        return state.chats.list()
+
+    @app.post("/chats", status_code=201)
+    def create_chat(body: NewChat) -> dict:
+        return state.chats.create(body.stores, body.title)
+
+    @app.get("/chats/{chat_id}")
+    def get_chat(chat_id: str) -> dict:
+        return state.chats.get(chat_id)
+
+    @app.patch("/chats/{chat_id}")
+    def patch_chat(chat_id: str, body: ChatPatch) -> dict:
+        return state.chats.update(chat_id, **body.model_dump(exclude_unset=True))
+
+    @app.delete("/chats/{chat_id}", status_code=204)
+    def delete_chat(chat_id: str) -> Response:
+        state.chats.delete(chat_id)
+        return Response(status_code=204)
+
+    @app.post("/chats/{chat_id}/messages")
+    def chat_message(chat_id: str, body: NewMessage) -> dict:
+        return state.chats.ask(chat_id, body.content, body.model)
+
+    @app.post("/chats/{chat_id}/messages/{n}/attempts")
+    def chat_attempt(chat_id: str, n: int, body: NewAttempt) -> dict:
+        overrides = {s: o.model_dump(exclude_unset=True) for s, o in body.overrides.items()}
+        return state.chats.rerun(chat_id, n, overrides)
+
+    @app.post("/chats/{chat_id}/messages/{n}/attempts/{attempt}/answer")
+    def chat_answer(chat_id: str, n: int, attempt: int, body: AnswerRequest | None = None) -> dict:
+        return state.chats.answer(chat_id, n, attempt, body.model if body else None)
+
+    @app.post("/chats/{chat_id}/stores/{store}/default")
+    def chat_default(chat_id: str, store: str) -> dict:
+        return state.chats.set_default(chat_id, store)
 
     @app.post("/query")
     def query(body: QueryRequest) -> dict:

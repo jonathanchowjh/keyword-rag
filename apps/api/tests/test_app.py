@@ -2250,7 +2250,14 @@ def test_ai_settings_round_trip(client):
     }
     assert {"label": "Haiku 5.5", "price_in": 0.10, "price_out": 0.50} in body["prices"]
     assert body["roles"]["answer"] == "router/llama3.1"
-    assert body["known_roles"] == ["default", "answer", "summary", "keywords", "query"]
+    assert body["known_roles"] == [
+        "default",
+        "answer",
+        "summary",
+        "keywords",
+        "query",
+        "rewrite",
+    ]
     assert body["budget"] == {"cap_usd": 20.0, "spent_usd": 0.0, "from_env": False}
     assert "ollama" not in {p["id"] for p in body["presets"]}
     assert {"id": "openrouter", "label": "OpenRouter", "kind": "openai"}.items() <= next(
@@ -3297,3 +3304,141 @@ def test_chat_needs_the_user_to_speak_last(client):
     ]
     assert client.post("/chat", json={"collection": "c", "messages": messages}).status_code == 422
     assert client.post("/chat", json={"collection": "c", "messages": []}).status_code == 422
+
+
+# -- /chats ----------------------------------------------------------------------
+
+
+def new_chat(client, stores=("c",), **body) -> dict:
+    r = client.post("/chats", json={"stores": list(stores), **body})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_chats_crud_and_errors(client):
+    add_collection(client)
+    assert client.get("/chats").json() == []
+    chat = new_chat(client, title="Mine")
+    assert chat["title"] == "Mine" and chat["stores"] == ["c"]
+    assert client.get("/chats").json()[0]["id"] == chat["id"]
+    got = client.get(f"/chats/{chat['id']}").json()
+    assert got["messages"] == [] and got["settings"]["evidence_size"] == 8
+    r = client.patch(
+        f"/chats/{chat['id']}", json={"title": "New", "evidence_size": 3, "rewrite": True}
+    )
+    assert r.status_code == 200 and r.json()["title"] == "New"
+    assert r.json()["settings"]["evidence_size"] == 3 and r.json()["settings"]["rewrite"] is True
+    for body in ({"evidence_size": 0}, {"evidence_size": 21}, {"stores": []}, {"title": " "}):
+        assert client.patch(f"/chats/{chat['id']}", json=body).status_code == 422
+    assert client.patch(f"/chats/{chat['id']}", json={"stores": ["nope"]}).status_code == 404
+    assert client.post("/chats", json={"stores": []}).status_code == 422
+    assert client.post("/chats", json={"stores": ["nope"]}).status_code == 404
+    assert client.get("/chats/nope").status_code == 404
+    assert client.patch("/chats/nope", json={"title": "x"}).status_code == 404
+    assert client.delete("/chats/nope").status_code == 404
+    assert client.post(f"/chats/{chat['id']}/messages", json={"content": ""}).status_code == 422
+    assert client.post("/chats/nope/messages", json={"content": "hi"}).status_code == 404
+    assert client.post(f"/chats/{chat['id']}/messages/9/attempts", json={}).status_code == 404
+    assert (
+        client.post(f"/chats/{chat['id']}/messages/9/attempts/1/answer", json={}).status_code == 404
+    )
+    assert client.post(f"/chats/{chat['id']}/stores/nope/default").status_code == 404
+    assert client.delete(f"/chats/{chat['id']}").status_code == 204
+    assert client.get(f"/chats/{chat['id']}").status_code == 404
+
+
+def test_chat_message_returns_decisions_evidence_and_cost(client):
+    add_collection(client)
+    chat = new_chat(client)
+    r = client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
+    assert r.status_code == 200, r.text
+    message = r.json()
+    assert message["n"] == 1 and message["content"] == "enzyme rate"
+    (attempt,) = message["attempts"]
+    assert attempt["attempt"] == 1 and attempt["answer"] and attempt["usd"] > 0
+    assert attempt["decisions"][0]["store"] == "c" and attempt["decisions"][0]["kept"]
+    assert attempt["evidence"] and attempt["evidence"][0]["store"] == "c"
+    assert client.get(f"/chats/{chat['id']}").json()["messages"][0]["attempts"] == [attempt]
+    r = client.post(f"/chats/{chat['id']}/messages/1/attempts", json={"overrides": {}})
+    assert r.status_code == 200 and r.json()["attempt"] == 2 and r.json()["answer"] is None
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    assert client.post(f"{url}/2/answer", json={}).json()["answer"]
+    assert client.post(f"{url}/2/answer", json={}).status_code == 409  # already answered
+    assert client.post(f"{url}/1/answer", json={}).status_code == 409
+    assert client.post(f"{url}/3/answer", json={}).status_code == 404
+    bad = client.post(f"/chats/{chat['id']}/messages", json={"content": "x", "model": "no/such"})
+    assert bad.status_code == 422
+    assert len(client.get(f"/chats/{chat['id']}").json()["messages"]) == 1
+
+
+def test_chat_attempt_override_rejects_a_method_the_store_cannot_run(client):
+    add_collection(client, name="bare", lists=False)
+    chat = new_chat(client, stores=["bare"])
+    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme"})
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    r = client.post(url, json={"overrides": {"bare": {"method": "kw_individual"}}})
+    assert r.status_code == 409 and "needs keyword lists" in r.json()["detail"]
+    for bad in ({"k": 0}, {"k": 21}, {"bar": 2}, {"method": "nope"}):
+        r = client.post(url, json={"overrides": {"bare": bad}})
+        assert r.status_code == 422, bad
+    r = client.post(url, json={"overrides": {"other": {"k": 2}}})
+    assert r.status_code == 404
+    r = client.post(url, json={"overrides": {"bare": {"k": 2, "method": None}}})
+    assert r.status_code == 200 and r.json()["decisions"][0]["k"] == 2
+
+
+def test_set_as_default_from_a_chat_changes_the_store_search_and_bar(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    chat = new_chat(client)
+    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    only_bar = client.post(url, json={"overrides": {"c": {"bar": 0.25}}})
+    assert only_bar.status_code == 200
+    assert only_bar.json()["decisions"][0]["bar_source"] == "override"
+    assert db.get_chat_bar(conn, "c") is None  # an override is in memory only
+    client.post(url, json={"overrides": {"c": {"k": 2, "search": {"example": "off"}}}})
+    r = client.post(f"/chats/{chat['id']}/stores/c/default")
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["chat_bar"] == 0.25 and got["chat_k"] == 2 and got["chat_method"] is None
+    assert db.get_chat_bar(conn, "c") == 0.25 and got["search"]["example"] == "off"
+    assert client.get("/collections/c").json()["search"]["example"] == "off"
+    assert set(got) == {"search", "chat_method", "chat_k", "chat_bar"}
+    assert client.get("/collections/c/bar").json()["source"] == "manual"
+    # a null clears the saved value
+    client.post(url, json={"overrides": {"c": {"bar": None}}})
+    got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
+    assert got["chat_bar"] is None and got["chat_k"] == 2
+
+
+def test_rewrite_is_a_known_role(client):
+    assert "rewrite" in client.get("/ai").json()["known_roles"]
+
+
+def test_old_post_chat_still_answers(client):
+    add_collection(client)
+    r = client.post("/chat", json=chat_body())
+    assert r.status_code == 200 and r.json()["answer"]
+
+
+def test_deleting_a_store_drops_its_bar(client):
+    conn = client.app.state.conn
+
+    def build_store():
+        add_collection(client)
+        if db.get_eval_set(conn, "e") is None:
+            db.create_eval_set(conn, "e", "mcq")
+            qs = [Question(f"q{i:02d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(20)]
+            db.replace_questions(conn, "e", qs, None)
+        db.set_default_eval_set(conn, "c", "e")
+
+    build_store()
+    first = client.get("/collections/c/bar").json()
+    assert first["source"] == "set" and first["eval_set"] == "e" and first["n"] == 20
+    conn.execute("update store_bars set value = 0.999 where collection = 'c'")
+    assert client.get("/collections/c/bar").json()["value"] == 0.999  # cached
+    assert client.delete("/collections/c").status_code == 204
+    assert client.get("/collections/c/bar").status_code == 404
+    build_store()
+    assert client.get("/collections/c/bar").json() == first

@@ -6,7 +6,7 @@ import pytest
 from aiconnect.ai import UnknownModel, UnknownPrice
 from ragqa_core import db
 from ragqa_core.builder import Builder
-from ragqa_core.chats import EVIDENCE_SIZE, RRF_K, Chats, UnknownChat
+from ragqa_core.chats import EVIDENCE_SIZE, RRF_K, AlreadyAnswered, Chats, UnknownChat
 from ragqa_core.db import connect, replace_questions
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.fakes import fake_ai, fake_models
@@ -278,6 +278,16 @@ def test_rerun_adds_an_attempt_without_answering_and_answer_answers_it(tmp_path)
         chats.answer(chat["id"], 1, 3)
     with pytest.raises(UnknownChat):
         chats.rerun(chat["id"], 2, {})
+
+
+def test_answer_refuses_an_answered_attempt(tmp_path):
+    chats, prompts = build(tmp_path)
+    chat = chats.create(["a", "b"])
+    chats.ask(chat["id"], ENZYME)
+    before, spent = len(prompts), ledger(chats, "chat")
+    with pytest.raises(AlreadyAnswered):
+        chats.answer(chat["id"], 1, 1)
+    assert len(prompts) == before and ledger(chats, "chat") == spent
 
 
 def test_rerun_rejects_a_bad_override_without_keeping_it(tmp_path):
