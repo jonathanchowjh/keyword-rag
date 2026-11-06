@@ -3399,6 +3399,9 @@ def test_set_as_default_from_a_chat_changes_the_store_search_and_bar(client):
     assert only_bar.json()["decisions"][0]["bar_source"] == "override"
     assert db.get_chat_bar(conn, "c") is None  # an override is in memory only
     client.post(url, json={"overrides": {"c": {"k": 2, "search": {"example": "off"}}}})
+    held = client.get(f"/chats/{chat['id']}").json()["overrides"]
+    assert held == {"c": {"bar": 0.25, "k": 2, "search": {"example": "off"}}}
+    assert client.get("/collections/c").json()["chat_k"] is None  # not saved yet
     r = client.post(f"/chats/{chat['id']}/stores/c/default")
     assert r.status_code == 200, r.text
     got = r.json()
@@ -3407,6 +3410,9 @@ def test_set_as_default_from_a_chat_changes_the_store_search_and_bar(client):
     assert client.get("/collections/c").json()["search"]["example"] == "off"
     assert set(got) == {"search", "chat_method", "chat_k", "chat_bar"}
     assert client.get("/collections/c/bar").json()["source"] == "manual"
+    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {}
+    detail = client.get("/collections/c").json()
+    assert (detail["chat_k"], detail["chat_method"]) == (2, None)
     # a null clears the saved value
     client.post(url, json={"overrides": {"c": {"bar": None}}})
     got = client.post(f"/chats/{chat['id']}/stores/c/default").json()

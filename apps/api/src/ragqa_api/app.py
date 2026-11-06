@@ -613,6 +613,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "count": count,
             "keyword_lists": asdict(lists) if lists else None,
             "methods_available": available,
+            # A chat's search defaults, as Set as default saves them; null is the store's own.
+            "chat_method": db.get_chat_method(state.conn, name),
+            "chat_k": db.get_chat_k(state.conn, name),
             "state": busy,
             "progress": job["progress"] if job and job["status"] == "running" else None,
             "job": job,

@@ -139,7 +139,9 @@ class Chats:
             for m in db.chat_messages(self.conn, chat_id)
         ]
         deleted = [s for s in chat["stores"] if db.get_collection(self.conn, s) is None]
-        return {**chat, "deleted_stores": deleted, "messages": messages}
+        with self._lock:  # what the next search uses for each store, beyond its defaults
+            overrides = copy.deepcopy(self.overrides.get(chat_id, {}))
+        return {**chat, "deleted_stores": deleted, "messages": messages, "overrides": overrides}
 
     def update(
         self,

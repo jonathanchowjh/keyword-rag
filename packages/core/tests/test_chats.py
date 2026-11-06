@@ -322,11 +322,17 @@ def test_set_default_writes_only_the_named_fields_and_drops_the_override(tmp_pat
     db.set_chat_bar(conn, "a", 0.5)
     search = chats.retriever.spec("a").search
 
-    chats.rerun(chat["id"], 1, {"a": {"method": "vector"}})
+    assert chats.get(chat["id"])["overrides"] == {}
+    chats.rerun(chat["id"], 1, {"a": {"method": "vector"}, "b": {"keep": True}})
+    held = chats.get(chat["id"])["overrides"]
+    assert held == {"a": {"method": "vector"}, "b": {"keep": True}}
+    held["a"]["method"] = "keyword"  # a copy: the chat's own is untouched
+    assert chats.overrides[chat["id"]]["a"] == {"method": "vector"}
     saved = chats.set_default(chat["id"], "a")
     assert saved["chat_method"] == "vector" and saved["chat_bar"] == 0.5
     assert saved["chat_k"] is None and chats.retriever.spec("a").search == search
     assert "a" not in chats.overrides[chat["id"]]
+    assert chats.get(chat["id"])["overrides"] == {"b": {"keep": True}}
 
     chats.rerun(chat["id"], 1, {"a": {"bar": None, "k": 3, "keep": True}})
     chats.rerun(chat["id"], 1, {"a": {"search": {"weights": {"words": 0.0}}}})

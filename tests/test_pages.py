@@ -3011,6 +3011,10 @@ def test_set_as_default_asks_then_saves(page, seeded):
     expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
     expect(store_row(step, "deflt").locator(".bar")).to_have_text("0.25 edited")
     expect(box).not_to_contain_text(question)
+    # The form now shows the saved defaults: Search anyway was not saved.
+    expect(box.get_by_label("k", exact=True)).to_have_value("3")
+    expect(box.get_by_label("Use the store's bar")).to_be_checked()
+    expect(box.get_by_label("Search anyway")).not_to_be_checked()
 
 
 DROPPED = {
@@ -3083,3 +3087,56 @@ def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
     expect(step.locator("fieldset[data-edit]")).to_have_count(2)
     expect(edit_box(step, "c")).to_be_visible()
     expect(edit_box(step, "vo")).to_be_visible()
+
+
+def test_edit_shows_the_chats_held_settings_and_set_as_default_saves_them(page, seeded):
+    free_store(seeded, "held")  # no eval set, so no bar; its own k is the evidence size
+    conn = seeded.app.state.conn
+    sent = attempt_posts(page)
+    chat_id = open_chat(page, seeded, ("held",))
+    chat_ask(page, "volcano magma")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    chat_ask(page, "and the lava?")
+    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+
+    # Message 2 is re-run with k = 2 and Search anyway: the chat now holds both for the store.
+    two = retrieval_step(page, 2)
+    expect(two).to_contain_text("Edit: settings for the next search in this chat")
+    box = edit_box(two, "held")
+    box.get_by_label("k", exact=True).fill("2")
+    box.get_by_label("Search anyway").check()
+    with page.expect_response(lambda r: r.url.endswith("/messages/2/attempts")):
+        box.get_by_role("button", name="Re-run retrieval").click()
+    assert sent == [{"overrides": {"held": {"k": 2, "keep": True}}}]
+    expect(page.locator("#msg-2").get_by_role("tab", name="Attempt 2")).to_be_visible()
+
+    # Message 1's Edit shows what the next search will use, not what message 1 ran with.
+    one = retrieval_step(page, 1)
+    expect(store_row(one, "held").locator(".kept")).to_have_text("kept · no bar")
+    box = edit_box(one, "held")
+    expect(box.get_by_label("k", exact=True)).to_have_value("2")
+    expect(box.get_by_label("Search anyway")).to_be_checked()
+
+    # Set as default with nothing more edited saves exactly what the form shows, and sends
+    # no re-run.
+    box.get_by_role("button", name="Set as default").click()
+    with page.expect_response(lambda r: r.url.endswith("/stores/held/default")):
+        box.get_by_role("button", name="Yes, save").click()
+    expect(box.locator(".edit-note")).to_contain_text("Saved as held's default")
+    assert len(sent) == 1
+    assert db.get_chat_k(conn, "held") == 2
+    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["overrides"] == {}
+    # The server dropped the override, Search anyway with it; k = 2 is now the store's own.
+    expect(box.get_by_label("Search anyway")).not_to_be_checked()
+    expect(box.get_by_label("k", exact=True)).to_have_value("2")
+    expect(
+        edit_box(retrieval_step(page, 2), "held").get_by_label("Search anyway")
+    ).not_to_be_checked()
+
+    # Changing only Search anyway sends only that, and the search runs with the k shown.
+    box.get_by_label("Search anyway").check()
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")) as got:
+        box.get_by_role("button", name="Re-run retrieval").click()
+    assert sent[-1] == {"overrides": {"held": {"keep": True}}}
+    ran = next(d for d in got.value.json()["decisions"] if d["store"] == "held")
+    assert (ran["k"], ran["reason"]) == (2, "search anyway")

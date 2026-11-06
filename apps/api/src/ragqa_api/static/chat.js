@@ -230,19 +230,41 @@ function evidenceHtml(e, at, ui) {
   return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">${esc(what)}</span>${passageHtml(e.text, key, ui)}</li>`;
 }
 
-// A store's Edit form as its decision ran: input values, as the form holds them.
-function editBase(d) {
-  const w = d.search?.weights ?? {};
+// What the chat's next search uses for the store, as the Edit form's input values: the
+// store's defaults with the chat's held override on top. The defaults come from the store's
+// detail; while it is missing (its fetch failed), from `d`, a decision of this chat.
+function nextBase(store, d) {
+  const own = details[store];
+  const held = chat.overrides?.[store] ?? {};
+  // With no method saved, Chats._decide picks keyword_rag where it can run, else hybrid.
+  const fallback = own?.methods_available?.includes("keyword_rag") ? "keyword_rag" : "hybrid";
+  const method = own ? (own.chat_method ?? fallback) : (d?.method ?? fallback);
+  const k = own ? (own.chat_k ?? chat.settings.evidence_size) : (d?.k ?? chat.settings.evidence_size);
+  const base = (own ? own.search : d?.search) ?? {};
+  const weights = { ...base.weights, ...held.search?.weights };
+  const tags = held.search?.query_tags ?? base.query_tags ?? "similarity";
   const out = {
-    method: d.method ?? "",
-    k: d.k == null ? "" : String(d.k),
-    query_tags: d.search?.query_tags ?? "similarity",
-    ownBar: d.bar_source !== "override",
-    bar: d.bar_source === "override" && d.bar != null ? String(d.bar) : "",
-    keep: d.reason === "search anyway",
+    method: held.method ?? method,
+    k: String(held.k ?? k),
+    query_tags: tags === "oracle" ? "classifier" : tags, // a chat has no gold: as Chats._decide
+    ownBar: held.bar == null,
+    bar: held.bar == null ? "" : String(held.bar),
+    keep: Boolean(held.keep),
   };
-  for (const c of CHANNELS) out[c] = String(w[c] ?? 1);
+  for (const c of CHANNELS) out[c] = String(weights[c] ?? 1);
   return out;
+}
+
+// The decision for the store in the attempt message n shows, if it has one.
+function decisionOf(n, store) {
+  const m = chat.messages.find((x) => x.n === n);
+  return m ? shownAttempt(m, turnOf(chat.id, n))?.decisions.find((d) => d.store === store) : undefined;
+}
+
+// The store's override for what the form changes from the next search's settings.
+function changesOf(n, store) {
+  const base = nextBase(store, decisionOf(n, store));
+  return overrideOf(turnOf(chat.id, n).edits[store] ?? base, base);
 }
 
 // The override for what `edit` changes from `base`, only the fields changed; null for k or
@@ -283,10 +305,10 @@ function readEdit(box) {
 
 const option = (value, chosen) => `<option value="${esc(value)}"${value === chosen ? " selected" : ""}>${esc(value)}</option>`;
 
-// A store's Edit form: its unsent edit when there is one, else the decision as it ran.
-function editHtml(d, ui) {
-  const store = d.store;
-  const base = editBase(d);
+// A store's Edit form: its unsent edit when there is one, else what the next search uses. `d`
+// is the store's decision in the attempt shown, if any.
+function editHtml(store, d, ui) {
+  const base = nextBase(store, d);
   const e = ui.edits[store] ?? base;
   const methods = [...new Set([...(details[store]?.methods_available ?? []), base.method, e.method])].filter(Boolean);
   const weights = CHANNELS.map(
@@ -304,7 +326,7 @@ function editHtml(d, ui) {
       <label>k <input name="k" type="number" min="1" max="${MAX_EVIDENCE}" step="1" value="${esc(e.k)}"></label>
       <label>Query tags <select name="query_tags">${QUERY_TAGS.map((t) => option(t, e.query_tags)).join("")}</select></label>
       ${weights}
-      <label>Bar <input name="bar" type="number" min="-1" max="1" step="0.01" value="${esc(e.bar)}" placeholder="${esc(two(d.bar))}"${e.ownBar ? " disabled" : ""}></label>
+      <label>Bar <input name="bar" type="number" min="-1" max="1" step="0.01" value="${esc(e.bar)}" placeholder="${esc(d && d.bar_source !== "override" ? two(d.bar) : "")}"${e.ownBar ? " disabled" : ""}></label>
       <label class="check"><input name="ownBar" type="checkbox"${e.ownBar ? " checked" : ""}> Use the store's bar</label>
       <label class="check"><input name="keep" type="checkbox"${e.keep ? " checked" : ""}> Search anyway</label>
     </div><div class="row">
@@ -315,21 +337,22 @@ function editHtml(d, ui) {
 }
 
 // The attempt's Retrieval step, collapsed unless the reader opened it: the search text, each
-// store's decision, the passages, and, on the latest attempt, an Edit form for each of the
-// chat's stores still there. Only the latest: the chat's overrides build on what it ran with.
+// store's decision as it ran, the passages, and, on the latest attempt, an Edit form for each
+// of the chat's stores still there, showing what the chat's next search uses.
 function retrievalHtml(a, at, ui, latest) {
   const passages = [...a.evidence].sort((x, y) => x.n - y.n).map((e) => evidenceHtml(e, at, ui)).join("");
   const stores = a.decisions.length
     ? `<div class="scroll"><table class="decisions"><thead><tr><th>Store</th><th>Method</th><th class="num">Best match</th>
         <th class="num">Bar</th><th>Kept</th></tr></thead><tbody>${a.decisions.map(decisionHtml).join("")}</tbody></table></div>`
     : '<p class="muted">No store was searched.</p>';
-  const edits = latest ? a.decisions.filter((d) => live().includes(d.store)).map((d) => editHtml(d, ui)).join("") : "";
+  const decision = (store) => a.decisions.find((d) => d.store === store);
+  const edits = latest ? live().map((store) => editHtml(store, decision(store), ui)).join("") : "";
   const elsewhere = latest ? "" : '<p class="muted">To edit and re-run, open the latest attempt.</p>';
   return `<details class="retrieval"${ui.open ? " open" : ""}><summary>Retrieval step</summary>
     <p><strong>Searched for:</strong> <span class="searched">${esc(a.search_text)}</span></p>
     <h3>Stores</h3>${stores}
     <h3>Evidence</h3>${passages ? `<ol class="evidence">${passages}</ol>` : '<p class="muted">No passages.</p>'}
-    ${edits ? `<h3>Edit</h3><div class="edits">${edits}</div>` : elsewhere}</details>`;
+    ${edits ? `<h3>Edit: settings for the next search in this chat</h3><div class="edits">${edits}</div>` : elsewhere}</details>`;
 }
 
 // A saved message: the user's text, then the attempt chosen (the latest unless a tab says
@@ -432,6 +455,12 @@ function drawTurn(n) {
   if (m && el) el.outerHTML = messageHtml(m);
 }
 
+// Draws every message again in place, as drawLog does but without scrolling: for a change
+// every Edit form shows, such as the chat's held overrides or a store's defaults.
+function drawTurns() {
+  for (const m of chat?.messages ?? []) drawTurn(m.n);
+}
+
 function setBusy() {
   const waiting = chat != null && pending[chat.id] != null;
   $("send").disabled = !chat || waiting || !hasModel;
@@ -458,6 +487,7 @@ async function loadDetails(names) {
     names.map(async (s) => (details[s] = await api(`/collections/${encodeURIComponent(s)}`))),
   );
   drawChips();
+  drawTurns(); // the Edit forms show the stores' defaults
   const failed = got.find((r) => r.status === "rejected");
   if (failed) $("status").textContent = failed.reason.message;
 }
@@ -553,10 +583,12 @@ async function patch(body) {
     if (chat?.id === id) {
       // Only stores that exist can be added, so the deleted ones are those still kept.
       const deleted = chat.deleted_stores.filter((s) => saved.stores.includes(s));
-      chat = { ...chat, ...saved, deleted_stores: deleted };
+      // The server drops a removed store's override; the PATCH reply does not hold them.
+      const overrides = Object.fromEntries(Object.entries(chat.overrides ?? {}).filter(([s]) => saved.stores.includes(s)));
+      chat = { ...chat, ...saved, deleted_stores: deleted, overrides };
       drawHead();
       setBusy();
-      loadDetails(live().filter((s) => !(s in details)));
+      loadDetails(live().filter((s) => !(s in details))); // and redraws the Edit forms
     }
   } catch (e) {
     if (chat?.id === id) drawHead(); // back to what is saved
@@ -606,18 +638,26 @@ async function ask() {
 
 // -- re-runs and defaults ----------------------------------------------------------------------
 
+// The chat's held overrides, read again after the server changed them, and every Edit form
+// redrawn with them. Only they are taken from the read: a reply landing meanwhile may be
+// newer than the read's messages.
+async function loadOverrides(id) {
+  const got = await api(`/chats/${encodeURIComponent(id)}`);
+  if (chat?.id !== id) return;
+  chat = { ...chat, overrides: got.overrides };
+  drawTurns();
+}
+
 // Re-runs message n's retrieval with the store's changes as the chat's override, and shows
 // the new attempt. A refusal is said beside the store and the edit stays. Returns the attempt,
 // or null when there is none.
 async function rerun(n, store) {
   const id = chat.id;
   const ui = turnOf(id, n);
-  const m = chat.messages.find((x) => x.n === n);
-  const decision = shownAttempt(m, ui)?.decisions.find((d) => d.store === store);
-  if (!decision || ui.busy) return null;
+  if (ui.busy) return null;
   let override;
   try {
-    override = overrideOf(ui.edits[store] ?? editBase(decision), editBase(decision));
+    override = changesOf(n, store);
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
     drawTurn(n);
@@ -634,6 +674,7 @@ async function rerun(n, store) {
     ui.notes[store] = null;
     ui.tab = attempt.attempt;
     if (chat?.id === id) chat = withAttempt(chat, n, attempt);
+    await loadOverrides(id).catch(said); // what every form's next search now uses
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
   }
@@ -670,17 +711,15 @@ async function answerAttempt(n, number) {
 
 const unset = (x, shown = x) => (x == null ? "unset" : shown);
 
-// Saves the store's settings as its default. An edit not yet re-run is re-run first, as the
-// server saves the override the chat holds.
+// Saves the store's settings, as its form shows them, as its default. The server saves the
+// override the chat holds, so a form that differs from it is re-run first.
 async function setDefault(n, store) {
   const id = chat.id;
   const ui = turnOf(id, n);
   ui.confirm = null;
-  const m = chat.messages.find((x) => x.n === n);
-  const decision = shownAttempt(m, ui)?.decisions.find((d) => d.store === store);
   let edited = false;
   try {
-    edited = Boolean(decision) && Object.keys(overrideOf(ui.edits[store] ?? editBase(decision), editBase(decision))).length > 0;
+    edited = Object.keys(changesOf(n, store)).length > 0;
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
     drawTurn(n);
@@ -693,6 +732,9 @@ async function setDefault(n, store) {
     const saved = await api(`/chats/${encodeURIComponent(id)}/stores/${encodeURIComponent(store)}/default`, { method: "POST" });
     const what = [`method ${unset(saved.chat_method)}`, `k ${unset(saved.chat_k)}`, `bar ${unset(saved.chat_bar, two(saved.chat_bar))}`];
     ui.notes[store] = { text: `Saved as ${store}'s default: ${what.join(", ")}.` };
+    delete ui.edits[store];
+    // The server dropped the store's override (Search anyway with it) and holds new defaults.
+    await Promise.all([loadOverrides(id).catch(said), loadDetails([store])]);
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
   }
