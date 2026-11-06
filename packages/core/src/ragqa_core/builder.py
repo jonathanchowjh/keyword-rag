@@ -231,11 +231,18 @@ class Builder:
     def estimate_tag_usd(self, spec: CollectionSpec, terms: list[str], items: list[Item]) -> float:
         """0 unless the build tags with the AI. Raises NoConnection("keywords") when no
         model can price it."""
+        return self.plan_tag(spec, terms, items)[0]
+
+    def plan_tag(
+        self, spec: CollectionSpec, terms: list[str], items: list[Item]
+    ) -> tuple[float, int]:
+        """What tagging the items would spend, and how many calls it would send (the cache
+        misses): none unless the build tags with the AI. Raises as estimate_tag_usd does."""
         build = build_of(spec)
         if build.tagging != "ai":
-            return 0.0
+            return 0.0, 0
         prompts = [tag_prompt(terms, describe_text(i, build.describes), build.tag_k) for i in items]
-        return self.ai.estimate_many(prompts, TAG_TOKENS, role="keywords")
+        return self.ai.plan_many(prompts, TAG_TOKENS, role="keywords")
 
     def _tag(
         self,
@@ -440,21 +447,32 @@ class Builder:
         """What `build` would spend after adding the items: induction while the collection
         has no vocabulary, then tagging and abstraction of what is not yet built. None when
         no model for keywords can price it: adding is then refused, as it is for summaries."""
+        return self.plan_build(spec, items)[0]
+
+    def plan_build(self, spec: CollectionSpec, items: list[Item]) -> tuple[float | None, int]:
+        """What `build` would spend after adding the items, as estimate_build_usd, and how
+        many calls it would send: the cache misses, one complete_many per step. With no
+        model for keywords: None, and build_calls (cached or not)."""
         if not builds(spec):
-            return 0.0
+            return 0.0, 0
         todo = self.unbuilt(spec, items)
         terms = db.get_vocabulary(self.conn, spec.name)
         try:
-            return (
-                self.estimate_induce_usd(spec, todo["induce"])
-                + self.estimate_tag_usd(spec, terms or GUESSED_TERMS, todo["tag"])
-                + self.estimate_abstract_usd(spec, todo["abstract"])
-            )
+            plans = [
+                self.ai.plan_many(
+                    self._induce_prompts(spec, todo["induce"]), INDUCE_TOKENS, role="keywords"
+                ),
+                self.plan_tag(spec, terms or GUESSED_TERMS, todo["tag"]),
+                self.ai.plan_many(
+                    self._abstract_prompts(spec, todo["abstract"]), ABSTRACT_TOKENS, role="keywords"
+                ),
+            ]
         except NoConnection:
-            return None
+            return None, self.build_calls(spec, items)
+        return sum(usd for usd, _ in plans), sum(calls for _, calls in plans)
 
     def build_calls(self, spec: CollectionSpec, items: list[Item]) -> int:
-        """How many AI calls `build` would make after adding the items."""
+        """How many AI calls `build` would make after adding the items, cached or not."""
         if not builds(spec):
             return 0
         todo = self.unbuilt(spec, items)

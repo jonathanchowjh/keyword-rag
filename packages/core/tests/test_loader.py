@@ -234,6 +234,32 @@ def test_import_items_then_reimport_is_free(tmp_path, monkeypatch):
     assert ix.store.get("m", ["n0"])[0].meta["source"] == "upload:notes"
 
 
+def test_an_import_estimate_on_cached_work_counts_no_calls(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "r.db")
+    ai = fake_ai(conn, lambda p: "A summary.")
+    ix = Indexer(conn, Store(None, None), fake_models(), ai)
+    spec = ix.create("m", "multihop", True)
+    ix.set_lists(spec, KeywordLists(topic=["note"], method=["topic"], common=["number"]))
+    ld = loader_for(ix, tmp_path)
+    ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
+    ix.store.delete_items("m", [r["id"] for r in ITEM_ROWS])  # new again, summaries cached
+    setup = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP)["setup"]
+    est = ld.estimate_import(spec, setup)
+    assert est["new"] == 4 and est["calls"] == 0 and est["est_usd"] == 0
+
+
+def test_a_build_estimate_on_cached_work_counts_no_calls(tmp_path, monkeypatch):
+    conn, ix, ld, _ = worked_load(tmp_path, monkeypatch)
+    ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w"), lambda p: 0)
+    ix.store.delete_items("w", [r["id"] for r in ITEM_ROWS])  # untagged again, tags cached
+    setup = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w")["setup"]
+    spec = ix.spec("w")
+    est = ld.estimate_import(spec, setup)
+    assert est["new"] == 4 and est["calls"] == 0 and est["est_usd"] == 0
+    items = [Item(r["id"], r["text"], None) for r in ITEM_ROWS]
+    assert ld.builder.build_calls(spec, items) == 4  # four tags to make, all cached
+
+
 def test_import_items_without_lists_makes_ai_lists(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
     assert ix.spec("m").keyword_version is None
@@ -450,8 +476,10 @@ def test_a_stopped_build_is_finished_by_loading_again(tmp_path, monkeypatch):
     assert ix.spec("w").vocabulary_version is not None
     assert all(not h.tags for batch in ix.store.scroll("w") for h in batch)
     # What is left is priced: a tag per item and an abstract per explained one, no induction.
+    # The stopped tagging's replies are cached, so only the abstracts would be sent.
     spec = ix.spec("w")
-    assert ld.estimate_load(spec, "scibench", None)["calls"] == len(items) + 2
+    assert ld.builder.build_calls(spec, []) == len(items) + 2
+    assert ld.estimate_load(spec, "scibench", None)["calls"] == 2
     result = ld.run(job, lambda p: None)
     assert result["added"] == 0 and result["tagged"] == len(items) and result["abstracted"] == 2
     hits = [h for batch in ix.store.scroll("w") for h in batch]

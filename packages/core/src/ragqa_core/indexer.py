@@ -18,6 +18,7 @@ from ragqa_core.types import FACETS, BuildSettings, CollectionSpec, Item, Keywor
 
 NAME = db.NAME
 BATCH = 64
+PROPOSE_TOKENS = 2000
 
 
 class ModelMismatch(Exception):
@@ -126,15 +127,16 @@ class Indexer:
         if not spec.summarize:
             return 0.0
         todo, _ = self.changed(spec, items, source)
-        return self.estimate_summaries_usd(todo)
+        return self.plan_summaries(todo)[0]
 
-    def estimate_summaries_usd(self, items: list[Item]) -> float | None:
-        """A summary of each item; None when the summary job has no model to price it with."""
+    def plan_summaries(self, items: list[Item]) -> tuple[float | None, int]:
+        """What summarizing the items would spend, and how many calls it would send (the
+        cache misses). With no model to price it: None, and one call per item."""
         try:
             prompts = [summary_prompt(i.text) for i in items]
-            return self.ai.estimate_many(prompts, SUMMARY_TOKENS, role="summary")
+            return self.ai.plan_many(prompts, SUMMARY_TOKENS, role="summary")
         except NoConnection:
-            return None
+            return None, len(items)
 
     def add(
         self,
@@ -217,15 +219,17 @@ class Indexer:
         self.store.set_chunk_sources(name, source_of)
         return {"labelled": labelled_now}
 
-    def estimate_propose_usd(self, spec: CollectionSpec, sample: list[Item]) -> float:
+    def plan_propose(self, spec: CollectionSpec, sample: list[Item]) -> tuple[float, int]:
+        """What proposing lists from the sample would spend, and 1 call, or 0 when its reply
+        is cached. Raises NoConnection("keywords") when no model can price it."""
         prompt = propose_prompt([i.text for i in sample], spec.qa_type)
-        return self.ai.estimate_usd(len(prompt), 2000, role="keywords")
+        return self.ai.plan_many([prompt], PROPOSE_TOKENS, role="keywords")
 
     def propose_lists(self, spec: CollectionSpec, sample: list[Item]) -> KeywordLists:
         reply = self.ai.complete(
             propose_prompt([i.text for i in sample], spec.qa_type),
             role="keywords",
-            max_tokens=2000,
+            max_tokens=PROPOSE_TOKENS,
             purpose="propose",
         )
         proposed = parse_json(reply.text)

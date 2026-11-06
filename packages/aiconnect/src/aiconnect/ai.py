@@ -964,8 +964,21 @@ class AI:
         model: str | None = None,
         system: str = "",
     ) -> float:
-        """What complete_many would spend on these prompts: a cached one is free, and the
-        rest are priced batched exactly when it would send them as a batch (more than
+        """What complete_many would spend on these prompts; see plan_many."""
+        return self.plan_many(prompts, max_tokens, role=role, model=model, system=system)[0]
+
+    def plan_many(
+        self,
+        prompts: list[str],
+        max_tokens: int,
+        *,
+        role: str = "default",
+        model: str | None = None,
+        system: str = "",
+    ) -> tuple[float, int]:
+        """What complete_many would spend on these prompts, and how many calls it would send:
+        the cache misses, a repeated prompt once. A cached one is free, and the rest are
+        priced batched exactly when it would send them as a batch (more than
         BATCH_THRESHOLD misses, on a kind with a Batch API). Raises as estimate_usd does."""
         connection_id, model_id = self.resolve(model or self.model_for(role))
         rates = self.need_rates(connection_id, model_id)
@@ -976,7 +989,7 @@ class AI:
         batch = (
             len(misses) > BATCH_THRESHOLD and self.need_connection(connection_id)["kind"] in BATCH
         )
-        return self._usd(rates, system, list(misses.values()), max_tokens, batch)
+        return self._usd(rates, system, list(misses.values()), max_tokens, batch), len(misses)
 
     def month_spend(self) -> float:
         month = datetime.now(UTC).strftime("%Y-%m")

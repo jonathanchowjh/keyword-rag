@@ -227,16 +227,16 @@ class Loader:
     ) -> dict:
         """`built`: a published build will be applied, so the build steps cost nothing."""
         todo, _ = self.indexer.changed(spec, items, source)
-        estimate = self.indexer.estimate_add_usd(spec, items, source)
-        calls = len(todo) if spec.summarize else 0
+        # calls: what would be sent, so a cached summary, proposal or build step is none.
+        estimate, calls = self.indexer.plan_summaries(todo) if spec.summarize else (0.0, 0)
         if self.ai.ready("keywords") and self.makes_lists(spec):
-            propose = self.indexer.estimate_propose_usd(spec, propose_sample(items))
+            propose, propose_calls = self.indexer.plan_propose(spec, propose_sample(items))
             estimate = None if estimate is None else estimate + propose
-            calls += 1
+            calls += propose_calls
         if not built:
-            build_usd = self.builder.estimate_build_usd(spec, todo)
+            build_usd, build_calls = self.builder.plan_build(spec, todo)
             estimate = None if estimate is None or build_usd is None else estimate + build_usd
-            calls += self.builder.build_calls(spec, todo)
+            calls += build_calls
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 
     def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int, set[str]]:
@@ -355,11 +355,10 @@ class Loader:
         if self.indexer.store.exists(target.name):
             have = {h.id for batch in self.indexer.store.scroll(target.name) for h in batch}
             items = [i for i in items if i.id not in have]  # unbuilt stored ones: build's own
-        estimate = self.indexer.estimate_summaries_usd(items) if target.summarize else 0.0
-        build_usd = self.builder.estimate_build_usd(target, items)
+        estimate, calls = self.indexer.plan_summaries(items) if target.summarize else (0.0, 0)
+        build_usd, build_calls = self.builder.plan_build(target, items)
         estimate = None if estimate is None or build_usd is None else estimate + build_usd
-        calls = (len(items) if target.summarize else 0) + self.builder.build_calls(target, items)
-        return {"est_usd": estimate, "items": len(items), "calls": calls}
+        return {"est_usd": estimate, "items": len(items), "calls": calls + build_calls}
 
     def start_copy(self, source: str, target: CollectionSpec) -> str:
         """Make the target with the source's eval set, switched-off sources, and queue the

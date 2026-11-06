@@ -158,6 +158,17 @@ def test_estimate_many_prices_only_the_misses_and_batches_as_the_send_would(tmp_
     assert c.estimate_many(prompts[:1], 100, system="s") > 0
 
 
+def test_plan_many_counts_only_the_calls_it_would_send(tmp_path):
+    c = fake_ai(tmp_path / "ai.db", lambda p: "ok")
+    prompts = ["a", "b", "c", "a"]
+    usd, misses = c.plan_many(prompts, 100)
+    assert misses == 3 and usd == pytest.approx(c.estimate_many(prompts, 100)) and usd > 0
+    c.complete_many(prompts[:2], max_tokens=100, purpose="t")
+    assert c.plan_many(prompts, 100)[1] == 1  # only "c" is not cached
+    c.complete_many(prompts, max_tokens=100, purpose="t")
+    assert c.plan_many(prompts, 100) == (0, 0)
+
+
 def test_estimate_has_no_batch_discount_where_batches_do_not_exist(tmp_path):
     c = fake_ai(tmp_path / "ai.db", lambda p: "")
     c.add_connection("oa", "openai", "OpenAI-compatible", api_key="k")

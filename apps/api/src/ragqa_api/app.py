@@ -1118,8 +1118,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         need_ai("keywords")
         sample = sample_items(state.store, name, tuple(db.disabled_sources(state.conn, name)))
         if not (body and body.confirm):
-            estimate = state.indexer.estimate_propose_usd(spec, sample)
-            return JSONResponse({"estimate": {"est_usd": estimate, "calls": 1}}, 200)
+            estimate, calls = state.indexer.plan_propose(spec, sample)
+            return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
         return asdict(state.indexer.propose_lists(spec, sample))
 
     @app.get("/collections/{name}/keyword-lists")
@@ -1194,8 +1194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             need_ai("keywords")
         if not body.confirm:
             items = state.builder.stored_items(name)
-            estimate = state.builder.estimate_tag_usd(spec, terms, items)
-            calls = len(items) if build.tagging == "ai" else 0
+            estimate, calls = state.builder.plan_tag(spec, terms, items)
             return JSONResponse(
                 {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
             )

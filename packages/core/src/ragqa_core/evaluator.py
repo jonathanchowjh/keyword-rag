@@ -445,6 +445,9 @@ class Evaluator:
                 (n, chars, tokens, n > BATCH_THRESHOLD, "answer", model)
                 for n in n_by_method.values()
             )
+        # Every call the run would make, cached or not: answer prompts depend on what is
+        # retrieved, so they cannot be checked against the cache, and the other parts are
+        # priced from a sample of the questions. The price counts the same calls.
         calls = sum(part[0] for part in parts)
         if calls == 0:
             return {"calls": 0, "est_usd": 0.0, "roles": []}
