@@ -10,11 +10,11 @@ from collections.abc import Callable, Collection
 
 import numpy as np
 
-from aiconnect.ai import AI
+from aiconnect.ai import AI, AwaitingReplies, BudgetExceeded, NoConnection, ProviderError
 from ragqa_core import db
 from ragqa_core.builder import TAG_TOKENS, Builder, build_of, picked_terms
 from ragqa_core.connection import Connection
-from ragqa_core.indexer import Indexer
+from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, matched
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
@@ -57,6 +57,31 @@ class MethodUnavailable(Exception):
 
 class UnknownCollection(Exception):
     pass
+
+
+# What one method's run may raise and still leave the others to run: it becomes that
+# method's `error`, so it does not hide what the others spent.
+PER_METHOD_ERRORS = (
+    MethodUnavailable,
+    NoConnection,
+    BudgetExceeded,
+    ModelMismatch,
+    AwaitingReplies,
+    ProviderError,  # a method's provider failing must not hide what the others spent
+)
+
+
+def available_methods(spec: CollectionSpec, has_lists: bool) -> dict[str, str | None]:
+    """Each method with why it can't run on the store, or None when it can."""
+    out: dict[str, str | None] = {}
+    for m in METHOD_NAMES:
+        if m in KEYWORD_METHODS and not has_lists:
+            out[m] = "needs keyword lists"
+        elif m == "keyword_rag" and spec.vocabulary_version is None:
+            out[m] = "needs a vocabulary"
+        else:
+            out[m] = None
+    return out
 
 
 def rrf(rankings: list[list[Hit]], k: int, weights: list[float] | None = None) -> list[Hit]:

@@ -15,7 +15,8 @@ delete_collection_rows and the migrations in connect are several statements and
 are not atomic (move_ai_tables, replace_questions and each collection's step of the eval set
 migration are one transaction each). The eval set writes (save_questions, replace_questions,
 delete_eval_set) hold the lock for the whole write; log_job also reads then writes, so it
-assumes a single writer (the worker).
+assumes a single writer (the worker). So do the chat writes, which number a chat's messages
+and a message's attempts inside the lock.
 """
 
 import hashlib
@@ -84,6 +85,20 @@ create table if not exists store_bars (
   collection text not null, kind text not null default 'gate', key text not null,
   value real, n integer not null, computed_at text not null,
   primary key (collection, kind)
+);
+create table if not exists chats (
+  id text primary key, title text not null, stores_json text not null,
+  settings_json text not null, created_at text not null, updated_at text not null
+);
+create table if not exists chat_messages (
+  chat_id text not null, n integer not null, content text not null,
+  created_at text not null, primary key (chat_id, n)
+);
+create table if not exists chat_attempts (
+  chat_id text not null, n integer not null, attempt integer not null,
+  search_text text not null, decisions_json text not null, evidence_json text not null,
+  answer text, citations_json text not null, usd real not null, error text, model text,
+  created_at text not null, primary key (chat_id, n, attempt)
 );
 """
 
@@ -1008,3 +1023,177 @@ def run_items(conn: Connection, job_id: str, method: str | None = None) -> list[
         }
         for r in rows
     ]
+
+
+# -- saved chats ---------------------------------------------------------------
+
+
+def _chat(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "stores": json.loads(row["stores_json"]),
+        "settings": json.loads(row["settings_json"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_chat(conn: Connection, title: str, stores: list[str], settings: dict) -> str:
+    chat_id = uuid.uuid4().hex
+    stamp = now()
+    conn.execute(
+        "insert into chats values (?, ?, ?, ?, ?, ?)",
+        (chat_id, title, json.dumps(stores), json.dumps(settings), stamp, stamp),
+    )
+    return chat_id
+
+
+def get_chat(conn: Connection, chat_id: str) -> dict | None:
+    row = first(conn.execute("select * from chats where id = ?", (chat_id,)))
+    return _chat(row) if row else None
+
+
+def list_chats(conn: Connection) -> list[dict]:
+    """Newest first. now() has one-second resolution, so rowid breaks ties."""
+    rows = conn.execute(
+        "select c.*, (select count(*) from chat_messages m where m.chat_id = c.id) as messages"
+        " from chats c order by c.updated_at desc, c.rowid desc"
+    )
+    return [{**_chat(r), "messages": r["messages"]} for r in rows]
+
+
+def update_chat(
+    conn: Connection,
+    chat_id: str,
+    *,
+    title: str | None = None,
+    stores: list[str] | None = None,
+    settings: dict | None = None,
+) -> None:
+    """Writes the fields given, and stamps updated_at."""
+    with conn.lock:
+        if title is not None:
+            conn.execute("update chats set title = ? where id = ?", (title, chat_id))
+        if stores is not None:
+            conn.execute(
+                "update chats set stores_json = ? where id = ?", (json.dumps(stores), chat_id)
+            )
+        if settings is not None:
+            conn.execute(
+                "update chats set settings_json = ? where id = ?", (json.dumps(settings), chat_id)
+            )
+        conn.execute("update chats set updated_at = ? where id = ?", (now(), chat_id))
+
+
+def delete_chat(conn: Connection, chat_id: str) -> None:
+    with conn.lock:
+        conn.execute("delete from chat_attempts where chat_id = ?", (chat_id,))
+        conn.execute("delete from chat_messages where chat_id = ?", (chat_id,))
+        conn.execute("delete from chats where id = ?", (chat_id,))
+
+
+def add_chat_message(conn: Connection, chat_id: str, content: str) -> int:
+    """Saves the chat's next message and returns its number, counted from 1."""
+    with conn.lock:
+        n = conn.execute(
+            "select coalesce(max(n), 0) + 1 as n from chat_messages where chat_id = ?",
+            (chat_id,),
+        )[0]["n"]
+        stamp = now()
+        conn.execute("insert into chat_messages values (?, ?, ?, ?)", (chat_id, n, content, stamp))
+        conn.execute("update chats set updated_at = ? where id = ?", (stamp, chat_id))
+        return n
+
+
+def delete_chat_message(conn: Connection, chat_id: str, n: int) -> None:
+    with conn.lock:
+        conn.execute("delete from chat_attempts where chat_id = ? and n = ?", (chat_id, n))
+        conn.execute("delete from chat_messages where chat_id = ? and n = ?", (chat_id, n))
+
+
+def chat_messages(conn: Connection, chat_id: str) -> list[dict]:
+    rows = conn.execute(
+        "select n, content, created_at from chat_messages where chat_id = ? order by n",
+        (chat_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def _attempt(row: sqlite3.Row) -> dict:
+    return {
+        "n": row["n"],
+        "attempt": row["attempt"],
+        "search_text": row["search_text"],
+        "decisions": json.loads(row["decisions_json"]),
+        "evidence": json.loads(row["evidence_json"]),
+        "answer": row["answer"],
+        "citations": json.loads(row["citations_json"]),
+        "usd": row["usd"],
+        "error": row["error"],
+        "model": row["model"],
+        "created_at": row["created_at"],
+    }
+
+
+def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> int:
+    """Saves message n's next attempt (search_text, decisions, evidence, answer, citations,
+    usd, error, model) and returns its number, counted from 1."""
+    with conn.lock:
+        number = conn.execute(
+            "select coalesce(max(attempt), 0) + 1 as a from chat_attempts"
+            " where chat_id = ? and n = ?",
+            (chat_id, n),
+        )[0]["a"]
+        conn.execute(
+            "insert into chat_attempts values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat_id,
+                n,
+                number,
+                attempt["search_text"],
+                json.dumps(attempt["decisions"]),
+                json.dumps(attempt["evidence"]),
+                attempt["answer"],
+                json.dumps(attempt["citations"]),
+                attempt["usd"],
+                attempt["error"],
+                attempt["model"],
+                now(),
+            ),
+        )
+        return number
+
+
+def answer_chat_attempt(
+    conn: Connection, chat_id: str, n: int, attempt: int, answered: dict
+) -> None:
+    """Writes an attempt's answer, citations, usd, error and model."""
+    conn.execute(
+        "update chat_attempts set answer = ?, citations_json = ?, usd = ?, error = ?, model = ?"
+        " where chat_id = ? and n = ? and attempt = ?",
+        (
+            answered["answer"],
+            json.dumps(answered["citations"]),
+            answered["usd"],
+            answered["error"],
+            answered["model"],
+            chat_id,
+            n,
+            attempt,
+        ),
+    )
+
+
+def chat_attempts(conn: Connection, chat_id: str, n: int | None = None) -> list[dict]:
+    """The chat's attempts (or message n's), by message, then attempt."""
+    if n is None:
+        rows = conn.execute(
+            "select * from chat_attempts where chat_id = ? order by n, attempt", (chat_id,)
+        )
+    else:
+        rows = conn.execute(
+            "select * from chat_attempts where chat_id = ? and n = ? order by attempt",
+            (chat_id, n),
+        )
+    return [_attempt(r) for r in rows]

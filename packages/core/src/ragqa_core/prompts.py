@@ -18,6 +18,11 @@ SUMMARY_TOKENS = 120
 CHAT_TOKENS = 1024
 CHAT_TURNS = 6  # the history a chat reply sees
 CHAT_PASSAGE_CHARS = 1500  # imports.CHUNK_CHARS: a text upload's chunk is never cut
+REWRITE_TOKENS = 200
+# n, or a range n-m with a hyphen or en dash. ASCII digits only, as JavaScript's \d, and at
+# most 4 of them, so a long run can't make int() raise after the paid call.
+CITE_PART = r"[0-9]{1,4}(?:\s*[-\u2013]\s*[0-9]{1,4})?"
+CITATION = re.compile(rf"\[({CITE_PART}(?:\s*,\s*{CITE_PART})*)\]")  # [n], [n, m], [n-m]
 
 METHOD_HINT = {
     "mcq": "experiment or analysis types (e.g. tabular scrutiny, controlled experiment)",
@@ -110,7 +115,7 @@ def abstract_prompt(text: str, explanation: str, answer: str | None) -> str:
     )
 
 
-def edge_order(hits: list[Hit]) -> list[Hit]:
+def edge_order[T](hits: list[T]) -> list[T]:
     """Best first and last (spec D12): ranks 1, 3, 5, … then …, 6, 4, 2, so the weakest
     evidence sits in the middle, where a long prompt is read least."""
     return hits[0::2] + hits[1::2][::-1]
@@ -179,11 +184,17 @@ def answer_prompt(
 
 def chat_prompt(question: str, history: list[dict], hits: list[Hit]) -> tuple[str, str]:
     """A chat reply's prompt: the last CHAT_TURNS of the history, the passages numbered from 1
-    in edge order (each cut short), then the question."""
+    in edge order (each cut short), then the question. With no passages, the model is told
+    so, and told to say so."""
     system = (
         "You answer questions using the passages given. Cite the passages you use as [n]."
         " If they don't hold the answer, say so."
     )
+    if not hits:
+        system += (
+            " No store passages matched this question; answer from general knowledge and say"
+            " that no store passages were used."
+        )
     parts = []
     if history[-CHAT_TURNS:]:
         turns = (
@@ -199,6 +210,28 @@ def chat_prompt(question: str, history: list[dict], hits: list[Hit]) -> tuple[st
         parts.append("Passages:\n" + "\n".join(lines))
     parts.append(f"Question: {question}")
     return system, "\n\n".join(parts)
+
+
+def rewrite_prompt(history: list[str], message: str) -> tuple[str, str]:
+    """A follow-up rewritten as one standalone question, from the user's earlier messages."""
+    system = (
+        "Rewrite the user's last message as one standalone question that keeps every name"
+        " and detail from the earlier messages. Reply with the question only."
+    )
+    earlier = "\n".join(f"User: {m}" for m in history)
+    return system, f"Earlier messages:\n{earlier}\n\nLast message: {message}"
+
+
+def cited_numbers(text: str, count: int) -> list[int]:
+    """The passage numbers `text` cites, in first-cited order and each once: lists and
+    ranges are expanded, and numbers outside 1..count dropped."""
+    out: dict[int, None] = {}
+    for group in CITATION.findall(text):
+        for part in group.split(","):
+            ends = [int(x) for x in re.split(r"[-\u2013]", part)]
+            for n in range(max(ends[0], 1), min(ends[-1], count) + 1):
+                out[n] = None
+    return list(out)
 
 
 def hop_prompt(question: str, passages: list[str]) -> str:

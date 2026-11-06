@@ -10,7 +10,6 @@ Run with `uvicorn --factory ragqa_api.app:create_app`.
 
 import base64
 import json
-import re
 import secrets
 import shutil
 import threading
@@ -61,15 +60,17 @@ from ragqa_core.prompts import (
     CHAT_TURNS,
     answer_prompt,
     chat_prompt,
+    cited_numbers,
     edge_order,
 )
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
-    KEYWORD_METHODS,
     METHOD_NAMES,
+    PER_METHOD_ERRORS,
     MethodUnavailable,
     Retriever,
     UnknownCollection,
+    available_methods,
 )
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
@@ -86,14 +87,6 @@ from ragqa_core.vocabulary import clean_terms
 from ragqa_worker.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
-PER_METHOD_ERRORS = (
-    MethodUnavailable,
-    NoConnection,
-    BudgetExceeded,
-    ModelMismatch,
-    AwaitingReplies,
-    ProviderError,  # a method's provider failing must not hide what the others spent
-)
 BUSY_STATE = {
     "load": "loading",
     "rekey": "rekeying",
@@ -239,37 +232,6 @@ class ChatRequest(BaseModel):
     method: str | None = None  # keyword_rag with a vocabulary, else hybrid
     k: int = Field(5, ge=1, le=20)
     model: str | None = None
-
-
-# n, or a range n-m with a hyphen or en dash. ASCII digits only, as JavaScript's \d, and at
-# most 4 of them, so a long run can't make int() raise after the paid call.
-CITE_PART = r"[0-9]{1,4}(?:\s*[-\u2013]\s*[0-9]{1,4})?"
-CITATION = re.compile(rf"\[({CITE_PART}(?:\s*,\s*{CITE_PART})*)\]")  # [n], [n, m], [n-m]
-
-
-def cited_numbers(text: str, count: int) -> list[int]:
-    """The passage numbers `text` cites, in first-cited order and each once: lists and
-    ranges are expanded, and numbers outside 1..count dropped."""
-    out: dict[int, None] = {}
-    for group in CITATION.findall(text):
-        for part in group.split(","):
-            ends = [int(x) for x in re.split(r"[-\u2013]", part)]
-            for n in range(max(ends[0], 1), min(ends[-1], count) + 1):
-                out[n] = None
-    return list(out)
-
-
-def available_methods(spec: CollectionSpec, has_lists: bool) -> dict[str, str | None]:
-    """Each method with why it can't run on the store, or None when it can."""
-    out: dict[str, str | None] = {}
-    for m in METHOD_NAMES:
-        if m in KEYWORD_METHODS and not has_lists:
-            out[m] = "needs keyword lists"
-        elif m == "keyword_rag" and spec.vocabulary_version is None:
-            out[m] = "needs a vocabulary"
-        else:
-            out[m] = None
-    return out
 
 
 class EvalRequest(BaseModel):

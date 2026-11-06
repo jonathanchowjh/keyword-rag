@@ -1,15 +1,18 @@
 from dataclasses import replace
 
 from ragqa_core.prompts import (
+    REWRITE_TOKENS,
     abstract_prompt,
     answer_prompt,
     chat_prompt,
+    cited_numbers,
     edge_order,
     hop_prompt,
     induce_prompt,
     parse_answer,
     parse_json,
     propose_prompt,
+    rewrite_prompt,
     summary_prompt,
     tag_prompt,
 )
@@ -236,3 +239,31 @@ def test_chat_prompt_cuts_long_passages():
     long = Hit("h", "x" * 5000, 1.0, {}, [], None, None, {})
     _, user = chat_prompt("q", [], [long])
     assert "[1] " + "x" * 1500 + "\n" in user and "x" * 1501 not in user
+
+
+def test_chat_prompt_without_passages_says_none_matched():
+    system, user = chat_prompt("why?", [{"role": "user", "content": "hi"}], [])
+    assert "Passages" not in user and user.endswith("Question: why?")
+    assert system.endswith(
+        "No store passages matched this question; answer from general knowledge and say"
+        " that no store passages were used."
+    )
+    with_hits, _ = chat_prompt("why?", [], chat_hits(1))
+    assert "No store passages matched" not in with_hits
+
+
+def test_rewrite_prompt_asks_for_one_standalone_question():
+    system, user = rewrite_prompt(["Tell me about enzymes", "And catalysts?"], "Which is faster?")
+    assert system == (
+        "Rewrite the user's last message as one standalone question that keeps every name"
+        " and detail from the earlier messages. Reply with the question only."
+    )
+    assert user.index("Tell me about enzymes") < user.index("And catalysts?")
+    assert user.index("And catalysts?") < user.index("Which is faster?")
+    assert user.rstrip().endswith("Which is faster?")
+    assert REWRITE_TOKENS == 200
+
+
+def test_cited_numbers_expand_lists_and_ranges_in_first_cited_order():
+    assert cited_numbers("see [3], [1-2] and [2, 9] and [4\u20135]", 4) == [3, 1, 2, 4]
+    assert cited_numbers("[12345] [0]", 4) == []
