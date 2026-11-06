@@ -162,21 +162,32 @@ function bindRunForm() {
   });
   const forget = () => ($("rf-confirm").innerHTML = "");
   form.addEventListener("change", forget);
-  // The counts follow the chosen eval set: re-read from the estimate, which is free.
-  $("rf-set").addEventListener("change", async () => {
+  // The counts follow the chosen eval set and split: re-read from the estimate, which is free.
+  let counting = 0; // bumped by each re-read, so an older answer can't overwrite a newer one
+  const labels = (dev, all) => {
+    $("rf-split").querySelector("[value=dev]").textContent = `Dev slice (${dev})`;
+    $("rf-split").querySelector("[value=full]").textContent = `All (${all})`;
+  };
+  const recount = async () => {
+    const mine = ++counting;
     $("rf-msg").textContent = "";
     const request = body();
+    const chosen = $("rf-set").value;
     if (!request.methods.length) request.methods = ["hybrid"];
     try {
       const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
-      const chosen = $("rf-set").value;
-      $("rf-split").querySelector("[value=dev]").textContent = `Dev slice (${count(estimate.dev_questions)})`;
-      $("rf-split").querySelector("[value=full]").textContent = `All (${count(estimate.questions)})`;
+      if (mine !== counting) return;
+      labels(count(estimate.dev_questions), count(estimate.questions));
       $("rf-measure").innerHTML = measureHtml(chosen === col.eval_set ? col : estimate);
     } catch (e) {
+      if (mine !== counting) return;
+      labels("–", "–"); // not the last set's counts
+      $("rf-measure").innerHTML = "";
       $("rf-msg").textContent = e.message;
     }
-  });
+  };
+  $("rf-set").addEventListener("change", recount);
+  $("rf-split").addEventListener("change", recount);
   $("rf-estimate").addEventListener("click", async () => {
     $("rf-msg").textContent = "";
     forget();

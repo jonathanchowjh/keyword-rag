@@ -573,7 +573,8 @@ class ImportBox {
         msg.textContent = e.message;
       }
     };
-    if (estimate && estimate.est_usd > 0) confirmSpend(this.own("confirm"), estimate, queue);
+    // An unpriced (null) estimate is not free: it is shown and confirmed, like a priced one.
+    if (estimate && estimate.est_usd !== 0) confirmSpend(this.own("confirm"), estimate, queue);
     else await queue();
   }
 }

@@ -1183,6 +1183,34 @@ def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_p
     expect(page.locator("#sources tbody tr", has_text="upload:notes")).to_have_count(0)
 
 
+def test_an_unpriced_items_import_asks_before_it_queues(page, seeded, tmp_path):
+    seeded.build("unp")  # keyword lists made: the import itself is free on the server
+
+    def unpriced(route):
+        body = route.fetch().json()
+        body["estimate"] = {**body["estimate"], "est_usd": None}
+        route.fulfill(json=body)
+
+    page.route("**/collections/unp/uploads?*", unpriced)
+    imports = []
+    page.on("request", lambda r: imports.append(r) if r.url.endswith("/imports") else None)
+    notes = tmp_path / "notes.jsonl"
+    notes.write_text(json.dumps({"id": "u1", "text": "a note about reefs"}))
+    page.goto(seeded.url + "/c/unp")
+    page.locator("#imp-items-file").set_input_files(str(notes))
+    page.locator("#imp-items-go").click()
+    expect(page.locator("#imp-items-preview")).to_contain_text("1 row")
+    page.locator("#imp-items-import").click()
+    confirm = page.locator("#imp-items-confirm")
+    expect(confirm).to_contain_text("cost unknown: no AI model is set up")
+    page.wait_for_timeout(200)
+    assert imports == []  # nothing queued until Start
+    confirm.get_by_role("button", name="Start").click()
+    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
+    assert len(imports) == 1 and json.loads(imports[0].post_data)["confirm"] is True
+    jobs_done(seeded, "unp")
+
+
 def test_import_questions_on_the_eval_set_page_then_include_leaked(page, seeded, tmp_path):
     httpx.post(f"{seeded.url}/collections", json={"name": "qimp", "qa_type": "mcq"})
     httpx.post(f"{seeded.url}/eval-sets", json={"name": "qimp", "qa_type": "mcq"})
@@ -1838,6 +1866,44 @@ def test_run_form_picks_an_eval_set_of_the_store_type_and_shows_its_counts(page,
     expect(page.locator("#runs tbody tr")).to_have_count(1)
     runs = httpx.get(f"{seeded.url}/eval?collection=rf1").json()
     assert [r["eval_set"] for r in runs] == ["rf2"]
+
+
+def test_run_form_counts_follow_the_newest_pick(page, seeded):
+    seeded.build("rc")
+    mcq_set(seeded, "rc3", 3)
+    mcq_set(seeded, "rc5", 5)
+    held, failing = [], []
+
+    def estimate(route):
+        if route.request.method != "POST":
+            route.fallback()
+        elif failing:
+            route.fulfill(status=500, json={"detail": "estimate broke"})
+        elif json.loads(route.request.post_data or "{}").get("eval_set") == "rc3":
+            held.append(route)  # answered late, after the newer pick
+        else:
+            route.fallback()
+
+    page.route("**/eval", estimate)
+    page.goto(seeded.url + "/c/rc")
+    expect(page.locator("#runs")).not_to_be_empty()
+    page.get_by_role("button", name="New run").click()
+    full = page.locator("#rf-split option[value=full]")
+    page.locator("#rf-set").select_option("rc3")
+    page.locator("#rf-set").select_option("rc5")
+    expect(full).to_have_text("All (5)")
+    assert len(held) == 1
+    with page.expect_response(lambda r: '"rc3"' in (r.request.post_data or "")):
+        held[0].fallback()
+    page.wait_for_timeout(200)  # the older answer is in, and must not draw
+    expect(full).to_have_text("All (5)")
+    # A split change re-reads too; a failed read shows no counts rather than the last ones.
+    page.expected = ["500"]
+    failing.append(True)
+    page.locator("#rf-split").select_option("full")
+    expect(full).to_have_text("All (–)")
+    expect(page.locator("#rf-split option[value=dev]")).to_have_text("Dev slice (–)")
+    expect(page.locator("#rf-msg")).to_contain_text("estimate broke")
 
 
 def test_run_form_says_when_the_estimate_refuses_a_set(page, seeded):
