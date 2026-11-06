@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import time
+import zipfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -1824,6 +1825,45 @@ def test_a_text_file_shrunk_to_one_chunk_is_one_item_named_by_the_file(client):
     grown = add_text(client, "x.md", long_text(["alpha", "brine"]))
     assert grown["result"]["removed"] == 1
     assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2"]
+
+
+def store_import(client, filename, body, source_name="docs"):
+    """A file imported the store page's way: no accept=text, the guessed mapping."""
+    up = upload(client, body, filename=filename).json()
+    r = do_import(client, up, source_name, confirm=True)
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    return job
+
+
+def test_a_file_named_like_a_chunk_of_another_is_not_its_chunk(client, tmp_path):
+    add_collection(client, questions=False, lists=False)
+    store_import(client, "a.md", long_text(["alpha", "brine", "cocoa"]))
+    store_import(client, "a.md#b.md", b"one chunk of its own")
+    zipped = tmp_path / "x.zip"
+    with zipfile.ZipFile(zipped, "w") as z:
+        z.writestr("a.md#old/x.md", long_text(["delta", "egret"]).decode())
+        z.writestr("a.md#7.txt", b"also its own")
+    store_import(client, "x.zip", zipped.read_bytes())
+    before = source_ids(client, "upload:docs")
+    assert {"a.md#b.md", "a.md#old/x.md#1", "a.md#old/x.md#2", "a.md#7.txt"} <= set(before)
+    job = store_import(client, "a.md", long_text(["alpha", "brine"]))
+    assert job["result"]["removed"] == 1
+    assert source_ids(client, "upload:docs") == sorted(set(before) - {"a.md#3"})
+
+
+def test_appending_to_a_split_file_re_indexes_only_the_changed_chunks(client):
+    add_collection(client, questions=False, lists=False)
+    add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    job = add_text(client, "x.md", long_text(["alpha", "brine", "cocoa", "delta"]))
+    assert job["result"]["updated"] <= 2 and job["result"]["new"] == 1
+    assert job["result"]["unchanged"] >= 2
+    held = client.app.state.store.get("c", [f"x.md#{i}" for i in (1, 2, 3, 4)])
+    assert [(h.meta["part"], h.meta["parts"]) for h in held] == [(i, 4) for i in (1, 2, 3, 4)]
+    assert all(h.meta["source"] == "upload:docs" and h.meta["file"] == "x.md" for h in held)
+    again = add_text(client, "x.md", long_text(["alpha", "brine", "cocoa", "delta"]))
+    assert again["result"]["unchanged"] == 4
 
 
 def test_a_failed_text_import_removes_nothing(client):

@@ -61,6 +61,12 @@ def stored_exclusions(q: Question, stored: set[str]) -> Question:
     return replace(q, meta={**q.meta, "excluded_ids": kept})
 
 
+def chunk_of(item_id: str) -> str | None:
+    """The file a `<file>#<digits>` chunk id names; None for any other id."""
+    base, mark, part = item_id.rpartition("#")
+    return base if mark and part.isascii() and part.isdigit() else None
+
+
 class Loader:
     def __init__(
         self,
@@ -248,17 +254,25 @@ class Loader:
 
     def drop_stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> int:
         """Delete the source's items of these text files that the import no longer yields:
-        ids equal to a file name or starting with `<file>#`, less the ids just written. A
-        file that shrank leaves none of its old chunks behind. Returns how many went."""
+        ids equal to a file name or `<file>#<digits>`, less the ids just written. A file that
+        shrank leaves none of its old chunks behind; a file named `a.md#b.md` is not a chunk
+        of `a.md`. Returns how many went."""
         stale = [
             i
             for i in self.indexer.store.source_ids(name, source)
-            if i not in written
-            and (i in files or any(i[:k] in files for k, c in enumerate(i) if c == "#"))
+            if i not in written and (i in files or chunk_of(i) in files)
         ]
         if stale:
             self.indexer.store.delete_items(name, stale)
         return len(stale)
+
+    def set_chunk_meta(self, name: str, source: str, items: list[Item]) -> None:
+        """Write each chunk's current meta (its part and the file's parts) to the store as a
+        payload only: no embedding, no AI. The change hash leaves `parts` out, so a chunk
+        whose text did not change is not re-indexed when its file gains or loses a part."""
+        meta = {i.id: {"meta": {**i.meta, "source": source}} for i in items if "parts" in i.meta}
+        if meta:
+            self.indexer.store.set_payloads(name, meta)
 
     def questions_set(self, spec: CollectionSpec) -> str:
         """The store's default eval set, made (named after the store) when it has none. Raises
@@ -310,6 +324,8 @@ class Loader:
             # After the add, so an import that fails removes nothing.
             written = {i.id for i in built}
             counts["removed"] = self.drop_stale_chunks(name, setup["source"], files, written)
+            if files:
+                self.set_chunk_meta(name, setup["source"], built)
         else:
             eval_set = self.questions_set(spec)
             counts, todo = self.question_counts(eval_set, built)

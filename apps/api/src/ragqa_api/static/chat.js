@@ -106,11 +106,21 @@ function textHtml(text, cited, at) {
     const kind = /^\s*[-*] +\S/.test(line) ? "ul" : /^\s*\d+\. +\S/.test(line) ? "ol" : null;
     if (kind) {
       flush();
+      // Items run on across a single blank line, and an indented line continues its item.
+      const mark = kind === "ul" ? /^\s*[-*] +(.*)$/ : /^\s*(\d+)\. +(.*)$/;
       const items = [];
-      const mark = kind === "ul" ? /^\s*[-*] +(.*)$/ : /^\s*\d+\. +(.*)$/;
-      for (; i < lines.length && mark.test(lines[i]); i++) items.push(lines[i].match(mark)[1]);
+      const first = line.match(mark);
+      const start = kind === "ol" && Number(first[1]) !== 1 ? ` start="${Number(first[1])}"` : "";
+      for (; i < lines.length; i++) {
+        const item = lines[i].match(mark);
+        if (item) items.push([item[kind === "ul" ? 1 : 2]]);
+        else if (/^\s+\S/.test(lines[i])) items[items.length - 1].push(lines[i].trim());
+        else if (!lines[i].trim() && mark.test(lines[i + 1] ?? "")) continue;
+        else break;
+      }
       i--;
-      out.push(`<${kind}>${items.map((s) => `<li>${inlineHtml(s, cited, at)}</li>`).join("")}</${kind}>`);
+      const lis = items.map((parts) => `<li>${parts.map((s) => inlineHtml(s, cited, at)).join("<br>")}</li>`);
+      out.push(`<${kind}${start}>${lis.join("")}</${kind}>`);
       continue;
     }
     if (line.trim()) para.push(line);

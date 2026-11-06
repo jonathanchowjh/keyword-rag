@@ -2196,6 +2196,28 @@ def test_chat_markdown_headings_ordered_lists_italic_and_code(page, seeded):
     expect(body.locator("p em")).to_have_text("go")
 
 
+def test_chat_markdown_lists_run_across_blank_lines_resume_and_continue(page, seeded):
+    answer = (
+        "1. a\n\n2. b\n\n3. c\n\nThen:\n\n4. d\n5. e\n\n- one\n  more of one [1]\n- two\n\nAfter."
+    )
+    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "lists?")
+    body = page.locator("#log .reply .md")
+    lists = body.locator("ol")
+    expect(lists).to_have_count(2)
+    expect(lists.first.locator("li")).to_have_text(["a", "b", "c"])
+    assert lists.first.get_attribute("start") is None
+    expect(lists.nth(1)).to_have_attribute("start", "4")
+    expect(lists.nth(1).locator("li")).to_have_text(["d", "e"])
+    items = body.locator("ul li")
+    expect(items).to_have_count(2)
+    expect(items.first).to_have_text("onemore of one [1]")
+    expect(items.first.locator("br")).to_have_count(1)
+    expect(items.first.locator("a.cite")).to_have_count(1)
+    expect(body.locator("p").last).to_have_text("After.")
+
+
 def test_chat_new_chat_in_another_store_keeps_the_reply_on_its_way(page, seeded):
     held = []
     chat_route(page, held.append)

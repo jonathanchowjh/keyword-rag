@@ -63,7 +63,11 @@ def chunks_of(name: str) -> str:
 
 
 def item_hash(item: Item) -> str:
-    content = [item.text, item.answer, item.explanation, item.meta]
+    """What decides whether an item changed. A chunk's `parts` is left out: a file that
+    gains or loses a part re-indexes only the chunks whose text changed (the loader writes
+    the new count as a payload)."""
+    meta = {k: v for k, v in item.meta.items() if k != "parts"}
+    content = [item.text, item.answer, item.explanation, meta]
     return hashlib.sha1(
         json.dumps(content, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:16]

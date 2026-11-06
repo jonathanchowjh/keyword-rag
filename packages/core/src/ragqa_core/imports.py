@@ -163,11 +163,12 @@ def decode(data: bytes) -> str:
 
 
 def text_rows(filename: str, text: str) -> list[dict]:
-    """A text file's rows: one {file, text} as it is when it fits in one chunk, else one row
-    per chunk, with the id `<file>#<i>` and its place in the file in meta."""
+    """A text file's rows: one {file, text} when it is one chunk (as it is, unless only its
+    padding made it too long), else one row per chunk, with the id `<file>#<i>` and its
+    place in the file in meta."""
     chunks = chunk_text(text, filename)
     if len(chunks) <= 1:
-        return [{"file": filename, "text": text}]
+        return [{"file": filename, "text": chunks[0] if chunks else text}]
     n = len(chunks)
     return [
         {"file": f"{filename}#{i}", "text": c, "meta": {"file": filename, "part": i, "parts": n}}
@@ -189,17 +190,17 @@ TABLE_RULE = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
 
 
 def chunk_text(text: str, filename: str, size: int = CHUNK_CHARS) -> list[str]:
-    """The text in chunks of at most `size` characters. A file that fits with its breadcrumb
-    is one chunk, as it is. Else a .md is cut at headings first (a chunk never spans two
-    sections); within a section, paragraphs, code blocks, tables and lists are packed whole,
-    and one too big alone is split at line, row, item or sentence ends. Each chunk starts
-    with a breadcrumb line (`notes.md › Setup › Install`) and a blank line, both counted in
-    `size`; a body under MIN_CHUNK_CHARS merges into a neighbour of its section that has
-    room. No AI call."""
+    """The text in chunks of at most `size` characters. A file that fits is one chunk with
+    no breadcrumb, as it is (stripped, when only its padding is over). Else a .md is cut at
+    headings first (a chunk never spans two sections); within a section, paragraphs, code
+    blocks, tables and lists are packed whole, and one too big alone is split at line, row,
+    item or sentence ends. Each chunk starts with a breadcrumb line (`notes.md › Setup ›
+    Install`) and a blank line, both counted in `size`; a body under MIN_CHUNK_CHARS merges
+    into a neighbour of its section that has room. No AI call."""
     if not text.strip():
         return []
-    if len(text.strip()) + len(breadcrumb(filename, [])) + 2 <= size:
-        return [text]
+    if len(text.strip()) <= size:
+        return [text if len(text) <= size else text.strip()]
     chunks: list[tuple[str, str]] = []
     for path, lines in sections(text, filename.lower().endswith(".md")):
         crumb = breadcrumb(filename, path)
@@ -221,8 +222,9 @@ def breadcrumb(filename: str, path: list[str]) -> str:
 
 def sections(text: str, markdown: bool) -> list[tuple[list[str], list[str]]]:
     """(heading path, lines) for each section; a heading of level L ends every open heading
-    of level L or deeper. A heading inside a code fence is text. A .txt is one section."""
-    out: list[tuple[list[str], list[str]]] = [([], [])]
+    of level L or deeper. A heading inside a code fence is text. A .txt is one section. A
+    section that is only its heading line is dropped: its children's breadcrumbs name it."""
+    out: list[tuple[list[str], list[str], bool]] = [([], [], False)]
     stack: list[tuple[int, str]] = []
     fenced = False
     for line in text.splitlines():
@@ -233,9 +235,13 @@ def sections(text: str, markdown: bool) -> list[tuple[list[str], list[str]]]:
             level = len(heading.group(1))
             stack = [h for h in stack if h[0] < level]
             stack.append((level, heading.group(2).strip().rstrip("#").strip()))
-            out.append(([t for _, t in stack], []))
+            out.append(([t for _, t in stack], [], True))
         out[-1][1].append(line)
-    return [(path, lines) for path, lines in out if any(line.strip() for line in lines)]
+    return [
+        (path, lines)
+        for path, lines, headed in out
+        if sum(1 for line in lines if line.strip()) > (1 if headed else 0)
+    ]
 
 
 def units(lines: list[str]) -> list[tuple[str, str]]:

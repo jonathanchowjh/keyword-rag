@@ -549,3 +549,32 @@ def test_a_long_text_file_inside_a_zip_is_chunked_too(tmp_path):
         "short.md",
     ]
     assert imports.text_files(rows) == {"docs/long.txt", "short.md"}
+
+
+def test_chunk_text_drops_a_section_that_is_only_its_heading():
+    text = f"# Guide\n\n## Install\n\n{sentences(25, 'i')}\n\n## Use\n\n{sentences(25, 'u')}"
+    chunks = imports.chunk_text(text, "x.md")
+    assert all(body(c).strip("#").strip() not in ("Guide", "") for c in chunks)
+    assert all(
+        any(line and not line.startswith("#") for line in body(c).split("\n")) for c in chunks
+    )
+    under = [c for c in chunks if "iiii" in c]
+    assert under and all(c.startswith("x.md › Guide › Install\n\n") for c in under)
+    # a heading with text of its own keeps its section
+    kept = imports.chunk_text(f"# Guide\n\nwelcome\n\n## Use\n\n{sentences(40, 'u')}", "x.md")
+    assert body(kept[0]) == "# Guide\n\nwelcome"
+
+
+def test_chunk_text_one_chunk_needs_no_room_for_a_breadcrumb():
+    text = sentences(29)  # 1,478 characters
+    assert len(text) == 1478
+    assert imports.chunk_text(text, "n" * 60 + ".md") == [text]
+
+
+def test_a_one_chunk_text_file_is_never_longer_than_a_chunk(tmp_path):
+    text = ("para. " * 40 + "\n\n\n\n") * 6 + "\n" * 200  # over 1,500 only by its padding
+    assert len(text) > 1500 and len(text.strip()) <= 1500
+    rows = imports.text_rows("w.txt", text)
+    assert rows == [{"file": "w.txt", "text": text.strip()}]
+    assert imports.text_rows("w.txt", "short\n") == [{"file": "w.txt", "text": "short\n"}]
+    assert imports.text_rows("w.txt", "  ") == [{"file": "w.txt", "text": "  "}]

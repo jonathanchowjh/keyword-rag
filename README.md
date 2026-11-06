@@ -220,7 +220,11 @@ confirm the estimate. A question import on the eval set page
   `<file>#1`, `<file>#2`, …, and `meta` holds `{file, part, parts}`. A file that
   fits in one passage stays one item, named by the file, as it is. Re-adding a
   file updates its passages by id and deletes, from the same source, the old
-  passages it no longer yields. Splitting means more items: on a store that spends
+  passages it no longer yields (`<file>` and `<file>#<digits>` only; a file named
+  `a.md#b.md` is not a passage of `a.md`). A passage whose text did not change is
+  not re-indexed when the file gains or loses a passage; its `parts` is rewritten.
+  A section that is only a heading makes no passage: its children's breadcrumbs
+  name it. Splitting means more items: on a store that spends
   per item (summaries), the add's estimate shows the extra cost.
 - **Mapping:** items need `text`; `id`, `answer`, `explanation`, `skill` and
   `topic` are optional. Questions need `text` and `answer` (and `choices` for

@@ -11,6 +11,9 @@
   file's old passages it no longer yields from the same source (the job result has
   `removed`). `/chat` citations carry `part` and `parts`, and the chat's Sources say
   `part i of n`. A file that fits in one passage is one item, as before.
+- Imports: a long text file imported before passages were split is one item, `name`.
+  Re-importing it now adds `name#1..n` and removes `name`, so eval-set evidence
+  (`gold_ids`) that names `name` stops counting.
 - Chat: a reply shows a safe subset of Markdown. The text is escaped first, then code
   blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings (as bold lines) and
   paragraphs are drawn; links, images, tables and HTML stay as typed text, and `[n]`
