@@ -570,8 +570,9 @@ A collection remembers the dense model it was built with. Changing
   sent. A model priced $0 is free to the budget, so price paid models.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
   imports and keyword-list proposals return the estimate unless
-  `confirm: true` is set. The Lab (`/query`) is the exception: it spends at
-  once and shows each method's cost after.
+  `confirm: true` is set. The Lab (`/query`) and the chat (`/chat`) are the exception: they
+  spend at once and show each reply's cost after, and the monthly cap still
+  holds.
 - **Every response is cached.** A re-run with the same prompts is free, and its
   answers are identical.
 - **Batches.** With the Anthropic connection, runs of more than 50 calls use
@@ -588,13 +589,14 @@ much.
 
 ## Pages
 
-The side nav reads Stores, Eval sets, Lab, Settings. The store pages live under `/c/` and the API under `/collections`; both mean a store.
+The side nav reads Stores, Chat, Eval sets, Lab, Settings. The store pages live under `/c/` and the API under `/collections`; both mean a store.
 
 | Route | What it shows |
 |---|---|
 | `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store (one that exists is opened instead), create a store or set up the benchmarks |
 | `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), delete |
 | `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
+| `/chat` | Chat over a store: pick the store, method and model; each reply has `[n]` links to its sources (id, source, the first 300 characters, expandable), the method, the query tags and the cost. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to the store for good (an add that would spend shows its estimate with Add and Cancel). The conversation is kept per store in the browser tab, not on the server; New chat clears it. With no answer model Send is disabled and a note links to Settings |
 | `/eval-sets` | Every eval set; create one |
 | `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions, delete the set |
 | `/lab` | One question, methods side by side |
@@ -622,7 +624,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PATCH /collections/{name}` | `{eval_set}`: make that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or while a load or question import is queued or running on the store |
 | `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
-| `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost |
+| `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost. `accept=text` takes only `.txt` and `.md` files (422 otherwise); the chat uses it. A source name is cleaned to letters, digits, space, `_`, `.` and `-`, at most 64 characters |
 | `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`; `kind=questions` goes to the store's default eval set. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up. With `kind=questions`, 409 before anything else when the store's default eval set has another type |
 | `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
 | `PATCH /collections/{name}/sources/{source}` | `{enabled}`: switch a source on or off for retrieval. 409 while an eval runs, or to switch off the last item source |
@@ -637,6 +639,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
+| `POST /chat` | `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary, else `hybrid`; a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`. Returns `{answer, citations: [{n, id, text, source}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
 | `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
@@ -747,7 +750,8 @@ package's own: `BudgetExceeded`, `NoConnection`, `UnknownModel`,
 ## Roadmap
 
 The next version turns the bench into a chat over your own documents that
-shows its evidence, with the keyword method brought up to date:
+shows its evidence, with the keyword method brought up to date. The single-store
+chat is built:
 
 - **Keyword-RAG v2** (built; its [experiments](#experiments) have not been run,
   so it is not yet known to beat the paper's method): build recipes per
@@ -757,8 +761,9 @@ shows its evidence, with the keyword method brought up to date:
   keywords, and
   abstracted worked examples. New benchmarks: BRIGHT AoPS and TheoremQA-Q,
   scored by nDCG@10.
-- **Chat**: ask across several corpora, with routing, inline citations and an
-  editable retrieval step under every answer.
+- **Chat across stores**: the chat (built) answers from one store with
+  citations; asking across several stores, with routing, and an editable
+  retrieval step under every answer are next.
 - **Library**: collections renamed to corpora, with PDF, Word and HTML
   imports.
 

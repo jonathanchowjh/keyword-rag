@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Chat: a page at `/chat` (side nav, under Stores) and `POST /chat` answer from one
+  store's passages and cite them as `[n]`, with sources under each reply, the method,
+  the query tags and the cost. It retrieves on the latest question with `keyword_rag`
+  when the store has a vocabulary, else `hybrid`, or the chosen method (409 when the
+  store cannot run it); oracle tags become classifier tags. The last 6 turns are sent.
+  It spends like the Lab: no estimate, the cost on each reply, the budget cap enforced.
+  The conversation stays in the browser tab. Add document adds `.txt` and `.md` files to
+  the store (uploads take `accept=text`); a source name is cleaned the same way in the
+  store and eval set uploads.
 - Stores and eval sets: a store (the API still says collection) is what is retrieved
   on; an eval set is a named, typed, versioned list of questions, with pages at
   `/eval-sets` and `/e/{name}` and endpoints under `/eval-sets`. A store's default
