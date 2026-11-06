@@ -398,3 +398,4 @@ def test_source_name_cleans_file_names():
     assert imports.source_name("notes.txt") == "notes"
     name = imports.source_name("a" * 100 + ".txt")
     assert name == "a" * 64 and imports.SOURCE_NAME.match(name)
+    assert imports.source_name("a" * 63 + " b.txt") == "a" * 63  # no space left at the cut

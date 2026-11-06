@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from ragqa_api.app import create_app
 from ragqa_core import db
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
+from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
@@ -2681,14 +2682,16 @@ def test_eval_set_import_runs_in_the_request(client, monkeypatch):
     r = client.post("/eval-sets/e/uploads", params={"filename": "quiz.jsonl"}, content=rows)
     assert r.status_code == 200, r.text
     up = r.json()
-    assert up["preview"]["ready"] and up["preview"]["usable"] == 3
+    assert up["preview"]["ready"] and up["preview"]["usable"] == 3 and up["source_name"] == "quiz"
     from ragqa_core import imports
 
     seen = []
     real = imports.preview
     monkeypatch.setattr(imports, "preview", lambda *a, **k: seen.append(a[-1]) or real(*a, **k))
-    client.post("/eval-sets/e/uploads", params={"filename": "Q3 (final).jsonl"}, content=rows)
-    assert seen == ["upload:Q3 -final"]
+    named = client.post(
+        "/eval-sets/e/uploads", params={"filename": "Q3 (final).jsonl"}, content=rows
+    )
+    assert seen == ["upload:Q3 -final"] and named.json()["source_name"] == "Q3 -final"
     body = {
         "upload_id": up["upload_id"],
         "mapping": up["preview"]["mapping"],
@@ -3012,6 +3015,37 @@ def test_chat_answers_with_citations(tmp_path):
         assert got["citations"][0]["id"] == got["hit_ids"][0] == "enzyme-item"
         assert got["citations"][0]["n"] == 1 and "enzyme" in got["citations"][0]["text"]
         assert got["usd"] > 0 and got["method"] == "hybrid" and got["query_tags"] is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "cited"),
+    [
+        ("Rates rise [1, 2].", [1, 2]),
+        ("Rates rise [2-3].", [2, 3]),
+        ("Rates rise [3–2].", []),  # a range read backwards cites nothing
+        ("Rates rise [1]. Again [1].", [1]),
+        ("Rates rise [9] and [3].", [3]),  # 3 passages: 9 is not one of them
+        ("Rates rise [2] [1, 3].", [2, 1, 3]),
+    ],
+)
+def test_chat_cites_lists_and_ranges(tmp_path, answer, cited):
+    with make_client(tmp_path, reply=lambda p: answer) as client:
+        add_collection(client)
+        ai = client.app.state.ai
+        complete, calls = ai.complete, []
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs)
+            return complete(*args, **kwargs)
+
+        ai.complete = spy
+        got = client.post("/chat", json=chat_body()).json()
+    hits = got["hit_ids"]
+    assert len(hits) == 3
+    shown = hits[0::2] + hits[1::2][::-1]  # the passages are numbered best first and last
+    assert [c["n"] for c in got["citations"]] == cited
+    assert [c["id"] for c in got["citations"]] == [shown[n - 1] for n in cited]
+    assert [(c["purpose"], c["max_tokens"]) for c in calls] == [("chat", CHAT_TOKENS)]
 
 
 def test_chat_cites_what_the_model_saw(tmp_path):

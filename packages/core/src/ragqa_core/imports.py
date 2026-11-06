@@ -27,9 +27,10 @@ SOURCE_NAME = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 
 def source_name(filename: str) -> str:
     """A source name from a file name: the stem with each run of characters outside
-    SOURCE_NAME's set made a '-', trimmed, cut to 64; 'upload' when nothing is left."""
+    SOURCE_NAME's set made a '-', trimmed, cut to 64 and trimmed again; 'upload' when
+    nothing is left."""
     stem = re.sub(r"[^A-Za-z0-9 _.-]+", "-", Path(filename).stem)
-    return stem.strip(" -")[:64] or "upload"
+    return stem.strip(" -")[:64].strip(" -") or "upload"
 
 
 FORMATS = {

@@ -1136,10 +1136,10 @@ def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_p
     page.goto(seeded.url + "/c/imp")
     expect(page.locator("#imp-items-source")).to_have_value("")
     page.locator("#imp-items-file").set_input_files(str(notes))
-    expect(page.locator("#imp-items-source")).to_have_value("notes")
     page.locator("#imp-items-go").click()
     preview = page.locator("#imp-items-preview")
     expect(preview).to_contain_text("3 rows")
+    expect(page.locator("#imp-items-source")).to_have_value("notes")  # named by the upload
     expect(preview.locator("table tbody tr")).to_have_count(3)
     expect(preview.locator("b")).to_have_count(0)  # file text is escaped
     page.locator("#imp-items-import").click()
@@ -1202,8 +1202,8 @@ def test_own_science_collection_offers_import_and_benchmark(page, seeded, tmp_pa
     notes = tmp_path / "own notes!.csv"
     notes.write_text("text\nfirst thing about reefs\nsecond thing about tides\n")
     page.locator("#imp-items-file").set_input_files(str(notes))
-    expect(page.locator("#imp-items-source")).to_have_value("own notes-")
     page.locator("#imp-items-go").click()
+    expect(page.locator("#imp-items-source")).to_have_value("own notes")
     page.locator("#imp-items-import").click()
     # no keyword lists yet, so the import pays to make them: it asks before it queues
     page.locator("#imp-items-confirm").get_by_role("button", name="Start").click()
@@ -1238,6 +1238,27 @@ def test_run_form_lists_what_is_not_measurable(page, seeded):
     expect(page.locator("#runs")).not_to_be_empty()  # the page has loaded its collection
     page.get_by_role("button", name="New run").click()
     expect(page.locator("#run-form")).to_contain_text("This run will measure:")
+
+
+def test_the_store_upload_names_the_source_as_the_chat_does(page, seeded, tmp_path):
+    httpx.post(f"{seeded.url}/collections", json={"name": "named", "qa_type": "science"})
+    f = tmp_path / "Q3 (final).md"
+    f.write_text("# Q3\nrevenue grew")
+    page.goto(seeded.url + "/c/named")
+    upload_and_preview(page, "items", f)
+    expect(page.locator("#imp-items-source")).to_have_value("Q3 -final")
+    # a name typed before the upload is kept, and priced under that name
+    other = tmp_path / "other.md"
+    other.write_text("more text")
+    page.locator("#imp-items-file").set_input_files(str(other))
+    expect(page.locator("#imp-items-source")).to_have_value("")
+    page.locator("#imp-items-source").fill("mine")
+    with page.expect_request(
+        lambda r: r.url.endswith("/collections/named/imports") and r.method == "POST"
+    ) as sent:
+        page.locator("#imp-items-go").click()
+    assert json.loads(sent.value.post_data)["source_name"] == "mine"
+    expect(page.locator("#imp-items-source")).to_have_value("mine")
 
 
 def test_a_new_file_clears_the_old_preview(page, seeded, tmp_path):
@@ -2023,6 +2044,56 @@ def test_chat_page_sends_shows_citations_and_cost(page, seeded):
     expect(page.locator("#log li:target")).to_have_count(1)
 
 
+def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
+    chat_route(
+        page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": "Rates rise [1, 2]."})
+    )
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "grouped?")
+    reply_box = page.locator("#log .reply")
+    expect(reply_box).to_contain_text("Rates rise [1, 2].")
+    expect(reply_box.locator("a.cite")).to_have_text(["1", "2"])
+    expect(reply_box.locator(".sources li")).to_have_count(2)
+    reply_box.locator("a.cite").nth(1).click()
+    expect(page.locator("#log li:target")).to_contain_text("other")
+
+
+def test_chat_new_chat_drops_the_reply_still_on_its_way(page, seeded):
+    held = []
+    chat_route(page, held.append)
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "slow question")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert len(held) == 1
+    page.get_by_role("button", name="New chat").click()
+    expect(page.locator("#log .user")).to_have_count(0)
+    held[0].fulfill(json=CHAT_REPLY)
+    expect(page.locator("#send")).to_be_enabled()
+    expect(page.locator("#log .msg")).to_have_count(0)
+    page.reload()
+    expect(page.locator("#send")).to_be_enabled()
+    expect(page.locator("#log .msg")).to_have_count(0)
+
+
+def test_chat_store_detail_failing_still_enables_send_and_add(page, seeded):
+    page.expected = ["500"]
+    page.route(
+        "**/collections/c",
+        lambda r: (
+            r.fulfill(status=500, json={"detail": "store detail broke"})
+            if r.request.method == "GET"
+            else r.fallback()
+        ),
+    )
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#status")).to_contain_text("store detail broke")
+    expect(page.locator("#send")).to_be_enabled()
+    expect(page.locator("#add-doc")).to_be_enabled()
+
+
 def test_chat_page_keeps_the_conversation_on_reload_and_new_chat_clears_it(page, seeded):
     chat_route(page, lambda route: route.fulfill(json=CHAT_REPLY))
     page.goto(seeded.url + "/chat")
@@ -2186,6 +2257,68 @@ def test_chat_upload_shows_the_estimate_and_cancel_adds_nothing(page, seeded, tm
         assert httpx.get(f"{seeded.url}/jobs", params={"collection": "paid"}).json() == []
     finally:
         ai.set_role("keywords", None)
+
+
+def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_methods(page, seeded, tmp_path):
+    ai = seeded.app.state.ai
+    ai.add_model("anthropic", "kw-paid", label="Paid", price_in=1, price_out=1)
+    ai.set_role("keywords", "anthropic/kw-paid")
+    try:
+        r = httpx.post(f"{seeded.url}/collections", json={"name": "paid2", "qa_type": "science"})
+        assert r.status_code == 201, r.text
+        details = []
+
+        def detail(route):
+            # The fake AI cannot propose usable lists, so the store's second look, after the
+            # add, is given the keyword methods an add with lists would bring.
+            data = route.fetch().json()
+            details.append(data)
+            if len(details) > 1:
+                data["methods_available"].append("kw_all")
+            route.fulfill(json=data)
+
+        page.route("**/collections/paid2", detail)
+        page.goto(seeded.url + "/chat")
+        page.locator("#store").select_option("paid2")
+        expect(page.locator("#method option[value='kw_all']")).to_have_count(0)
+        page.locator("#method").select_option("vector")
+        path = tmp_path / "pay.txt"
+        path.write_text("coral reefs bleach when oceans warm")
+        page.locator("#doc-file").set_input_files(str(path))
+        box = page.locator("#adding")
+        expect(box).to_contain_text("AI call")
+        with page.expect_response(
+            lambda r: r.url.endswith("/collections/paid2/imports") and r.request.method == "POST"
+        ) as queued:
+            box.get_by_role("button", name="Add", exact=True).click()
+        assert queued.value.status == 202 and queued.value.json()["job_id"]
+        expect(page.locator("#log")).to_contain_text("Added pay.txt")
+        assert [s["source"] for s in sources(seeded, "paid2")] == ["upload:pay"]
+        # the picker is rebuilt from the store after the add, and keeps the pick
+        expect(page.locator("#method option[value='kw_all']")).to_have_count(1)
+        expect(page.locator("#method")).to_have_value("vector")
+        assert len(details) == 2
+    finally:
+        ai.set_role("keywords", None)
+
+
+def test_chat_upload_queued_behind_another_job_says_it_is_waiting(page, seeded, tmp_path):
+    free_store(seeded, "behind")
+    polls = []
+
+    def job(route):
+        polls.append(route.request.url)
+        if len(polls) <= 3:
+            route.fulfill(json={"id": "x", "status": "queued", "progress": 0})
+        else:
+            route.fallback()
+
+    page.route("**/jobs/*", job)
+    chat_upload(page, seeded, "behind", tmp_path, "later.txt", "tides follow the moon")
+    expect(page.locator("#adding")).to_have_text(
+        "Adding later.txt: waiting for the store's other job…"
+    )
+    expect(page.locator("#log")).to_contain_text("Added later.txt")
 
 
 def test_chat_upload_refuses_other_files_without_uploading(page, seeded, tmp_path):

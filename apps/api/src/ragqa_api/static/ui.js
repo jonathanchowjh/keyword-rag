@@ -432,11 +432,6 @@ export function shell(active) {
 
 // -- importing a file ----------------------------------------------------------------------------
 
-// The file's name as a source name: other characters become "-", at most 64 long.
-function sourceFor(file) {
-  return file.name.replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64) || "upload";
-}
-
 // The upload-preview-import widget for a store's items (queues a job, priced first) or an eval set's
 // questions (imported in the request, no estimate). Fills `el`; `done` runs after an import.
 class ImportBox {
@@ -463,7 +458,7 @@ class ImportBox {
       this.ticket++; // and no answer still on its way may paint it back
       this.own("preview").innerHTML = "";
       this.own("msg").textContent = "";
-      if (file) this.own("source").value = sourceFor(file);
+      this.own("source").value = ""; // the upload names it, the route's rule
     });
     this.own("go").addEventListener("click", () => this.upload());
     // Items are priced under the source name, so a new name or mapping needs a new estimate.
@@ -489,6 +484,10 @@ class ImportBox {
       const got = await upload(path, file);
       this.uploadId = got.upload_id;
       this.show(got.preview, got.estimate);
+      // The upload is priced under its cleaned file name; a name typed first is priced anew.
+      const typed = this.own("source").value;
+      if (!typed) this.own("source").value = got.source_name;
+      else if (typed !== got.source_name && this.kind === "items") this.previewAgain();
     } catch (e) {
       this.uploadId = null;
       this.own("preview").innerHTML = "";

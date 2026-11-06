@@ -13,6 +13,7 @@ let turns = []; // what the log shows: {role: "user"} | {role: "reply", ...the /
 let answering = false;
 let hasModel = false;
 let adding = false; // files are being added: the store stays put until they are in
+let conversation = 0; // bumped by New chat, so a reply still on its way is dropped
 
 // -- the conversation, kept per store in sessionStorage; the page works without it ------------
 
@@ -45,11 +46,16 @@ function forget() {
 
 // -- drawing ---------------------------------------------------------------------------------
 
-// The reply's text, escaped, with each [n] that has a source linked to it.
+// A citation mark, the route's rule: [n], [n, m, …] or [n-m] (hyphen or en dash).
+const CITATION = /\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\]/g;
+
+// The reply's text, escaped, with each cited number linked to its source: a lone [n] as a
+// whole, each number of a grouped bracket on its own.
 function textHtml(text, cited, at) {
   const have = new Set(cited.map((c) => c.n));
-  return esc(text).replace(/\[(\d+)\]/g, (mark, n) =>
-    have.has(+n) ? `<a class="cite" href="#src-${at}-${n}">${mark}</a>` : mark,
+  const link = (n, shown) => (have.has(+n) ? `<a class="cite" href="#src-${at}-${n}">${shown}</a>` : shown);
+  return esc(text).replace(CITATION, (mark, inner) =>
+    /^\d+$/.test(inner) ? link(inner, mark) : `[${inner.replace(/\d+/g, (n) => link(n, n))}]`,
   );
 }
 
@@ -97,6 +103,8 @@ async function ask() {
   const content = $("box").value.trim();
   if (!content || answering || !hasModel || !$("store").value) return;
   const store = $("store").value;
+  const mine = conversation;
+  const stale = () => store !== $("store").value || mine !== conversation; // moved on while thinking
   turns.push({ role: "user", content });
   // The conversation the model sees: the user's turns and its own answers, never an error.
   const messages = turns
@@ -112,10 +120,10 @@ async function ask() {
       method: "POST",
       body: { collection: store, messages, method: $("method").value, model: $("model").value || null },
     });
-    if (store !== $("store").value) return; // the store moved on while this was thinking
+    if (stale()) return;
     turns.push(r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer", usd: r.usd } : { role: "reply", ...r });
   } catch (e) {
-    if (store !== $("store").value) return;
+    if (stale()) return;
     turns.push({ role: "error", content: e.message });
   } finally {
     setBusy(false);
@@ -145,7 +153,10 @@ async function follow(file, jobId) {
   for (;;) {
     const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
     if (job.status !== "queued" && job.status !== "running") return job;
-    $("adding").textContent = `Adding ${file}… ${Math.round((job.progress ?? 0) * 100)}%`;
+    $("adding").textContent =
+      job.status === "queued"
+        ? `Adding ${file}: waiting for the store's other job…`
+        : `Adding ${file}… ${Math.round((job.progress ?? 0) * 100)}%`;
     await wait(500);
   }
 }
@@ -171,17 +182,29 @@ async function addFiles(files) {
   adding = true;
   $("store").disabled = true;
   $("add-doc").disabled = true;
+  let added = false;
   for (const file of files) {
     try {
       if (!/\.(txt|md)$/i.test(file.name)) throw new Error("only .txt and .md files can be added here");
       const said = await addFile(store, file);
       if (said) turns.push({ role: "note", content: said });
+      added ||= Boolean(said);
     } catch (e) {
       turns.push({ role: "error", content: `${file.name}: ${e.message}` });
     }
     save();
     draw();
     refreshSpend();
+  }
+  // An add can give the store keyword lists or a vocabulary, and so more methods.
+  if (added) {
+    try {
+      fillMethods(await api(`/collections/${encodeURIComponent(store)}`), $("method").value);
+    } catch (e) {
+      turns.push({ role: "error", content: e.message });
+      save();
+      draw();
+    }
   }
   $("adding").textContent = "";
   $("store").disabled = false;
@@ -193,18 +216,26 @@ async function addFiles(files) {
 
 let picking = 0; // bumped by each store pick, so only the newest one draws
 
+// The store's methods in the picker, `keep` picked when the store has it, else the default.
+function fillMethods(detail, keep) {
+  const methods = detail.methods_available;
+  const first = methods.includes(keep) ? keep : methods.includes("keyword_rag") ? "keyword_rag" : "hybrid";
+  $("method").innerHTML = methods
+    .map((m) => `<option value="${esc(m)}"${m === first ? " selected" : ""}>${esc(methodLabel(m))}</option>`)
+    .join("");
+}
+
 async function pickStore() {
   const mine = ++picking;
   const name = $("store").value;
   turns = load();
   draw();
-  const detail = await api(`/collections/${encodeURIComponent(name)}`);
-  if (mine !== picking) return;
-  const methods = detail.methods_available;
-  const first = detail.vocabulary_version && methods.includes("keyword_rag") ? "keyword_rag" : "hybrid";
-  $("method").innerHTML = methods
-    .map((m) => `<option value="${esc(m)}"${m === first ? " selected" : ""}>${esc(methodLabel(m))}</option>`)
-    .join("");
+  try {
+    const detail = await api(`/collections/${encodeURIComponent(name)}`);
+    if (mine === picking) fillMethods(detail, null);
+  } finally {
+    setBusy(answering); // Send and Add follow the store even when its detail fails
+  }
 }
 
 async function loadModels() {
@@ -223,8 +254,10 @@ async function loadStores() {
   setBusy(false);
 }
 
+// pickStore sets Send and Add before it fails, so the error line set here stays.
 $("store").addEventListener("change", () => pickStore().catch((e) => ($("status").textContent = e.message)));
 $("new").addEventListener("click", () => {
+  conversation++;
   turns = [];
   forget();
   draw();

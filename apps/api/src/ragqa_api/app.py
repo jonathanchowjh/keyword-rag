@@ -241,7 +241,20 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
-CITATION = re.compile(r"\[(\d+)\]")
+CITE_PART = r"\d+(?:\s*[-\u2013]\s*\d+)?"  # n, or a range n-m with a hyphen or en dash
+CITATION = re.compile(rf"\[({CITE_PART}(?:\s*,\s*{CITE_PART})*)\]")  # [n], [n, m], [n-m]
+
+
+def cited_numbers(text: str, count: int) -> list[int]:
+    """The passage numbers `text` cites, in first-cited order and each once: lists and
+    ranges are expanded, and numbers outside 1..count dropped."""
+    out: dict[int, None] = {}
+    for group in CITATION.findall(text):
+        for part in group.split(","):
+            ends = [int(x) for x in re.split(r"[-\u2013]", part)]
+            for n in range(max(ends[0], 1), min(ends[-1], count) + 1):
+                out[n] = None
+    return list(out)
 
 
 def available_methods(spec: CollectionSpec, has_lists: bool) -> dict[str, str | None]:
@@ -978,13 +991,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         owner = f"eval-set:{name}"
         upload_id = imports.save_upload(state.settings.home, owner, filename, body_chunks(request))
         path, _ = imports.open_upload(state.settings.home, owner, upload_id)
-        source = "upload:" + imports.source_name(filename)
+        source_name = imports.source_name(filename)
+        source = "upload:" + source_name
         try:
             shown = imports.preview(path, filename, "questions", row["qa_type"], None, None, source)
         except ValueError:
             shutil.rmtree(path.parent, ignore_errors=True)
             raise
-        return {"upload_id": upload_id, "filename": filename, "preview": shown}
+        return {
+            "upload_id": upload_id,
+            "filename": filename,
+            "source_name": source_name,
+            "preview": shown,
+        }
 
     @app.post("/eval-sets/{name}/imports")
     def import_eval_set_questions(name: str, body: EvalSetImport) -> dict:
@@ -1281,18 +1300,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 purpose="chat",
             )
             ordered = edge_order(hits)
-            for n in dict.fromkeys(int(m) for m in CITATION.findall(done.text)):
-                if 1 <= n <= len(ordered):
-                    hit = ordered[n - 1]
-                    source = hit.meta.get("source")
-                    cited.append(
-                        {
-                            "n": n,
-                            "id": hit.id,
-                            "text": hit.text[:CHAT_PASSAGE_CHARS],
-                            "source": source,
-                        }
-                    )
+            for n in cited_numbers(done.text, len(ordered)):
+                hit = ordered[n - 1]
+                cited.append(
+                    {
+                        "n": n,
+                        "id": hit.id,
+                        "text": hit.text[:CHAT_PASSAGE_CHARS],
+                        "source": hit.meta.get("source"),
+                    }
+                )
             return {"answer": done.text}
 
         out = run_method(spec, last.content, method, body.k, 60, search, skip, answer)
