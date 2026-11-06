@@ -2618,7 +2618,7 @@ def test_eval_set_crud_and_versions(client):
     got = client.get("/eval-sets/e").json()
     assert got["version"] == version and got["qa_type"] == "mcq"
     assert [q["id"] for q in got["questions"]] == ["a", "b"]
-    assert got["questions"][0]["meta"] == {"skill": "s", "odd": [1]}
+    assert got["questions"][0]["meta"] == {"skill": "s", "odd": [1], "source": "hand"}
     assert [v["version"] for v in got["versions"]] == [version]
     assert client.get("/eval-sets").json()[0]["questions"] == 2
     bad = put_questions(client, "e", [{**MCQ, "id": "z", "gold_answers": ["Z"]}], version)
@@ -2826,3 +2826,146 @@ def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
     )
     scans.clear()
     assert client.get("/collections/c").json()["leaked"] == 1 and len(scans) == 1
+
+
+TIDES = jsonl({"id": "n1", "text": "so the tides follow the moon each day we saw"})
+HAND = {
+    **MCQ,
+    "id": "h1",
+    "text": "the tides follow the moon each day",
+    "meta": {"solution": "Rates rise."},
+}
+OTHER = {**MCQ, "id": "h2", "text": "an unrelated question", "meta": {"solution": "Rates rise."}}
+
+
+def test_a_hand_written_question_is_checked_for_leaks_per_store(client):
+    add_collection(client, questions=False)
+    import_items(client, body=TIDES)
+    add_collection(client, name="d", questions=False)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    kept = {**MCQ, "id": "k1", "text": "already here", "meta": {}}
+    assert put_questions(client, "e", [kept]).status_code == 200
+    version = client.get("/eval-sets/e").json()["version"]
+    r = put_questions(client, "e", [kept, HAND, OTHER], version)
+    assert r.status_code == 200, r.text
+    meta = {q["id"]: q["meta"] for q in client.get("/eval-sets/e").json()["questions"]}
+    assert meta["h1"]["source"] == "hand" and meta["h2"]["source"] == "hand"
+    assert meta["k1"] == {}  # not new to the set: stored as sent
+    for store, excluded, asked in (("c", 1, 2), ("d", 0, 3)):
+        body = {**EVAL, "collection": store, "eval_set": "e", "confirm": True}
+        r = client.post("/eval", json=body)
+        assert r.status_code == 202, r.text
+        job = wait(client, r.json()["job_id"])
+        assert job["status"] == "done", job
+        assert job["setup"]["leaked_excluded"] == excluded
+        assert len(job["setup"]["question_ids"]) == asked
+
+
+def test_patch_sets_and_clears_the_store_default_eval_set(client):
+    add_collection(client)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    assert (
+        put_questions(client, "e", [{**MCQ, "meta": {"solution": "Rates rise."}}]).status_code
+        == 200
+    )
+    body = {**EVAL, "methods": PAIR, "answer": True, "eval_set": "e", "confirm": True}
+    run = client.post("/eval", json=body).json()["job_id"]
+    assert wait(client, run)["status"] == "done"
+    assert client.get("/collections/c").json()["answer"] is None  # not the default's run
+    r = client.patch("/collections/c", json={"eval_set": "e"})
+    assert r.status_code == 200, r.text
+    assert r.json() == client.get("/collections/c").json()
+    assert r.json()["eval_set"] == "e" and r.json()["answer"]["run_id"] == run
+    cleared = client.patch("/collections/c", json={"eval_set": None}).json()
+    assert cleared["eval_set"] == "c" and cleared["answer"] is None  # the name fallback
+    client.post("/eval-sets", json={"name": "s", "qa_type": "science"})
+    clash = client.patch("/collections/c", json={"eval_set": "s"})
+    assert clash.status_code == 409
+    assert clash.json()["detail"] == "eval set 's' is science; store 'c' is mcq"
+    assert client.patch("/collections/c", json={"eval_set": "nope"}).status_code == 404
+    assert client.patch("/collections/nope", json={"eval_set": "e"}).status_code == 404
+    assert client.get("/collections/c").json()["eval_set"] == "c"
+
+
+def test_patch_is_refused_while_a_load_or_question_import_is_queued(client):
+    add_collection(client)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    client.app.state.worker.stop()
+    conn = client.app.state.conn
+    job = db.create_job(conn, "import", "c", {"kind": "questions"})
+    r = client.patch("/collections/c", json={"eval_set": "e"})
+    assert r.status_code == 409 and "under way on 'c'" in r.json()["detail"]
+    db.request_cancel(conn, job)
+    db.create_job(conn, "load", "c", {"dataset": "scienceqa"})
+    assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 409
+    assert db.default_eval_set(conn, "c") == "c"
+
+
+def test_a_store_and_an_eval_set_of_one_name_have_one_type(client):
+    client.post("/eval-sets", json={"name": "x", "qa_type": "science"})
+    r = client.post("/collections", json={"name": "x", "qa_type": "mcq"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "eval set 'x' is science; store 'x' is mcq"
+    assert client.post("/collections", json={"name": "x", "qa_type": "science"}).status_code == 201
+    client.post("/collections", json={"name": "y", "qa_type": "mcq"})
+    r = client.post("/eval-sets", json={"name": "y", "qa_type": "table"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "eval set 'y' is table; store 'y' is mcq"
+    assert client.post("/eval-sets", json={"name": "y", "qa_type": "mcq"}).status_code == 201
+
+
+def science_default(client):
+    """Store c (mcq) whose default eval set is a science one, as an old database may have."""
+    add_collection(client, questions=False)
+    client.app.state.worker.stop()
+    client.post("/eval-sets", json={"name": "s", "qa_type": "science"})
+    db.set_default_eval_set(client.app.state.conn, "c", "s")
+
+
+def test_load_is_refused_before_anything_when_the_default_set_is_another_type(client):
+    science_default(client)
+    for confirm in (False, True):
+        r = client.post("/collections/c/load", json={"dataset": "scienceqa", "confirm": confirm})
+        assert r.status_code == 409
+        assert r.json()["detail"] == "eval set 's' is science; store 'c' is mcq"
+    conn = client.app.state.conn
+    assert db.list_jobs(conn, kind="load") == []
+    assert db.default_eval_set(conn, "c") == "s" and db.get_eval_set(conn, "c") is None
+
+
+def test_a_question_import_is_refused_when_the_default_set_is_another_type(client):
+    science_default(client)
+    rows = jsonl({"id": "u1", "text": "do tides follow?", "choices": ["y", "n"], "answer": "A"})
+    up = upload(client, rows, kind="questions").json()
+    for confirm in (False, True):
+        r = do_import(client, up, "qs", kind="questions", confirm=confirm)
+        assert r.status_code == 409
+        assert r.json()["detail"] == "eval set 's' is science; store 'c' is mcq"
+    conn = client.app.state.conn
+    assert db.list_jobs(conn, kind="import") == []
+    assert db.default_eval_set(conn, "c") == "s" and db.get_eval_set(conn, "c") is None
+    items = do_import(client, upload(client).json(), "notes", confirm=False)
+    assert items.status_code == 200  # items do not go to the eval set
+
+
+def test_an_empty_question_id_is_refused(client):
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    for blank in ("", "  "):
+        r = put_questions(client, "e", [{**MCQ, "id": blank}])
+        assert r.status_code == 422 and r.json()["detail"].endswith(": no id")
+    assert client.get("/eval-sets/e").json()["questions"] == []
+
+
+def test_a_deleted_store_leaves_no_leak_scan_behind(client):
+    def store_with(body):
+        add_collection(client, questions=False, lists=False)
+        import_items(client, body=body)
+        assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 200
+        return client.get("/collections/c").json()
+
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    assert put_questions(client, "e", [HAND, OTHER]).status_code == 200
+    assert store_with(TIDES)["leaked"] == 1
+    assert client.delete("/collections/c").status_code == 204
+    # the same count of items and the same set version, but nothing leaks into these
+    assert store_with(jsonl({"id": "n1", "text": "glaciers carve valleys"}))["leaked"] == 0

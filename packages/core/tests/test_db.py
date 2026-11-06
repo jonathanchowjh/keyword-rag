@@ -899,3 +899,39 @@ def test_replace_questions_with_a_repeated_id_changes_nothing(conn):
         db.replace_questions(conn, "e", twice, v1)
     assert [q.text for q in get_questions(conn, "e")] == ["one", "two"]
     assert db.get_eval_set(conn, "e")["version"] == v1
+
+
+def test_replace_questions_that_fail_midway_keep_the_old_ones(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", questions_of("one", "two"))
+    v1 = db.get_eval_set(conn, "e")["version"]
+
+    def boom(sql, rows):
+        raise sqlite3.OperationalError("disk full")
+
+    conn.executemany = boom  # the insert fails after the delete ran
+    with pytest.raises(sqlite3.OperationalError):
+        db.replace_questions(conn, "e", questions_of("three"), v1)
+    del conn.executemany
+    assert [q.text for q in get_questions(conn, "e")] == ["one", "two"]
+    assert db.get_eval_set(conn, "e")["version"] == v1
+    assert db.replace_questions(conn, "e", questions_of("three"), v1) != v1
+
+
+def test_migration_pins_runs_a_step_left_unpinned(tmp_path):
+    path = tmp_path / "half.db"
+    conn = connect(path)
+    save_collection(conn, CollectionSpec("c", "mcq", False, "d", 4))
+    save_questions(conn, "c", questions_of("one"))  # the set of its name and a first snapshot
+    first_version = db.get_eval_set(conn, "c")["version"]
+    save_questions(conn, "c", questions_of("one", "two"))
+    old = create_job(conn, "eval", "c", {"split": "full"})  # an old run, never pinned
+    pinned = create_job(conn, "eval", "c", {"eval_set": "c", "eval_set_version": "v"})
+    conn.close()
+    conn = connect(path)
+    assert get_job(conn, old)["setup"] == {
+        "split": "full",
+        "eval_set": "c",
+        "eval_set_version": first_version,
+    }
+    assert get_job(conn, pinned)["setup"] == {"eval_set": "c", "eval_set_version": "v"}

@@ -139,6 +139,10 @@ class EvalSetPatch(BaseModel):
     include_leaked: bool
 
 
+class CollectionPatch(BaseModel):
+    eval_set: str | None  # null: the set named after the store, if any
+
+
 class EvalSetImport(BaseModel):
     upload_id: str
     mapping: dict[str, str | None] | None = None
@@ -270,6 +274,10 @@ class BudgetSet(BaseModel):
 
 def spec_json(spec: CollectionSpec) -> dict:
     return asdict(spec)
+
+
+def type_clash(eval_set: str, set_type: str, store: str, store_type: str) -> EvalSetMismatch:
+    return EvalSetMismatch(f"eval set '{eval_set}' is {set_type}; store '{store}' is {store_type}")
 
 
 def check_mapping(kind: str, mapping: dict | None) -> None:
@@ -483,6 +491,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         eval_set = db.default_eval_set(state.conn, name)
         return eval_set, db.get_questions(state.conn, eval_set) if eval_set else []
 
+    def check_default_set(spec: CollectionSpec) -> None:
+        """Refuses a store whose default eval set is of another type, before anything is
+        estimated or queued. Reads only: no set is made and no pointer written."""
+        name = db.default_eval_set(state.conn, spec.name)
+        found = db.get_eval_set(state.conn, name) if name else None
+        if name and found and found["qa_type"] != spec.qa_type:
+            raise type_clash(name, found["qa_type"], spec.name, spec.qa_type)
+
     def leaked_ids(spec: CollectionSpec, eval_set: str | None) -> set[str]:
         """The eval set's questions whose text is inside the store's items."""
         return state.evaluator.leaked_ids(spec, eval_set) if eval_set else set()
@@ -509,6 +525,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_collection(body: NewCollection) -> dict:
         if db.get_collection(state.conn, body.name):
             raise HTTPException(409, f"collection '{body.name}' already exists")
+        found = db.get_eval_set(state.conn, body.name)
+        if found and found["qa_type"] != body.qa_type:  # it would be the store's default
+            raise type_clash(body.name, found["qa_type"], body.name, body.qa_type)
         return spec_json(
             state.indexer.create(
                 body.name, body.qa_type, body.summarize, body.recipe or "paper_2024"
@@ -558,6 +577,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "measurable": measurable(spec.qa_type, fields),
         }
 
+    @app.patch("/collections/{name}")
+    def patch_collection(name: str, body: CollectionPatch) -> dict:
+        """Makes the eval set the store's default; null clears it."""
+        spec = state.retriever.spec(name)
+        if body.eval_set is not None:
+            found = known_set(body.eval_set)
+            if found["qa_type"] != spec.qa_type:
+                raise type_clash(body.eval_set, found["qa_type"], name, spec.qa_type)
+        if store_is_loading(name):
+            raise HTTPException(409, f"a load or question import is under way on '{name}'; wait")
+        db.set_default_eval_set(state.conn, name, body.eval_set)
+        return get_collection(name)
+
     @app.delete("/collections/{name}", status_code=204)
     def delete_collection(name: str) -> Response:
         state.retriever.spec(name)
@@ -573,6 +605,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         state.store.drop(name)
         state.retriever.forget(name)
+        state.evaluator.forget(name)
         db.delete_collection_rows(state.conn, name)
         imports.delete_uploads(state.settings.home, name)
         return Response(status_code=204)
@@ -665,6 +698,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/imports", status_code=202)
     def start_import(name: str, body: ImportRequest):
         spec = state.retriever.spec(name)
+        if body.kind == "questions":
+            check_default_set(spec)
         path, meta = open_upload(name, body.upload_id)
         if not SOURCE_NAME.match(body.source_name):
             raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
@@ -789,18 +824,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if j["setup"].get("eval_set") == name
         ]
 
+    def store_is_loading(store: str) -> bool:
+        """Whether a load or a question import is queued or running on the store: it writes
+        to the store's default eval set."""
+        for status in ("queued", "running"):
+            for job in db.list_jobs(state.conn, collection=store, status=status, limit=db.ALL):
+                if job["kind"] == "load" or (
+                    job["kind"] == "import" and job["setup"].get("kind") == "questions"
+                ):
+                    return True
+        return False
+
     def set_is_loading(name: str) -> bool:
         """Whether a load or a question import is queued or running on a store whose default
         is this set: it would write to the set while it is saved."""
         stores = [c.name for c in db.list_collections(state.conn)]
-        for store in (s for s in stores if db.default_eval_set(state.conn, s) == name):
-            for status in ("queued", "running"):
-                for job in db.list_jobs(state.conn, collection=store, status=status, limit=db.ALL):
-                    if job["kind"] == "load" or (
-                        job["kind"] == "import" and job["setup"].get("kind") == "questions"
-                    ):
-                        return True
-        return False
+        return any(
+            store_is_loading(s) for s in stores if db.default_eval_set(state.conn, s) == name
+        )
 
     def not_loading(name: str) -> None:
         if set_is_loading(name):
@@ -819,6 +860,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/eval-sets", status_code=201)
     def create_eval_set(body: NewEvalSet) -> dict:
+        store = db.get_collection(state.conn, body.name)
+        if store and store.qa_type != body.qa_type:  # it would be the store's default
+            raise type_clash(body.name, body.qa_type, body.name, store.qa_type)
         try:
             db.create_eval_set(state.conn, body.name, body.qa_type)
         except ValueError as e:
@@ -839,6 +883,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def put_eval_questions(name: str, body: QuestionsPut) -> dict:
         row = known_set(name)
         questions = [Question(**q.model_dump()) for q in body.questions]
+        # A question new to the set with no source is written by hand: checked for leaks.
+        held = {q.id for q in db.get_questions(state.conn, name)}
+        questions = [
+            q
+            if q.id in held or "source" in q.meta
+            else replace(q, meta={**q.meta, "source": "hand"})
+            for q in questions
+        ]
         seen: set[str] = set()
         for q in questions:
             if q.id in seen:
@@ -936,6 +988,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/load", status_code=202)
     def load(name: str, body: LoadRequest):
         spec = state.retriever.spec(name)
+        check_default_set(spec)
         if body.dataset not in DATASETS:
             raise HTTPException(422, f"unknown dataset {body.dataset!r}; known: {list(DATASETS)}")
         if DATASETS[body.dataset] != spec.qa_type:

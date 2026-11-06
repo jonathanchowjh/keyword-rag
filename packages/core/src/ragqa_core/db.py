@@ -11,10 +11,11 @@ the worker thread: a ragqa_core.connection.Connection, in autocommit mode, which
 runs each statement under one lock and returns its rows as a list.
 
 The lock covers one statement. log_job, request_cancel, delete_job,
-delete_collection_rows and the migration in connect are several statements and
-are not atomic (move_ai_tables is one transaction). The eval set writes (save_questions,
-replace_questions, delete_eval_set) hold the lock for the whole write; log_job also reads then
-writes, so it assumes a single writer (the worker).
+delete_collection_rows and the migrations in connect are several statements and
+are not atomic (move_ai_tables, replace_questions and each collection's step of the eval set
+migration are one transaction each). The eval set writes (save_questions, replace_questions,
+delete_eval_set) hold the lock for the whole write; log_job also reads then writes, so it
+assumes a single writer (the worker).
 """
 
 import hashlib
@@ -226,28 +227,49 @@ def _migrate_run_items(conn: Connection) -> None:
 def _migrate_eval_sets(conn: Connection) -> None:
     """Questions used to belong to a collection. Each such collection gets an eval set of its
     name, and its runs are pinned to that set's first snapshot: their questions stay as they
-    were when the set is edited."""
+    were when the set is edited. Each collection's step is one transaction; runs a step left
+    unpinned (a migration from before it was one) are pinned to the set's first snapshot."""
     rows = conn.execute(
         "select name, qa_type, include_leaked from collections where name in"
-        " (select collection from questions) and name not in (select name from eval_sets)"
+        " (select collection from questions) or name in (select name from eval_sets)"
     )
     for row in rows:
         name = row["name"]
         with conn.lock:
-            create_eval_set(conn, name, row["qa_type"])
-            conn.execute(
-                "update eval_sets set include_leaked = ? where name = ?",
-                (row["include_leaked"], name),
-            )
-            version = snapshot_eval_set(conn, name)
-            for job in conn.execute(
-                "select id, setup_json from jobs where kind = 'eval' and collection = ?", (name,)
-            ):
-                setup = json.loads(job["setup_json"])
-                if "eval_set" not in setup and "eval_set_version" not in setup:
-                    set_job_setup(
-                        conn, job["id"], {**setup, "eval_set": name, "eval_set_version": version}
+            conn.execute("begin immediate")
+            try:
+                if get_eval_set(conn, name) is None:
+                    create_eval_set(conn, name, row["qa_type"])
+                    conn.execute(
+                        "update eval_sets set include_leaked = ? where name = ?",
+                        (row["include_leaked"], name),
                     )
+                    snapshot_eval_set(conn, name)
+                _pin_old_runs(conn, name)
+                conn.execute("commit")
+            except BaseException:
+                conn.execute("rollback")
+                raise
+
+
+def _pin_old_runs(conn: Connection, name: str) -> None:
+    """Every eval on the collection that records no eval set gets the set of its name, at that
+    set's first snapshot."""
+    first_version = first(
+        conn.execute(
+            "select version from eval_set_versions where eval_set = ? order by rowid limit 1",
+            (name,),
+        )
+    )
+    if first_version is None:
+        return
+    version = first_version["version"]
+    for job in conn.execute(
+        "select id, setup_json from jobs where kind = 'eval' and collection = ?", (name,)
+    ):
+        setup = json.loads(job["setup_json"])
+        if "eval_set" not in setup and "eval_set_version" not in setup:
+            set_job_setup(conn, job["id"], {**setup, "eval_set": name, "eval_set_version": version})
 
 
 def save_collection(conn: Connection, spec: CollectionSpec) -> None:
@@ -549,12 +571,19 @@ def replace_questions(
         ids = [q.id for q in questions]
         if repeated := next((i for i in ids if ids.count(i) > 1), None):
             raise ValueError(f"question id '{repeated}' appears more than once")
-        conn.execute("delete from questions where collection = ?", (name,))
-        conn.executemany(
-            "insert into questions values (?, ?, ?)",
-            [(name, q.id, json.dumps(asdict(q))) for q in questions],
-        )
-        return snapshot_eval_set(conn, name)
+        conn.execute("begin immediate")  # all or nothing: a failed insert keeps the old ones
+        try:
+            conn.execute("delete from questions where collection = ?", (name,))
+            conn.executemany(
+                "insert into questions values (?, ?, ?)",
+                [(name, q.id, json.dumps(asdict(q))) for q in questions],
+            )
+            version = snapshot_eval_set(conn, name)
+            conn.execute("commit")
+        except BaseException:
+            conn.execute("rollback")
+            raise
+        return version
 
 
 def get_questions(conn: Connection, name: str, version: str | None = None) -> list[Question]:

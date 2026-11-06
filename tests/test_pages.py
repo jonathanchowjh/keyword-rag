@@ -1679,6 +1679,7 @@ def test_store_page_links_its_eval_set_or_offers_to_make_one(page, seeded):
     page.goto(seeded.url + "/c/noset")
     expect(page.locator("#asked")).to_contain_text("No eval set yet")
     expect(page.locator('#asked a[href="/eval-sets"]')).to_be_visible()
+    expect(page.get_by_label("Default eval set")).to_have_value("")  # mcq sets exist to pick
 
 
 def test_eval_sets_page_lists_and_creates(page, seeded):
@@ -1727,6 +1728,7 @@ def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
     assert by_id["q0"]["meta"] == next(q for q in before["questions"] if q["id"] == "q0")["meta"]
     added = [q for q in got["questions"] if q["text"] == "a brand new question"]
     assert [q["gold_answers"] for q in added] == [["B"]]
+    assert [q["meta"] for q in added] == [{"source": "hand"}]  # checked for leaks
     assert len(got["versions"]) == len(before["versions"]) + 1
     expect(page.locator("#versions li").first).to_contain_text(got["version"][:8])
 
@@ -1750,6 +1752,11 @@ def test_eval_set_page_keeps_edits_on_a_stale_save(page, seeded):
     expect(page.locator("#save-msg")).to_contain_text("changed")
     expect(page.locator("[data-field=text]").first).to_have_value("my edit survives")
     assert question_map(seeded, "stalee")["q0"]["text"] != "my edit survives"
+    page.get_by_role("button", name="Reload (discard my edits)").click()
+    expect(page.locator("#questions tbody tr")).to_have_count(39)
+    expect(page.locator("[data-field=text]")).to_have_count(0)
+    expect(page.locator("#save-msg")).to_have_text("")
+    expect(page.locator("#dirty")).to_have_text("")
 
 
 def test_eval_set_page_pages_fifty_at_a_time(page, seeded):
@@ -1840,3 +1847,108 @@ def test_run_page_says_the_eval_set_changed_after_the_run(page, seeded):
     assert r.status_code == 200, r.text
     page.goto(f"{seeded.url}/c/chg/runs/{run_id}")
     expect(page.locator("#head")).to_contain_text("eval set changed after this run")
+
+
+def test_store_page_picks_its_default_eval_set(page, seeded):
+    seeded.build("pk")
+    mcq_set(seeded, "pk2", 3)
+    httpx.post(f"{seeded.url}/eval-sets", json={"name": "pksci", "qa_type": "science"})
+    page.goto(seeded.url + "/c/pk")
+    pick = page.get_by_label("Default eval set")
+    expect(pick).to_have_value("pk")
+    values = pick.locator("option").evaluate_all("o => o.map(x => x.value)")
+    assert "" in values and "pk2" in values and "pksci" not in values
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("#rf-set")).to_have_value("pk")
+    pick.select_option("pk2")
+    expect(page.locator('#asked a[href="/e/pk2"]')).to_be_visible()
+    expect(page.locator("#asked")).to_contain_text("3 questions")
+    expect(page.locator("#rf-set")).to_have_value("pk2")
+    expect(page.locator("#rf-split option[value=full]")).to_have_text("All (3)")
+    assert httpx.get(f"{seeded.url}/collections/pk").json()["eval_set"] == "pk2"
+    pick.select_option("")  # none: the set named after the store again
+    expect(page.locator('#asked a[href="/e/pk"]')).to_be_visible()
+    expect(pick).to_have_value("pk")
+    assert httpx.get(f"{seeded.url}/collections/pk").json()["eval_set"] == "pk"
+
+
+def test_store_page_says_how_many_of_its_questions_leaked(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "lk", "qa_type": "mcq"})
+    tides = [{"id": "t1", "text": "so the tides follow the moon each day we saw"}]
+    r = httpx.post(f"{seeded.url}/collections/lk/documents", json={"items": tides, "confirm": True})
+    assert r.status_code == 200, r.text
+    httpx.post(f"{seeded.url}/eval-sets", json={"name": "lk", "qa_type": "mcq"})
+    qs = [
+        {"id": "h1", "text": "the tides follow the moon each day", "choices": ["x", "y"]},
+        {"id": "h2", "text": "an unrelated one", "choices": ["x", "y"]},
+    ]
+    r = httpx.put(f"{seeded.url}/eval-sets/lk/questions", json={"questions": qs})
+    assert r.status_code == 200, r.text
+    page.goto(seeded.url + "/c/lk")
+    asked = page.locator("#asked")
+    expect(asked).to_contain_text(
+        "1 question appears among the items (leaked): it is left out of runs."
+    )
+    expect(asked.locator("input[type=checkbox]")).to_have_count(
+        0
+    )  # that lives on the eval set page
+    httpx.patch(f"{seeded.url}/eval-sets/lk", json={"include_leaked": True})
+    page.reload()
+    expect(asked).to_contain_text("the eval set includes them in runs")
+
+
+def test_eval_set_page_will_not_import_over_unsaved_edits(page, seeded, tmp_path):
+    seeded.build("dirt")
+    before = httpx.get(f"{seeded.url}/eval-sets/dirt").json()
+    qs = tmp_path / "more.jsonl"
+    qs.write_text(
+        json.dumps({"id": "u1", "text": "one more", "choices": ["x", "y"], "answer": "A"})
+    )
+    page.goto(seeded.url + "/e/dirt")
+    expect(page.locator("#questions tbody tr")).to_have_count(40)
+    expect(page.locator("#imp-questions-go")).to_be_enabled()
+    row = page.locator("#questions tbody tr").first
+    row.get_by_role("button", name="Edit").click()
+    row.locator("[data-field=text]").fill("my unsaved edit")
+    expect(page.locator("#imp-questions-go")).to_be_disabled()  # typing is an edit already
+    row.get_by_role("button", name="Done").click()
+    expect(page.locator("#imp-note")).to_have_text("Save or discard your changes before importing")
+    expect(page.locator("#imp-questions-file")).to_be_disabled()
+    expect(page.locator("#imp-questions-go")).to_be_disabled()
+    expect(page.locator("#questions tbody tr").first).to_contain_text("my unsaved edit")
+    assert httpx.get(f"{seeded.url}/eval-sets/dirt").json() == before  # nothing imported
+    page.get_by_role("button", name="Save changes").click()
+    expect(page.locator("#save-msg")).to_contain_text("Saved as version")
+    expect(page.locator("#imp-note")).to_have_text("")
+    upload_and_preview(page, "questions", qs)
+    page.locator("#imp-questions-import").click()
+    expect(page.locator("#imp-questions-preview")).to_contain_text("1 new")
+    expect(page.locator("#questions tbody tr")).to_have_count(41)
+    assert question_map(seeded, "dirt")["q0"]["text"] == "my unsaved edit"
+
+
+def test_eval_set_versions_mark_the_current_one_after_a_revert(page, seeded):
+    mcq_set(seeded, "rev", 2)
+    first = httpx.get(f"{seeded.url}/eval-sets/rev").json()
+    r = httpx.put(
+        f"{seeded.url}/eval-sets/rev/questions", json={"questions": first["questions"][:1]}
+    )
+    second = r.json()["version"]
+    r = httpx.put(f"{seeded.url}/eval-sets/rev/questions", json={"questions": first["questions"]})
+    assert r.json()["version"] == first["version"]  # the same content: the same version
+    page.goto(seeded.url + "/e/rev")
+    items = page.locator("#versions li")
+    expect(items).to_have_count(2)
+    expect(items.filter(has_text=first["version"][:8])).to_contain_text("current")
+    expect(items.filter(has_text=second[:8])).not_to_contain_text("current")
+
+
+def test_a_default_store_that_exists_is_opened_not_added_again(page, seeded):
+    r = httpx.post(f"{seeded.url}/collections", json={"name": "scienceqa", "qa_type": "mcq"})
+    assert r.status_code == 201, r.text
+    page.goto(seeded.url + "/")
+    expect(page.locator("#defaults").get_by_role("link", name="Open scienceqa")).to_have_attribute(
+        "href", "/c/scienceqa"
+    )
+    expect(page.get_by_role("button", name="Add scienceqa")).to_have_count(0)
+    expect(page.get_by_role("button", name="Add scibench")).to_be_visible()

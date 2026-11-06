@@ -241,21 +241,26 @@ class Evaluator:
         set's version changes: the store page asks for it on every poll."""
         found = db.get_eval_set(self.conn, eval_set)
         version = found["version"] if found else None
+        count = self.retriever.store.count(spec.name)
+        kept = self._leaked.get((spec.name, eval_set))
+        if kept is not None and kept[:2] == (count, version):
+            return set(kept[2])
         checked = [
             q
             for q in db.get_questions(self.conn, eval_set, version)
             if str(q.meta.get("source", "")).startswith("upload:") or q.meta.get("source") == "hand"
         ]
-        if not checked:
-            return set()
-        count = self.retriever.store.count(spec.name)
-        kept = self._leaked.get((spec.name, eval_set))
-        if kept is not None and kept[:2] == (count, version):
-            return set(kept[2])
-        texts = [h.text for batch in self.retriever.store.scroll(spec.name) for h in batch]
-        leaked = imports.leaked_ids(checked, texts)
+        leaked: set[str] = set()
+        if checked:
+            texts = [h.text for batch in self.retriever.store.scroll(spec.name) for h in batch]
+            leaked = imports.leaked_ids(checked, texts)
         self._leaked[(spec.name, eval_set)] = (count, version, leaked)
         return set(leaked)
+
+    def forget(self, name: str) -> None:
+        """Drops the leak scans of a store that is gone."""
+        for key in [k for k in self._leaked if k[0] == name]:
+            del self._leaked[key]
 
     def _questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """What a run that has not recorded its questions asks: its set's, less those leaked

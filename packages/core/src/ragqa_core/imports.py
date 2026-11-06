@@ -295,6 +295,8 @@ def build_items(rows: list[dict], mapping: dict) -> tuple[list[Item], dict]:
 def question_problem(q: Question, qa_type: QaType) -> str | None:
     """Why the question is not usable, or None. No gold answer is fine for every type: it
     leaves the answers unmeasured, as with BRIGHT."""
+    if not q.id.strip():
+        return "no id"
     if not q.text.strip():
         return "no text"
     if qa_type == "mcq":

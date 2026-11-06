@@ -91,7 +91,14 @@ function draw() {
   $("questions").innerHTML = questionsHtml();
   $("pager").innerHTML = pagerHtml();
   $("fields").textContent = fieldsHtml();
+  showDirty();
+}
+
+// An import reloads the set, so it waits until the edits are saved or discarded.
+function showDirty() {
   $("dirty").textContent = dirty ? "Unsaved changes" : "";
+  $("imp-wrap").disabled = dirty;
+  $("imp-note").textContent = dirty ? "Save or discard your changes before importing" : "";
 }
 
 // Reads the open rows' fields back into the working copy.
@@ -109,6 +116,11 @@ function commit() {
 }
 
 function bindTable() {
+  $("questions").addEventListener("input", () => {
+    if (dirty) return;
+    dirty = true; // typing in an open row is an edit, though the table is not redrawn for it
+    showDirty();
+  });
   $("questions").addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
@@ -136,12 +148,22 @@ function bindTable() {
     commit();
     const taken = new Set(rows.map((q) => q.id));
     while (taken.has(`new-${++added}`));
-    rows.push({ id: `new-${added}`, text: "", choices: null, gold_answers: [], gold_ids: [], meta: {}, _open: true, _new: true });
+    rows.push({ id: `new-${added}`, text: "", choices: null, gold_answers: [], gold_ids: [], meta: { source: "hand" }, _open: true, _new: true });
     page = Math.floor((rows.length - 1) / PAGE_SIZE);
     dirty = true;
     draw();
   });
   $("save").addEventListener("click", save);
+  $("save-msg").addEventListener("click", async (e) => {
+    if (!e.target.closest("#reload")) return;
+    $("save-msg").textContent = "";
+    try {
+      await load();
+      $("save-msg").className = "";
+    } catch (err) {
+      $("save-msg").textContent = err.message;
+    }
+  });
 }
 
 // -- saving ------------------------------------------------------------------------------------------
@@ -164,6 +186,10 @@ async function save() {
   } catch (e) {
     $("save-msg").className = "err"; // the edits stay where they are
     $("save-msg").textContent = e.message;
+    if (e.status === 409) { // stale or busy: reloading is the way on, and it is the user's call
+      $("save-msg").insertAdjacentHTML("beforeend",
+        ' <button type="button" id="reload" class="secondary">Reload (discard my edits)</button>');
+    }
   }
 }
 
@@ -171,8 +197,8 @@ async function save() {
 
 function versionsHtml() {
   return set.versions
-    .map((v, i) => `<li><code>${esc(short(v.version))}</code> ${esc(clock(v.created_at))} · ${esc(
-      plural(v.questions, "question"))}${i === 0 ? ' · <span class="ok">current</span>' : ""}</li>`)
+    .map((v) => `<li><code>${esc(short(v.version))}</code> ${esc(clock(v.created_at))} · ${esc(
+      plural(v.questions, "question"))}${v.version === set.version ? ' · <span class="ok">current</span>' : ""}</li>`)
     .join("");
 }
 
@@ -226,7 +252,7 @@ async function start() {
       importPath: `/eval-sets/${enc}/imports`,
       kind: "questions",
       qaType: set.qa_type,
-      done: load,
+      done: () => (dirty ? null : load()), // edits made while it ran are kept; Save then says it moved on
     });
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Eval sets", href: "/eval-sets" }] }) +

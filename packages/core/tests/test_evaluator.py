@@ -1636,3 +1636,19 @@ def test_leaked_ids_scan_once_until_the_store_or_the_set_changes(env):
     ev._leaked.clear()
     ev.queue("c", "full", ["hybrid"], False, None)  # included: nothing to drop, so no scan
     assert len(scans) == 3
+
+
+def test_leaked_ids_reads_no_questions_while_the_scan_is_kept(env, monkeypatch):
+    conn, ev = env
+    ix = ev.retriever.indexer
+    spec = ix.spec("c")
+    ix.add(spec, [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
+    save_questions(conn, "c", [Question("h1", LONG, ["y", "n"], ["A"], [], {"source": "hand"})])
+    assert ev.leaked_ids(spec, "c") == {"h1"}
+    reads = []
+    get_questions = db.get_questions
+    monkeypatch.setattr(db, "get_questions", lambda *a: reads.append(a) or get_questions(*a))
+    assert ev.leaked_ids(spec, "c") == {"h1"} and reads == []
+    ev.forget("c")
+    assert ev._leaked == {}
+    assert ev.leaked_ids(spec, "c") == {"h1"} and len(reads) == 1

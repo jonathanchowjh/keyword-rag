@@ -380,6 +380,8 @@ def test_question_problem():
     ok = Question("a", "which one?", ["x", "y"], ["B"], [], {})
     assert question_problem(ok, "mcq") is None
     assert question_problem(replace(ok, text="  "), "mcq") == "no text"
+    assert question_problem(replace(ok, id=""), "mcq") == "no id"
+    assert question_problem(replace(ok, id=" "), "mcq") == "no id"
     assert "choices" in question_problem(replace(ok, choices=["x"]), "mcq")
     assert "choices" in question_problem(replace(ok, choices=None), "mcq")
     assert "answer" in question_problem(replace(ok, gold_answers=["Z"]), "mcq")

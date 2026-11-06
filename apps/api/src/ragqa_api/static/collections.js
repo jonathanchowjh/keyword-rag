@@ -1,4 +1,4 @@
-import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, pct, pill, plural,
+import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, paint, pct, pill, plural,
   refreshSpend, shell, short, verdictHtml } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
@@ -43,6 +43,7 @@ async function refresh() {
   try {
     const [specs] = await Promise.all([api("/collections"), catalog().then((c) => (cat = c))]);
     const full = await Promise.all(specs.map((s) => api(`/collections/${encodeURIComponent(s.name)}`)));
+    drawDefaults(new Set(specs.map((s) => s.name)));
     const html = full.length
       ? `<div class="table"><div class="th"><div>Store</div><div>Do keywords help?</div>
           <div>Ready?</div></div>${full.map(rowHtml).join("")}</div>`
@@ -99,11 +100,14 @@ async function create() {
 
 // -- a default store ----------------------------------------------------------------------------
 
-function drawDefaults() {
-  $("defaults").innerHTML = Object.entries(cat.datasets)
-    .map(([id, type]) => `<div class="row"><button type="button" class="secondary" data-dataset="${esc(id)}">Add ${esc(id)}</button>
+// A dataset whose store exists links to it: adding it again would load it again.
+function drawDefaults(stores) {
+  paint("defaults", Object.entries(cat.datasets)
+    .map(([id, type]) => `<div class="row">${stores.has(id)
+      ? `<a href="/c/${encodeURIComponent(id)}">Open ${esc(id)}</a>`
+      : `<button type="button" class="secondary" data-dataset="${esc(id)}">Add ${esc(id)}</button>`}
       <span class="muted">${esc(cat.qa_types[type]?.label ?? type)}</span></div>`)
-    .join("");
+    .join(""));
 }
 
 // Creates the store named after the dataset, then asks to load it: the estimate first, and a
@@ -214,10 +218,6 @@ function confirmLoads(paying) {
 }
 
 $("new").addEventListener("click", showForm);
-catalog().then((c) => {
-  cat = c;
-  drawDefaults();
-});
 $("setup").addEventListener("click", setup);
 refresh();
 setInterval(refresh, REFRESH_MS);

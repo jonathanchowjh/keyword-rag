@@ -14,6 +14,14 @@
   setup, deleting a store keeps its eval sets, and deleting an eval set deletes the
   runs that used it after a confirm. Reloading a dataset upserts its questions by id,
   so it overwrites hand edits and restores deleted questions.
+  `PATCH /collections/{name}` `{eval_set}` picks a store's default eval set (null clears
+  it), also from a select on the store page. A store and an eval set of one name have
+  one type: creating either is refused with 409 otherwise, and a load or question
+  import on a store whose default set has another type is refused with 409 before
+  anything is estimated or queued. A question added by hand is saved with
+  `source: "hand"` and checked for leaks; a question needs an id. The eval set page
+  waits for unsaved edits to be saved before it imports, and after a stale save offers
+  to reload.
 - Method v2: collections get a recipe (`worked_examples`, `reference`, `paper_2024`),
   chosen at creation or by copying a collection's items under another recipe. Build
   steps (induced vocabulary, AI tagging, abstracted examples) are estimated before

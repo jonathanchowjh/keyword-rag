@@ -28,7 +28,9 @@ async function send(path, init) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail;
-    throw new Error(typeof detail === "string" ? detail : response.statusText || "request failed");
+    const error = new Error(typeof detail === "string" ? detail : response.statusText || "request failed");
+    error.status = response.status;
+    throw error;
   }
   return data;
 }

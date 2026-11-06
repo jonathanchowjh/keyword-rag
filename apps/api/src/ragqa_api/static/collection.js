@@ -20,6 +20,7 @@ const enc = encodeURIComponent(name);
 
 let cat = null;
 let col = null; // the latest GET /collections/{name}
+let sets = []; // the eval sets of this store's type
 let runs = [];
 let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
@@ -331,13 +332,54 @@ function bindSources() {
 
 // -- its eval set -----------------------------------------------------------------------------------
 
+// Picks the store's default eval set among those of its type; "none" falls back to the set
+// named after the store, if there is one.
+function defaultPickHtml() {
+  if (!sets.length) return "";
+  const options = ['<option value="">(none)</option>']
+    .concat(sets.map((e) => `<option value="${esc(e.name)}"${e.name === col.eval_set ? " selected" : ""}>${esc(e.name)}</option>`))
+    .join("");
+  return `<div class="row"><label>Default eval set<select id="as-set">${options}</select></label>
+    <span id="as-msg" class="err" role="status"></span></div>`;
+}
+
+function leakedHtml() {
+  const n = col.leaked;
+  if (!n) return "";
+  const what = n === 1 ? "1 question appears" : `${count(n)} questions appear`;
+  const fate = col.include_leaked
+    ? "the eval set includes them in runs"
+    : `${n === 1 ? "it is" : "they are"} left out of runs`;
+  return `<p class="warn">${esc(what)} among the items (leaked): ${esc(fate)}.</p>`;
+}
+
 function askedHtml() {
   if (!col.eval_set) {
-    return '<p>No eval set yet. <a href="/eval-sets">Create one</a> to ask this store questions.</p>';
+    return `<p>No eval set yet. <a href="/eval-sets">Create one</a> to ask this store questions.</p>${defaultPickHtml()}`;
   }
   return `<p><a href="/e/${encodeURIComponent(col.eval_set)}">${esc(col.eval_set)}</a>:
     ${esc(plural(col.questions, "question"))}, of which ${esc(count(col.dev_questions))} in the dev slice
-    that runs use by default.</p>`;
+    that runs use by default.</p>${leakedHtml()}${defaultPickHtml()}`;
+}
+
+function bindAsked() {
+  $("asked").addEventListener("change", async (e) => {
+    const select = e.target.closest("#as-set");
+    if (!select) return;
+    $("as-msg").textContent = "";
+    try {
+      col = await api(`/collections/${enc}`, { method: "PATCH", body: { eval_set: select.value || null } });
+      if (!$("run-form").hidden) { // the run form's default follows
+        $("rf-set").innerHTML = setOptions(sets);
+        if ($("rf-set").value) $("rf-set").dispatchEvent(new Event("change"));
+      }
+      await refresh();
+      if ($("as-set")) $("as-set").value = col.eval_set ?? ""; // "none" may fall back to a set
+    } catch (err) {
+      select.value = col.eval_set ?? "";
+      $("as-msg").textContent = err.message;
+    }
+  });
 }
 
 // -- keyword lists ----------------------------------------------------------------------
@@ -477,14 +519,16 @@ async function refresh() {
   clearTimeout(timer);
   try {
     cat = await catalog();
-    let loads;
-    [col, runs, loads, versions] = await Promise.all([
+    let loads, everySet;
+    [col, runs, loads, versions, everySet] = await Promise.all([
       api("/collections/" + enc),
       api("/eval?collection=" + enc),
       api("/jobs?collection=" + enc + "&kind=load&limit=1"),
       api("/collections/" + enc + "/keyword-lists"),
+      api("/eval-sets"),
     ]);
     loadJob = loads[0] ?? null;
+    sets = everySet.filter((e) => e.qa_type === col.qa_type);
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("runs", runsHtml());
@@ -504,6 +548,7 @@ $("new-run").addEventListener("click", toggleRunForm);
 buildLists();
 buildDelete();
 bindSources();
+bindAsked();
 importBox($("imp-items"), {
   uploadPath: `/collections/${enc}/uploads`,
   importPath: `/collections/${enc}/imports`,
