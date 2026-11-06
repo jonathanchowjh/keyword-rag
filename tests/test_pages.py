@@ -180,6 +180,20 @@ def test_run_page_questions_open_with_gold_and_answer(page, seeded):
     expect(page.locator("#questions details[open] [data-matched]").first).to_be_visible()
 
 
+def test_run_page_mutes_evidence_the_store_does_not_hold(page, seeded):
+    url = f"{seeded.url}/eval/{seeded.run_id}/questions?disagree=false"
+    rows = httpx.get(url).json()
+    rows[0] = {**rows[0], "gold_answers": [], "gold_ids": ["enzyme-item", "gone"]}
+    rows[0]["gold_held"] = ["enzyme-item"]
+    page.route("**/questions?disagree=false", lambda route: route.fulfill(json=rows))
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    opened = page.locator("#questions details", has_text=rows[0]["question"]).first
+    opened.locator("summary").click()
+    expect(opened).to_contain_text("Gold: enzyme-item · gone (not in this store)")
+    expect(opened.locator("[data-unheld].muted")).to_have_text("gone (not in this store)")
+
+
 def test_run_head_says_what_changed_since_the_run(page, seeded):
     run_id = seeded.build("since", run=True)
     page.goto(f"{seeded.url}/c/since/runs/{run_id}")

@@ -1552,6 +1552,21 @@ def test_evidence_counts_only_where_the_store_holds_it(tmp_path):
     assert (held["evidence_named"], held["evidence_held"]) == (2, 1)
 
 
+def test_run_views_say_which_evidence_the_store_holds(tmp_path):
+    conn, ev = evidence_env(tmp_path)
+    half = ev.queue("half", "full", ["hybrid"], False, None, eval_set="mq")
+    ev.run(half)
+    store, reads = ev.retriever.store, []
+    get = store.get
+    store.get = lambda *a, **kw: reads.append(1) or get(*a, **kw)
+    items = {r["question_id"]: r for r in ev.items(half, "hybrid", wrong_only=False)}
+    asked = {q["question_id"]: q for q in ev.questions(half, disagree=False)}
+    for view in (items, asked):
+        assert (view["m1"]["gold_ids"], view["m1"]["gold_held"]) == (["g1"], ["g1"])
+        assert (view["m2"]["gold_ids"], view["m2"]["gold_held"]) == (["g2"], [])
+    assert len(reads) == 2  # one read of the store per view
+
+
 def test_retrieval_only_run_that_measures_nothing_is_refused(tmp_path):
     conn, ev = evidence_env(tmp_path)
     nothing = "nothing to measure: this store holds none of the eval set's evidence"

@@ -278,6 +278,16 @@ function methodHtml(m, row) {
     <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></div>`;
 }
 
+// The gold answers, else the evidence ids. An id the store does not hold is muted: the metrics
+// left it out, so it is unmeasured there, not missed. Rows from before gold_held lack it.
+function goldHtml(q) {
+  if (q.gold_answers?.length || !q.gold_ids?.length) return esc(show(q.gold_answers?.length ? q.gold_answers : q.gold_ids));
+  const held = new Set(q.gold_held ?? q.gold_ids);
+  return q.gold_ids
+    .map((g) => (held.has(g) ? esc(g) : `<span class="muted" data-unheld>${esc(g)} (not in this store)</span>`))
+    .join(" · ");
+}
+
 function questionHtml(q, picked) {
   const outcome = q.methods[picked]?.outcome;
   const mark = outcome ? `${outcome} ` : "";
@@ -285,7 +295,7 @@ function questionHtml(q, picked) {
   const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m]));
   return `<details><summary>${esc(mark)}${esc(q.question ?? q.question_id)}</summary>
     ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
-    <p>Gold: ${esc(show(q.gold_answers?.length ? q.gold_answers : q.gold_ids))}</p>
+    <p>Gold: ${goldHtml(q)}</p>
     <div class="sides">${columns.join("")}</div></details>`;
 }
 

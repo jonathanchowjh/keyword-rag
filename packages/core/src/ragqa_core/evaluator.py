@@ -300,11 +300,15 @@ class Evaluator:
     def _held(self, spec: CollectionSpec, questions: list[Question]) -> list[Question]:
         """Each question with its evidence ids cut to those the store holds. Evidence the
         store lacks cannot be found in it, so it is unmeasured there, never missed."""
-        wanted = sorted({g for q in questions for g in q.gold_ids})
-        if not wanted:
+        if not any(q.gold_ids for q in questions):
             return questions
-        held = {h.id for h in self.retriever.store.get(spec.name, wanted)}
+        held = self._held_ids(spec, questions)
         return [replace(q, gold_ids=[g for g in q.gold_ids if g in held]) for q in questions]
+
+    def _held_ids(self, spec: CollectionSpec, questions: list[Question]) -> set[str]:
+        """Which of the questions' evidence ids the store holds, in one read of the store."""
+        wanted = sorted({g for q in questions for g in q.gold_ids})
+        return {h.id for h in self.retriever.store.get(spec.name, wanted)} if wanted else set()
 
     def _evidence(self, spec: CollectionSpec, questions: list[Question]) -> tuple[int, int]:
         """How many questions name evidence, and how many of those the store holds any of."""
@@ -1011,21 +1015,23 @@ class Evaluator:
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
-        out = []
-        for row in db.run_items(self.conn, job_id, method):
-            if wrong_only and not is_wrong(row, primary, answering):
-                continue
-            q = questions.get(row["question_id"])
-            out.append(
-                {
-                    **row,
-                    "question": q.text if q else None,
-                    "choices": q.choices if q else None,
-                    "gold_answers": q.gold_answers if q else [],
-                    "gold_ids": q.gold_ids if q else [],
-                }
-            )
-        return out
+        rows = [
+            (row, questions.get(row["question_id"]))
+            for row in db.run_items(self.conn, job_id, method)
+            if not wrong_only or is_wrong(row, primary, answering)
+        ]
+        held = self._held_ids(spec, [q for _, q in rows if q])
+        return [
+            {
+                **row,
+                "question": q.text if q else None,
+                "choices": q.choices if q else None,
+                "gold_answers": q.gold_answers if q else [],
+                "gold_ids": q.gold_ids if q else [],
+                "gold_held": [g for g in q.gold_ids if g in held] if q else [],
+            }
+            for row, q in rows
+        ]
 
     def questions(self, job_id: str, disagree: bool) -> list[dict]:
         """Each question of a run with every method's row and its right/wrong outcome. With
@@ -1041,6 +1047,8 @@ class Evaluator:
         by_question: dict[str, dict[str, dict]] = {}
         for r in db.run_items(self.conn, job_id):
             by_question.setdefault(r["question_id"], {})[r["method"]] = r
+        shown = [questions[qid] for qid in by_question if qid in questions]
+        held = self._held_ids(spec, shown)  # the evidence the metrics read, as _held cuts it
         out = []
         for qid, rows in by_question.items():
             methods = {}
@@ -1062,6 +1070,7 @@ class Evaluator:
                     "choices": q.choices if q else None,
                     "gold_answers": q.gold_answers if q else [],
                     "gold_ids": q.gold_ids if q else [],
+                    "gold_held": [g for g in q.gold_ids if g in held] if q else [],
                     "methods": methods,
                 }
             )
