@@ -118,3 +118,9 @@ td.num, td[data-said] { white-space:nowrap; }
 .md pre { padding:8px 10px; overflow-x:auto; white-space:pre; overflow-wrap:normal;
   background:var(--card); border:1px solid var(--line); border-radius:6px; }
 .md pre code { padding:0; border:0; background:none; }
+/* A chat's stores as chips: the name, what it holds or "deleted", and a remove button. */
+.chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chip { display:inline-flex; align-items:center; gap:2px; font-size:13px; padding:2px 2px 2px 10px;
+  border:1px solid var(--line); border-radius:12px; }
+.chip.gone { color:var(--muted); border-style:dashed; }
+.chip button { padding:0 6px; border:0; background:transparent; color:inherit; font-size:14px; line-height:1.2; }

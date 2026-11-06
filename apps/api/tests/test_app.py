@@ -823,6 +823,7 @@ PUBLIC = {
     "/status",
     "/ai",
     "/chat",
+    "/chats",
 }
 PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab", "/chat")
 

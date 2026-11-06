@@ -2057,26 +2057,64 @@ def test_a_default_store_that_exists_is_opened_not_added_again(page, seeded):
 
 # -- Chat page ---------------------------------------------------------------------------
 
-CHAT_REPLY = {
+CHAT_ATTEMPT = {
+    "n": 1,
+    "attempt": 1,
+    "search_text": "asked",
+    "decisions": [],
+    "evidence": [],
     "answer": "Rates rise [1] with <b>heat</b> [2].",
     "citations": [
-        {"n": 1, "id": "enzyme-item", "text": "enzyme " + "kinetics " * 60, "source": "hand"},
-        {"n": 2, "id": "other", "text": "short <i>passage</i>", "source": None},
+        {
+            "n": 1,
+            "id": "enzyme-item",
+            "text": "enzyme " + "kinetics " * 60,
+            "source": "hand",
+            "part": None,
+            "parts": None,
+            "store": "c",
+        },
+        {
+            "n": 2,
+            "id": "other",
+            "text": "short <i>passage</i>",
+            "source": None,
+            "part": None,
+            "parts": None,
+            "store": "c",
+        },
     ],
-    "hit_ids": ["enzyme-item", "other"],
-    "method": "hybrid",
-    "query_tags": None,
     "usd": 0.0123,
     "error": None,
+    "model": "anthropic/fake",
 }
 
 
+def make_chat(seeded, stores=("c",), title=None) -> str:
+    body = {"stores": list(stores), **({"title": title} if title else {})}
+    r = httpx.post(f"{seeded.url}/chats", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def open_chat(page, seeded, stores=("c",), title=None) -> str:
+    """A new saved chat on `stores`, opened on the page."""
+    chat_id = make_chat(seeded, stores, title)
+    page.goto(f"{seeded.url}/chat#{chat_id}")
+    expect(page.locator("#chips .chip")).to_have_count(len(stores))
+    return chat_id
+
+
 def chat_route(page, handler):
-    """Answer the POST to /chat; the page itself, a GET of the same path, goes through."""
-    page.route(
-        "**/chat",
-        lambda route: handler(route) if route.request.method == "POST" else route.fallback(),
-    )
+    """Answer each POST of a message to a chat."""
+    page.route("**/chats/*/messages", lambda route: handler(route))
+
+
+def chat_message(route, n=1, **attempt):
+    """What the server sends back for the message POSTed at `route`: its attempt is
+    CHAT_ATTEMPT with `attempt`'s changes."""
+    content = json.loads(route.request.post_data)["content"]
+    return {"n": n, "content": content, "attempts": [{**CHAT_ATTEMPT, "n": n, **attempt}]}
 
 
 def chat_ask(page, text):
@@ -2084,23 +2122,220 @@ def chat_ask(page, text):
     page.locator("#send").click()
 
 
+def chat_link(page, chat_id):
+    return page.locator(f'#chat-list a[href="#{chat_id}"]')
+
+
+def test_new_chat_picks_stores_and_lists_saved_chats(page, seeded):
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#send")).to_be_disabled()  # no chat open yet
+    page.locator("#new").click()
+    picker = page.locator("#picking")
+    expect(picker.locator("label", has=page.locator('input[value="c"]'))).to_contain_text("mcq")
+    picker.locator('input[value="c"]').check()
+    picker.locator('input[value="vo"]').check()
+    page.get_by_role("button", name="Start chat").click()
+    expect(page).to_have_url(re.compile(r"/chat#[0-9a-f]{32}$"))
+    first = page.url.split("#")[1]
+    expect(page.locator("#chips .chip")).to_have_text([re.compile("^c"), re.compile("^vo")])
+    expect(picker).to_be_empty()
+    chat_ask(page, "the first of two saved chats")
+    expect(page.locator("#log .reply")).to_have_count(1)
+    expect(chat_link(page, first)).to_contain_text("the first of two saved chats")
+    expect(chat_link(page, first)).to_contain_text("c, vo")
+    expect(page.locator("#chat-title")).to_have_text("the first of two saved chats")
+
+    # A second chat, asked later, is listed above the first.
+    page.locator("#new").click()
+    picker.locator('input[value="c"]').check()
+    page.get_by_role("button", name="Start chat").click()
+    expect(page).not_to_have_url(re.compile(first))
+    second = page.url.split("#")[1]
+    expect(page.locator("#log .msg")).to_have_count(0)
+    chat_ask(page, "the second of two saved chats")
+    expect(chat_link(page, second)).to_contain_text("the second of two saved chats")
+    hrefs = page.locator("#chat-list a").evaluate_all("els => els.map(e => e.getAttribute('href'))")
+    assert hrefs.index(f"#{second}") < hrefs.index(f"#{first}")
+
+    # The header's edits are saved on the chat.
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        page.locator("#add-store").select_option("vo")
+    expect(page.locator("#chips .chip")).to_have_count(2)
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        page.get_by_role("button", name="Remove c").click()
+    expect(page.locator("#chips .chip")).to_have_text([re.compile("^vo")])
+    expect(page.get_by_role("button", name="Remove vo")).to_be_disabled()  # a chat needs one
+    page.locator("#evidence").fill("3")
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        page.locator("#evidence").blur()
+    expect(page.locator("#chat-head")).to_contain_text("costs one AI call per follow-up")
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        page.get_by_label("Rewrite follow-ups with AI").check()
+    saved = httpx.get(f"{seeded.url}/chats/{second}").json()
+    assert saved["stores"] == ["vo"]
+    assert saved["settings"]["evidence_size"] == 3 and saved["settings"]["rewrite"] is True
+
+    # Clicking a chat opens it.
+    chat_link(page, first).click()
+    expect(page).to_have_url(re.compile(f"#{first}$"))
+    expect(page.locator("#log .user")).to_have_text("the first of two saved chats")
+    expect(page.locator("#evidence")).to_have_value("8")
+
+    # Delete asks first.
+    row = page.locator("#chat-list li", has=page.locator(f'a[href="#{second}"]'))
+    row.get_by_role("button", name="Delete").click()
+    expect(page.get_by_text("Delete chat the second of two saved chats?")).to_be_visible()
+    page.get_by_role("button", name="Keep it").click()
+    expect(page.get_by_text("Delete chat the second of two saved chats?")).to_have_count(0)
+    row.get_by_role("button", name="Delete").click()
+    page.get_by_role("button", name="Yes, delete").click()
+    expect(chat_link(page, second)).to_have_count(0)
+    assert httpx.get(f"{seeded.url}/chats/{second}").status_code == 404
+    expect(page.locator("#log .user")).to_have_text("the first of two saved chats")  # still open
+    # Deleting the open chat closes it.
+    open_row = page.locator("#chat-list li", has=page.locator(f'a[href="#{first}"]'))
+    open_row.get_by_role("button", name="Delete").click()
+    page.get_by_role("button", name="Yes, delete").click()
+    expect(chat_link(page, first)).to_have_count(0)
+    expect(page.locator("#log .msg")).to_have_count(0)
+    expect(page).not_to_have_url(re.compile("#"))
+    expect(page.locator("#send")).to_be_disabled()
+
+
+def test_new_chat_needs_a_store(page, seeded):
+    posts = []
+    page.on(
+        "request",
+        lambda r: posts.append(r.url) if r.method == "POST" and r.url.endswith("/chats") else None,
+    )
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#send")).to_be_disabled()
+    expect(page.locator("#add-doc")).to_be_disabled()
+    page.locator("#new").click()
+    page.get_by_role("button", name="Start chat").click()
+    expect(page.locator("#pick-note")).to_have_text("Pick at least one store.")
+    assert posts == []
+    page.route(
+        "**/collections",
+        lambda r: r.fulfill(json=[]) if r.request.method == "GET" else r.fallback(),
+    )
+    page.reload()
+    page.locator("#new").click()
+    picker = page.locator("#picking")
+    expect(picker).to_contain_text("No stores yet")
+    expect(picker.get_by_role("link", name="Stores")).to_have_attribute("href", "/")
+    expect(page.get_by_role("button", name="Start chat")).to_have_count(0)
+    expect(page.locator("#send")).to_be_disabled()
+
+
+def test_chat_reopens_after_reload_from_the_server(page, seeded):
+    ai = seeded.app.state.ai
+    fake_replies(ai, lambda p: "Rates rise [1].")
+    # A conversation the old page kept in the tab: ignored.
+    page.add_init_script(
+        "sessionStorage.setItem('chat:c', JSON.stringify([{role: 'user', content: 'old tab'}]))"
+    )
+    try:
+        chat_id = open_chat(page, seeded)
+        chat_ask(page, "enzyme kinetics rate experiment")  # close enough to c to clear its bar
+        expect(page.locator("#log .reply")).to_have_count(1)
+        page.reload()
+        expect(page).to_have_url(re.compile(f"#{chat_id}$"))
+        expect(page.locator("#log .user")).to_have_text("enzyme kinetics rate experiment")
+        expect(page.locator("#log .reply .md")).to_have_text("Rates rise [1].")
+        sources_ = page.locator("#log .reply .sources li")
+        expect(sources_).to_have_count(1)
+        expect(sources_.locator(".what")).to_contain_text(re.compile(r" · c$"))
+        expect(page.locator("#log")).not_to_contain_text("old tab")
+        assert page.evaluate("Object.keys(sessionStorage)") == ["chat:c"]  # nothing written
+        expect(chat_link(page, chat_id)).to_contain_text("enzyme kinetics rate experiment")
+    finally:
+        fake_replies(ai, lambda p: "Answer: A")
+
+
+def test_switching_chats_while_a_reply_is_on_its_way_shows_it_in_its_own_chat(page, seeded):
+    held = []
+    chat_route(page, held.append)
+    first = make_chat(seeded, ["c"], "slow chat one")
+    second = make_chat(seeded, ["vo"], "slow chat two")
+    page.goto(f"{seeded.url}/chat#{first}")
+    expect(page.locator("#chips .chip")).to_have_count(1)
+
+    def ask_and_hold(question):
+        count = len(held)
+        chat_ask(page, question)
+        for _ in range(100):
+            if len(held) > count:
+                break
+            page.wait_for_timeout(20)
+        assert len(held) == count + 1
+
+    # The reply comes while the page is on the other chat: not drawn there, kept in its own.
+    ask_and_hold("asked in the first chat")
+    expect(page.locator("#log .user")).to_have_text("asked in the first chat")
+    expect(page.locator("#status")).to_have_text("thinking…")
+    chat_link(page, second).click()
+    expect(page).to_have_url(re.compile(f"#{second}$"))
+    expect(page.locator("#log .msg")).to_have_count(0)
+    expect(page.locator("#status")).to_have_text("")
+    expect(page.locator("#send")).to_be_enabled()  # this chat has nothing on its way
+    with page.expect_response(lambda r: r.url.endswith(f"/chats/{first}/messages")):
+        held[-1].continue_()
+    expect(page.locator("#log .msg")).to_have_count(0)
+    expect(page.locator("#spoken")).to_have_text("")
+    chat_link(page, first).click()
+    expect(page.locator("#log .user")).to_have_text("asked in the first chat")
+    expect(page.locator("#log .reply")).to_have_count(1)
+
+    # Back on its own chat before the reply comes: drawn there, and read out.
+    ask_and_hold("asked again")
+    chat_link(page, second).click()
+    expect(page.locator("#log .msg")).to_have_count(0)
+    chat_link(page, first).click()
+    expect(page.locator("#log .user")).to_have_text(["asked in the first chat", "asked again"])
+    expect(page.locator("#send")).to_be_disabled()  # its reply is still on its way
+    held[-1].continue_()
+    expect(page.locator("#log .reply")).to_have_count(2)
+    expect(page.locator("#send")).to_be_enabled()
+    # Only the newest reply is read out; the log itself is not live.
+    expect(page.locator("#spoken")).to_have_text("Answer: A")
+    expect(page.locator("#log")).not_to_have_attribute("aria-live", re.compile(".*"))
+
+
+def test_a_deleted_store_shows_as_deleted(page, seeded):
+    free_store(seeded, "doomed")
+    chat_id = make_chat(seeded, ["c", "doomed"], "a chat that outlives a store")
+    r = httpx.post(f"{seeded.url}/chats/{chat_id}/messages", json={"content": "before it goes"})
+    assert r.status_code == 200, r.text
+    assert httpx.delete(f"{seeded.url}/collections/doomed").status_code == 204
+    page.goto(f"{seeded.url}/chat#{chat_id}")  # no request for the deleted store's detail
+    chips = page.locator("#chips .chip")
+    expect(chips).to_have_count(2)
+    expect(chips.nth(1)).to_have_text(re.compile("^doomed · deleted"))
+    expect(chips.first).not_to_contain_text("deleted")
+    expect(page.locator("#doc-store option")).to_have_text(["c"])
+    expect(page.locator("#log .user")).to_have_text("before it goes")  # the old chat reads whole
+    expect(page.locator("#log .reply")).to_have_count(1)
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        page.get_by_role("button", name="Remove doomed").click()
+    expect(chips).to_have_count(1)
+    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["stores"] == ["c"]
+
+
 def test_chat_page_sends_shows_citations_and_cost(page, seeded):
     sent = []
 
     def reply(route):
         sent.append(json.loads(route.request.post_data))
-        route.fulfill(json={**CHAT_REPLY, "query_tags": ["enzyme"], "method": "keyword_rag"})
+        route.fulfill(json=chat_message(route))
 
     chat_route(page, reply)
-    page.goto(seeded.url + "/chat")
-    expect(page.locator("#store")).to_have_value("c")
-    expect(page.locator("#method option")).not_to_have_count(0)
-    page.locator("#method").select_option("hybrid")
-    chat_ask(page, "how fast <u>are</u> enzymes?")
+    chat_id = open_chat(page, seeded)
+    with page.expect_request(lambda r: r.url.endswith(f"/chats/{chat_id}/messages")):
+        chat_ask(page, "how fast <u>are</u> enzymes?")
     reply_box = page.locator("#log .reply")
     expect(reply_box).to_be_visible()
-    assert sent[0]["collection"] == "c" and sent[0]["method"] == "hybrid"
-    assert sent[0]["messages"] == [{"role": "user", "content": "how fast <u>are</u> enzymes?"}]
+    assert sent[0]["content"] == "how fast <u>are</u> enzymes?"
     assert sent[0]["model"]
     expect(page.locator("#log .user")).to_have_text("how fast <u>are</u> enzymes?")
     expect(reply_box).to_contain_text("Rates rise [1] with <b>heat</b> [2].")
@@ -2110,24 +2345,25 @@ def test_chat_page_sends_shows_citations_and_cost(page, seeded):
     first = reply_box.locator(".sources li").first
     expect(first).to_contain_text("enzyme-item")
     expect(first).to_contain_text("hand")
+    expect(first.locator(".what")).to_have_text("[1] enzyme-item · hand · c")
     expect(first.locator("details")).to_have_count(1)  # longer than 300 characters
     assert len(first.locator("summary").inner_text()) <= 305
     first.locator("summary").click()
     expect(first.locator("details .full")).to_contain_text("kinetics " * 50)
     expect(reply_box.locator(".sources li").nth(1).locator("details")).to_have_count(0)
     expect(reply_box.locator(".sources li").nth(1)).to_contain_text("short <i>passage</i>")
-    expect(reply_box.locator(".meta")).to_contain_text("Keyword-RAG")
-    expect(reply_box.locator(".meta")).to_contain_text("enzyme")
     expect(reply_box.locator(".meta")).to_contain_text("$0.01")
     expect(page.locator("#box")).to_have_value("")
     reply_box.locator("a.cite").first.click()
     expect(page.locator("#log li:target")).to_have_count(1)
+    expect(page.locator("#log li:target")).to_have_attribute("id", "src-1-1")
+    expect(page).to_have_url(re.compile(f"#{chat_id}$"))  # the address still names the chat
 
 
 def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
     answer = "Rates rise [1, 2], again [02]."
-    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
-    page.goto(seeded.url + "/chat")
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, answer=answer)))
+    open_chat(page, seeded)
     chat_ask(page, "grouped?")
     reply_box = page.locator("#log .reply")
     expect(reply_box).to_contain_text(answer)
@@ -2142,21 +2378,20 @@ def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
 
 
 def test_chat_sources_name_the_part_of_a_split_file(page, seeded):
-    part = {"n": 1, "id": "x.md#2", "text": "x.md\n\nbrine", "source": "upload:x"}
-    citations = [{**part, "part": 2, "parts": 3}, {**CHAT_REPLY["citations"][1], "n": 2}]
-    reply = {**CHAT_REPLY, "citations": citations}
-    chat_route(page, lambda route: route.fulfill(json=reply))
-    page.goto(seeded.url + "/chat")
+    part = {"n": 1, "id": "x.md#2", "text": "x.md\n\nbrine", "source": "upload:x", "store": "c"}
+    citations = [{**part, "part": 2, "parts": 3}, CHAT_ATTEMPT["citations"][1]]
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, citations=citations)))
+    open_chat(page, seeded)
     chat_ask(page, "parts?")
-    sources = page.locator("#log .reply .sources li .what")
-    expect(sources.first).to_have_text("[1] x.md#2 · upload:x · part 2 of 3")
-    expect(sources.nth(1)).not_to_contain_text("part")
+    sources_ = page.locator("#log .reply .sources li .what")
+    expect(sources_.first).to_have_text("[1] x.md#2 · upload:x · part 2 of 3 · c")
+    expect(sources_.nth(1)).not_to_contain_text("part")
 
 
 def test_chat_renders_a_safe_subset_of_markdown(page, seeded):
     answer = "**Rates** rise [1].\n\n- one\n- two\n\n```\n<b>x</b>\n```\n"
-    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
-    page.goto(seeded.url + "/chat")
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, answer=answer)))
+    open_chat(page, seeded)
     chat_ask(page, "markdown?")
     body = page.locator("#log .reply .md")
     expect(body.locator("strong")).to_have_text("Rates")
@@ -2169,8 +2404,8 @@ def test_chat_renders_a_safe_subset_of_markdown(page, seeded):
 
 def test_chat_markdown_makes_no_link_and_keeps_snake_case(page, seeded):
     answer = "See [a](javascript:alert(1)) and snake_case_name [1]."
-    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
-    page.goto(seeded.url + "/chat")
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, answer=answer)))
+    open_chat(page, seeded)
     chat_ask(page, "links?")
     body = page.locator("#log .reply .md")
     expect(body).to_have_text(answer)
@@ -2181,8 +2416,8 @@ def test_chat_markdown_makes_no_link_and_keeps_snake_case(page, seeded):
 
 def test_chat_markdown_headings_ordered_lists_italic_and_code(page, seeded):
     answer = "## Plan\n1. *first* [1]\n2. __second__\n\nUse `x [1] **y**` here,\nthen _go_."
-    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
-    page.goto(seeded.url + "/chat")
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, answer=answer)))
+    open_chat(page, seeded)
     chat_ask(page, "more?")
     body = page.locator("#log .reply .md")
     expect(body.locator("p").first.locator("strong")).to_have_text("Plan")
@@ -2200,8 +2435,8 @@ def test_chat_markdown_lists_run_across_blank_lines_resume_and_continue(page, se
     answer = (
         "1. a\n\n2. b\n\n3. c\n\nThen:\n\n4. d\n5. e\n\n- one\n  more of one [1]\n- two\n\nAfter."
     )
-    chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))
-    page.goto(seeded.url + "/chat")
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, answer=answer)))
+    open_chat(page, seeded)
     chat_ask(page, "lists?")
     body = page.locator("#log .reply .md")
     lists = body.locator("ol")
@@ -2218,62 +2453,6 @@ def test_chat_markdown_lists_run_across_blank_lines_resume_and_continue(page, se
     expect(body.locator("p").last).to_have_text("After.")
 
 
-def test_chat_new_chat_in_another_store_keeps_the_reply_on_its_way(page, seeded):
-    held = []
-    chat_route(page, held.append)
-    page.goto(seeded.url + "/chat")
-    expect(page.locator("#store")).to_have_value("c")
-
-    def ask_then_clear_vo(question):
-        count = len(held)
-        chat_ask(page, question)
-        for _ in range(100):
-            if len(held) > count:
-                break
-            page.wait_for_timeout(20)
-        assert len(held) == count + 1
-        page.locator("#store").select_option("vo")
-        page.get_by_role("button", name="New chat").click()
-
-    # The reply comes while the page is on vo: kept for c, not drawn on vo.
-    ask_then_clear_vo("asked of c")
-    held[-1].fulfill(json=CHAT_REPLY)
-    expect(page.locator("#send")).to_be_enabled()
-    expect(page.locator("#log .msg")).to_have_count(0)
-    page.locator("#store").select_option("c")
-    expect(page.locator("#log .user")).to_have_text("asked of c")
-    expect(page.locator("#log .reply")).to_have_count(1)
-    # The reply comes once the page is back on c: drawn there.
-    ask_then_clear_vo("asked again")
-    page.locator("#store").select_option("c")
-    held[-1].fulfill(json={**CHAT_REPLY, "answer": "The second reply."})
-    expect(page.locator("#log .reply")).to_have_count(2)
-    expect(page.locator("#log .user")).to_have_text(["asked of c", "asked again"])
-    # Only the newest reply is read out; the log itself is not live.
-    expect(page.locator("#spoken")).to_have_text("The second reply.")
-    expect(page.locator("#log")).not_to_have_attribute("aria-live", re.compile(".*"))
-
-
-def test_chat_new_chat_drops_the_reply_still_on_its_way(page, seeded):
-    held = []
-    chat_route(page, held.append)
-    page.goto(seeded.url + "/chat")
-    chat_ask(page, "slow question")
-    for _ in range(100):
-        if held:
-            break
-        page.wait_for_timeout(20)
-    assert len(held) == 1
-    page.get_by_role("button", name="New chat").click()
-    expect(page.locator("#log .user")).to_have_count(0)
-    held[0].fulfill(json=CHAT_REPLY)
-    expect(page.locator("#send")).to_be_enabled()
-    expect(page.locator("#log .msg")).to_have_count(0)
-    page.reload()
-    expect(page.locator("#send")).to_be_enabled()
-    expect(page.locator("#log .msg")).to_have_count(0)
-
-
 def test_chat_store_detail_failing_still_enables_send_and_add(page, seeded):
     page.expected = ["500"]
     page.route(
@@ -2284,31 +2463,16 @@ def test_chat_store_detail_failing_still_enables_send_and_add(page, seeded):
             else r.fallback()
         ),
     )
-    page.goto(seeded.url + "/chat")
+    open_chat(page, seeded)
     expect(page.locator("#status")).to_contain_text("store detail broke")
     expect(page.locator("#send")).to_be_enabled()
     expect(page.locator("#add-doc")).to_be_enabled()
 
 
-def test_chat_page_keeps_the_conversation_on_reload_and_new_chat_clears_it(page, seeded):
-    chat_route(page, lambda route: route.fulfill(json=CHAT_REPLY))
-    page.goto(seeded.url + "/chat")
-    chat_ask(page, "first question")
-    expect(page.locator("#log .reply")).to_have_count(1)
-    page.reload()
-    expect(page.locator("#log .user")).to_have_text("first question")
-    expect(page.locator("#log .reply")).to_have_count(1)
-    expect(page.locator("#log .reply .sources li")).to_have_count(2)
-    page.get_by_role("button", name="New chat").click()
-    expect(page.locator("#log .user")).to_have_count(0)
-    page.reload()
-    expect(page.locator("#log .user")).to_have_count(0)
-
-
 def test_chat_without_an_answer_model_says_what_to_set_up(page, seeded):
     ai = httpx.get(seeded.url + "/ai").json()
     page.route("**/ai", lambda route: route.fulfill(json={**ai, "models": []}))
-    page.goto(seeded.url + "/chat")
+    open_chat(page, seeded)
     note = page.locator("#note")
     expect(note).to_contain_text("Chat needs an answer model: choose one on Settings")
     expect(note.get_by_role("link", name="Settings")).to_have_attribute("href", "/settings")
@@ -2318,16 +2482,20 @@ def test_chat_without_an_answer_model_says_what_to_set_up(page, seeded):
 def test_chat_reply_error_keeps_the_conversation(page, seeded):
     replies = [
         {"detail": "hybrid is down"},
-        {**CHAT_REPLY, "answer": None, "citations": [], "error": "budget used up"},
+        {"answer": None, "citations": [], "error": "budget used up"},
     ]
 
     def reply(route):
         body = replies.pop(0)
-        route.fulfill(status=409 if "detail" in body else 200, json=body)
+        if "detail" in body:
+            route.fulfill(status=409, json=body)
+        else:
+            route.fulfill(json=chat_message(route, **body))
 
     page.expected = ["409"]  # the first reply is a refusal, which is the point
     chat_route(page, reply)
-    page.goto(seeded.url + "/chat")
+    other = make_chat(seeded, ["vo"], "the other chat")
+    chat_id = open_chat(page, seeded)
     chat_ask(page, "will this fail?")
     expect(page.locator("#log .err")).to_contain_text("hybrid is down")
     expect(page.locator("#spoken")).to_have_text("Error: hybrid is down")
@@ -2338,51 +2506,23 @@ def test_chat_reply_error_keeps_the_conversation(page, seeded):
     expect(page.locator("#log [role=alert]")).to_have_count(0)
     expect(page.locator("#spoken")).to_have_text("Error: budget used up")
     expect(page.locator("#log .user")).to_have_count(2)
-    page.locator("#store").select_option("vo")  # another store's conversation: nothing spoken
+    chat_link(page, other).click()  # another chat's conversation: nothing spoken
     expect(page.locator("#spoken")).to_have_text("")
-    page.locator("#store").select_option("c")
-    page.reload()
-    expect(page.locator("#log .user")).to_have_count(2)
-    expect(page.locator("#log .err")).to_have_count(2)
-    page.locator("#new").click()
+    expect(page.locator("#log .msg")).to_have_count(0)
+    chat_link(page, chat_id).click()
+    # The refusal saved nothing on the server; the page keeps it in its chat until a reload.
+    expect(page.locator("#log .user")).to_have_text("will this fail?")
+    expect(page.locator("#log .err")).to_contain_text("hybrid is down")
     expect(page.locator("#spoken")).to_have_text("")
-
-
-def test_chat_sends_only_the_last_six_turns_and_the_new_message(page, seeded):
-    sent = []
-
-    def reply(route):
-        sent.append(json.loads(route.request.post_data))
-        route.fulfill(json=CHAT_REPLY)
-
-    chat_route(page, reply)
-    page.goto(seeded.url + "/chat")
-    for n in range(6):
-        chat_ask(page, f"question {n}")
-        expect(page.locator("#log .reply")).to_have_count(n + 1)
-    assert len(sent[-1]["messages"]) == 7
-    assert sent[-1]["messages"][-1] == {"role": "user", "content": "question 5"}
-    assert sent[-1]["messages"][0]["content"] == "question 2"  # 11 turns before it, cut to 6
 
 
 def test_chat_error_line_shows_what_it_cost(page, seeded):
-    spent = {**CHAT_REPLY, "answer": None, "citations": [], "error": "budget used up", "usd": 0.5}
-    chat_route(page, lambda route: route.fulfill(json=spent))
-    page.goto(seeded.url + "/chat")
+    spent = {"answer": None, "citations": [], "error": "budget used up", "usd": 0.5}
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, **spent)))
+    open_chat(page, seeded)
     chat_ask(page, "pricey")
     expect(page.locator("#log .err")).to_contain_text("budget used up")
     expect(page.locator("#log .err")).to_contain_text("$0.50")
-
-
-def test_chat_without_stores_disables_send(page, seeded):
-    page.route(
-        "**/collections",
-        lambda r: r.fulfill(json=[]) if r.request.method == "GET" else r.fallback(),
-    )
-    page.goto(seeded.url + "/chat")
-    expect(page.locator("#note")).to_contain_text("No stores yet")
-    expect(page.locator("#note").get_by_role("link", name="Stores")).to_have_attribute("href", "/")
-    expect(page.locator("#send")).to_be_disabled()
 
 
 DOC_LISTS = {"topic": ["volcano", "coral"], "method": ["survey"], "common": ["rate"]}
@@ -2409,16 +2549,36 @@ def free_store(seeded, name):
 
 
 def chat_upload(page, seeded, store, tmp_path, filename, text):
+    """Opens a chat on c and `store`, and adds the file to `store`."""
     path = tmp_path / filename
     path.write_text(text)
-    page.goto(seeded.url + "/chat")
-    page.locator("#store").select_option(store)
+    chat_id = open_chat(page, seeded, ("c", store))
+    page.locator("#doc-store").select_option(store)
     page.locator("#doc-file").set_input_files(str(path))
+    return chat_id
+
+
+def test_add_document_asks_which_store(page, seeded, tmp_path):
+    free_store(seeded, "pick-a")
+    free_store(seeded, "pick-b")
+    open_chat(page, seeded, ("pick-a", "pick-b"))
+    expect(page.locator("#doc-store option")).to_have_text(["pick-a", "pick-b"])
+    page.locator("#doc-store").select_option("pick-b")
+    path = tmp_path / "tides.txt"
+    path.write_text("tides follow the moon")
+    page.locator("#doc-file").set_input_files(str(path))
+    expect(page.locator("#log")).to_contain_text("Added tides.txt to pick-b")
+    assert "upload:tides" in [s["source"] for s in sources(seeded, "pick-b")]
+    assert "upload:tides" not in [s["source"] for s in sources(seeded, "pick-a")]
+    expect(page.locator("#doc-store")).to_have_value("pick-b")  # kept for the next file
 
 
 def test_chat_upload_adds_a_document_and_the_next_answer_can_cite_it(page, seeded, tmp_path):
     free_store(seeded, "docs")
-    chat_upload(page, seeded, "docs", tmp_path, "reefs.txt", "coral reefs bleach when oceans warm")
+    db.set_chat_method(seeded.app.state.conn, "docs", "hybrid")
+    chat_id = chat_upload(
+        page, seeded, "docs", tmp_path, "reefs.txt", "coral reefs bleach when oceans warm"
+    )
     expect(page.locator("#add-doc")).to_be_disabled()  # while the file is being added
     expect(page.locator("#log")).to_contain_text("Added reefs.txt")
     expect(page.locator("#add-doc")).to_be_enabled()
@@ -2426,12 +2586,10 @@ def test_chat_upload_adds_a_document_and_the_next_answer_can_cite_it(page, seede
     store = seeded.app.state.store
     owners = store.sources_of("docs", store.ids("docs"))
     hit_id = next(i for i, source in owners.items() if source == "upload:reefs")
-    page.locator("#method").select_option("hybrid")
-    with page.expect_response(
-        lambda r: r.url.endswith("/chat") and r.request.method == "POST"
-    ) as got:
+    with page.expect_response(lambda r: r.url.endswith(f"/chats/{chat_id}/messages")) as got:
         chat_ask(page, "why do coral reefs bleach?")
-    assert got.value.json()["hit_ids"][0] == hit_id
+    evidence = got.value.json()["attempts"][0]["evidence"]
+    assert [e["id"] for e in evidence if e["store"] == "docs"][0] == hit_id
     expect(page.locator("#log .reply")).to_be_visible()
 
 
@@ -2463,7 +2621,7 @@ def test_chat_upload_shows_the_estimate_and_cancel_adds_nothing(page, seeded, tm
         ai.set_role("keywords", None)
 
 
-def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_methods(page, seeded, tmp_path):
+def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_store(page, seeded, tmp_path):
     ai = seeded.app.state.ai
     ai.add_model("anthropic", "kw-paid", label="Paid", price_in=1, price_out=1)
     ai.set_role("keywords", "anthropic/kw-paid")
@@ -2471,21 +2629,14 @@ def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_methods(page, 
         r = httpx.post(f"{seeded.url}/collections", json={"name": "paid2", "qa_type": "science"})
         assert r.status_code == 201, r.text
         details = []
-
-        def detail(route):
-            # The fake AI cannot propose usable lists, so the store's second look, after the
-            # add, is given the keyword methods an add with lists would bring.
-            data = route.fetch().json()
-            details.append(data)
-            if len(details) > 1:
-                data["methods_available"].append("kw_all")
-            route.fulfill(json=data)
-
-        page.route("**/collections/paid2", detail)
-        page.goto(seeded.url + "/chat")
-        page.locator("#store").select_option("paid2")
-        expect(page.locator("#method option[value='kw_all']")).to_have_count(0)
-        page.locator("#method").select_option("vector")
+        page.on(
+            "request",
+            lambda r: details.append(r.url) if r.url.endswith("/collections/paid2") else None,
+        )
+        open_chat(page, seeded, ("c", "paid2"))
+        chip = page.locator('#chips .chip[data-store="paid2"]')
+        expect(chip).to_contain_text("0 items")
+        page.locator("#doc-store").select_option("paid2")
         path = tmp_path / "pay.txt"
         path.write_text("coral reefs bleach when oceans warm")
         page.locator("#doc-file").set_input_files(str(path))
@@ -2498,9 +2649,8 @@ def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_methods(page, 
         assert queued.value.status == 202 and queued.value.json()["job_id"]
         expect(page.locator("#log")).to_contain_text("Added pay.txt")
         assert [s["source"] for s in sources(seeded, "paid2")] == ["upload:pay"]
-        # the picker is rebuilt from the store after the add, and keeps the pick
-        expect(page.locator("#method option[value='kw_all']")).to_have_count(1)
-        expect(page.locator("#method")).to_have_value("vector")
+        # the store is looked up again after the add, so its chip shows the new item
+        expect(chip).to_contain_text("1 item")
         assert len(details) == 2
     finally:
         ai.set_role("keywords", None)
@@ -2533,13 +2683,3 @@ def test_chat_upload_refuses_other_files_without_uploading(page, seeded, tmp_pat
     expect(page.locator("#log .err")).to_contain_text("only .txt and .md")
     assert posts == []
     expect(page.locator("#add-doc")).to_be_enabled()
-
-
-def test_chat_add_document_needs_a_store(page, seeded):
-    page.route(
-        "**/collections",
-        lambda r: r.fulfill(json=[]) if r.request.method == "GET" else r.fallback(),
-    )
-    page.goto(seeded.url + "/chat")
-    expect(page.locator("#note")).to_contain_text("No stores yet")
-    expect(page.locator("#add-doc")).to_be_disabled()

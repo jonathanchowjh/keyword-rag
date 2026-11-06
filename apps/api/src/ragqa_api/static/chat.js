@@ -1,50 +1,30 @@
-import { $, UNPRICED, api, catalog, esc, head, methodLabel, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
+import { $, UNPRICED, api, esc, head, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
 
-const TURNS = 6; // earlier turns sent with the new message; the route trims to the same
 const PASSAGE = 300; // characters of a source shown before it is expanded
+const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
 
 shell("chat");
 $("head").innerHTML = head({
   title: "Chat",
-  sub: "Ask a store a question. Each reply cites the passages it used, listed under it.",
+  sub: "Ask across one or more stores. Each reply cites the passages it used, listed under it. Chats are saved.",
 });
 
-let turns = []; // what the log shows: {role: "user"} | {role: "reply", ...the /chat reply} | {role: "error"}
-let answering = false;
+let stores = []; // every store, as GET /collections lists them
+let chats = []; // the saved chats, newest first, as GET /chats lists them
+let openId = ""; // the chat the page is on (the URL hash), set before it has loaded
+let chat = null; // that chat once loaded: GET /chats/{id}, with its messages
+let opening = 0; // bumped by each open, so only the newest one draws
 let hasModel = false;
-let adding = false; // files are being added: the store stays put until they are in
-const cleared = {}; // New chat clicks per store, so a reply to a cleared conversation is dropped
+let adding = false; // files are being added
+const details = {}; // store -> its GET /collections/{name}, for its chip
+const pending = {}; // chat id -> the message still on its way there
+const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes
 
-// -- the conversation, kept per store in sessionStorage; the page works without it ------------
+// The chat's stores that still exist.
+const live = () => (chat ? chat.stores.filter((s) => !chat.deleted_stores.includes(s)) : []);
+const lastN = (c) => c.messages.at(-1)?.n ?? 0;
 
-const key = (store) => `chat:${store}`;
-
-function load(store = $("store").value) {
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(key(store)));
-    return Array.isArray(saved) ? saved : [];
-  } catch {
-    return [];
-  }
-}
-
-function save(store = $("store").value, list = turns) {
-  try {
-    sessionStorage.setItem(key(store), JSON.stringify(list));
-  } catch {
-    // no storage: the chat lives until the page closes
-  }
-}
-
-function forget() {
-  try {
-    sessionStorage.removeItem(key($("store").value));
-  } catch {
-    // nothing kept, nothing to clear
-  }
-}
-
-// -- drawing ---------------------------------------------------------------------------------
+// -- drawing a reply ---------------------------------------------------------------------------
 
 // A citation mark, the route's rule: [n], [n, m, …] or [n-m] (hyphen or en dash), each
 // number 1 to 4 ASCII digits.
@@ -130,87 +110,273 @@ function textHtml(text, cited, at) {
   return out.join("");
 }
 
+// One cited passage. Its id, src-<message n>-<passage n>, is where the reply's [n] links.
 function sourceHtml(c, at) {
   const long = c.text.length > PASSAGE;
   const body = long
     ? `<details><summary>${esc(c.text.slice(0, PASSAGE))}…</summary><div class="full">${esc(c.text)}</div></details>`
     : `<div>${esc(c.text)}</div>`;
   const part = c.parts > 1 ? ` · part ${esc(c.part)} of ${esc(c.parts)}` : "";
-  const from = (c.source ? ` · ${esc(c.source)}` : "") + part;
-  return `<li id="src-${at}-${c.n}"><span class="what">[${c.n}] ${esc(c.id)}${from}</span>${body}</li>`;
+  const from = (c.source ? ` · ${esc(c.source)}` : "") + part + (c.store ? ` · ${esc(c.store)}` : "");
+  return `<li id="src-${at}-${Number(c.n)}"><span class="what">[${Number(c.n)}] ${esc(c.id)}${from}</span>${body}</li>`;
 }
 
-function replyHtml(t, at) {
-  const tags = t.query_tags?.length ? ` · question tags ${esc(t.query_tags.join(", "))}` : "";
-  const sources = t.citations.length
-    ? `<div class="what muted">Sources</div><ul class="sources">${t.citations.map((c) => sourceHtml(c, at)).join("")}</ul>`
+const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "");
+
+// An attempt's answer with its sources and cost; with no answer, its error and cost.
+function attemptHtml(a, at) {
+  if (a.answer == null) return `<div class="msg err">${esc(a.error ?? "no answer")}${costHtml(a.usd)}</div>`;
+  const sources = a.citations.length
+    ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, at)).join("")}</ul>`
     : "";
-  return `<div class="msg reply"><div class="md" data-text="${esc(t.answer)}">${textHtml(t.answer, t.citations, at)}</div>${sources}
-    <div class="meta muted">${esc(methodLabel(t.method))}${tags} · ${usd(t.usd)}</div></div>`;
+  const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
+  return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, a.citations, at)}</div>${sources}
+    ${note}<div class="meta muted">Cost ${usd(a.usd)}</div></div>`;
 }
 
-function turnHtml(t, at) {
-  if (t.role === "user") return `<div class="msg user">${esc(t.content)}</div>`;
-  if (t.role === "note") return `<div class="msg note muted">${esc(t.content)}</div>`;
-  if (t.role === "error") return `<div class="msg err">${esc(t.content)}${t.usd > 0 ? ` <span class="muted">(${usd(t.usd)})</span>` : ""}</div>`;
-  return replyHtml(t, at);
+// A saved message: the user's text, then its latest attempt.
+function messageHtml(m) {
+  const n = Number(m.n);
+  const latest = m.attempts.at(-1);
+  return `<div class="turn" id="msg-${n}" data-n="${n}"><div class="msg user">${esc(m.content)}</div>${latest ? attemptHtml(latest, n) : ""}</div>`;
 }
 
-function draw() {
-  $("log").innerHTML = turns.map(turnHtml).join("");
+function lineHtml(l) {
+  if (l.role === "user") return `<div class="msg user">${esc(l.content)}</div>`;
+  if (l.role === "note") return `<div class="msg note muted">${esc(l.content)}</div>`;
+  return `<div class="msg err">${esc(l.content)}</div>`;
+}
+
+// What the newest reply says aloud.
+function spokenOf(m) {
+  const a = m.attempts.at(-1);
+  return a?.answer ?? `Error: ${a?.error ?? "no answer"}`;
+}
+
+// -- drawing the page ------------------------------------------------------------------------
+
+function drawList() {
+  $("chat-list").innerHTML = chats
+    .map(
+      (c) => `<li class="${c.id === openId ? "active" : ""}"><a href="#${esc(c.id)}">${esc(c.title)}
+        <span class="stores">${esc(c.stores.join(", "))}</span></a>
+        <button type="button" class="secondary" data-delete="${esc(c.id)}" aria-label="Delete chat ${esc(c.title)}">Delete</button></li>`,
+    )
+    .join("");
+}
+
+function chipHtml(store, only) {
+  const gone = chat.deleted_stores.includes(store);
+  const what = gone ? " · deleted" : details[store] ? ` · ${plural(details[store].count, "item")}` : "";
+  return `<span class="chip${gone ? " gone" : ""}" data-store="${esc(store)}">${esc(store)}<span class="muted">${esc(what)}</span>
+    <button type="button" data-remove="${esc(store)}" aria-label="Remove ${esc(store)}"${only ? " disabled" : ""}>×</button></span>`;
+}
+
+function drawChips() {
+  if (chat) $("chips").innerHTML = chat.stores.map((s) => chipHtml(s, chat.stores.length === 1)).join("");
+}
+
+function drawHead() {
+  $("empty").hidden = Boolean(chat);
+  $("chat-head").hidden = !chat;
+  if (!chat) return;
+  $("chat-title").textContent = chat.title;
+  drawChips();
+  const others = stores.filter((s) => !chat.stores.includes(s.name));
+  $("add-store").innerHTML = ['<option value="">Add a store…</option>']
+    .concat(others.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} · ${esc(s.qa_type)}</option>`))
+    .join("");
+  $("add-store").disabled = !others.length;
+  $("evidence").value = chat.settings.evidence_size;
+  $("rewrite").checked = Boolean(chat.settings.rewrite);
+  const keep = $("doc-store").value;
+  $("doc-store").innerHTML = live()
+    .map((s) => `<option value="${esc(s)}"${s === keep ? " selected" : ""}>${esc(s)}</option>`)
+    .join("");
+}
+
+function drawLog() {
+  let html = "";
+  if (chat) {
+    const lines = local[chat.id] ?? [];
+    const after = (n) => lines.filter((l) => l.after === n).map(lineHtml).join("");
+    const waiting = pending[chat.id];
+    html = after(0) + chat.messages.map((m) => messageHtml(m) + after(m.n)).join("");
+    if (waiting != null) html += `<div class="msg user">${esc(waiting)}</div>`;
+  }
+  $("log").innerHTML = html;
   const last = $("log").lastElementChild;
   if (last) last.scrollIntoView({ block: "nearest" });
 }
 
-function setBusy(busy) {
-  answering = busy;
-  $("send").disabled = busy || !hasModel || !$("store").value;
-  $("add-doc").disabled = adding || !$("store").value;
-  $("status").textContent = busy ? "thinking…" : "";
+function setBusy() {
+  const waiting = chat != null && pending[chat.id] != null;
+  $("send").disabled = !chat || waiting || !hasModel;
+  $("add-doc").disabled = !chat || adding || !live().length;
+  $("doc-store").disabled = adding;
+  $("status").textContent = waiting ? "thinking…" : "";
 }
 
-// -- sending ---------------------------------------------------------------------------------
+// -- loading -----------------------------------------------------------------------------------
+
+async function loadList() {
+  chats = await api("/chats");
+  drawList();
+  const listed = chats.find((c) => c.id === chat?.id);
+  if (listed) {
+    chat.title = listed.title; // the first message names a new chat
+    $("chat-title").textContent = chat.title;
+  }
+}
+
+// The stores' details for their chips; a failure is said in the status line and changes nothing else.
+async function loadDetails(names) {
+  const got = await Promise.allSettled(
+    names.map(async (s) => (details[s] = await api(`/collections/${encodeURIComponent(s)}`))),
+  );
+  drawChips();
+  const failed = got.find((r) => r.status === "rejected");
+  if (failed) $("status").textContent = failed.reason.message;
+}
+
+async function openChat(id) {
+  const mine = ++opening;
+  openId = id;
+  chat = null;
+  $("spoken").textContent = ""; // another chat: nothing of the last one is read out
+  drawList();
+  drawHead();
+  drawLog();
+  setBusy();
+  if (!id) return;
+  try {
+    const got = await api(`/chats/${encodeURIComponent(id)}`);
+    if (mine !== opening) return;
+    chat = got;
+  } catch (e) {
+    if (mine === opening) $("status").textContent = e.message;
+    return;
+  }
+  drawHead();
+  drawLog();
+  setBusy();
+  await loadDetails(live());
+}
+
+const hashId = () => location.hash.slice(1); // a chat id is hex: nothing to decode
+
+// -- saved chats -------------------------------------------------------------------------------
+
+function pickStores() {
+  if (!stores.length) {
+    $("picking").innerHTML = '<p class="muted">No stores yet. Create one on the <a href="/">Stores</a> page.</p>';
+    return;
+  }
+  const boxes = stores
+    .map((s) => `<label class="check"><input type="checkbox" value="${esc(s.name)}"> ${esc(s.name)} <span class="muted">${esc(s.qa_type)}</span></label>`)
+    .join("");
+  $("picking").innerHTML = `<fieldset><legend>Stores to search</legend><div class="checks">${boxes}</div></fieldset>
+    <div class="actions"><button type="button" data-start>Start chat</button>
+      <button type="button" class="secondary" data-cancel>Cancel</button></div>
+    <p id="pick-note" class="err" role="status"></p>`;
+  $("picking").querySelector("[data-cancel]").addEventListener("click", () => ($("picking").innerHTML = ""));
+  $("picking").querySelector("[data-start]").addEventListener("click", async () => {
+    const picked = [...$("picking").querySelectorAll("input:checked")].map((box) => box.value);
+    if (!picked.length) {
+      $("pick-note").textContent = "Pick at least one store.";
+      return;
+    }
+    try {
+      const made = await api("/chats", { method: "POST", body: { stores: picked } });
+      $("picking").innerHTML = "";
+      await loadList();
+      location.hash = made.id; // opens it
+    } catch (e) {
+      $("pick-note").textContent = e.message;
+    }
+  });
+}
+
+function askDelete(id) {
+  const title = chats.find((c) => c.id === id)?.title ?? "";
+  const box = $("deleting");
+  box.innerHTML = `<p>${esc(`Delete chat ${title}?`)}</p><div class="actions">
+    <button type="button" class="danger" data-yes>Yes, delete</button>
+    <button type="button" class="secondary" data-keep>Keep it</button></div>`;
+  box.querySelector("[data-keep]").addEventListener("click", () => (box.innerHTML = ""));
+  box.querySelector("[data-yes]").addEventListener("click", async () => {
+    try {
+      await api(`/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
+      box.innerHTML = "";
+      delete local[id];
+      if (id === openId) {
+        history.replaceState(null, "", location.pathname); // no hash: no chat open
+        await openChat("");
+      }
+      await loadList();
+    } catch (e) {
+      box.innerHTML = `<p class="err" role="status">${esc(e.message)}</p>`;
+    }
+  });
+}
+
+// Saves a change to the open chat's title, stores, evidence size or rewrite.
+async function patch(body) {
+  if (!chat) return;
+  const id = chat.id;
+  try {
+    const saved = await api(`/chats/${encodeURIComponent(id)}`, { method: "PATCH", body });
+    if (chat?.id === id) {
+      // Only stores that exist can be added, so the deleted ones are those still kept.
+      const deleted = chat.deleted_stores.filter((s) => saved.stores.includes(s));
+      chat = { ...chat, ...saved, deleted_stores: deleted };
+      drawHead();
+      setBusy();
+      loadDetails(live().filter((s) => !(s in details)));
+    }
+  } catch (e) {
+    if (chat?.id === id) drawHead(); // back to what is saved
+    $("status").textContent = e.message;
+  }
+  loadList().catch(() => {});
+}
+
+// -- sending -----------------------------------------------------------------------------------
 
 async function ask() {
   const content = $("box").value.trim();
-  if (!content || answering || !hasModel || !$("store").value) return;
-  const store = $("store").value;
-  const mine = cleared[store] ?? 0;
-  turns.push({ role: "user", content });
-  // The conversation the model sees: the user's turns and its own answers, never an error.
-  const messages = turns
-    .filter((t) => t.role === "user" || t.role === "reply")
-    .map((t) => (t.role === "user" ? { role: "user", content: t.content } : { role: "assistant", content: t.answer }))
-    .slice(-(TURNS + 1));
+  if (!content || !chat || pending[chat.id] != null || !hasModel) return;
+  const id = chat.id;
+  const after = lastN(chat);
+  pending[id] = content;
   $("box").value = "";
-  save();
-  draw();
-  setBusy(true);
-  let turn;
+  drawLog();
+  setBusy();
+  let message = null;
+  let error = null;
   try {
-    const r = await api("/chat", {
+    message = await api(`/chats/${encodeURIComponent(id)}/messages`, {
       method: "POST",
-      body: { collection: store, messages, method: $("method").value, model: $("model").value || null },
+      body: { content, model: $("model").value || null },
     });
-    turn = r.error || r.answer === null ? { role: "error", content: r.error ?? "no answer", usd: r.usd } : { role: "reply", ...r };
   } catch (e) {
-    turn = { role: "error", content: e.message };
-  } finally {
-    setBusy(false);
-    refreshSpend();
+    error = e.message; // refused: the server kept nothing, so the page keeps it until a reload
+    (local[id] ??= []).push({ after, role: "user", content }, { after, role: "error", content: error });
   }
-  if ((cleared[store] ?? 0) !== mine) return; // New chat cleared its conversation meanwhile
-  if (store !== $("store").value) {
-    save(store, [...load(store), turn]); // the page is on another store: kept for when it's back
+  delete pending[id];
+  refreshSpend();
+  loadList().catch(() => {}); // the first message names the chat, and it is now the newest
+  if (chat?.id !== id) {
+    setBusy(); // its own chat reads it from the server when opened
     return;
   }
-  turns.push(turn);
-  save();
-  draw();
-  $("spoken").textContent = turn.role === "reply" ? turn.answer : `Error: ${turn.content}`;
+  if (message) chat.messages.push(message);
+  drawLog();
+  setBusy();
+  $("spoken").textContent = message ? spokenOf(message) : `Error: ${error}`;
 }
 
-// -- adding documents -------------------------------------------------------------------------
+// -- adding documents --------------------------------------------------------------------------
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -250,97 +416,73 @@ async function addFile(store, file) {
   const queued = await api(`/collections/${name}/imports`, { method: "POST", body });
   const job = await follow(file.name, queued.job_id);
   if (job.status !== "done") throw new Error(job.error || `the import ${job.status}`);
-  return `Added ${file.name}`;
+  return `Added ${file.name} to ${store}`;
 }
 
 async function addFiles(files) {
-  const store = $("store").value;
-  if (!files.length || !store || adding) return;
+  const store = $("doc-store").value;
+  if (!files.length || !store || !chat || adding) return;
+  const id = chat.id;
+  const start = lastN(chat);
+  // A line in the chat the files went to, drawn when the page is still on it.
+  const say = (role, content) => {
+    (local[id] ??= []).push({ after: chat?.id === id ? lastN(chat) : start, role, content });
+    if (chat?.id === id) drawLog();
+  };
   adding = true;
-  $("store").disabled = true;
-  $("add-doc").disabled = true;
+  setBusy();
   let added = false;
   for (const file of files) {
     try {
       if (!/\.(txt|md)$/i.test(file.name)) throw new Error("only .txt and .md files can be added here");
       const said = await addFile(store, file);
-      if (said) turns.push({ role: "note", content: said });
+      if (said) say("note", said);
       added ||= Boolean(said);
     } catch (e) {
-      turns.push({ role: "error", content: `${file.name}: ${e.message}` });
+      say("error", `${file.name}: ${e.message}`);
     }
-    save();
-    draw();
     refreshSpend();
   }
-  // An add can give the store keyword lists or a vocabulary, and so more methods.
-  if (added) {
-    try {
-      fillMethods(await api(`/collections/${encodeURIComponent(store)}`), $("method").value);
-    } catch (e) {
-      turns.push({ role: "error", content: e.message });
-      save();
-      draw();
-    }
-  }
   $("adding").textContent = "";
-  $("store").disabled = false;
   adding = false;
-  setBusy(answering);
+  setBusy();
+  if (added) await loadDetails([store]); // its chip shows the items it now holds
 }
 
-// -- the pickers -----------------------------------------------------------------------------
-
-let picking = 0; // bumped by each store pick, so only the newest one draws
-
-// The store's methods in the picker, `keep` picked when the store has it, else the default.
-function fillMethods(detail, keep) {
-  const methods = detail.methods_available;
-  const first = methods.includes(keep) ? keep : methods.includes("keyword_rag") ? "keyword_rag" : "hybrid";
-  $("method").innerHTML = methods
-    .map((m) => `<option value="${esc(m)}"${m === first ? " selected" : ""}>${esc(methodLabel(m))}</option>`)
-    .join("");
-}
-
-async function pickStore() {
-  const mine = ++picking;
-  const name = $("store").value;
-  turns = load();
-  $("spoken").textContent = "";
-  draw();
-  try {
-    const detail = await api(`/collections/${encodeURIComponent(name)}`);
-    if (mine === picking) fillMethods(detail, null);
-  } finally {
-    setBusy(answering); // Send and Add follow the store even when its detail fails
-  }
-}
+// -- start -------------------------------------------------------------------------------------
 
 async function loadModels() {
   const ai = await api("/ai");
   $("model").innerHTML = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
   hasModel = $("model").options.length > 0;
   $("note").innerHTML = hasModel ? "" : 'Chat needs an answer model: choose one on <a href="/settings">Settings</a>';
-  setBusy(false);
+  setBusy();
 }
 
-async function loadStores() {
-  const list = await api("/collections");
-  $("store").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
-  if (list.length) await pickStore();
-  else $("note").innerHTML += ' No stores yet. Create one on the <a href="/">Stores</a> page.';
-  setBusy(false);
-}
+const said = (e) => ($("status").textContent = e.message);
 
-// pickStore sets Send and Add before it fails, so the error line set here stays.
-$("store").addEventListener("change", () => pickStore().catch((e) => ($("status").textContent = e.message)));
-$("new").addEventListener("click", () => {
-  cleared[$("store").value] = (cleared[$("store").value] ?? 0) + 1;
-  turns = [];
-  $("spoken").textContent = "";
-  forget();
-  draw();
+$("new").addEventListener("click", pickStores);
+$("chat-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-delete]");
+  if (button) askDelete(button.dataset.delete);
 });
+$("chips").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove]");
+  if (button && chat) patch({ stores: chat.stores.filter((s) => s !== button.dataset.remove) });
+});
+$("add-store").addEventListener("change", () => {
+  const store = $("add-store").value;
+  if (store && chat) patch({ stores: [...chat.stores, store] });
+});
+$("evidence").addEventListener("change", () => {
+  const size = Number($("evidence").value);
+  if (Number.isInteger(size) && size >= 1 && size <= MAX_EVIDENCE) patch({ evidence_size: size });
+  else {
+    $("status").textContent = `Evidence size is a whole number from 1 to ${MAX_EVIDENCE}.`;
+    if (chat) $("evidence").value = chat.settings.evidence_size;
+  }
+});
+$("rewrite").addEventListener("change", () => patch({ rewrite: $("rewrite").checked }));
 $("add-doc").addEventListener("click", () => $("doc-file").click());
 $("doc-file").addEventListener("change", () => {
   const files = [...$("doc-file").files];
@@ -357,9 +499,19 @@ $("box").addEventListener("keydown", (event) => {
     ask();
   }
 });
+window.addEventListener("hashchange", () => {
+  const id = hashId();
+  if (id && document.getElementById(id)) {
+    // A citation's jump to its passage, not another chat: the address goes on naming the chat.
+    history.replaceState(null, "", openId ? `#${openId}` : location.pathname);
+    return;
+  }
+  openChat(id).catch(said);
+});
 
-catalog()
-  .catch(() => {})
-  .then(loadModels)
-  .then(loadStores)
-  .catch((e) => ($("status").textContent = e.message));
+loadModels()
+  .catch(said)
+  .then(async () => (stores = await api("/collections")))
+  .then(loadList)
+  .then(() => openChat(hashId()))
+  .catch(said);
