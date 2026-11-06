@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Chat across stores: chats are saved on the server (`/chats`) and search several
+  stores. Each store has a bar, the 5th percentile of the best matches of its own
+  default eval set's questions (dev slice, up to 200; BRIGHT exclusions and leaked
+  questions left out), shown by `GET /collections/{name}/bar`; with fewer than 20
+  usable questions or no eval set the store is always kept, and a bar you set wins.
+  The gate scores the message alone and the follow-up search text and takes the
+  higher. A follow-up is searched with the message plus the previous 2 user
+  messages, or, with Rewrite follow-ups with AI on, a standalone question from the
+  new `rewrite` job (one AI call per follow-up, never repeated by a re-run). A store
+  the previous message kept on its own merit is kept again (one message back). Kept
+  stores are merged by RRF (k = 60) by store and id, cut to the evidence size
+  (default 8, 1 to 20).
+- Chat: a retrieval step under each answer shows every store's decision and
+  evidence. Edit a store's method, k, search settings or bar, or search it anyway,
+  then re-run (adds an attempt without answering) and Answer from this attempt.
+  Edits last until the service restarts; Set as default saves method, k, search
+  settings and bar for the store ("search anyway" is not saved). No estimate before
+  a message; each reply and attempt shows its cost and the budget cap holds. The old
+  `POST /chat` still works; conversations kept only in a browser tab are not migrated.
 - Imports: a `.txt` or `.md` upload (also inside a zip) longer than one passage is
   split into passages of up to 1,500 characters (`imports.chunk_text`): Markdown
   headings first, then paragraphs and sentences; code blocks, tables and lists are

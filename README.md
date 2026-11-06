@@ -34,6 +34,7 @@ local.
 - [Recipes](#recipes)
 - [Retrieval methods](#retrieval-methods)
 - [Answering](#answering)
+- [Chat across stores](#chat-across-stores)
 - [Datasets](#datasets)
 - [AI connections](#ai-connections)
 - [Configuration](#configuration)
@@ -432,6 +433,53 @@ from the AI model set up for the `answer` job, but that model reads the
 question and the passages, so text planted in a corpus can steer what it
 writes.
 
+## Chat across stores
+
+A chat searches several stores at once and answers from the best evidence, with
+the evidence shown under every answer. Chats are saved on the server. The old
+`POST /chat` for one store still works.
+
+For each message the service does this:
+
+1. **Search text.** The first message is searched as typed. A follow-up is
+   searched with the message plus the previous 2 user messages. With **Rewrite
+   follow-ups with AI** on, the `rewrite` job (set it on Settings) turns the
+   follow-up into one standalone question instead: one AI call per follow-up,
+   never for the first message, and a re-run never rewrites again.
+2. **The bar.** Each store has a bar, the score a message's best match should
+   reach for the store to be worth searching. It is worked out from the
+   store's own default eval set: the 5th percentile of the best matches of its
+   questions (the dev slice, up to 200; BRIGHT exclusions and leaked questions
+   are left out). So 95% of questions that belong to the store would clear it.
+   With fewer than 20 usable questions, or no eval set, the store has no bar
+   and is always kept. A bar you set yourself wins. It is recomputed when the
+   eval set's version, its item count or the store's switched-off sources
+   change. `GET /collections/{name}/bar` shows it.
+3. **The gate.** A store is kept when its best match clears its bar. The gate
+   scores the message alone and the follow-up search text, and takes the
+   higher, so a short follow-up such as "and the second one?" is not dropped.
+4. **Sticky stores.** A store the previous message kept on its own merit (it
+   cleared its bar, had no bar, or you searched it anyway; judged from that
+   message's latest answered attempt) is kept again. This reaches one message
+   back only.
+5. **Merge.** Every kept store is searched with its own method and settings.
+   The results are merged by reciprocal rank fusion (k = 60) by store and id,
+   and cut to the evidence size (default 8, 1 to 20). The model answers from
+   that evidence.
+
+**The retrieval step.** Under each answer you can open the step to see every
+store's decision. Edit a store's method, k, search settings or bar, or tick
+"search anyway", and **Re-run**. A re-run adds an attempt without answering;
+**Answer from this attempt** answers it (an answered attempt cannot be answered
+again). These edits last until the service restarts. The store's Edit form
+shows the settings the next search in this chat uses. **Set as default** saves
+the fields you edited (method, k, search settings and bar) as the store's own
+settings; "search anyway" is not saved.
+
+**Spending.** There is no estimate before a message. Each reply and each
+attempt shows its cost (the rewrite, every store's retrieval and the answer),
+and the monthly cap holds.
+
 ## Datasets
 
 All are downloaded at runtime into the `ragqa` volume and never committed.
@@ -503,6 +551,7 @@ is needed in `.env`.
   | `summary` | per-item summaries for the keyword methods |
   | `keywords` | AI keyword-list proposals |
   | `query` | paid query-time steps: query summaries, keywords and hops |
+| `rewrite` | the chat's optional follow-up rewrite: one AI call turns a follow-up into a standalone question |
 
 - **Budget.** The monthly cap is set here too. This month's spend counts every
   connection together.
@@ -585,9 +634,10 @@ A collection remembers the dense model it was built with. Changing
   sent. A model priced $0 is free to the budget, so price paid models.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
   imports and keyword-list proposals return the estimate unless
-  `confirm: true` is set. The Lab (`/query`) and the chat (`/chat`) are the exception: they
-  spend at once and show each reply's cost after, and the monthly cap still
-  holds.
+  `confirm: true` is set. The Lab (`/query`) and the chat (`/chat`, `/chats`) are the
+  exception: they spend at once and show each reply's and attempt's cost after
+  (the follow-up rewrite, one AI call per follow-up, is part of it), and the
+  monthly cap still holds.
 - **Every response is cached.** A re-run with the same prompts is free, and its
   answers are identical.
 - **Batches.** With the Anthropic connection, runs of more than 50 calls use
@@ -611,7 +661,7 @@ The side nav reads Stores, Chat, Eval sets, Lab, Settings. The store pages live 
 | `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store (one that exists is opened instead), create a store or set up the benchmarks |
 | `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), delete |
 | `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
-| `/chat` | Chat over a store: pick the store, method and model; each reply has `[n]` links to its sources (id, source, `part i of n` for a passage of a split file, the first 300 characters, expandable), the method, the query tags and the cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to the store for good (an add that would spend shows its estimate with Add and Cancel). The conversation is kept per store in the browser tab, not on the server; New chat clears it. With no answer model Send is disabled and a note links to Settings |
+| `/chat` | Chat across stores. The left lists your saved chats (chats are saved on the server; conversations that lived only in a browser tab before are not migrated). A chat has a list of stores, an evidence size (default 8, 1 to 20) and the optional **Rewrite follow-ups with AI**. Each reply has `[n]` links to its sources (id, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). With no answer model Send is disabled and a note links to Settings. Under each answer a **retrieval step** shows, per store, whether it was kept or dropped and why, its best match against its bar, its method and the evidence found; see [Chat across stores](#chat-across-stores) |
 | `/eval-sets` | Every eval set; create one |
 | `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions, delete the set |
 | `/lab` | One question, methods side by side |
@@ -654,7 +704,14 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
-| `POST /chat` | `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
+| `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept |
+| `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}` |
+| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions; change `{title, stores, evidence_size, rewrite}`; delete |
+| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt. 422 for an answer model with no price, before anything is saved |
+| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}}`: re-run the retrieval of message `n` with edits. Adds an attempt without answering; a re-run never rewrites the follow-up again |
+| `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. An answered attempt cannot be answered again (409) |
+| `POST /chats/{id}/stores/{store}/default` | Set as default: save the store's method, k, search settings and bar from the overrides this chat uses |
+| `POST /chat` | The single-store chat, unchanged. `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
 | `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
@@ -764,9 +821,9 @@ package's own: `BudgetExceeded`, `NoConnection`, `UnknownModel`,
 
 ## Roadmap
 
-The bench is now a chat over one store of your own documents that shows its
-evidence, with the keyword method brought up to date; chat across stores is
-next. Where each part stands:
+The bench is now a chat across your stores that shows its evidence and lets
+you edit and re-run the retrieval, with the keyword method brought up to date;
+store profiles and routing are next. Where each part stands:
 
 - **Keyword-RAG v2** (built; its [experiments](#experiments) have not been run,
   so it is not yet known to beat the paper's method): build recipes per
@@ -776,9 +833,9 @@ next. Where each part stands:
   keywords, and
   abstracted worked examples. New benchmarks: BRIGHT AoPS and TheoremQA-Q,
   scored by nDCG@10.
-- **Chat across stores**: the chat (built) answers from one store with
-  citations; asking across several stores, with routing, and an editable
-  retrieval step under every answer are next.
+- **Chat across stores** (built): saved chats that search several stores,
+  keep those that clear their bar and show an editable retrieval step under
+  every answer. Next, phase B: store profiles and routing.
 - **Library**: collections renamed to corpora, with PDF, Word and HTML
   imports.
 
