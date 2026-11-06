@@ -1733,6 +1733,25 @@ def test_upload_unsupported_type_is_422(client):
     assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
 
 
+def test_store_upload_with_accept_text_refuses_other_files(client):
+    add_collection(client)
+    r = client.post(
+        "/collections/c/uploads",
+        params={"filename": "notes.pdf", "kind": "items", "accept": "text"},
+        content=b"x",
+    )
+    assert r.status_code == 422 and "only .txt and .md" in r.json()["detail"]
+    assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
+    ok = client.post(
+        "/collections/c/uploads",
+        params={"filename": "Q3 (final).md", "kind": "items", "accept": "text"},
+        content=b"some text",
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["source_name"] == "Q3 -final"
+    assert upload(client, filename="notes.jsonl").status_code == 200  # no accept: as before
+
+
 def test_upload_to_an_unknown_collection_is_404(client):
     assert upload(client, name="nope").status_code == 404
 
@@ -2650,7 +2669,7 @@ def test_a_stale_or_busy_save_is_refused_and_writes_nothing(client):
     assert [q.id for q in db.get_questions(client.app.state.conn, "e")] == ["a"]
 
 
-def test_eval_set_import_runs_in_the_request(client):
+def test_eval_set_import_runs_in_the_request(client, monkeypatch):
     client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
     client.post("/collections", json={"name": "e", "qa_type": "mcq"})
     rows = jsonl(
@@ -2663,6 +2682,13 @@ def test_eval_set_import_runs_in_the_request(client):
     assert r.status_code == 200, r.text
     up = r.json()
     assert up["preview"]["ready"] and up["preview"]["usable"] == 3
+    from ragqa_core import imports
+
+    seen = []
+    real = imports.preview
+    monkeypatch.setattr(imports, "preview", lambda *a, **k: seen.append(a[-1]) or real(*a, **k))
+    client.post("/eval-sets/e/uploads", params={"filename": "Q3 (final).jsonl"}, content=rows)
+    assert seen == ["upload:Q3 -final"]
     body = {
         "upload_id": up["upload_id"],
         "mapping": up["preview"]["mapping"],

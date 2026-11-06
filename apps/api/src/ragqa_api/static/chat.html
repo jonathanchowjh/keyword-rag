@@ -35,9 +35,12 @@
     <label>Method <select id="method"></select></label>
     <label>Model <select id="model"></select></label>
     <button id="new" type="button" class="secondary">New chat</button>
+    <button id="add-doc" type="button" class="secondary">Add document</button>
+    <input id="doc-file" type="file" accept=".txt,.md" multiple hidden>
   </div>
   <p id="note" class="muted" role="status"></p>
 
+  <div id="adding" class="muted" aria-live="polite"></div>
   <div id="log" aria-live="polite"></div>
 
   <form id="compose">

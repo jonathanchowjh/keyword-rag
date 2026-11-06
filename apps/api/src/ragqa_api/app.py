@@ -105,6 +105,7 @@ BUSY_STATE = {
 }
 DOCUMENT_FIELDS = ("id", "text", "answer", "explanation", "meta")
 SYNC_ITEMS = 20  # more items than this are imported by the worker
+TEXT_SUFFIXES = (".txt", ".md")  # what the chat can add to a store
 STALL_AFTER = timedelta(minutes=10)
 PROBLEM = {
     "failed": "failed",
@@ -705,16 +706,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 shutil.rmtree(state.settings.home / "uploads" / upload_id, ignore_errors=True)
 
     @app.post("/collections/{name}/uploads")
-    def add_upload(name: str, request: Request, filename: str, kind: Literal["items", "questions"]):
-        """The raw file as the body; answers with a preview under a guessed mapping."""
+    def add_upload(
+        name: str,
+        request: Request,
+        filename: str,
+        kind: Literal["items", "questions"],
+        accept: Literal["text"] | None = None,
+    ):
+        """The raw file as the body; answers with a preview under a guessed mapping.
+        With accept=text only a .txt or .md file is taken."""
         spec = state.retriever.spec(name)
+        if accept == "text" and Path(filename).suffix.lower() not in TEXT_SUFFIXES:
+            raise HTTPException(422, "only .txt and .md files can be added here")
         length = request.headers.get("content-length", "")
         if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
             raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
         upload_id = imports.save_upload(state.settings.home, name, filename, body_chunks(request))
         path, _ = open_upload(name, upload_id)
-        stem = Path(filename).stem
-        source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
+        source = "upload:" + imports.source_name(filename)
         shown = preview_upload(spec, path, filename, kind, None, source)
         try:
             estimate = estimate_upload(spec, upload_id, kind, shown, source)
@@ -724,6 +733,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "upload_id": upload_id,
             "filename": filename,
+            "source_name": imports.source_name(filename),
             "preview": shown,
             "estimate": estimate,
         }
@@ -967,8 +977,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         owner = f"eval-set:{name}"
         upload_id = imports.save_upload(state.settings.home, owner, filename, body_chunks(request))
         path, _ = imports.open_upload(state.settings.home, owner, upload_id)
-        stem = Path(filename).stem
-        source = "upload:" + (stem if SOURCE_NAME.match(stem) else "upload")
+        source = "upload:" + imports.source_name(filename)
         try:
             shown = imports.preview(path, filename, "questions", row["qa_type"], None, None, source)
         except ValueError:

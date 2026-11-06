@@ -1,4 +1,4 @@
-import { $, api, catalog, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, UNPRICED, api, catalog, esc, head, methodLabel, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
 
 const TURNS = 6; // earlier turns sent with the new message; the route trims to the same
 const PASSAGE = 300; // characters of a source shown before it is expanded
@@ -12,6 +12,7 @@ $("head").innerHTML = head({
 let turns = []; // what the log shows: {role: "user"} | {role: "reply", ...the /chat reply} | {role: "error"}
 let answering = false;
 let hasModel = false;
+let adding = false; // files are being added: the store stays put until they are in
 
 // -- the conversation, kept per store in sessionStorage; the page works without it ------------
 
@@ -72,6 +73,7 @@ function replyHtml(t, at) {
 
 function turnHtml(t, at) {
   if (t.role === "user") return `<div class="msg user">${esc(t.content)}</div>`;
+  if (t.role === "note") return `<div class="msg note muted">${esc(t.content)}</div>`;
   if (t.role === "error") return `<div class="msg err" role="alert">${esc(t.content)}${t.usd > 0 ? ` <span class="muted">(${usd(t.usd)})</span>` : ""}</div>`;
   return replyHtml(t, at);
 }
@@ -97,7 +99,7 @@ async function ask() {
   turns.push({ role: "user", content });
   // The conversation the model sees: the user's turns and its own answers, never an error.
   const messages = turns
-    .filter((t) => t.role !== "error")
+    .filter((t) => t.role === "user" || t.role === "reply")
     .map((t) => (t.role === "user" ? { role: "user", content: t.content } : { role: "assistant", content: t.answer }))
     .slice(-(TURNS + 1));
   $("box").value = "";
@@ -120,6 +122,67 @@ async function ask() {
   }
   save();
   draw();
+}
+
+// -- adding documents -------------------------------------------------------------------------
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Asks, in #adding, whether to spend `estimate`; resolves true on Add and false on Cancel.
+function askToAdd(file, estimate) {
+  const cost = estimate.est_usd == null ? UNPRICED : `≈ ${usd(estimate.est_usd)}`;
+  $("adding").innerHTML = `${esc(file)}: ${esc(cost)} · ${esc(plural(estimate.calls ?? 0, "AI call"))}
+    <button type="button" data-add>Add</button> <button type="button" data-cancel class="secondary">Cancel</button>`;
+  return new Promise((resolve) => {
+    $("adding").querySelector("[data-add]").addEventListener("click", () => resolve(true));
+    $("adding").querySelector("[data-cancel]").addEventListener("click", () => resolve(false));
+  });
+}
+
+// Follows an import job, with the line "Adding <file>… 40%"; returns the finished job.
+async function follow(file, jobId) {
+  for (;;) {
+    const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
+    if (job.status !== "queued" && job.status !== "running") return job;
+    $("adding").textContent = `Adding ${file}… ${Math.round((job.progress ?? 0) * 100)}%`;
+    await wait(500);
+  }
+}
+
+// One file into the store for good, as its own source: upload, estimate, confirm if it spends.
+async function addFile(store, file) {
+  const name = encodeURIComponent(store);
+  $("adding").textContent = `Adding ${file.name}…`;
+  const up = await upload(`/collections/${name}/uploads?kind=items&accept=text&filename=${encodeURIComponent(file.name)}`, file);
+  const free = up.estimate?.est_usd === 0; // unpriced (null) is not free
+  if (!free && !(await askToAdd(file.name, up.estimate ?? { est_usd: null }))) return null;
+  $("adding").textContent = `Adding ${file.name}…`;
+  const body = { upload_id: up.upload_id, kind: "items", mapping: up.preview.mapping, source_name: up.source_name, confirm: true };
+  const queued = await api(`/collections/${name}/imports`, { method: "POST", body });
+  const job = await follow(file.name, queued.job_id);
+  if (job.status !== "done") throw new Error(job.error || `the import ${job.status}`);
+  return `Added ${file.name}`;
+}
+
+async function addFiles(files) {
+  const store = $("store").value;
+  if (!files.length || !store || adding) return;
+  adding = true;
+  $("store").disabled = true;
+  for (const file of files) {
+    try {
+      const said = await addFile(store, file);
+      if (said) turns.push({ role: "note", content: said });
+    } catch (e) {
+      turns.push({ role: "error", content: `${file.name}: ${e.message}` });
+    }
+    save();
+    draw();
+    refreshSpend();
+  }
+  $("adding").textContent = "";
+  $("store").disabled = false;
+  adding = false;
 }
 
 // -- the pickers -----------------------------------------------------------------------------
@@ -161,6 +224,12 @@ $("new").addEventListener("click", () => {
   turns = [];
   forget();
   draw();
+});
+$("add-doc").addEventListener("click", () => $("doc-file").click());
+$("doc-file").addEventListener("change", () => {
+  const files = [...$("doc-file").files];
+  $("doc-file").value = "";
+  addFiles(files);
 });
 $("compose").addEventListener("submit", (event) => {
   event.preventDefault();

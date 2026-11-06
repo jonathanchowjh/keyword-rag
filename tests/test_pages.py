@@ -2108,3 +2108,70 @@ def test_chat_without_stores_disables_send(page, seeded):
     expect(page.locator("#note")).to_contain_text("No stores yet")
     expect(page.locator("#note").get_by_role("link", name="Stores")).to_have_attribute("href", "/")
     expect(page.locator("#send")).to_be_disabled()
+
+
+DOC_LISTS = {"topic": ["volcano", "coral"], "method": ["survey"], "common": ["rate"]}
+
+
+def free_store(seeded, name):
+    """A store with keyword lists whose recipe tags by similarity, so adding to it is free."""
+    r = httpx.post(
+        f"{seeded.url}/collections",
+        json={"name": name, "qa_type": "science", "recipe": "paper_2024"},
+    )
+    assert r.status_code == 201, r.text
+    body = {"items": [{"id": "base", "text": "volcano magma lava pressure"}], "confirm": True}
+    assert httpx.post(f"{seeded.url}/collections/{name}/documents", json=body).status_code == 200
+    r = httpx.put(f"{seeded.url}/collections/{name}/keyword-lists", json=DOC_LISTS)
+    assert r.status_code == 202, r.text
+    assert seeded.wait(r.json()["job_id"])["status"] == "done"
+
+
+def chat_upload(page, seeded, store, tmp_path, filename, text):
+    path = tmp_path / filename
+    path.write_text(text)
+    page.goto(seeded.url + "/chat")
+    page.locator("#store").select_option(store)
+    page.locator("#doc-file").set_input_files(str(path))
+
+
+def test_chat_upload_adds_a_document_and_the_next_answer_can_cite_it(page, seeded, tmp_path):
+    free_store(seeded, "docs")
+    chat_upload(page, seeded, "docs", tmp_path, "reefs.txt", "coral reefs bleach when oceans warm")
+    expect(page.locator("#log")).to_contain_text("Added reefs.txt")
+    assert [s["source"] for s in sources(seeded, "docs")] == ["hand", "upload:reefs"]
+    page.locator("#method").select_option("hybrid")
+    with page.expect_response(
+        lambda r: r.url.endswith("/chat") and r.request.method == "POST"
+    ) as got:
+        chat_ask(page, "why do coral reefs bleach?")
+    assert any(i != "base" for i in got.value.json()["hit_ids"])
+    expect(page.locator("#log .reply")).to_be_visible()
+
+
+def test_chat_upload_cleans_the_file_name(page, seeded, tmp_path):
+    free_store(seeded, "cleaned")
+    chat_upload(page, seeded, "cleaned", tmp_path, "Q3 (final).md", "# Q3\nrevenue grew")
+    expect(page.locator("#log")).to_contain_text("Added Q3 (final).md")
+    assert "upload:Q3 -final" in [s["source"] for s in sources(seeded, "cleaned")]
+
+
+def test_chat_upload_shows_the_estimate_and_cancel_adds_nothing(page, seeded, tmp_path):
+    ai = seeded.app.state.ai
+    ai.add_model("anthropic", "kw-priced", label="Priced", price_in=1, price_out=1)
+    ai.set_role("keywords", "anthropic/kw-priced")
+    try:
+        r = httpx.post(f"{seeded.url}/collections", json={"name": "paid", "qa_type": "science"})
+        assert r.status_code == 201, r.text
+        chat_upload(page, seeded, "paid", tmp_path, "pay.txt", "some words about <b>tides</b>")
+        box = page.locator("#adding")
+        expect(box).to_contain_text("AI call")
+        expect(box.get_by_role("button", name="Add", exact=True)).to_be_visible()
+        assert sources(seeded, "paid") == []
+        box.get_by_role("button", name="Cancel").click()
+        expect(box).to_be_empty()
+        expect(page.locator("#log")).not_to_contain_text("Added")
+        assert sources(seeded, "paid") == []
+        assert httpx.get(f"{seeded.url}/jobs", params={"collection": "paid"}).json() == []
+    finally:
+        ai.set_role("keywords", None)

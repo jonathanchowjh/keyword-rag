@@ -390,3 +390,11 @@ def test_question_problem():
     plain = Question("b", "how warm?", None, [], [], {})
     assert question_problem(plain, "science") is None
     assert question_problem(replace(plain, gold_answers=["28 C"]), "multihop") is None
+
+
+def test_source_name_cleans_file_names():
+    assert imports.source_name("Q3 (final).md") == "Q3 -final"
+    assert imports.source_name("(((.md") == "upload"
+    assert imports.source_name("notes.txt") == "notes"
+    name = imports.source_name("a" * 100 + ".txt")
+    assert name == "a" * 64 and imports.SOURCE_NAME.match(name)
