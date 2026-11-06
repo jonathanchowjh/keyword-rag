@@ -946,9 +946,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         questions = [Question(**q.model_dump()) for q in body.questions]
         # A question with no source whose id no version of the set has held is written by
         # hand: checked for leaks. One the set held before (a restored older version) is not.
-        held = {q.id for q in db.get_questions(state.conn, name)}
-        for saved in db.eval_set_versions(state.conn, name):
-            held |= {q.id for q in db.get_questions(state.conn, name, saved["version"])}
+        held = db.eval_set_ids_ever(state.conn, name)
         questions = [
             q
             if q.id in held or "source" in q.meta

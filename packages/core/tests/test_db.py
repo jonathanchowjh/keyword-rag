@@ -704,6 +704,15 @@ def test_saving_questions_snapshots_a_version_only_when_they_change(conn):
         get_questions(conn, "e", "nope")
 
 
+def test_eval_set_ids_ever_is_the_union_of_ids_across_versions(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    assert db.eval_set_ids_ever(conn, "e") == set()
+    save_questions(conn, "e", questions_of("one", "two"))
+    save_questions(conn, "e", questions_of("one"))
+    save_questions(conn, "e", [Question("z", "new", None, ["a"], [])])
+    assert db.eval_set_ids_ever(conn, "e") == {"q0", "q1", "z"}
+
+
 def test_save_questions_on_a_store_name_creates_its_eval_set_and_refuses_an_unknown_name(conn):
     save_collection(conn, CollectionSpec("c", "table", False, "d", 4))
     save_questions(conn, "c", questions_of("one"))

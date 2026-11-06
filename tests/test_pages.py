@@ -2257,10 +2257,14 @@ def test_chat_reply_error_keeps_the_conversation(page, seeded):
     expect(page.locator("#send")).to_be_enabled()
     chat_ask(page, "and again?")
     expect(page.locator("#log .err").nth(1)).to_contain_text("budget used up")
+    expect(page.locator("#log [role=alert]")).to_have_count(0)
+    expect(page.locator("#spoken")).to_have_text("budget used up")
     expect(page.locator("#log .user")).to_have_count(2)
     page.reload()
     expect(page.locator("#log .user")).to_have_count(2)
     expect(page.locator("#log .err")).to_have_count(2)
+    page.locator("#new").click()
+    expect(page.locator("#spoken")).to_have_text("")
 
 
 def test_chat_sends_only_the_last_six_turns_and_the_new_message(page, seeded):

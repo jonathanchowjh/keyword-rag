@@ -35,6 +35,12 @@ def test_dense_and_sparse_search_find_the_matching_item(setup):
     assert s.count("c") == 2
 
 
+def test_held_returns_only_the_ids_present(setup):
+    s, _ = setup
+    assert s.held("c", ["1", "nope", "2"]) == {"1", "2"}
+    assert s.held("c", ["nope"]) == set()
+
+
 def test_hit_carries_payload(setup):
     s, m = setup
     hit = s.get("c", ["1"])[0]

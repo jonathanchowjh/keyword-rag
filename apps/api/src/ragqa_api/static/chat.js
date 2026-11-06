@@ -81,7 +81,7 @@ function replyHtml(t, at) {
 function turnHtml(t, at) {
   if (t.role === "user") return `<div class="msg user">${esc(t.content)}</div>`;
   if (t.role === "note") return `<div class="msg note muted">${esc(t.content)}</div>`;
-  if (t.role === "error") return `<div class="msg err" role="alert">${esc(t.content)}${t.usd > 0 ? ` <span class="muted">(${usd(t.usd)})</span>` : ""}</div>`;
+  if (t.role === "error") return `<div class="msg err">${esc(t.content)}${t.usd > 0 ? ` <span class="muted">(${usd(t.usd)})</span>` : ""}</div>`;
   return replyHtml(t, at);
 }
 
@@ -136,7 +136,7 @@ async function ask() {
   turns.push(turn);
   save();
   draw();
-  if (turn.role === "reply") $("spoken").textContent = turn.answer;
+  $("spoken").textContent = turn.role === "reply" ? turn.answer : turn.content;
 }
 
 // -- adding documents -------------------------------------------------------------------------
@@ -235,6 +235,7 @@ async function pickStore() {
   const mine = ++picking;
   const name = $("store").value;
   turns = load();
+  $("spoken").textContent = "";
   draw();
   try {
     const detail = await api(`/collections/${encodeURIComponent(name)}`);
@@ -265,6 +266,7 @@ $("store").addEventListener("change", () => pickStore().catch((e) => ($("status"
 $("new").addEventListener("click", () => {
   cleared[$("store").value] = (cleared[$("store").value] ?? 0) + 1;
   turns = [];
+  $("spoken").textContent = "";
   forget();
   draw();
 });

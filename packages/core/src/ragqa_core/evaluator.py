@@ -308,7 +308,7 @@ class Evaluator:
     def _held_ids(self, spec: CollectionSpec, questions: list[Question]) -> set[str]:
         """Which of the questions' evidence ids the store holds, in one read of the store."""
         wanted = sorted({g for q in questions for g in q.gold_ids})
-        return {h.id for h in self.retriever.store.get(spec.name, wanted)} if wanted else set()
+        return self.retriever.store.held(spec.name, wanted) if wanted else set()
 
     def _evidence(self, spec: CollectionSpec, questions: list[Question]) -> tuple[int, int]:
         """How many questions name evidence, and how many of those the store holds any of."""

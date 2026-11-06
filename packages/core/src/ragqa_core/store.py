@@ -326,6 +326,13 @@ class Store:
         by_id = {to_hit(r).id: to_hit(r) for r in records}
         return [by_id[i] for i in ids if i in by_id]
 
+    def held(self, name: str, ids: list[str]) -> set[str]:
+        """Which of these item ids the store holds, read without the payload texts."""
+        records = self.client.retrieve(
+            name, [point_id(name, i) for i in ids], with_payload=["item_id"]
+        )
+        return {(r.payload or {})["item_id"] for r in records}
+
     def ids(self, name: str, batch: int = 1024, skip: tuple[str, ...] = ()) -> list[str]:
         out: list[str] = []
         offset = None

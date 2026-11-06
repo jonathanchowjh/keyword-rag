@@ -517,6 +517,16 @@ def list_eval_sets(conn: Connection) -> list[dict]:
     return [_eval_set(r, r["n"]) for r in conn.execute(f"{EVAL_SET_SQL} order by e.name")]
 
 
+def eval_set_ids_ever(conn: Connection, name: str) -> set[str]:
+    """Every question id any saved version of the set has held, read in one query."""
+    rows = conn.execute(
+        "select distinct json_extract(value, '$.id') as id"
+        " from eval_set_versions, json_each(questions_json) where eval_set = ?",
+        (name,),
+    )
+    return {r["id"] for r in rows}
+
+
 def eval_set_versions(conn: Connection, name: str) -> list[dict]:
     rows = conn.execute(
         "select version, created_at, questions_json from eval_set_versions"
