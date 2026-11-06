@@ -2,6 +2,8 @@ import { $, UNPRICED, api, esc, head, modelOptions, plural, refreshSpend, shell,
 
 const PASSAGE = 300; // characters of a source shown before it is expanded
 const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
+const CHANNELS = ["meaning", "words", "keywords"]; // a search's weighted channels
+const QUERY_TAGS = ["classifier", "similarity", "model"]; // oracle needs a question's gold: never in a chat
 
 shell("chat");
 $("head").innerHTML = head({
@@ -20,15 +22,44 @@ const details = {}; // store -> its GET /collections/{name}, for its chip
 const pending = {}; // chat id -> the message still on its way there
 const arrived = {}; // chat id -> a reply that came while its chat was loading, merged once it has
 const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes
+const turns = {}; // "chat id:message n" -> what the reader has open or edited there, kept across redraws
 
 // The chat's stores that still exist.
 const live = () => (chat ? chat.stores.filter((s) => !chat.deleted_stores.includes(s)) : []);
 const lastN = (c) => c.messages.at(-1)?.n ?? 0;
 
+// Message n's state on the page: the attempt tab chosen (null: the latest), whether its
+// Retrieval step is open, the passages expanded, each store's unsent edit and note, the store
+// whose Set as default is being confirmed, and whether a request for it is on its way.
+function turnOf(chatId, n) {
+  return (turns[`${chatId}:${n}`] ??= {
+    tab: null,
+    open: false,
+    expanded: new Set(),
+    edits: {},
+    notes: {},
+    confirm: null,
+    busy: false,
+    error: "",
+  });
+}
+
+const shownAttempt = (m, ui) => m.attempts.find((a) => a.attempt === ui.tab) ?? m.attempts.at(-1);
+
 // The chat's messages with `message` in place of any of the same n: the server saves a message
 // before its attempt, so a chat read meanwhile may already hold it with no attempt.
 function withMessage(c, message) {
   const messages = [...c.messages.filter((m) => m.n !== message.n), message].sort((a, b) => a.n - b.n);
+  return { ...c, messages };
+}
+
+// The chat with `attempt` in place of any of the same number on message n.
+function withAttempt(c, n, attempt) {
+  const messages = c.messages.map((m) =>
+    m.n !== n
+      ? m
+      : { ...m, attempts: [...m.attempts.filter((a) => a.attempt !== attempt.attempt), attempt].sort((a, b) => a.attempt - b.attempt) },
+  );
   return { ...c, messages };
 }
 
@@ -38,11 +69,12 @@ function withMessage(c, message) {
 // number 1 to 4 ASCII digits.
 const CITATION = /\[([0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?(?:\s*,\s*[0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?)*)\]/g;
 
-// Escaped text with each cited number linked to its source: a lone [n] as a whole, each
-// number of a grouped bracket on its own. A mark like [01] links to source 1.
+// Escaped text with each cited number linked to its passage in the Retrieval step, whose id
+// is ev-<at>-<n>: a lone [n] as a whole, each number of a grouped bracket on its own. A mark
+// like [01] links to passage 1.
 function citeHtml(escaped, cited, at) {
   const have = new Set(cited.map((c) => c.n));
-  const link = (n, shown) => (have.has(Number(n)) ? `<a class="cite" href="#src-${at}-${Number(n)}">${shown}</a>` : shown);
+  const link = (n, shown) => (have.has(Number(n)) ? `<a class="cite" href="#ev-${at}-${Number(n)}">${shown}</a>` : shown);
   return escaped.replace(CITATION, (mark, inner) =>
     /^\d+$/.test(inner) ? link(inner, mark) : `[${inner.replace(/\d+/g, (n) => link(n, n))}]`,
   );
@@ -118,35 +150,209 @@ function textHtml(text, cited, at) {
   return out.join("");
 }
 
-// One cited passage. Its id, src-<message n>-<passage n>, is where the reply's [n] links.
-function sourceHtml(c, at) {
-  const long = c.text.length > PASSAGE;
-  const body = long
-    ? `<details><summary>${esc(c.text.slice(0, PASSAGE))}…</summary><div class="full">${esc(c.text)}</div></details>`
-    : `<div>${esc(c.text)}</div>`;
+// A passage's text: the first PASSAGE characters, the rest behind a toggle whose open state
+// is kept, under `key`, in the turn's `expanded`.
+function passageHtml(text, key, ui) {
+  if (text.length <= PASSAGE) return `<div>${esc(text)}</div>`;
+  const open = ui.expanded.has(key) ? " open" : "";
+  return `<details data-expand="${esc(key)}"${open}><summary>${esc(text.slice(0, PASSAGE))}…</summary><div class="full">${esc(text)}</div></details>`;
+}
+
+// One cited passage, listed under the answer.
+function sourceHtml(c, at, ui) {
   const part = c.parts > 1 ? ` · part ${esc(c.part)} of ${esc(c.parts)}` : "";
   const from = (c.source ? ` · ${esc(c.source)}` : "") + part + (c.store ? ` · ${esc(c.store)}` : "");
-  return `<li id="src-${at}-${Number(c.n)}"><span class="what">[${Number(c.n)}] ${esc(c.id)}${from}</span>${body}</li>`;
+  return `<li><span class="what">[${Number(c.n)}] ${esc(c.id)}${from}</span>${passageHtml(c.text, `src-${at}-${Number(c.n)}`, ui)}</li>`;
 }
 
 const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "");
 
-// An attempt's answer with its sources and cost; with no answer, its error and cost.
-function attemptHtml(a, at) {
-  if (a.answer == null) return `<div class="msg err">${esc(a.error ?? "no answer")}${costHtml(a.usd)}</div>`;
+// An attempt's answer with its sources and cost; with no answer, its error and cost (or that
+// it is not answered yet) and Answer from this attempt. `at` is "<message n>-<attempt>".
+function attemptHtml(a, at, ui) {
+  if (a.answer == null) {
+    const said = a.error
+      ? `<div class="msg err">${esc(a.error)}${costHtml(a.usd)}</div>`
+      : `<div class="msg unanswered muted">Not answered yet.${costHtml(a.usd)}</div>`;
+    const error = ui.error ? `<span class="err" role="status">${esc(ui.error)}</span>` : "";
+    const off = ui.busy || !hasModel ? " disabled" : "";
+    return `${said}<div class="row"><button type="button" data-answer="${Number(a.attempt)}"${off}>Answer from this attempt</button>${error}</div>`;
+  }
+  const passages = new Set(a.evidence.map((e) => e.n));
+  const cited = a.citations.filter((c) => passages.has(c.n)); // linked only where its passage is drawn
   const sources = a.citations.length
-    ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, at)).join("")}</ul>`
+    ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, at, ui)).join("")}</ul>`
+    : "";
+  const none = a.decisions.length && !a.decisions.some((d) => d.kept)
+    ? '<div class="meta warn none-kept">No store was kept, so this answer used no store passages.</div>'
     : "";
   const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
-  return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, a.citations, at)}</div>${sources}
-    ${note}<div class="meta muted">Cost ${usd(a.usd)}</div></div>`;
+  return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, cited, at)}</div>${sources}
+    ${none}${note}<div class="meta muted">Cost ${usd(a.usd)}</div></div>`;
 }
 
-// A saved message: the user's text, then its latest attempt.
+// -- the retrieval step ------------------------------------------------------------------------
+
+const two = (x) => (x == null ? "–" : Number(x).toFixed(2));
+
+function methodText(d) {
+  if (!d.method) return "–";
+  return d.method === "keyword_rag" && d.search?.query_tags ? `keyword_rag · query tags: ${d.search.query_tags}` : d.method;
+}
+
+function barText(d) {
+  if (d.bar_source === "none") return "none"; // no eval set
+  if (d.bar_source === "few") return "too few questions";
+  const said = { manual: " manual", override: " edited" }[d.bar_source] ?? "";
+  return d.bar == null ? "–" : two(d.bar) + said;
+}
+
+function keptText(d) {
+  if (d.reason === "deleted") return "deleted";
+  if (d.error) return `dropped · error: ${d.error}`;
+  return `${d.kept ? "kept" : "dropped"} · ${d.reason}`;
+}
+
+function decisionHtml(d) {
+  return `<tr data-store="${esc(d.store)}"${d.kept ? "" : ' class="dropped"'}><th scope="row">${esc(d.store)}</th>
+    <td class="method">${esc(methodText(d))}</td><td class="num best">${esc(two(d.best))}</td>
+    <td class="num bar">${esc(barText(d))}</td><td class="kept">${esc(keptText(d))}</td></tr>`;
+}
+
+// One passage the answer was given. Its id, ev-<message n>-<attempt>-<passage n>, is where
+// the answer's [n] links, so the attempts of one message never share an id.
+function evidenceHtml(e, at, ui) {
+  const key = `ev-${at}-${Number(e.n)}`;
+  const what = [`[${Number(e.n)}] ${e.id}`, e.store, e.source, e.parts > 1 ? `part ${e.part} of ${e.parts}` : null]
+    .concat(e.rank != null ? [`rank ${e.rank}`] : [], e.channels?.length ? [e.channels.join(", ")] : [])
+    .filter((x) => x != null && x !== "")
+    .join(" · ");
+  return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">${esc(what)}</span>${passageHtml(e.text, key, ui)}</li>`;
+}
+
+// A store's Edit form as its decision ran: input values, as the form holds them.
+function editBase(d) {
+  const w = d.search?.weights ?? {};
+  const out = {
+    method: d.method ?? "",
+    k: d.k == null ? "" : String(d.k),
+    query_tags: d.search?.query_tags ?? "similarity",
+    ownBar: d.bar_source !== "override",
+    bar: d.bar_source === "override" && d.bar != null ? String(d.bar) : "",
+    keep: d.reason === "search anyway",
+  };
+  for (const c of CHANNELS) out[c] = String(w[c] ?? 1);
+  return out;
+}
+
+// The override for what `edit` changes from `base`, only the fields changed; null for k or
+// bar means the store's own. Throws, with what to fix, on a value the route would refuse.
+function overrideOf(edit, base) {
+  const out = {};
+  if (edit.method !== base.method) out.method = edit.method;
+  if (edit.k !== base.k) {
+    const k = edit.k.trim() === "" ? null : Number(edit.k);
+    if (k !== null && !(Number.isInteger(k) && k >= 1 && k <= MAX_EVIDENCE)) {
+      throw new Error(`k is a whole number from 1 to ${MAX_EVIDENCE}.`);
+    }
+    out.k = k;
+  }
+  const search = {};
+  if (edit.query_tags !== base.query_tags) search.query_tags = edit.query_tags;
+  for (const c of CHANNELS.filter((c) => edit[c] !== base[c])) {
+    const weight = edit[c].trim() === "" ? NaN : Number(edit[c]);
+    if (!Number.isFinite(weight)) throw new Error("A weight is a number, 0 or more.");
+    (search.weights ??= {})[c] = weight;
+  }
+  if (Object.keys(search).length) out.search = search;
+  if (edit.ownBar !== base.ownBar || (!edit.ownBar && edit.bar !== base.bar)) {
+    const bar = edit.bar.trim() === "" ? NaN : Number(edit.bar);
+    if (!edit.ownBar && !(bar >= -1 && bar <= 1)) throw new Error("A bar is a number from -1 to 1.");
+    out.bar = edit.ownBar ? null : bar;
+  }
+  if (edit.keep !== base.keep) out.keep = edit.keep;
+  return out;
+}
+
+function readEdit(box) {
+  const field = (name) => box.querySelector(`[name="${name}"]`);
+  const out = { ownBar: field("ownBar").checked, keep: field("keep").checked };
+  for (const name of ["method", "k", "query_tags", "bar", ...CHANNELS]) out[name] = field(name).value;
+  return out;
+}
+
+const option = (value, chosen) => `<option value="${esc(value)}"${value === chosen ? " selected" : ""}>${esc(value)}</option>`;
+
+// A store's Edit form: its unsent edit when there is one, else the decision as it ran.
+function editHtml(d, ui) {
+  const store = d.store;
+  const base = editBase(d);
+  const e = ui.edits[store] ?? base;
+  const methods = [...new Set([...(details[store]?.methods_available ?? []), base.method, e.method])].filter(Boolean);
+  const weights = CHANNELS.map(
+    (c) => `<label>${c[0].toUpperCase() + c.slice(1)} weight <input name="${c}" type="number" min="0" step="0.1" value="${esc(e[c])}"></label>`,
+  ).join("");
+  const note = ui.notes[store];
+  const off = ui.busy ? " disabled" : "";
+  const confirm =
+    ui.confirm === store
+      ? `<div class="confirm"><span>${esc(`Save these settings as ${store}'s default? Search anyway is not saved.`)}</span>
+        <button type="button" data-save${off}>Yes, save</button> <button type="button" class="secondary" data-unsave>Cancel</button></div>`
+      : "";
+  return `<fieldset data-edit="${esc(store)}"><legend>${esc(store)}</legend><div class="row">
+      <label>Method <select name="method">${methods.map((m) => option(m, e.method)).join("")}</select></label>
+      <label>k <input name="k" type="number" min="1" max="${MAX_EVIDENCE}" step="1" value="${esc(e.k)}"></label>
+      <label>Query tags <select name="query_tags">${QUERY_TAGS.map((t) => option(t, e.query_tags)).join("")}</select></label>
+      ${weights}
+      <label>Bar <input name="bar" type="number" min="-1" max="1" step="0.01" value="${esc(e.bar)}" placeholder="${esc(two(d.bar))}"${e.ownBar ? " disabled" : ""}></label>
+      <label class="check"><input name="ownBar" type="checkbox"${e.ownBar ? " checked" : ""}> Use the store's bar</label>
+      <label class="check"><input name="keep" type="checkbox"${e.keep ? " checked" : ""}> Search anyway</label>
+    </div><div class="row">
+      <button type="button" data-rerun${off}>Re-run retrieval</button>
+      <button type="button" class="secondary" data-default${off}>Set as default</button>
+      <span class="edit-note${note?.bad ? " err" : " muted"}" role="status">${esc(note?.text ?? "")}</span>
+    </div>${confirm}</fieldset>`;
+}
+
+// The attempt's Retrieval step, collapsed unless the reader opened it: the search text, each
+// store's decision, the passages, and, on the latest attempt, an Edit form for each of the
+// chat's stores still there. Only the latest: the chat's overrides build on what it ran with.
+function retrievalHtml(a, at, ui, latest) {
+  const passages = [...a.evidence].sort((x, y) => x.n - y.n).map((e) => evidenceHtml(e, at, ui)).join("");
+  const stores = a.decisions.length
+    ? `<div class="scroll"><table class="decisions"><thead><tr><th>Store</th><th>Method</th><th class="num">Best match</th>
+        <th class="num">Bar</th><th>Kept</th></tr></thead><tbody>${a.decisions.map(decisionHtml).join("")}</tbody></table></div>`
+    : '<p class="muted">No store was searched.</p>';
+  const edits = latest ? a.decisions.filter((d) => live().includes(d.store)).map((d) => editHtml(d, ui)).join("") : "";
+  const elsewhere = latest ? "" : '<p class="muted">To edit and re-run, open the latest attempt.</p>';
+  return `<details class="retrieval"${ui.open ? " open" : ""}><summary>Retrieval step</summary>
+    <p><strong>Searched for:</strong> <span class="searched">${esc(a.search_text)}</span></p>
+    <h3>Stores</h3>${stores}
+    <h3>Evidence</h3>${passages ? `<ol class="evidence">${passages}</ol>` : '<p class="muted">No passages.</p>'}
+    ${edits ? `<h3>Edit</h3><div class="edits">${edits}</div>` : elsewhere}</details>`;
+}
+
+// A saved message: the user's text, then the attempt chosen (the latest unless a tab says
+// otherwise), with a tab for each attempt when there are several, and its Retrieval step.
 function messageHtml(m) {
   const n = Number(m.n);
-  const latest = m.attempts.at(-1);
-  return `<div class="turn" id="msg-${n}" data-n="${n}"><div class="msg user">${esc(m.content)}</div>${latest ? attemptHtml(latest, n) : ""}</div>`;
+  const ui = turnOf(chat.id, n);
+  const shown = shownAttempt(m, ui);
+  let body = "";
+  if (shown) {
+    const at = `${n}-${Number(shown.attempt)}`;
+    const tabs =
+      m.attempts.length > 1
+        ? `<div class="tabs" role="tablist">${m.attempts
+            .map((a) => {
+              const on = a.attempt === shown.attempt;
+              return `<button type="button" role="tab" class="secondary" aria-selected="${on}" data-tab="${Number(a.attempt)}">Attempt ${Number(a.attempt)}</button>`;
+            })
+            .join("")}</div>`
+        : "";
+    body = tabs + attemptHtml(shown, at, ui) + retrievalHtml(shown, at, ui, shown === m.attempts.at(-1));
+  }
+  return `<div class="turn" id="msg-${n}" data-n="${n}"><div class="msg user">${esc(m.content)}</div>${body}</div>`;
 }
 
 function lineHtml(l) {
@@ -217,6 +423,13 @@ function drawLog() {
   $("log").innerHTML = html;
   const last = $("log").lastElementChild;
   if (last) last.scrollIntoView({ block: "nearest" });
+}
+
+// Draws message n again, in place, from the chat and its turn's state.
+function drawTurn(n) {
+  const m = chat?.messages.find((x) => x.n === n);
+  const el = document.getElementById(`msg-${n}`);
+  if (m && el) el.outerHTML = messageHtml(m);
 }
 
 function setBusy() {
@@ -391,6 +604,102 @@ async function ask() {
   $("spoken").textContent = message ? spokenOf(message) : `Error: ${error}`;
 }
 
+// -- re-runs and defaults ----------------------------------------------------------------------
+
+// Re-runs message n's retrieval with the store's changes as the chat's override, and shows
+// the new attempt. A refusal is said beside the store and the edit stays. Returns the attempt,
+// or null when there is none.
+async function rerun(n, store) {
+  const id = chat.id;
+  const ui = turnOf(id, n);
+  const m = chat.messages.find((x) => x.n === n);
+  const decision = shownAttempt(m, ui)?.decisions.find((d) => d.store === store);
+  if (!decision || ui.busy) return null;
+  let override;
+  try {
+    override = overrideOf(ui.edits[store] ?? editBase(decision), editBase(decision));
+  } catch (e) {
+    ui.notes[store] = { text: e.message, bad: true };
+    drawTurn(n);
+    return null;
+  }
+  ui.busy = true;
+  ui.notes[store] = { text: "Re-running…" };
+  drawTurn(n);
+  let attempt = null;
+  try {
+    const overrides = Object.keys(override).length ? { [store]: override } : {};
+    attempt = await api(`/chats/${encodeURIComponent(id)}/messages/${Number(n)}/attempts`, { method: "POST", body: { overrides } });
+    delete ui.edits[store]; // the new attempt ran with them
+    ui.notes[store] = null;
+    ui.tab = attempt.attempt;
+    if (chat?.id === id) chat = withAttempt(chat, n, attempt);
+  } catch (e) {
+    ui.notes[store] = { text: e.message, bad: true };
+  }
+  ui.busy = false;
+  refreshSpend();
+  if (chat?.id === id) drawTurn(n);
+  return attempt;
+}
+
+// Answers the attempt from its own passages.
+async function answerAttempt(n, number) {
+  const id = chat.id;
+  const ui = turnOf(id, n);
+  if (ui.busy) return;
+  ui.busy = true;
+  ui.error = "";
+  drawTurn(n);
+  try {
+    const attempt = await api(`/chats/${encodeURIComponent(id)}/messages/${Number(n)}/attempts/${Number(number)}/answer`, {
+      method: "POST",
+      body: { model: $("model").value || null },
+    });
+    if (chat?.id === id) {
+      chat = withAttempt(chat, n, attempt);
+      $("spoken").textContent = attempt.answer ?? `Error: ${attempt.error ?? "no answer"}`;
+    }
+  } catch (e) {
+    ui.error = e.message;
+  }
+  ui.busy = false;
+  refreshSpend();
+  if (chat?.id === id) drawTurn(n);
+}
+
+const unset = (x, shown = x) => (x == null ? "unset" : shown);
+
+// Saves the store's settings as its default. An edit not yet re-run is re-run first, as the
+// server saves the override the chat holds.
+async function setDefault(n, store) {
+  const id = chat.id;
+  const ui = turnOf(id, n);
+  ui.confirm = null;
+  const m = chat.messages.find((x) => x.n === n);
+  const decision = shownAttempt(m, ui)?.decisions.find((d) => d.store === store);
+  let edited = false;
+  try {
+    edited = Boolean(decision) && Object.keys(overrideOf(ui.edits[store] ?? editBase(decision), editBase(decision))).length > 0;
+  } catch (e) {
+    ui.notes[store] = { text: e.message, bad: true };
+    drawTurn(n);
+    return;
+  }
+  if (edited && !(await rerun(n, store))) return;
+  ui.busy = true;
+  if (chat?.id === id) drawTurn(n);
+  try {
+    const saved = await api(`/chats/${encodeURIComponent(id)}/stores/${encodeURIComponent(store)}/default`, { method: "POST" });
+    const what = [`method ${unset(saved.chat_method)}`, `k ${unset(saved.chat_k)}`, `bar ${unset(saved.chat_bar, two(saved.chat_bar))}`];
+    ui.notes[store] = { text: `Saved as ${store}'s default: ${what.join(", ")}.` };
+  } catch (e) {
+    ui.notes[store] = { text: e.message, bad: true };
+  }
+  ui.busy = false;
+  if (chat?.id === id) drawTurn(n);
+}
+
 // -- adding documents --------------------------------------------------------------------------
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -514,6 +823,61 @@ $("box").addEventListener("keydown", (event) => {
     ask();
   }
 });
+$("log").addEventListener("click", (event) => {
+  const turn = event.target.closest(".turn");
+  if (!turn || !chat) return;
+  const n = Number(turn.dataset.n);
+  const ui = turnOf(chat.id, n);
+  const at = (selector) => event.target.closest(selector);
+  if (at("a.cite")) {
+    // Its passage is in the Retrieval step: open it before the jump.
+    ui.open = true;
+    turn.querySelector("details.retrieval").open = true;
+    return;
+  }
+  if (at("[data-tab]")) {
+    ui.tab = Number(at("[data-tab]").dataset.tab);
+    drawTurn(n);
+    return;
+  }
+  if (at("[data-answer]")) {
+    answerAttempt(n, Number(at("[data-answer]").dataset.answer)).catch(said);
+    return;
+  }
+  const box = at("fieldset[data-edit]");
+  if (!box) return;
+  const store = box.dataset.edit;
+  if (at("[data-rerun]")) rerun(n, store).catch(said);
+  else if (at("[data-save]")) setDefault(n, store).catch(said);
+  else if (at("[data-default]") || at("[data-unsave]")) {
+    ui.confirm = at("[data-default]") ? store : null;
+    drawTurn(n);
+  }
+});
+// An edit is kept as typed, so a redraw keeps it; nothing is sent until Re-run or Set as default.
+const edited = (event) => {
+  const box = event.target.closest("fieldset[data-edit]");
+  const turn = event.target.closest(".turn");
+  if (!box || !turn || !chat) return;
+  const edit = readEdit(box);
+  turnOf(chat.id, Number(turn.dataset.n)).edits[box.dataset.edit] = edit;
+  box.querySelector('[name="bar"]').disabled = edit.ownBar;
+};
+$("log").addEventListener("input", edited);
+$("log").addEventListener("change", edited);
+// What is open is kept per turn, so a redraw keeps it. Toggle does not bubble: caught on its way down.
+$("log").addEventListener(
+  "toggle",
+  (event) => {
+    const el = event.target;
+    const turn = el.closest?.(".turn");
+    if (!turn || !chat) return;
+    const ui = turnOf(chat.id, Number(turn.dataset.n));
+    if (el.matches("details.retrieval")) ui.open = el.open;
+    else if (el.dataset.expand) el.open ? ui.expanded.add(el.dataset.expand) : ui.expanded.delete(el.dataset.expand);
+  },
+  true,
+);
 window.addEventListener("hashchange", () => {
   const id = hashId();
   if (id && document.getElementById(id)) {

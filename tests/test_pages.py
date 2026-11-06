@@ -2090,6 +2090,11 @@ CHAT_ATTEMPT = {
     "error": None,
     "model": "anthropic/fake",
 }
+# The passages the answer was given, each with its number in the prompt: what [n] links to.
+CHAT_ATTEMPT["evidence"] = [
+    {**c, "rank": c["n"], "score": 0.016, "channels": ["meaning", "words"]}
+    for c in CHAT_ATTEMPT["citations"]
+]
 
 
 def make_chat(seeded, stores=("c",), title=None) -> str:
@@ -2441,7 +2446,8 @@ def test_chat_page_sends_shows_citations_and_cost(page, seeded):
     expect(page.locator("#box")).to_have_value("")
     reply_box.locator("a.cite").first.click()
     expect(page.locator("#log li:target")).to_have_count(1)
-    expect(page.locator("#log li:target")).to_have_attribute("id", "src-1-1")
+    expect(page.locator("#log li:target")).to_have_attribute("id", "ev-1-1-1")
+    expect(page.locator("#msg-1 details.retrieval")).to_have_attribute("open", "")
     expect(page).to_have_url(re.compile(f"#{chat_id}$"))  # the address still names the chat
 
 
@@ -2768,3 +2774,312 @@ def test_chat_upload_refuses_other_files_without_uploading(page, seeded, tmp_pat
     expect(page.locator("#log .err")).to_contain_text("only .txt and .md")
     assert posts == []
     expect(page.locator("#add-doc")).to_be_enabled()
+
+
+# -- The retrieval step under each answer --------------------------------------------------
+
+
+def retrieval_step(page, n=1):
+    """Message n's Retrieval step, opened."""
+    step = page.locator(f"#msg-{n} details.retrieval")
+    if step.get_attribute("open") is None:
+        step.locator(":scope > summary").click()
+    expect(step).to_have_attribute("open", "")
+    return step
+
+
+def store_row(step, store):
+    return step.locator(f'table.decisions tr[data-store="{store}"]')
+
+
+def edit_box(step, store):
+    return step.locator(f'fieldset[data-edit="{store}"]')
+
+
+def attempt_posts(page):
+    """The bodies the page POSTs to re-run a message's retrieval."""
+    sent = []
+    page.on(
+        "request",
+        lambda r: (
+            sent.append(json.loads(r.post_data))
+            if r.method == "POST" and r.url.endswith("/attempts")
+            else None
+        ),
+    )
+    return sent
+
+
+def test_retrieval_step_shows_search_text_store_decisions_and_evidence(page, seeded):
+    def tagged(route):
+        # The real reply, with vo run as keyword_rag (no store has a vocabulary here) and
+        # its first passage longer than 300 characters.
+        got = route.fetch()
+        message = got.json()
+        attempt = message["attempts"][0]
+        vo = next(d for d in attempt["decisions"] if d["store"] == "vo")
+        vo.update(method="keyword_rag", search={**vo["search"], "query_tags": "classifier"})
+        first = next(e for e in attempt["evidence"] if e["n"] == 1)
+        first["text"] += " and more" * 40
+        route.fulfill(response=got, json=message)
+
+    ai = seeded.app.state.ai
+    fake_replies(ai, lambda p: "Rates rise [1].")
+    try:
+        chat_route(page, tagged)
+        chat_id = open_chat(page, seeded, ("c", "vo"))
+        chat_ask(page, "enzyme kinetics rate experiment")
+        expect(page.locator("#msg-1 .reply")).to_have_count(1)
+        step = page.locator("#msg-1 details.retrieval")
+        expect(step.locator(":scope > summary")).to_have_text("Retrieval step")
+        expect(step).not_to_have_attribute("open", "")  # collapsed until opened
+        step = retrieval_step(page)
+        expect(step.locator(".searched")).to_have_text("enzyme kinetics rate experiment")
+
+        c = store_row(step, "c")
+        expect(c.locator(".method")).to_have_text("hybrid")
+        expect(c.locator(".best")).to_have_text("1.00")
+        expect(c.locator(".bar")).to_have_text("0.29")
+        expect(c.locator(".kept")).to_have_text("kept · clears its bar")
+        vo = store_row(step, "vo")
+        expect(vo.locator(".method")).to_have_text("keyword_rag · query tags: classifier")
+        expect(vo.locator(".kept")).to_have_text("kept · clears its bar")
+
+        # Every passage the answer was given, by its number in the prompt.
+        expect(step.locator("ol.evidence li")).to_have_count(6)
+        first = step.locator("#ev-1-1-1")
+        expect(first.locator(".what")).to_have_text("[1] enzyme-item · c · hand · rank 1")
+        expect(first.locator("details")).to_have_count(1)  # longer than 300 characters
+        assert len(first.locator("summary").inner_text()) <= 305
+        expect(step.locator("#ev-1-1-6 .what")).to_have_text("[6] enzyme-item · vo · hand · rank 1")
+        expect(step.locator("#ev-1-1-2")).to_contain_text("volcano magma lava pressure")
+
+        # Closed again, a citation opens it at the passage it cites.
+        step.locator(":scope > summary").click()
+        expect(step).not_to_have_attribute("open", "")
+        page.locator("#msg-1 .reply a.cite").click()
+        expect(step).to_have_attribute("open", "")
+        expect(page.locator("#log li:target")).to_have_attribute("id", "ev-1-1-1")
+        expect(page).to_have_url(re.compile(f"#{chat_id}$"))
+
+        # What is open survives the log's redraw on the next reply.
+        first.locator("summary").click()
+        expect(first.locator("details")).to_have_attribute("open", "")
+        chat_ask(page, "and the volcano?")
+        expect(page.locator("#log .turn")).to_have_count(2)
+        expect(page.locator("#msg-2 .reply")).to_have_count(1)
+        expect(step).to_have_attribute("open", "")
+        expect(first.locator("details")).to_have_attribute("open", "")
+        expect(page.locator("#msg-2 details.retrieval")).not_to_have_attribute("open", "")
+    finally:
+        fake_replies(ai, lambda p: "Answer: A")
+
+
+def test_rerun_with_an_override_adds_an_attempt_tab_and_answer_from_it(page, seeded):
+    sent = attempt_posts(page)
+    chat_id = open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "enzyme kinetics rate experiment")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    expect(turn.get_by_role("tab")).to_have_count(0)  # one attempt: no tabs
+    step = retrieval_step(page)
+    vo = edit_box(step, "vo")
+    expect(vo.get_by_label("Method")).to_have_value("hybrid")
+    expect(vo.get_by_label("k", exact=True)).to_have_value("8")
+    vo.get_by_label("k", exact=True).fill("2")
+    vo.get_by_label("Search anyway").check()
+    with page.expect_response(lambda r: r.url.endswith(f"/chats/{chat_id}/messages/1/attempts")):
+        vo.get_by_role("button", name="Re-run retrieval").click()
+    assert sent == [{"overrides": {"vo": {"k": 2, "keep": True}}}]  # only what was changed
+
+    second = turn.get_by_role("tab", name="Attempt 2")
+    expect(second).to_have_attribute("aria-selected", "true")
+    expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "false")
+    expect(step).to_have_attribute("open", "")
+    expect(store_row(step, "vo").locator(".kept")).to_have_text("kept · search anyway")
+    expect(step.locator('ol.evidence li[data-store="vo"]')).to_have_count(2)  # k = 2
+    expect(turn.locator(".reply")).to_have_count(0)  # a re-run is not answered
+    expect(edit_box(step, "vo").get_by_label("k", exact=True)).to_have_value("2")
+
+    answer = turn.get_by_role("button", name="Answer from this attempt")
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts/2/answer")):
+        answer.click()
+    expect(turn.locator(".reply .md")).to_have_text("Answer: A")
+    expect(answer).to_have_count(0)
+    saved = httpx.get(f"{seeded.url}/chats/{chat_id}").json()["messages"][0]["attempts"]
+    assert saved[0]["answer"] and saved[1]["answer"] == "Answer: A"
+
+    # The first attempt is still there, as it was.
+    turn.get_by_role("tab", name="Attempt 1").click()
+    expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "true")
+    expect(store_row(step, "vo").locator(".kept")).to_have_text("kept · clears its bar")
+    expect(step.locator('ol.evidence li[data-store="vo"]')).to_have_count(3)
+
+    expect(step.locator("fieldset[data-edit]")).to_have_count(0)  # edits build on the latest
+    expect(step).to_contain_text("To edit and re-run, open the latest attempt.")
+
+    # The chosen tab and an edit not yet re-run survive the log's redraw on the next reply.
+    chat_ask(page, "and the volcano?")
+    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+    expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "true")
+    expect(step).to_have_attribute("open", "")
+    second.click()
+    edit_box(step, "c").get_by_label("k", exact=True).fill("5")
+    chat_ask(page, "and the market?")
+    expect(page.locator("#msg-3 .reply")).to_have_count(1)
+    expect(second).to_have_attribute("aria-selected", "true")
+    expect(edit_box(step, "c").get_by_label("k", exact=True)).to_have_value("5")
+
+
+def test_rerun_refused_shows_the_reason_and_keeps_the_edit(page, seeded):
+    page.expected = ["422", "409"]  # refusals are the point
+    sent = attempt_posts(page)
+    open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "enzyme kinetics rate experiment")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    step = retrieval_step(page)
+    c = edit_box(step, "c")
+    for channel in ("Meaning", "Words", "Keywords"):
+        c.get_by_label(f"{channel} weight", exact=True).fill("0")
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")) as got:
+        c.get_by_role("button", name="Re-run retrieval").click()
+    assert got.value.status == 422
+    expect(c.locator(".edit-note")).to_have_text("at least one channel weight must be above 0")
+    expect(edit_box(step, "vo").locator(".edit-note")).to_have_text("")  # beside c only
+    expect(c.get_by_label("Meaning weight", exact=True)).to_have_value("0")
+    expect(turn.get_by_role("tab")).to_have_count(0)  # no attempt was added
+
+    # A method the store can't run is refused with its reason (409), and the edits stay.
+    page.route(
+        "**/messages/1/attempts",
+        lambda r: r.fulfill(status=409, json={"detail": "vector can't run on 'c' just now"}),
+    )
+    c.get_by_label("Method").select_option("vector")
+    c.get_by_role("button", name="Re-run retrieval").click()
+    expect(c.locator(".edit-note")).to_have_text("vector can't run on 'c' just now")
+    expect(c.get_by_label("Method")).to_have_value("vector")
+    expect(c.get_by_label("Words weight", exact=True)).to_have_value("0")
+
+    # A k the route would refuse is said on the page, and nothing is sent.
+    count = len(sent)
+    c.get_by_label("k", exact=True).fill("30")
+    c.get_by_role("button", name="Re-run retrieval").click()
+    expect(c.locator(".edit-note")).to_have_text("k is a whole number from 1 to 20.")
+    assert len(sent) == count
+    expect(turn.get_by_role("tab")).to_have_count(0)
+
+
+def test_set_as_default_asks_then_saves(page, seeded):
+    free_store(seeded, "deflt")  # no eval set, so no bar
+    conn = seeded.app.state.conn
+    defaults = []
+    page.on(
+        "request",
+        lambda r: defaults.append(r.url) if r.url.endswith("/stores/deflt/default") else None,
+    )
+    sent = attempt_posts(page)
+    open_chat(page, seeded, ("deflt",))
+    chat_ask(page, "volcano magma")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    step = retrieval_step(page)
+    expect(store_row(step, "deflt").locator(".bar")).to_have_text("none")
+    expect(store_row(step, "deflt").locator(".kept")).to_have_text("kept · no bar")
+    box = edit_box(step, "deflt")
+    box.get_by_label("k", exact=True).fill("3")
+    box.get_by_label("Use the store's bar").uncheck()
+    box.get_by_label("Bar", exact=True).fill("0.25")
+    box.get_by_label("Search anyway").check()
+
+    box.get_by_role("button", name="Set as default").click()
+    question = "Save these settings as deflt's default? Search anyway is not saved."
+    expect(box).to_contain_text(question)
+    box.get_by_role("button", name="Cancel").click()
+    expect(box).not_to_contain_text(question)
+    assert defaults == [] and sent == []
+    expect(box.get_by_label("k", exact=True)).to_have_value("3")  # the edit is kept
+
+    box.get_by_role("button", name="Set as default").click()
+    with page.expect_response(lambda r: r.url.endswith("/stores/deflt/default")):
+        box.get_by_role("button", name="Yes, save").click()
+    expect(box.locator(".edit-note")).to_contain_text("Saved as deflt's default")
+    # The edit is re-run first, so the server holds it as the chat's override, then saved.
+    assert sent == [{"overrides": {"deflt": {"k": 3, "bar": 0.25, "keep": True}}}]
+    assert db.get_chat_k(conn, "deflt") == 3
+    assert db.get_chat_bar(conn, "deflt") == 0.25
+    expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
+    expect(store_row(step, "deflt").locator(".bar")).to_have_text("0.25 edited")
+    expect(box).not_to_contain_text(question)
+
+
+DROPPED = {
+    "store": "c",
+    "method": "hybrid",
+    "k": 8,
+    "search": {"weights": {"meaning": 1, "words": 1, "keywords": 1}, "query_tags": "similarity"},
+    "best": 0.123,
+    "bar": 0.3,
+    "bar_source": "set",
+    "kept": False,
+    "reason": "below its bar",
+    "usd": 0.0,
+    "error": None,
+}
+GONE = {
+    **DROPPED,
+    "store": "gone",
+    "method": None,
+    "k": None,
+    "search": None,
+    "best": None,
+    "bar": None,
+    "bar_source": None,
+    "reason": "deleted",
+}
+
+
+def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
+    decisions = [
+        DROPPED,
+        {**DROPPED, "store": "vo", "bar": None, "bar_source": "few", "best": 0.5},
+        {**DROPPED, "store": "hand-bar", "bar": 0.4, "bar_source": "manual"},
+        {**DROPPED, "store": "edited-bar", "bar": 0.35, "bar_source": "override"},
+        {**DROPPED, "store": "no-set", "bar": None, "bar_source": "none"},
+        {**DROPPED, "store": "broke", "best": None, "bar": None, "bar_source": None}
+        | {"reason": "error", "error": "budget used up"},
+        GONE,
+    ]
+    answer = {"answer": "No store passages were used.", "citations": [], "evidence": []}
+    chat_route(
+        page,
+        lambda route: route.fulfill(json=chat_message(route, decisions=decisions, **answer)),
+    )
+    open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "something no store holds")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply .md")).to_have_text("No store passages were used.")
+    # Said under the answer, with the step still closed.
+    note = turn.locator(".reply .none-kept")
+    expect(note).to_have_text("No store was kept, so this answer used no store passages.")
+    expect(note).to_be_visible()
+    step = retrieval_step(page)
+    c = store_row(step, "c")
+    expect(c.locator(".best")).to_have_text("0.12")
+    expect(c.locator(".bar")).to_have_text("0.30")
+    expect(c.locator(".kept")).to_have_text("dropped · below its bar")
+    expect(store_row(step, "vo").locator(".bar")).to_have_text("too few questions")
+    expect(store_row(step, "hand-bar").locator(".bar")).to_have_text("0.40 manual")
+    expect(store_row(step, "edited-bar").locator(".bar")).to_have_text("0.35 edited")
+    expect(store_row(step, "no-set").locator(".bar")).to_have_text("none")
+    broke = store_row(step, "broke")
+    expect(broke.locator(".kept")).to_have_text("dropped · error: budget used up")
+    expect(broke.locator(".best")).to_have_text("–")
+    gone = store_row(step, "gone")
+    expect(gone.locator(".kept")).to_have_text("deleted")
+    expect(gone.locator(".method")).to_have_text("–")
+    expect(step.locator("ol.evidence li")).to_have_count(0)
+    # Only the chat's own stores can be edited.
+    expect(step.locator("fieldset[data-edit]")).to_have_count(2)
+    expect(edit_box(step, "c")).to_be_visible()
+    expect(edit_box(step, "vo")).to_be_visible()
