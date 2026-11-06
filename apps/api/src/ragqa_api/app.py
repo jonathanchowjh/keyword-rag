@@ -723,7 +723,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
         upload_id = imports.save_upload(state.settings.home, name, filename, body_chunks(request))
         path, _ = open_upload(name, upload_id)
-        source = "upload:" + imports.source_name(filename)
+        source_name = imports.source_name(filename)
+        source = "upload:" + source_name
         shown = preview_upload(spec, path, filename, kind, None, source)
         try:
             estimate = estimate_upload(spec, upload_id, kind, shown, source)
@@ -733,7 +734,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "upload_id": upload_id,
             "filename": filename,
-            "source_name": imports.source_name(filename),
+            "source_name": source_name,
             "preview": shown,
             "estimate": estimate,
         }

@@ -2120,7 +2120,13 @@ def free_store(seeded, name):
         json={"name": name, "qa_type": "science", "recipe": "paper_2024"},
     )
     assert r.status_code == 201, r.text
-    body = {"items": [{"id": "base", "text": "volcano magma lava pressure"}], "confirm": True}
+    base = [
+        {"id": "base", "text": "volcano magma lava pressure"},
+        {"id": "tax", "text": "income tax filing deadline"},
+        {"id": "bread", "text": "sourdough bread flour hydration"},
+        {"id": "star", "text": "neutron star gravity collapse"},
+    ]
+    body = {"items": base, "confirm": True}
     assert httpx.post(f"{seeded.url}/collections/{name}/documents", json=body).status_code == 200
     r = httpx.put(f"{seeded.url}/collections/{name}/keyword-lists", json=DOC_LISTS)
     assert r.status_code == 202, r.text
@@ -2138,14 +2144,19 @@ def chat_upload(page, seeded, store, tmp_path, filename, text):
 def test_chat_upload_adds_a_document_and_the_next_answer_can_cite_it(page, seeded, tmp_path):
     free_store(seeded, "docs")
     chat_upload(page, seeded, "docs", tmp_path, "reefs.txt", "coral reefs bleach when oceans warm")
+    expect(page.locator("#add-doc")).to_be_disabled()  # while the file is being added
     expect(page.locator("#log")).to_contain_text("Added reefs.txt")
+    expect(page.locator("#add-doc")).to_be_enabled()
     assert [s["source"] for s in sources(seeded, "docs")] == ["hand", "upload:reefs"]
+    store = seeded.app.state.store
+    owners = store.sources_of("docs", store.ids("docs"))
+    hit_id = next(i for i, source in owners.items() if source == "upload:reefs")
     page.locator("#method").select_option("hybrid")
     with page.expect_response(
         lambda r: r.url.endswith("/chat") and r.request.method == "POST"
     ) as got:
         chat_ask(page, "why do coral reefs bleach?")
-    assert any(i != "base" for i in got.value.json()["hit_ids"])
+    assert got.value.json()["hit_ids"][0] == hit_id
     expect(page.locator("#log .reply")).to_be_visible()
 
 
@@ -2175,3 +2186,23 @@ def test_chat_upload_shows_the_estimate_and_cancel_adds_nothing(page, seeded, tm
         assert httpx.get(f"{seeded.url}/jobs", params={"collection": "paid"}).json() == []
     finally:
         ai.set_role("keywords", None)
+
+
+def test_chat_upload_refuses_other_files_without_uploading(page, seeded, tmp_path):
+    free_store(seeded, "refuse")
+    posts = []
+    page.on("request", lambda r: posts.append(r.url) if "/uploads" in r.url else None)
+    chat_upload(page, seeded, "refuse", tmp_path, "notes.pdf", "not text")
+    expect(page.locator("#log .err")).to_contain_text("only .txt and .md")
+    assert posts == []
+    expect(page.locator("#add-doc")).to_be_enabled()
+
+
+def test_chat_add_document_needs_a_store(page, seeded):
+    page.route(
+        "**/collections",
+        lambda r: r.fulfill(json=[]) if r.request.method == "GET" else r.fallback(),
+    )
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#note")).to_contain_text("No stores yet")
+    expect(page.locator("#add-doc")).to_be_disabled()

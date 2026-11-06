@@ -87,6 +87,7 @@ function draw() {
 function setBusy(busy) {
   answering = busy;
   $("send").disabled = busy || !hasModel || !$("store").value;
+  $("add-doc").disabled = adding || !$("store").value;
   $("status").textContent = busy ? "thinking…" : "";
 }
 
@@ -169,8 +170,10 @@ async function addFiles(files) {
   if (!files.length || !store || adding) return;
   adding = true;
   $("store").disabled = true;
+  $("add-doc").disabled = true;
   for (const file of files) {
     try {
+      if (!/\.(txt|md)$/i.test(file.name)) throw new Error("only .txt and .md files can be added here");
       const said = await addFile(store, file);
       if (said) turns.push({ role: "note", content: said });
     } catch (e) {
@@ -183,6 +186,7 @@ async function addFiles(files) {
   $("adding").textContent = "";
   $("store").disabled = false;
   adding = false;
+  setBusy(answering);
 }
 
 // -- the pickers -----------------------------------------------------------------------------
