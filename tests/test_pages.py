@@ -1952,3 +1952,122 @@ def test_a_default_store_that_exists_is_opened_not_added_again(page, seeded):
     )
     expect(page.get_by_role("button", name="Add scienceqa")).to_have_count(0)
     expect(page.get_by_role("button", name="Add scibench")).to_be_visible()
+
+
+# -- Chat page ---------------------------------------------------------------------------
+
+CHAT_REPLY = {
+    "answer": "Rates rise [1] with <b>heat</b> [2].",
+    "citations": [
+        {"n": 1, "id": "enzyme-item", "text": "enzyme " + "kinetics " * 60, "source": "hand"},
+        {"n": 2, "id": "other", "text": "short <i>passage</i>", "source": None},
+    ],
+    "hit_ids": ["enzyme-item", "other"],
+    "method": "hybrid",
+    "query_tags": None,
+    "usd": 0.0123,
+    "error": None,
+}
+
+
+def chat_route(page, handler):
+    """Answer the POST to /chat; the page itself, a GET of the same path, goes through."""
+    page.route(
+        "**/chat",
+        lambda route: handler(route) if route.request.method == "POST" else route.fallback(),
+    )
+
+
+def chat_ask(page, text):
+    page.locator("#box").fill(text)
+    page.locator("#send").click()
+
+
+def test_chat_page_sends_shows_citations_and_cost(page, seeded):
+    sent = []
+
+    def reply(route):
+        sent.append(json.loads(route.request.post_data))
+        route.fulfill(json={**CHAT_REPLY, "query_tags": ["enzyme"], "method": "keyword_rag"})
+
+    chat_route(page, reply)
+    page.goto(seeded.url + "/chat")
+    expect(page.locator("#store")).to_have_value("c")
+    expect(page.locator("#method option")).not_to_have_count(0)
+    page.locator("#method").select_option("hybrid")
+    chat_ask(page, "how fast <u>are</u> enzymes?")
+    reply_box = page.locator("#log .reply")
+    expect(reply_box).to_be_visible()
+    assert sent[0]["collection"] == "c" and sent[0]["method"] == "hybrid"
+    assert sent[0]["messages"] == [{"role": "user", "content": "how fast <u>are</u> enzymes?"}]
+    assert sent[0]["model"]
+    expect(page.locator("#log .user")).to_have_text("how fast <u>are</u> enzymes?")
+    expect(reply_box).to_contain_text("Rates rise [1] with <b>heat</b> [2].")
+    assert page.locator("#log b, #log i, #log u").count() == 0  # nothing the model said is markup
+    expect(reply_box.locator("a.cite")).to_have_count(2)
+    expect(reply_box.locator(".sources li")).to_have_count(2)
+    first = reply_box.locator(".sources li").first
+    expect(first).to_contain_text("enzyme-item")
+    expect(first).to_contain_text("hand")
+    expect(first.locator("details")).to_have_count(1)  # longer than 300 characters
+    assert len(first.locator("summary").inner_text()) <= 305
+    first.locator("summary").click()
+    expect(first.locator("details .full")).to_contain_text("kinetics " * 50)
+    expect(reply_box.locator(".sources li").nth(1).locator("details")).to_have_count(0)
+    expect(reply_box.locator(".sources li").nth(1)).to_contain_text("short <i>passage</i>")
+    expect(reply_box.locator(".meta")).to_contain_text("Keyword-RAG")
+    expect(reply_box.locator(".meta")).to_contain_text("enzyme")
+    expect(reply_box.locator(".meta")).to_contain_text("$0.01")
+    expect(page.locator("#box")).to_have_value("")
+    reply_box.locator("a.cite").first.click()
+    expect(page.locator("#log li:target")).to_have_count(1)
+
+
+def test_chat_page_keeps_the_conversation_on_reload_and_new_chat_clears_it(page, seeded):
+    chat_route(page, lambda route: route.fulfill(json=CHAT_REPLY))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "first question")
+    expect(page.locator("#log .reply")).to_have_count(1)
+    page.reload()
+    expect(page.locator("#log .user")).to_have_text("first question")
+    expect(page.locator("#log .reply")).to_have_count(1)
+    expect(page.locator("#log .reply .sources li")).to_have_count(2)
+    page.get_by_role("button", name="New chat").click()
+    expect(page.locator("#log .user")).to_have_count(0)
+    page.reload()
+    expect(page.locator("#log .user")).to_have_count(0)
+
+
+def test_chat_without_an_answer_model_says_what_to_set_up(page, seeded):
+    ai = httpx.get(seeded.url + "/ai").json()
+    page.route("**/ai", lambda route: route.fulfill(json={**ai, "models": []}))
+    page.goto(seeded.url + "/chat")
+    note = page.locator("#note")
+    expect(note).to_contain_text("Chat needs an answer model: choose one on Settings")
+    expect(note.get_by_role("link", name="Settings")).to_have_attribute("href", "/settings")
+    expect(page.locator("#send")).to_be_disabled()
+
+
+def test_chat_reply_error_keeps_the_conversation(page, seeded):
+    replies = [
+        {"detail": "hybrid is down"},
+        {**CHAT_REPLY, "answer": None, "citations": [], "error": "budget used up"},
+    ]
+
+    def reply(route):
+        body = replies.pop(0)
+        route.fulfill(status=409 if "detail" in body else 200, json=body)
+
+    page.expected = ["409"]  # the first reply is a refusal, which is the point
+    chat_route(page, reply)
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "will this fail?")
+    expect(page.locator("#log .err")).to_contain_text("hybrid is down")
+    expect(page.locator("#log .user")).to_have_text("will this fail?")
+    expect(page.locator("#send")).to_be_enabled()
+    chat_ask(page, "and again?")
+    expect(page.locator("#log .err").nth(1)).to_contain_text("budget used up")
+    expect(page.locator("#log .user")).to_have_count(2)
+    page.reload()
+    expect(page.locator("#log .user")).to_have_count(2)
+    expect(page.locator("#log .err")).to_have_count(2)

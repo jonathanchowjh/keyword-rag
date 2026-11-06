@@ -364,6 +364,7 @@ function sideHtml(active, names) {
     .join("");
   return `<div class="brand">rag-qa</div><div class="tag">keyword RAG test bench</div>
     ${link("/", "Stores", "", active, "collections")}${stores}
+    ${link("/chat", "Chat", "", active, "chat")}
     ${link("/eval-sets", "Eval sets", "", active, "eval-sets")}
     ${link("/lab", "Lab", "", active, "lab")}
     ${link("/settings", "Settings", "", active, "settings")}
@@ -407,7 +408,7 @@ function refreshDot() {
 }
 
 // Renders the sidebar into <aside id="side">. `active` is "collections" (the stores), "eval-sets",
-// "lab", "settings", "worker", or "c/<name>" for a store's page.
+// "chat", "lab", "settings", "worker", or "c/<name>" for a store's page.
 export function shell(active) {
   const side = document.getElementById("side");
   let names = [];

@@ -820,8 +820,9 @@ PUBLIC = {
     "/catalog",
     "/status",
     "/ai",
+    "/chat",
 }
-PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab")
+PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab", "/chat")
 
 
 def test_pages_are_served(client):
@@ -2987,6 +2988,21 @@ def test_chat_answers_with_citations(tmp_path):
         assert got["usd"] > 0 and got["method"] == "hybrid" and got["query_tags"] is None
 
 
+def test_chat_cites_what_the_model_saw(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Long [1]") as client:
+        add_collection(client, name="long", questions=False, lists=False)
+        long_text = "enzyme " + "x" * 4993
+        r = client.post(
+            "/collections/long/documents",
+            json={"items": [{"id": "big", "text": long_text}], "confirm": True},
+        )
+        assert r.status_code == 200, r.text
+        body = {**chat_body("enzyme x"), "collection": "long", "method": "vector"}
+        got = client.post("/chat", json=body).json()
+        big = [c for c in got["citations"] if c["id"] == "big"]
+        assert big and len(big[0]["text"]) == 1500
+
+
 def test_chat_method_defaults_and_refusals(client):
     add_collection(client)
     assert client.post("/chat", json=chat_body()).json()["method"] == "hybrid"
@@ -3000,7 +3016,8 @@ def test_chat_method_defaults_and_refusals(client):
     body = {**chat_body(), "collection": "r"}
     got = client.post("/chat", json=body).json()
     assert got["method"] == "keyword_rag" and got["query_tags"][0] == "enzyme"
-    client.put("/collections/r/search", json={"query_tags": "oracle"})
+    put = client.put("/collections/r/search", json={"query_tags": "oracle"})
+    assert put.status_code == 200
     r = client.post("/chat", json=body)
     assert r.status_code == 200 and r.json()["error"] is None and r.json()["query_tags"]
 

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-qa · Chat</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/ui.css">
+<style>
+  #pickers { margin:0 0 12px; }
+  #log { display:grid; gap:10px; max-width:820px; margin:0 0 14px; }
+  .msg { border-radius:8px; padding:10px 12px; overflow-wrap:anywhere; white-space:pre-wrap; }
+  .user { background:var(--card); justify-self:end; max-width:85%; }
+  .reply { border:1px solid var(--line); }
+  .reply a.cite { text-decoration:none; font-size:12px; vertical-align:super; }
+  .meta { margin-top:8px; font-size:12px; white-space:normal; }
+  .sources { margin:8px 0 0; padding:0; list-style:none; font-size:13px; white-space:normal; }
+  .sources li { border-top:1px solid var(--line); padding:6px 0; }
+  .sources li:target { background:var(--hl); }
+  .sources .what { color:var(--muted); font-size:12px; }
+  .sources summary { cursor:pointer; }
+  .sources .full { margin-top:4px; white-space:pre-wrap; }
+  #compose { display:grid; gap:8px; max-width:820px; }
+  #box { min-height:60px; }
+</style>
+</head>
+<body>
+<aside id="side"></aside>
+<main id="main">
+  <div id="head"></div>
+
+  <div id="pickers" class="row">
+    <label>Store <select id="store"></select></label>
+    <label>Method <select id="method"></select></label>
+    <label>Model <select id="model"></select></label>
+    <button id="new" type="button" class="secondary">New chat</button>
+  </div>
+  <p id="note" class="muted" role="status"></p>
+
+  <div id="log" aria-live="polite"></div>
+
+  <form id="compose">
+    <label>Message <textarea id="box" placeholder="Ask about this store. Enter sends, Shift+Enter adds a line."></textarea></label>
+    <div class="row"><button id="send">Send</button><span id="status" class="muted" role="status"></span></div>
+  </form>
+</main>
+<script type="module" src="/static/chat.js"></script>
+</body>
+</html>

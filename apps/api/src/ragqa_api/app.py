@@ -55,7 +55,14 @@ from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
-from ragqa_core.prompts import CHAT_TOKENS, CHAT_TURNS, answer_prompt, chat_prompt, edge_order
+from ragqa_core.prompts import (
+    CHAT_PASSAGE_CHARS,
+    CHAT_TOKENS,
+    CHAT_TURNS,
+    answer_prompt,
+    chat_prompt,
+    edge_order,
+)
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     KEYWORD_METHODS,
@@ -1268,7 +1275,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if 1 <= n <= len(ordered):
                     hit = ordered[n - 1]
                     source = hit.meta.get("source")
-                    cited.append({"n": n, "id": hit.id, "text": hit.text, "source": source})
+                    cited.append(
+                        {
+                            "n": n,
+                            "id": hit.id,
+                            "text": hit.text[:CHAT_PASSAGE_CHARS],
+                            "source": source,
+                        }
+                    )
             return {"answer": done.text}
 
         out = run_method(spec, last.content, method, body.k, 60, search, skip, answer)
@@ -1572,6 +1586,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/c/{name}/runs/{id}": "run",
         "/worker": "worker",
         "/lab": "lab",
+        "/chat": "chat",
         "/settings": "settings",
     }
     for route, page in pages.items():
