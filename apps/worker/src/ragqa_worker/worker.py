@@ -103,6 +103,9 @@ class Worker:
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "import":
             result = self.loader.run_import(job, progress)
+            # An import can delete stale chunks and so leave the count as it was.
+            self.evaluator.forget(job["collection"])
+            self.evaluator.retriever.forget(job["collection"])
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "copy":
             result = self.loader.run_copy(job, progress)

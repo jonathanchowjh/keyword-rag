@@ -17,7 +17,7 @@ NAMED_CHOICE = re.compile(
 SUMMARY_TOKENS = 120
 CHAT_TOKENS = 1024
 CHAT_TURNS = 6  # the history a chat reply sees
-CHAT_PASSAGE_CHARS = 1500  # an uploaded text file is one item, so a hit can be a whole document
+CHAT_PASSAGE_CHARS = 1500  # imports.CHUNK_CHARS: a text upload's chunk is never cut
 
 METHOD_HINT = {
     "mcq": "experiment or analysis types (e.g. tabular scrutiny, controlled experiment)",

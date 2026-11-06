@@ -1753,6 +1753,108 @@ def test_store_upload_with_accept_text_refuses_other_files(client):
     assert upload(client, filename="notes.jsonl").status_code == 200  # no accept: as before
 
 
+def long_text(words: list[str]) -> bytes:
+    """One paragraph of 1,000 characters per word: 'w w w …', so each is one chunk."""
+    return "\n\n".join(" ".join([w] * (1000 // (len(w) + 1))) for w in words).encode()
+
+
+def add_text(client, filename, body, source_name="docs", name="c"):
+    """A text file added the chat's way: upload with accept=text, then import under the
+    preview's mapping."""
+    up = client.post(
+        f"/collections/{name}/uploads",
+        params={"filename": filename, "kind": "items", "accept": "text"},
+        content=body,
+    )
+    assert up.status_code == 200, up.text
+    r = do_import(client, up.json(), source_name, name=name, confirm=True)
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    return job
+
+
+def source_ids(client, source, name="c"):
+    return client.app.state.store.source_ids(name, source)
+
+
+def test_a_long_text_upload_adds_one_item_per_chunk_and_chat_cites_the_part(tmp_path):
+    reply = lambda p: " ".join(f"[{i}]" for i in range(1, 21))  # noqa: E731
+    with make_client(tmp_path, reply=reply) as client:
+        add_collection(client, questions=False, lists=False)
+        body = long_text(["alpha", "brine", "cocoa"])
+        assert len(body) > 2900
+        job = add_text(client, "x.md", body)
+        assert job["result"]["new"] == 3 and job["result"]["removed"] == 0
+        assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+        again = add_text(client, "x.md", body)  # the same file: the same ids, nothing new
+        assert again["result"]["unchanged"] == 3 and again["result"]["new"] == 0
+        assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+        chat = {**chat_body("brine"), "method": "vector", "k": 20}
+        got = client.post("/chat", json=chat).json()
+        part = next(c for c in got["citations"] if c["id"] == "x.md#2")
+        assert (part["part"], part["parts"], part["source"]) == (2, 3, "upload:docs")
+        assert part["text"].startswith("x.md\n\nbrine brine")
+        whole = next(c for c in got["citations"] if c["id"] == "enzyme-item")
+        assert whole["part"] is None and whole["parts"] is None
+
+
+def test_re_adding_a_shorter_text_file_leaves_only_its_new_chunks(client):
+    add_collection(client, questions=False, lists=False)
+    add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    add_text(client, "y.md", long_text(["delta", "egret", "finch"]))  # same source
+    add_text(client, "x.md", long_text(["gamma"]), source_name="other")  # another source
+    job = add_text(client, "x.md", long_text(["alpha", "brine"]))
+    assert job["result"]["removed"] == 1
+    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2"] + [
+        f"y.md#{i}" for i in (1, 2, 3)
+    ]
+    assert source_ids(client, "upload:other") == ["x.md"]
+    held = client.app.state.store.get("c", ["x.md#2", "y.md#3"])
+    assert [h.meta["parts"] for h in held] == [2, 3]
+
+
+def test_a_text_file_shrunk_to_one_chunk_is_one_item_named_by_the_file(client):
+    add_collection(client, questions=False, lists=False)
+    add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    job = add_text(client, "x.md", b"just a line now")
+    assert job["result"]["removed"] == 3 and job["result"]["new"] == 1
+    assert source_ids(client, "upload:docs") == ["x.md"]
+    assert client.app.state.store.get("c", ["x.md"])[0].text == "just a line now"
+    grown = add_text(client, "x.md", long_text(["alpha", "brine"]))
+    assert grown["result"]["removed"] == 1
+    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2"]
+
+
+def test_a_failed_text_import_removes_nothing(client):
+    add_collection(client, questions=False, lists=False)
+    add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    loader = client.app.state.loader
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the add broke")
+
+    loader._add = broken
+    up = client.post(
+        "/collections/c/uploads",
+        params={"filename": "x.md", "kind": "items", "accept": "text"},
+        content=b"short now",
+    ).json()
+    r = do_import(client, up, "docs", confirm=True)
+    assert wait(client, r.json()["job_id"])["status"] == "failed"
+    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+
+
+def test_a_text_import_drops_the_store_leak_scans(client):
+    add_collection(client, questions=False, lists=False)
+    forgot = []
+    evaluator = client.app.state.evaluator
+    forget = evaluator.forget
+    evaluator.forget = lambda name: (forgot.append(name), forget(name))
+    add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    assert forgot == ["c"]
+
+
 def test_upload_to_an_unknown_collection_is_404(client):
     assert upload(client, name="nope").status_code == 404
 

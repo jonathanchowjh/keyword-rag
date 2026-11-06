@@ -233,16 +233,32 @@ class Loader:
             calls += self.builder.build_calls(spec, todo)
         return {"est_usd": estimate, "items": len(items), "calls": calls}
 
-    def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int]:
-        """What the upload yields under the setup's mapping, and how many rows that leaves out."""
+    def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int, set[str]]:
+        """What the upload yields under the setup's mapping, how many rows that leaves out,
+        and the text files it was read from (none for a table or JSON file)."""
         path, meta = imports.open_upload(self.home, spec.name, setup["upload_id"])
-        _, rows, _ = imports.read_rows(path, meta["filename"])
+        fmt, rows, _ = imports.read_rows(path, meta["filename"])
         if setup["kind"] == "items":
             built, _ = imports.build_items(rows, setup["mapping"])
         else:
             built, _ = imports.build_questions(rows, setup["mapping"], spec.qa_type)
             built = [replace(q, meta={**q.meta, "source": setup["source"]}) for q in built]
-        return built, len(rows) - len(built)
+        files = imports.text_files(rows) if fmt in ("text", "zip") else set()
+        return built, len(rows) - len(built), files
+
+    def drop_stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> int:
+        """Delete the source's items of these text files that the import no longer yields:
+        ids equal to a file name or starting with `<file>#`, less the ids just written. A
+        file that shrank leaves none of its old chunks behind. Returns how many went."""
+        stale = [
+            i
+            for i in self.indexer.store.source_ids(name, source)
+            if i not in written
+            and (i in files or any(i[:k] in files for k, c in enumerate(i) if c == "#"))
+        ]
+        if stale:
+            self.indexer.store.delete_items(name, stale)
+        return len(stale)
 
     def questions_set(self, spec: CollectionSpec) -> str:
         """The store's default eval set, made (named after the store) when it has none. Raises
@@ -272,7 +288,7 @@ class Loader:
         return counts, todo
 
     def estimate_import(self, spec: CollectionSpec, setup: dict) -> dict:
-        built, skipped = self._read_upload(spec, setup)
+        built, skipped, _ = self._read_upload(spec, setup)
         if setup["kind"] == "questions":
             counts, _ = self.question_counts(
                 db.default_eval_set(self.conn, spec.name) or spec.name, built
@@ -287,10 +303,13 @@ class Loader:
         spec = self.indexer.spec(name)
         if spec is None:
             raise ValueError(f"unknown collection {name!r}")
-        built, skipped = self._read_upload(spec, setup)
+        built, skipped, files = self._read_upload(spec, setup)
         lists_source, build_result = None, {}
         if setup["kind"] == "items":
             lists_source, build_result, counts = self._add(spec, built, setup["source"], progress)
+            # After the add, so an import that fails removes nothing.
+            written = {i.id for i in built}
+            counts["removed"] = self.drop_stale_chunks(name, setup["source"], files, written)
         else:
             eval_set = self.questions_set(spec)
             counts, todo = self.question_counts(eval_set, built)

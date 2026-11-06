@@ -2141,6 +2141,18 @@ def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
     expect(page.locator("#log li:target")).to_contain_text("other")
 
 
+def test_chat_sources_name_the_part_of_a_split_file(page, seeded):
+    part = {"n": 1, "id": "x.md#2", "text": "x.md\n\nbrine", "source": "upload:x"}
+    citations = [{**part, "part": 2, "parts": 3}, {**CHAT_REPLY["citations"][1], "n": 2}]
+    reply = {**CHAT_REPLY, "citations": citations}
+    chat_route(page, lambda route: route.fulfill(json=reply))
+    page.goto(seeded.url + "/chat")
+    chat_ask(page, "parts?")
+    sources = page.locator("#log .reply .sources li .what")
+    expect(sources.first).to_have_text("[1] x.md#2 · upload:x · part 2 of 3")
+    expect(sources.nth(1)).not_to_contain_text("part")
+
+
 def test_chat_renders_a_safe_subset_of_markdown(page, seeded):
     answer = "**Rates** rise [1].\n\n- one\n- two\n\n```\n<b>x</b>\n```\n"
     chat_route(page, lambda route: route.fulfill(json={**CHAT_REPLY, "answer": answer}))

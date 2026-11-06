@@ -1316,6 +1316,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "id": hit.id,
                         "text": hit.text[:CHAT_PASSAGE_CHARS],
                         "source": hit.meta.get("source"),
+                        "part": hit.meta.get("part"),
+                        "parts": hit.meta.get("parts"),
                     }
                 )
             return {"answer": done.text}

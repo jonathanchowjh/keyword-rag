@@ -125,7 +125,8 @@ function sourceHtml(c, at) {
   const body = long
     ? `<details><summary>${esc(c.text.slice(0, PASSAGE))}…</summary><div class="full">${esc(c.text)}</div></details>`
     : `<div>${esc(c.text)}</div>`;
-  const from = c.source ? ` · ${esc(c.source)}` : "";
+  const part = c.parts > 1 ? ` · part ${esc(c.part)} of ${esc(c.parts)}` : "";
+  const from = (c.source ? ` · ${esc(c.source)}` : "") + part;
   return `<li id="src-${at}-${c.n}"><span class="what">[${c.n}] ${esc(c.id)}${from}</span>${body}</li>`;
 }
 

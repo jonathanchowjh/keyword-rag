@@ -399,3 +399,153 @@ def test_source_name_cleans_file_names():
     name = imports.source_name("a" * 100 + ".txt")
     assert name == "a" * 64 and imports.SOURCE_NAME.match(name)
     assert imports.source_name("a" * 63 + " b.txt") == "a" * 63  # no space left at the cut
+
+
+# -- chunking text uploads -------------------------------------------------------------------
+
+
+def sentences(n: int, word: str = "word") -> str:
+    """n sentences of 50 characters each, joined by spaces."""
+    return " ".join([(word * 49)[:49] + "."] * n)
+
+
+def body(chunk: str) -> str:
+    return chunk.split("\n\n", 1)[1]
+
+
+def test_chunk_text_packs_paragraphs():
+    paras = [sentences(10, w) for w in ("ant", "bee", "cat", "dog")]  # 509 characters each
+    chunks = imports.chunk_text("\n\n".join(paras), "n.txt")
+    assert [body(c) for c in chunks] == ["\n\n".join(paras[:2]), "\n\n".join(paras[2:])]
+    assert all(c.startswith("n.txt\n\n") for c in chunks)
+
+
+def test_chunk_text_splits_a_long_paragraph_at_a_sentence_end():
+    text = sentences(40)  # 2,039 characters, one paragraph
+    chunks = imports.chunk_text(text, "n.txt")
+    assert len(chunks) == 2 and all(body(c).endswith(".") for c in chunks)
+    assert " ".join(body(c) for c in chunks) == text
+
+
+def test_chunk_text_hard_cuts_a_run_with_no_spaces():
+    chunks = imports.chunk_text("x" * 4000, "n.txt")
+    assert len(chunks) == 3 and all(len(c) <= 1500 for c in chunks)
+    assert "".join(body(c) for c in chunks) == "x" * 4000
+
+
+def test_chunk_text_short_text_is_one_chunk_as_it_is_and_empty_is_none():
+    assert imports.chunk_text("# Title\nbody\n", "n.md") == ["# Title\nbody\n"]
+    assert imports.chunk_text("", "n.md") == [] and imports.chunk_text(" \n\t\n", "n.md") == []
+
+
+def test_chunk_text_never_packs_two_sections_and_names_the_heading_path():
+    text = (
+        f"# A\n\n{sentences(20, 'aaa')}\n\n## B\n\n{sentences(20, 'bbb')}\n\n"
+        f"# C\n\n{sentences(5, 'ccc')}"
+    )
+    chunks = imports.chunk_text(text, "x.md")
+    assert not any("aaa" in c and "ccc" in c for c in chunks)
+    under_b = [c for c in chunks if "bbb" in c]
+    assert under_b and all(c.startswith("x.md › A › B\n\n") for c in under_b)
+    assert [c for c in chunks if "ccc" in c][0].startswith("x.md › C\n\n# C")
+
+
+def test_chunk_text_breadcrumb_is_capped_cutting_the_deepest_headings():
+    text = f"# {'a' * 120}\n\n## {'b' * 120}\n\n{sentences(40)}"
+    crumbs = {c.split("\n", 1)[0] for c in imports.chunk_text(text, "x.md")}
+    assert crumbs == {f"x.md › {'a' * 120}"}
+
+
+def test_chunk_text_keeps_a_code_block_whole_and_splits_a_big_one_at_line_ends():
+    code = "```\nline one\n\nline two\n```"
+    chunks = imports.chunk_text(f"{sentences(20)}\n\n{code}\n\n{sentences(20)}", "x.md")
+    assert sum(code in c for c in chunks) == 1
+    lines = [f"print({i})  # {'y' * 30}" for i in range(80)]
+    chunks = imports.chunk_text("```\n" + "\n".join(lines) + "\n```", "x.md")
+    assert len(chunks) > 1
+    assert all(
+        line in lines or line.startswith(("```", "x.md")) or not line
+        for c in chunks
+        for line in c.split("\n")
+    )
+
+
+def test_chunk_text_splits_a_long_table_between_rows_repeating_its_header():
+    rows = [f"| r{i} | {'v' * 40} |" for i in range(80)]
+    chunks = imports.chunk_text("| key | value |\n|---|---|\n" + "\n".join(rows), "t.md")
+    assert len(chunks) > 1
+    for c in chunks:
+        assert body(c).startswith("| key | value |\n|---|---|\n| r")
+    held = [line for c in chunks for line in body(c).split("\n")[2:]]
+    assert held == rows
+
+
+def test_chunk_text_merges_a_small_trailing_paragraph_into_the_previous_chunk():
+    tail = "A short closing line of exactly fifty characters.."
+    chunks = imports.chunk_text(f"{sentences(40)}\n\n{tail}", "n.txt")
+    assert len(chunks) == 2 and not any(body(c) == tail for c in chunks)
+    assert chunks[-1].endswith(tail) and len(body(chunks[-1])) >= imports.MIN_CHUNK_CHARS
+
+
+def test_chunk_text_merges_a_small_chunk_into_the_next_one_with_room():
+    # 1,478 + 101 does not fit 1,500 less the breadcrumb, so the 101 starts a chunk, and
+    # the long paragraph after it fills the rest of that chunk rather than leave it small.
+    first, small, long = sentences(29, "a"), sentences(2, "b"), sentences(40, "c")
+    chunks = imports.chunk_text(f"{first}\n\n{small}\n\n{long}", "n.txt")
+    assert body(chunks[0]) == first and body(chunks[1]).startswith(small + "\n\n" + "c")
+    assert all(len(body(c)) >= imports.MIN_CHUNK_CHARS for c in chunks)
+    # The floor itself: into the previous body when it fits, else the next, else alone.
+    assert len(imports.merge_small(["x" * 900, "s" * 50, "y" * 900], 1000)) == 2
+    assert imports.merge_small(["s" * 50, "y" * 900], 1000) == ["s" * 50 + "\n\n" + "y" * 900]
+    assert imports.merge_small(["x" * 990, "s" * 50, "y" * 990], 1000)[1] == "s" * 50
+
+
+def test_chunk_text_keeps_a_list_whole():
+    items = "\n".join(f"- item {i}\n  more about it" for i in range(5)) + "\n\n- after a blank"
+    chunks = imports.chunk_text(f"{sentences(25)}\n\n{items}\n\n{sentences(5)}", "n.md")
+    assert sum(items in c for c in chunks) == 1
+
+
+def test_chunk_text_every_chunk_fits_the_prompt():
+    text = "\n\n".join(
+        [
+            f"# H{i}\n\n{sentences(i * 7)}\n\n| a | b |\n|-|-|\n" + "| x | y |\n" * i * 30
+            for i in range(1, 6)
+        ]
+        + ["```\n" + "z" * 3000 + "\n```", "- " + "w " * 2000]
+    )
+    chunks = imports.chunk_text(text, "big.md")
+    assert len(chunks) > 5 and all(len(c) <= imports.CHUNK_CHARS for c in chunks)
+    assert imports.CHUNK_CHARS == 1500
+
+
+def test_a_long_text_file_reads_as_one_row_per_chunk(tmp_path):
+    p = write(tmp_path / "x.md", f"# A\n\n{sentences(40)}\n\n# B\n\n{sentences(40)}")
+    fmt, rows, _ = imports.read_rows(p, "x.md")
+    assert fmt == "text" and len(rows) > 2
+    n = len(rows)
+    assert [r["file"] for r in rows] == [f"x.md#{i}" for i in range(1, n + 1)]
+    assert [r["meta"] for r in rows] == [
+        {"file": "x.md", "part": i, "parts": n} for i in range(1, n + 1)
+    ]
+    mapping = imports.guess_mapping(imports.columns(rows), "items")
+    assert mapping["id"] == "file" and mapping["meta"] == "meta"
+    items, _ = imports.build_items(rows, mapping)
+    assert [i.id for i in items] == [f"x.md#{i}" for i in range(1, n + 1)]
+    assert items[1].meta == {"file": "x.md", "part": 2, "parts": n}
+    assert imports.text_files(rows) == {"x.md"}
+
+
+def test_a_long_text_file_inside_a_zip_is_chunked_too(tmp_path):
+    p = tmp_path / "x.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("docs/long.txt", "x" * 4000)
+        z.writestr("short.md", "beta")
+    _, rows, _ = imports.read_rows(p, "x.zip")
+    assert [r["file"] for r in rows] == [
+        "docs/long.txt#1",
+        "docs/long.txt#2",
+        "docs/long.txt#3",
+        "short.md",
+    ]
+    assert imports.text_files(rows) == {"docs/long.txt", "short.md"}

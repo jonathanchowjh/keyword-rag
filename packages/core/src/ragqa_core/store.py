@@ -412,6 +412,26 @@ class Store:
 
         return {"explanation": filled("explanation"), "skill": filled("meta.skill")}
 
+    def source_ids(self, name: str, source: str) -> list[str]:
+        """The ids of the items in one source, read without the payload texts."""
+        by_source = Filter(must=[FieldCondition(key="meta.source", match=MatchValue(value=source))])
+        out: list[str] = []
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                name, limit=1024, offset=offset, with_payload=["item_id"], scroll_filter=by_source
+            )
+            out.extend((r.payload or {})["item_id"] for r in records)
+            if offset is None:
+                return sorted(out)
+
+    def delete_items(self, name: str, ids: list[str]) -> None:
+        """Delete these items and their chunks."""
+        self.client.delete(
+            name, points_selector=PointIdsList(points=[point_id(name, i) for i in ids])
+        )
+        self.delete_chunks(name, ids)
+
     def delete_source(self, name: str, source: str) -> None:
         by_source = Filter(must=[FieldCondition(key="meta.source", match=MatchValue(value=source))])
         for collection in (name, chunks_of(name)):

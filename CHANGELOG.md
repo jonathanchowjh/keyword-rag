@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Imports: a `.txt` or `.md` upload (also inside a zip) longer than one passage is
+  split into passages of up to 1,500 characters (`imports.chunk_text`): Markdown
+  headings first, then paragraphs and sentences; code blocks, tables and lists are
+  kept whole where they fit; each passage starts with a breadcrumb such as
+  `notes.md › Setup › Install`, and one under 200 characters merges into a neighbour.
+  Ids are `<file>#<i>` with `{file, part, parts}` in meta; a re-import deletes the
+  file's old passages it no longer yields from the same source (the job result has
+  `removed`). `/chat` citations carry `part` and `parts`, and the chat's Sources say
+  `part i of n`. A file that fits in one passage is one item, as before.
 - Chat: a reply shows a safe subset of Markdown. The text is escaped first, then code
   blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings (as bold lines) and
   paragraphs are drawn; links, images, tables and HTML stay as typed text, and `[n]`
