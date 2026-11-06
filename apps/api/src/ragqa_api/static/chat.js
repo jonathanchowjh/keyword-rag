@@ -207,7 +207,7 @@ async function ask() {
   turns.push(turn);
   save();
   draw();
-  $("spoken").textContent = turn.role === "reply" ? turn.answer : turn.content;
+  $("spoken").textContent = turn.role === "reply" ? turn.answer : `Error: ${turn.content}`;
 }
 
 // -- adding documents -------------------------------------------------------------------------
