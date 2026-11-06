@@ -238,6 +238,15 @@ def test_item_hash_covers_content_and_source():
     assert len(hashes) == 4
 
 
+def test_item_hash_ignores_parts_only_for_a_text_chunk():
+    one, two = Item("x", "t", meta={"parts": 1}), Item("x", "t", meta={"parts": 2})
+    assert item_hash(one) != item_hash(two)  # no file and part: not a chunk
+    chunk = {"file": "a.md", "part": 1}
+    assert item_hash(Item("x", "t", meta={**chunk, "parts": 1})) == item_hash(
+        Item("x", "t", meta={**chunk, "parts": 2})
+    )
+
+
 def test_hashes_reads_back_content_hash():
     s, _, items = sourced()
     assert s.hashes("c", ["a1"]) == {"a1": ""}  # upsert_items alone writes no hash
