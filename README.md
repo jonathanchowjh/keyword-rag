@@ -453,8 +453,10 @@ For each message the service does this:
    are left out). So 95% of questions that belong to the store would clear it.
    With fewer than 20 usable questions, or no eval set, the store has no bar
    and is always kept. A bar you set yourself wins. It is recomputed when the
-   eval set's version, its item count or the store's switched-off sources
-   change. `GET /collections/{name}/bar` shows it.
+   eval set's version, the store's item count, its switched-off sources or its
+   embedding model change, and after one of its sources is deleted. A store
+   built with another embedding model than the service runs is refused (409).
+   `GET /collections/{name}/bar` shows it.
 3. **The gate.** A store is kept when its best match clears its bar. The gate
    scores the message alone and the follow-up search text, and takes the
    higher, so a short follow-up such as "and the second one?" is not dropped.
@@ -465,16 +467,21 @@ For each message the service does this:
 5. **Merge.** Every kept store is searched with its own method and settings.
    The results are merged by reciprocal rank fusion (k = 60) by store and id,
    and cut to the evidence size (default 8, 1 to 20). The model answers from
-   that evidence.
+   that evidence. When no store is kept, or the kept stores find nothing, the
+   model answers without passages, and the page says the answer used none.
 
 **The retrieval step.** Under each answer you can open the step to see every
-store's decision. Edit a store's method, k, search settings or bar, or tick
+store's decision; for `keyword_rag`, the Method column also shows the query
+tags it picked. Edit a store's method, k, search settings or bar, or tick
 "search anyway", and **Re-run**. A re-run adds an attempt without answering;
 **Answer from this attempt** answers it (an answered attempt cannot be answered
 again). These edits last until the service restarts. The store's Edit form
-shows the settings the next search in this chat uses. **Set as default** saves
-the fields you edited (method, k, search settings and bar) as the store's own
-settings; "search anyway" is not saved.
+shows the settings the next search in this chat uses, and the store's saved
+defaults under them. The built-in method, a blank k (the chat's evidence size)
+and **Use the eval set's bar** clear a saved value: a re-run shows the result,
+and Set as default saves it. **Set as default** saves the fields you edited
+(method, k, search settings and bar) as the store's own settings; "search
+anyway" is not saved.
 
 **Spending.** There is no estimate before a message. Each reply and each
 attempt shows its cost (the rewrite, every store's retrieval and the answer),
@@ -551,7 +558,7 @@ is needed in `.env`.
   | `summary` | per-item summaries for the keyword methods |
   | `keywords` | AI keyword-list proposals |
   | `query` | paid query-time steps: query summaries, keywords and hops |
-| `rewrite` | the chat's optional follow-up rewrite: one AI call turns a follow-up into a standalone question |
+  | `rewrite` | the chat's optional follow-up rewrite: one AI call turns a follow-up into a standalone question |
 
 - **Budget.** The monthly cap is set here too. This month's spend counts every
   connection together.
@@ -685,7 +692,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `DELETE /eval-sets/{name}` | Without `?confirm=true`, `{runs}`: how many runs would go. With it, deletes the set and those runs. 409 while an eval or load uses the set |
 | `POST /eval-sets/{name}/uploads?filename=` | The raw file as the body; returns `{upload_id, preview}` |
 | `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
-| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
+| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, its saved chat defaults `chat_method`, `chat_k` and `chat_bar` (null when none is saved), `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
 | `PATCH /collections/{name}` | `{eval_set}`: make that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or while a load or question import is queued or running on the store |
 | `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
@@ -704,13 +711,13 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
-| `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept |
-| `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}` |
-| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions; change `{title, stores, evidence_size, rewrite}`; delete |
-| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt. 422 for an answer model with no price, before anything is saved |
-| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}}`: re-run the retrieval of message `n` with edits. Adds an attempt without answering; a re-run never rewrites the follow-up again |
-| `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. An answered attempt cannot be answered again (409) |
-| `POST /chats/{id}/stores/{store}/default` | Set as default: save the store's method, k, search settings and bar from the overrides this chat uses |
+| `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept. 409 when the store was built with another embedding model |
+| `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}`. 404 for an unknown store; 422 for no stores |
+| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, and the `overrides` it holds; change `{title, stores, evidence_size, rewrite}`; delete. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores or an evidence size outside 1 to 20 |
+| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt; each decision has the store's `method`, `k`, `search`, `best`, `bar`, `bar_source`, `tags` (the query tags `keyword_rag` picked, else null), `kept`, `reason`, `usd` and `error`. 404 for an unknown chat; 422 for empty text, or an answer model that is unknown or has no price, before anything is saved |
+| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
+| `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered. An answer model that is unknown or has no price becomes the attempt's `error` |
+| `POST /chats/{id}/stores/{store}/default` | Set as default: save, as the store's own, only the fields the chat's override for it names (method, k, search settings, bar), where `null` clears the saved value, then drop the override; "search anyway" is not saved. Returns `{search, chat_method, chat_k, chat_bar}`. 404 for an unknown chat, or a store not on it |
 | `POST /chat` | The single-store chat, unchanged. `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
 | `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
