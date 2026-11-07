@@ -1,6 +1,7 @@
 """The chat gate: how well a message matches a store, and the bar a store sets."""
 
 import json
+from collections.abc import Callable
 
 import numpy as np
 
@@ -10,7 +11,7 @@ from ragqa_core.datasets import dev_slice
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import Retriever
-from ragqa_core.types import Bar, CollectionSpec, Skip
+from ragqa_core.types import Bar, CollectionSpec, Question, Skip
 
 BAR_QUANTILE = 0.05
 BAR_SAMPLE = 200
@@ -42,33 +43,58 @@ class Router:
         manual = db.get_chat_bar(self.conn, spec.name) if saved else None
         if manual is not None:
             return Bar(manual, "manual", None, 0)
+
+        def score_one(q: Question, vector: np.ndarray, skip: tuple[str, ...]) -> float:
+            excluded = frozenset(q.meta.get("excluded_ids", []))
+            return self._top(spec.name, vector, Skip(skip, excluded))
+
+        return self._calibrate(spec, "gate", [], score_one)
+
+    def _sample(self, spec: CollectionSpec) -> tuple[str, str | None, list[Question]] | None:
+        """The questions a bar is set from: the dev slice of the store's eval set, less the
+        leaked ones, the first BAR_SAMPLE by id. None when the store has no eval set."""
         set_name = db.default_eval_set(self.conn, spec.name)
         if set_name is None:
-            return Bar(None, "none", None, 0)
+            return None
         found = db.get_eval_set(self.conn, set_name)
         version = found["version"] if found else None
-        disabled = db.disabled_sources(self.conn, spec.name)
-        count = self.retriever.store.count(spec.name)  # before scoring, see the cache key
-        key = json.dumps([set_name, version, count, sorted(disabled), spec.dense_model])
-        kept = db.get_store_bar(self.conn, spec.name, "gate")
-        if kept and kept["key"] == key:
-            return self._made(kept["value"], kept["n"], set_name)
         questions = db.get_questions(self.conn, set_name, version)
         leaked = self.evaluator.leaked_ids(spec, set_name)
         usable = [q for q in dev_slice(questions) if q.id not in leaked]
-        usable = sorted(usable, key=lambda q: q.id)[:BAR_SAMPLE]
+        return set_name, version, sorted(usable, key=lambda q: q.id)[:BAR_SAMPLE]
+
+    def _calibrate(
+        self,
+        spec: CollectionSpec,
+        kind: str,
+        key_extra: list,
+        score_one: Callable[[Question, np.ndarray, tuple[str, ...]], float | None],
+    ) -> Bar:
+        """The BAR_QUANTILE of score_one over the sample's questions, kept in store_bars
+        under `kind` until its key changes. The key is read before scoring, so a store that
+        changes meanwhile is scored again next time. A None score is left out."""
+        count = self.retriever.store.count(spec.name)
+        disabled = tuple(db.disabled_sources(self.conn, spec.name))
+        sample = self._sample(spec)
+        if sample is None:
+            return Bar(None, "none", None, 0)
+        set_name, version, usable = sample
+        key = json.dumps([set_name, version, count, sorted(disabled), spec.dense_model, *key_extra])
+        kept = db.get_store_bar(self.conn, spec.name, kind)
+        if kept and kept["key"] == key:
+            return self._made(kept["value"], kept["n"], set_name)
         value = None
         if len(usable) >= BAR_MIN:
             vectors = self._question_vectors(spec, set_name, version, usable)
-            skip = tuple(disabled)
-            scores = []
-            for q, vector in zip(usable, vectors, strict=True):
-                excluded = frozenset(q.meta.get("excluded_ids", []))
-                scores.append(self._top(spec.name, vector, Skip(skip, excluded)))
-            value = float(np.quantile(scores, BAR_QUANTILE))
-        db.save_store_bar(
-            self.conn, spec.name, "gate", {"key": key, "value": value, "n": len(usable)}
-        )
+            scores = [
+                s
+                for q, vector in zip(usable, vectors, strict=True)
+                if (s := score_one(q, vector, disabled)) is not None
+            ]
+            if len(scores) >= BAR_MIN:
+                value = float(np.quantile(scores, BAR_QUANTILE))
+        row = {"key": key, "value": value, "n": len(usable)}
+        db.save_store_bar(self.conn, spec.name, kind, row)
         return self._made(value, len(usable), set_name)
 
     def _made(self, value: float | None, n: int, set_name: str) -> Bar:
