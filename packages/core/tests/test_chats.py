@@ -352,6 +352,85 @@ def test_set_default_writes_only_the_named_fields_and_drops_the_override(tmp_pat
         chats.set_default(chat["id"], "nope")
 
 
+def test_an_override_of_null_previews_the_built_in_default_and_set_as_default_clears(tmp_path):
+    chats, _ = build(tmp_path)
+    conn = chats.conn
+    db.set_chat_bar(conn, "a", 0.99)  # no message reaches it
+    db.set_chat_method(conn, "a", "vector")
+    db.set_chat_k(conn, "a", 3)
+    chat = chats.create(["a"])
+    one = decision(attempt(chats.ask(chat["id"], ENZYME)), "a")
+    assert (one["method"], one["k"], one["bar"], one["bar_source"]) == ("vector", 3, 0.99, "manual")
+    assert one["reason"] == "below its bar"
+
+    # An absent field is what is in force: the saved values.
+    kept = decision(chats.rerun(chat["id"], 1, {"a": {"keep": True}}), "a")
+    assert (kept["method"], kept["k"], kept["bar_source"]) == ("vector", 3, "manual")
+
+    # An explicit null is the built-in default, whatever is saved.
+    nulls = {"bar": None, "method": None, "k": None}
+    cleared = decision(chats.rerun(chat["id"], 1, {"a": nulls}), "a")
+    own = chats.router.bar(chats.retriever.spec("a"), saved=False)
+    assert own.source == "set" and own.value is not None and own.value < 0.99
+    assert (cleared["bar"], cleared["bar_source"]) == (own.value, "set")
+    assert (cleared["method"], cleared["k"]) == ("hybrid", EVIDENCE_SIZE)
+    assert cleared["reason"] == "search anyway"  # keep is still held
+
+    # Set as default then saves what the re-run previewed: nothing saved.
+    saved = chats.set_default(chat["id"], "a")
+    assert (saved["chat_method"], saved["chat_k"], saved["chat_bar"]) == (None, None, None)
+    after = decision(chats.rerun(chat["id"], 1, {}), "a")
+    assert (after["method"], after["k"]) == (cleared["method"], cleared["k"])
+    assert (after["bar"], after["bar_source"]) == (cleared["bar"], cleared["bar_source"])
+    assert after["reason"] == "clears its bar"
+
+
+def test_a_keyword_rag_decision_records_its_query_tags(tmp_path):
+    chats, _ = build(tmp_path)
+    spec = chats.retriever.spec("a")
+    builder = chats.retriever.builder
+    db.set_vocabulary_version(chats.conn, "a", builder.save_vocabulary(spec, WORDS["a"].split()))
+    builder.tag(chats.retriever.spec("a"), builder.stored_items("a"))
+    chat = chats.create(["a", "b"])
+    one = attempt(chats.ask(chat["id"], BOTH))
+    a, b = decision(one, "a"), decision(one, "b")
+    assert a["method"] == "keyword_rag" and a["kept"]
+    assert a["tags"] and set(a["tags"]) <= set(WORDS["a"].split())
+    assert b["method"] == "hybrid" and b["tags"] is None
+
+
+def test_an_answered_attempts_usd_is_its_rewrite_stores_and_answer(tmp_path):
+    chats, _ = build(tmp_path)
+    db.set_chat_method(chats.conn, "a", "iterative")  # a paid method: one hop call
+    chat = chats.update(chats.create(["a", "b"])["id"], rewrite=True)
+    chats.ask(chat["id"], ENZYME)
+    rewrite, answer = ledger(chats, "chat_rewrite"), ledger(chats, "chat")
+    two = attempt(chats.ask(chat["id"], "and its rate?"))
+    rewrite, answer = ledger(chats, "chat_rewrite") - rewrite, ledger(chats, "chat") - answer
+    stores = sum(d["usd"] for d in two["decisions"])
+    assert rewrite > 0 and answer > 0 and stores > 0 and two["answer"]
+    assert two["usd"] == pytest.approx(rewrite + stores + answer)
+
+
+def test_rerun_of_a_message_with_no_attempt_is_unknown(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = chats.create(["a"])
+    n = db.add_chat_message(chats.conn, chat["id"], ENZYME)  # as while its attempt is made
+    with pytest.raises(UnknownChat, match=f"^no attempt 1 of message {n}"):
+        chats.rerun(chat["id"], n, {})
+
+
+def test_rewrite_sees_at_most_chat_turns_earlier_messages(tmp_path):
+    chats, prompts = build(tmp_path)
+    chat = chats.update(chats.create(["a"])["id"], rewrite=True)
+    for i in range(1, CHAT_TURNS + 3):
+        chats.ask(chat["id"], f"m{i} {ENZYME}")
+    last = [p for p in prompts if p.startswith("Earlier messages:")][-1]
+    earlier = last.split("\n\nLast message:")[0].split("\n")[1:]
+    assert len(earlier) == CHAT_TURNS
+    assert earlier[0] == f"User: m2 {ENZYME}"
+
+
 def test_no_store_kept_answers_without_passages_and_says_so(tmp_path):
     chats, prompts = build(tmp_path)
     chat = chats.create(["a", "b"])
@@ -388,7 +467,7 @@ def test_budget_stop_keeps_the_attempts_evidence_and_error(tmp_path):
     assert two["usd"] == pytest.approx(rewrite + sum(d["usd"] for d in two["decisions"]))
 
 
-def test_unpriced_answer_model_records_an_attempt_error(tmp_path):
+def test_unpriced_answer_model_is_refused_before_saving(tmp_path):
     chats, _ = build(tmp_path)
     chat = chats.create(["a"])
     with pytest.raises(UnknownPrice):

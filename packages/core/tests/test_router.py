@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -190,3 +192,41 @@ def test_chat_settings_round_trip_as_numbers(tmp_path):
     assert db.get_chat_method(conn, "c") == "hybrid"
     db.set_chat_bar(conn, "c", None)
     assert db.get_chat_bar(conn, "c") is None
+
+
+def test_bar_refuses_a_store_built_with_another_model(tmp_path):
+    router, spec = build(tmp_path)
+    router.retriever.models.dense_model = "other/model"
+    with pytest.raises(ModelMismatch):
+        router.bar(spec)
+    db.set_chat_bar(router.conn, "c", 0.9)  # checked before a saved bar is read
+    with pytest.raises(ModelMismatch):
+        router.bar(spec)
+
+
+def test_bar_recomputes_when_the_stores_model_changes(tmp_path):
+    router, spec = build(tmp_path)
+    calls = counting(router)
+    router.bar(spec)
+    calls.clear()
+    router.retriever.models.dense_model = "other/model"  # rebuilt under another model
+    router.bar(replace(spec, dense_model="other/model"))
+    assert len(calls) == 20
+
+
+def test_bar_unsaved_is_the_eval_set_bar_whatever_is_saved(tmp_path):
+    router, spec = build(tmp_path)
+    own = router.bar(spec)
+    db.set_chat_bar(router.conn, "c", 0.9)
+    assert router.bar(spec) == Bar(0.9, "manual", None, 0)
+    assert router.bar(spec, saved=False) == own
+
+
+def test_forget_drops_the_stores_bar(tmp_path):
+    router, spec = build(tmp_path)
+    router.bar(spec)
+    calls = counting(router)
+    router.forget("c")
+    assert db.get_store_bar(router.conn, "c", "gate") is None
+    router.bar(spec)
+    assert len(calls) == 20

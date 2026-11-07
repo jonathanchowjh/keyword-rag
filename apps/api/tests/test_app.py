@@ -963,6 +963,8 @@ def test_model_mismatch_on_query_and_eval(client):
     assert "built with fake/dense" in r.json()["results"]["hybrid"]["error"]
     r = client.post("/eval", json={"collection": "c", "methods": ["hybrid"]})
     assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
+    r = client.get("/collections/c/bar")
+    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
 
 
 def test_saving_lists_is_refused_when_the_dense_model_changed(client):
@@ -3412,11 +3414,52 @@ def test_set_as_default_from_a_chat_changes_the_store_search_and_bar(client):
     assert client.get("/collections/c/bar").json()["source"] == "manual"
     assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {}
     detail = client.get("/collections/c").json()
-    assert (detail["chat_k"], detail["chat_method"]) == (2, None)
+    assert (detail["chat_k"], detail["chat_method"], detail["chat_bar"]) == (2, None, 0.25)
     # a null clears the saved value
     client.post(url, json={"overrides": {"c": {"bar": None}}})
     got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
     assert got["chat_bar"] is None and got["chat_k"] == 2
+
+
+def test_a_null_override_runs_the_built_in_default_and_set_as_default_clears(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    db.set_chat_bar(conn, "c", 0.25)
+    db.set_chat_k(conn, "c", 2)
+    db.set_chat_method(conn, "c", "vector")
+    chat = new_chat(client)
+    first = client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"}).json()
+    ran = first["attempts"][0]["decisions"][0]
+    assert (ran["method"], ran["k"], ran["bar_source"]) == ("vector", 2, "manual")
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    nulls = {"c": {"bar": None, "k": None, "method": None}}
+    r = client.post(url, json={"overrides": nulls})
+    assert r.status_code == 200, r.text
+    ran = r.json()["decisions"][0]
+    assert (ran["method"], ran["k"], ran["bar_source"]) == ("hybrid", 8, "few")  # its set's
+    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == nulls
+    got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
+    assert (got["chat_method"], got["chat_k"], got["chat_bar"]) == (None, None, None)
+    detail = client.get("/collections/c").json()
+    assert (detail["chat_method"], detail["chat_k"], detail["chat_bar"]) == (None, None, None)
+    assert client.get("/collections/c/bar").json()["source"] == "few"
+
+
+def test_a_source_replaced_by_as_many_items_recomputes_the_bar(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    import_items(client)
+    db.create_eval_set(conn, "e", "mcq")
+    qs = [Question(f"q{i:02d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(20)]
+    db.replace_questions(conn, "e", qs, None)
+    db.set_default_eval_set(conn, "c", "e")
+    first = client.get("/collections/c/bar").json()
+    assert first["source"] == "set"
+    conn.execute("update store_bars set value = 0.999 where collection = 'c'")
+    assert client.get("/collections/c/bar").json()["value"] == 0.999  # cached
+    assert client.delete("/collections/c/sources/upload:notes").status_code == 204
+    import_items(client)  # as many items as before, under the same source
+    assert client.get("/collections/c/bar").json() == first
 
 
 def test_rewrite_is_a_known_role(client):

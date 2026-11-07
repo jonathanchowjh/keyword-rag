@@ -616,6 +616,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # A chat's search defaults, as Set as default saves them; null is the store's own.
             "chat_method": db.get_chat_method(state.conn, name),
             "chat_k": db.get_chat_k(state.conn, name),
+            "chat_bar": db.get_chat_bar(state.conn, name),
             "state": busy,
             "progress": job["progress"] if job and job["status"] == "running" else None,
             "job": job,
@@ -661,6 +662,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.store.drop(name)
         state.retriever.forget(name)
         state.evaluator.forget(name)
+        state.router.forget(name)
         db.delete_collection_rows(state.conn, name)
         imports.delete_uploads(state.settings.home, name)
         return Response(status_code=204)
@@ -825,6 +827,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "at least one source must stay on")
         db.set_source_enabled(state.conn, name, source, body.enabled)
         state.evaluator.forget(name)  # what the store holds changed: scan for leaks again
+        state.router.forget(name)
         return {**row, "enabled": body.enabled}
 
     @app.delete("/collections/{name}/sources/{source}", status_code=204)
@@ -841,6 +844,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.set_source_enabled(state.conn, name, source, True)
         state.retriever.forget(name)
         state.evaluator.forget(name)  # a re-import of as many items must scan again
+        state.router.forget(name)  # and set its bar again
         return Response(status_code=204)
 
     @app.get("/collections/{name}/questions")

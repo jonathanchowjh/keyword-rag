@@ -654,6 +654,11 @@ def save_store_bar(conn: Connection, name: str, kind: str, row: dict) -> None:
         )
 
 
+def delete_store_bars(conn: Connection, name: str) -> None:
+    with conn.lock:
+        conn.execute("delete from store_bars where collection = ?", (name,))
+
+
 def _chat_column(conn: Connection, name: str, column: str) -> str | None:
     row = first(conn.execute(f"select {column} from collections where name = ?", (name,)))
     return row[column] if row else None

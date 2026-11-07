@@ -114,7 +114,10 @@ class Chats:
         self.retriever = retriever
         self.router = router
         self.ai = ai
-        # chat id -> store -> {method?, k?, search?, bar?, keep?}; None means the store's own.
+        # chat id -> store -> {method?, k?, search?, bar?, keep?}. An absent field is what is
+        # in force (the store's saved value, else the built-in default); None for method, k
+        # or bar is the built-in default, ignoring a saved value, so a re-run previews what
+        # Set as default then saves.
         self.overrides: dict[str, dict[str, dict]] = {}
         self._lock = threading.Lock()
 
@@ -198,7 +201,7 @@ class Chats:
         joined = "\n".join([*earlier[-FOLLOW_UP_TURNS:], content])
         if not chat["settings"]["rewrite"] or not earlier:
             return joined, 0.0, None
-        system, user = rewrite_prompt(earlier, content)
+        system, user = rewrite_prompt(earlier[-CHAT_TURNS:], content)
         text, error = joined, None
         with self.ai.tally() as spent:
             try:
@@ -236,15 +239,14 @@ class Chats:
         then adds an unanswered attempt to message n, searched with attempt 1's text."""
         chat = self._chat(chat_id)
         message = self._message(chat_id, n)
-        with self._lock:
-            current = copy.deepcopy(self.overrides.get(chat_id, {}))
-        merged = {
-            store: self._merged(chat, store, current.get(store, {}), override)
-            for store, override in overrides.items()
-        }
-        with self._lock:
+        first = self._attempt_row(chat_id, n, 1)
+        with self._lock:  # checked and merged in one hold, so no other edit lands between
+            current = self.overrides.get(chat_id, {})
+            merged = {
+                store: self._merged(chat, store, current.get(store, {}), override)
+                for store, override in overrides.items()
+            }
             self.overrides.setdefault(chat_id, {}).update(merged)
-        first = db.chat_attempts(self.conn, chat_id, n)[0]
         return self._attempt(chat, n, message["content"], False, None, first["search_text"])
 
     def answer(self, chat_id: str, n: int, attempt: int, model: str | None = None) -> dict:
@@ -355,6 +357,7 @@ class Chats:
             "best": None,
             "bar": None,
             "bar_source": None,
+            "tags": None,  # the query tags keyword_rag picked; None for other methods
             "kept": False,
             "reason": "deleted",
             "usd": 0.0,
@@ -364,9 +367,12 @@ class Chats:
         if spec is None:
             return decision, []
         reasons = self._reasons(spec)
-        method = override.get("method") or db.get_chat_method(self.conn, store)
+        # An absent field is the saved value; None, set in the override, is the built-in one.
+        saved_method = db.get_chat_method(self.conn, store)
+        method = override["method"] if "method" in override else saved_method
         method = method or ("keyword_rag" if reasons["keyword_rag"] is None else "hybrid")
-        k = override.get("k") or db.get_chat_k(self.conn, store) or size
+        k = override["k"] if "k" in override else db.get_chat_k(self.conn, store)
+        k = k or size
         search = search_settings(spec.search or SearchSettings(), override.get("search"))
         if search.query_tags == "oracle":  # it needs a question's gold; a chat has none
             search = replace(search, query_tags="classifier")
@@ -374,13 +380,12 @@ class Chats:
         hits: list[Hit] = []
         with self.ai.tally() as spent:
             try:
-                # best_match checks the store's model first; bar does not.
                 texts = list(dict.fromkeys([content, search_text]))
                 best = decision["best"] = self.router.best_match(spec, texts)
                 if override.get("bar") is not None:
                     bar = Bar(override["bar"], "override", None, 0)
-                else:
-                    bar = self.router.bar(spec)
+                else:  # a None bar is the eval set's, as if none were saved
+                    bar = self.router.bar(spec, saved="bar" not in override)
                 decision.update(bar=bar.value, bar_source=bar.source)
                 if override.get("keep"):
                     reason = "search anyway"
@@ -394,7 +399,7 @@ class Chats:
                 if decision["kept"]:
                     if reasons[method]:
                         raise MethodUnavailable(f"{method} {reasons[method]} on '{store}'")
-                    hits = self._retrieve(spec, search_text, method, k, search)
+                    hits, decision["tags"] = self._retrieve(spec, search_text, method, k, search)
             except CHAT_ERRORS as e:
                 decision.update(kept=False, reason="error", error=error_text(e))
                 hits = []
@@ -403,12 +408,14 @@ class Chats:
 
     def _retrieve(
         self, spec: CollectionSpec, text: str, method: str, k: int, search: SearchSettings
-    ) -> list[Hit]:
+    ) -> tuple[list[Hit], list[str] | None]:
+        """The store's passages and, for keyword_rag, the query tags it picked first, as
+        POST /chat runs them."""
         tags = None
-        if method == "keyword_rag":  # its query tags first, as POST /chat runs them
+        if method == "keyword_rag":
             skip = tuple(db.disabled_sources(self.conn, spec.name))
             tags = self.retriever.query_tags(spec, text, search, skip)
-        return self.retriever.retrieve(spec.name, text, method, k, RRF_K, search, tags)
+        return self.retriever.retrieve(spec.name, text, method, k, RRF_K, search, tags), tags
 
     def _answer(
         self, chat_id: str, n: int, content: str, evidence: list[dict], model: str | None
@@ -483,7 +490,8 @@ class Chats:
 
     def _merged(self, chat: dict, store: str, current: dict, override: dict) -> dict:
         """The store's override with `override` merged in, checked. None for method, k or
-        bar means the store's own; a search is merged into the one already edited."""
+        bar is the built-in default (see self.overrides); a search is merged into the one
+        already edited, and a None search drops it."""
         if store not in chat["stores"]:
             raise UnknownCollection(f"'{store}' is not on this chat")
         spec = self.retriever.spec(store)

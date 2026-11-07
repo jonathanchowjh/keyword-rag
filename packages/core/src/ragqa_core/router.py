@@ -22,7 +22,7 @@ class Router:
         self.conn = conn
         self.retriever = retriever
         self.evaluator = evaluator
-        self._vectors: dict[tuple[str, str | None, str], tuple[list[str], np.ndarray]] = {}
+        self._vectors: dict[tuple[str, str | None, str, str], tuple[list[str], np.ndarray]] = {}
 
     def best_match(self, spec: CollectionSpec, texts: list[str]) -> float:
         """The highest top-1 meaning cosine over the texts; 0.0 for an empty store."""
@@ -35,8 +35,11 @@ class Router:
         found = self.retriever.store.search(name, "text_dense", vector, 1, skip.sources, skip.items)
         return found[0].score if found else 0.0
 
-    def bar(self, spec: CollectionSpec) -> Bar:
-        manual = db.get_chat_bar(self.conn, spec.name)
+    def bar(self, spec: CollectionSpec, saved: bool = True) -> Bar:
+        """The store's bar: its saved chat_bar, else the one its eval set sets. With
+        saved=False, the eval set's bar as if no chat_bar were saved."""
+        self.retriever.indexer.check_model(spec)
+        manual = db.get_chat_bar(self.conn, spec.name) if saved else None
         if manual is not None:
             return Bar(manual, "manual", None, 0)
         set_name = db.default_eval_set(self.conn, spec.name)
@@ -46,7 +49,7 @@ class Router:
         version = found["version"] if found else None
         disabled = db.disabled_sources(self.conn, spec.name)
         count = self.retriever.store.count(spec.name)  # before scoring, see the cache key
-        key = json.dumps([set_name, version, count, sorted(disabled)])
+        key = json.dumps([set_name, version, count, sorted(disabled), spec.dense_model])
         kept = db.get_store_bar(self.conn, spec.name, "gate")
         if kept and kept["key"] == key:
             return self._made(kept["value"], kept["n"], set_name)
@@ -72,8 +75,8 @@ class Router:
         return Bar(value, "set" if value is not None else "few", set_name, n)
 
     def _question_vectors(self, spec, set_name, version, usable) -> np.ndarray:
-        """Question vectors are embedded once per (set, version, qa type)."""
-        key = (set_name, version, spec.qa_type)
+        """Question vectors are embedded once per (set, version, qa type, model)."""
+        key = (set_name, version, spec.qa_type, spec.dense_model)
         ids = [q.id for q in usable]
         have = self._vectors.get(key)
         if have is None or have[0] != ids:
@@ -81,6 +84,12 @@ class Router:
             vectors = self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
             have = self._vectors[key] = (ids, vectors)
         return have[1]
+
+    def forget(self, name: str) -> None:
+        """Drops the store's kept bars: what it holds changed in a way the key may miss, as
+        when a source is replaced by as many items. Question vectors are kept per eval set,
+        not per store, so none are dropped."""
+        db.delete_store_bars(self.conn, name)
 
     def kept(self, best: float, bar: Bar) -> bool:
         return bar.value is None or best >= bar.value
