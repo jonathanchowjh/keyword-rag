@@ -28,6 +28,7 @@ let listsVersion = undefined; // the keyword-lists version the textareas were fi
 let listsDirty = false;
 let routeText = undefined; // the routing profile the textarea was filled from
 let routeDirty = false;
+let routeDraft = undefined; // the draft "Use the drafted profile" filled in, not yet saved
 
 shell(`c/${name}`);
 
@@ -520,9 +521,29 @@ function buildRoute() {
       <button type="button" id="rp-draft" class="secondary">Use the drafted profile</button></div>
     <p id="rp-msg" role="status"></p>`;
   $("rp-text").addEventListener("input", () => (routeDirty = true));
-  $("rp-save").addEventListener("click", () => saveRoute($("rp-text").value, "Saved."));
-  // null: the store's draft, which follows the store as it changes
-  $("rp-draft").addEventListener("click", () => saveRoute(null, "Using the drafted profile."));
+  // null: the store's draft, which follows the store as it changes. The draft filled in and
+  // left as it is, or a blank, saves that.
+  $("rp-save").addEventListener("click", () => {
+    const text = $("rp-text").value;
+    if (text === routeDraft) saveRoute(null, "Using the drafted profile.");
+    else if (!text.trim()) saveRoute(null, "Blank: using the drafted profile.");
+    else saveRoute(text, "Saved.");
+  });
+  $("rp-draft").addEventListener("click", fillDraft);
+}
+
+// Fills the box with the draft and saves nothing: a profile written by hand stays until Save.
+async function fillDraft() {
+  $("rp-msg").textContent = "";
+  try {
+    const draft = await api(`/collections/${enc}/route-profile/draft`, { method: "POST" });
+    $("rp-text").value = draft.route_profile;
+    routeDirty = true;
+    routeDraft = draft.route_profile;
+    $("rp-msg").innerHTML = '<span class="muted">The drafted profile, not saved: Save to use it.</span>';
+  } catch (e) {
+    $("rp-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
 }
 
 async function saveRoute(text, done) {
@@ -530,6 +551,7 @@ async function saveRoute(text, done) {
   try {
     col = await api(`/collections/${enc}`, { method: "PATCH", body: { route_profile: text } });
     routeDirty = false;
+    routeDraft = undefined;
     routeText = undefined;
     syncRoute();
     $("rp-msg").innerHTML = `<span class="ok">${esc(done)}</span>`;

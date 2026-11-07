@@ -3321,9 +3321,25 @@ def test_store_page_edits_and_resets_the_route_profile(page, seeded):
     page.reload()
     expect(box).to_have_value("Enzyme kinetics and assays.")
 
+    # The draft only fills the box: the profile written by hand is kept until Save.
     page.get_by_role("button", name="Use the drafted profile").click()
     expect(box).to_have_value(drafted)
+    expect(page.locator("#rp-msg")).to_have_text("The drafted profile, not saved: Save to use it.")
+    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
+    assert db.get_route_profile(conn, "routed") == "Enzyme kinetics and assays."
+    page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
+    expect(page.locator("#rp-msg")).to_have_text("Using the drafted profile.")
+    assert db.get_route_profile(conn, "routed") is None  # the draft, following the store
+
+    box.fill("Volcanoes.")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
+    box.fill("   ")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#rp-msg")).to_have_text("Blank: using the drafted profile.")
+    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
+    expect(box).to_have_value(drafted)
     assert db.get_route_profile(conn, "routed") is None
 
 
@@ -3366,10 +3382,52 @@ def test_check_routing_shows_both_modes(page, seeded):
     stores_ = panel.locator("table.per-store tbody tr")
     expect(stores_.locator("th")).to_have_text(["c", "vo"])
     expect(stores_.locator(".questions")).to_have_text(["40", "40"])
+    expect(panel).to_contain_text(
+        "Kept, every store and Kept, by profile: the share of the store's own questions on"
+        " which it was kept, when every store is searched and when routing by profile."
+    )
+    expect(panel.locator(".adds-none")).to_have_count(0)
     assert sent == [
         {"stores": ["c", "vo"], "split": "held_out"},
         {"stores": ["c", "vo"], "split": "dev"},
     ]
+
+    # A store that adds no questions says why: its set is all dev slice, or it has none.
+    def mode(searched):
+        return {"recall": 1, "precision": 0.5, "none_rate": 0, "mean_searched": searched}
+
+    def faked(vo_set):
+        return {
+            "split": "held_out",
+            "questions": 30,
+            "per_store": {
+                "c": {"eval_set": "c", "questions": 30, "recall_gate": 1, "recall_profiles": 1},
+                "vo": {
+                    "eval_set": vo_set,
+                    "questions": 0,
+                    "recall_gate": None,
+                    "recall_profiles": None,
+                },
+            },
+            "modes": {"gate": mode(2), "profiles": mode(1.5)},
+            "rows": [],
+        }
+
+    page.get_by_label("Questions to check on").select_option("held_out")
+    page.route("**/routing/eval", lambda r: r.fulfill(json=faked("vo")))
+    check.click()
+    expect(panel.locator(".adds-none")).to_have_text(
+        "vo adds no held-out questions: its eval set vo has no more than 200 questions, all in"
+        " the dev slice the bars were set on. Check on the dev slice to score it."
+    )
+    page.unroute("**/routing/eval")
+    page.route("**/routing/eval", lambda r: r.fulfill(json=faked(None)))
+    check.click()
+    expect(panel.locator(".adds-none")).to_have_text(
+        "vo adds no questions: it has no eval set. It still counts against the others"
+        " when it is kept for their questions."
+    )
+    page.unroute("**/routing/eval")
 
     page.get_by_role("button", name="Hide").click()
     expect(panel).to_be_empty()

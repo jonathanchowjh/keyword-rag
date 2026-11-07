@@ -507,6 +507,16 @@ function perStoreHtml(store, s) {
     <td class="num recall-gate">${esc(pct(s.recall_gate))}</td><td class="num recall-profiles">${esc(pct(s.recall_profiles))}</td></tr>`;
 }
 
+// Why a store adds no questions: it has no eval set, or (held out) its set is all dev slice.
+function addsNoneHtml(store, s, split) {
+  let why = `${store} adds no questions: its eval set ${s.eval_set} has none usable here.`;
+  if (s.eval_set == null)
+    why = `${store} adds no questions: it has no eval set. It still counts against the others when it is kept for their questions.`;
+  else if (split === "held_out")
+    why = `${store} adds no held-out questions: its eval set ${s.eval_set} has no more than 200 questions, all in the dev slice the bars were set on. Check on the dev slice to score it.`;
+  return `<p class="muted adds-none">${esc(why)}</p>`;
+}
+
 function checkHtml(c) {
   if (c.busy) return '<p class="muted">Checking routing…</p>';
   const hide = '<div class="row"><button type="button" class="secondary" data-hide>Hide</button></div>';
@@ -519,13 +529,19 @@ function checkHtml(c) {
   }
   const modes = Object.keys(MODES).map((k) => modeHtml(k, r.modes[k])).join("");
   const perStore = Object.entries(r.per_store).map(([store, s]) => perStoreHtml(store, s)).join("");
+  const addsNone = Object.entries(r.per_store)
+    .filter(([, s]) => !s.questions)
+    .map(([store, s]) => addsNoneHtml(store, s, r.split))
+    .join("");
   return `${said}<div class="tables">
     <table class="modes decisions"><thead><tr><th scope="col">Mode</th><th scope="col">Recall</th><th scope="col">Precision</th>
       <th scope="col">None kept</th><th scope="col">Stores searched</th></tr></thead><tbody>${modes}</tbody></table>
     <table class="per-store decisions"><thead><tr><th scope="col">Store</th><th scope="col">Its questions</th>
       <th scope="col">Kept, every store</th><th scope="col">Kept, by profile</th></tr></thead><tbody>${perStore}</tbody></table></div>
-    <p class="muted">Recall: the share of questions whose own store was kept. Precision: the share of the kept stores that
-      are the question's own. None kept: the share with no store kept. A store's own questions are its eval set's.</p>${hide}`;
+    ${addsNone}<p class="muted">Recall: the share of questions whose own store was kept. Precision: the share of the kept stores that
+      are the question's own. None kept: the share with no store kept. A store's own questions are its eval set's.
+      Its questions: how many of the questions are the store's own. Kept, every store and Kept, by profile: the share of the
+      store's own questions on which it was kept, when every store is searched and when routing by profile.</p>${hide}`;
 }
 
 // The check is shown while the page is on its chat and the chat has the stores it ran on.
