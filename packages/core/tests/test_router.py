@@ -410,3 +410,25 @@ def test_forget_drops_the_route_bar_and_the_profile_vector(tmp_path):
     assert db.get_store_bar(router.conn, "c", "route") is None
     router.route_score(spec, ["enzyme"])
     assert embeds == [["enzyme kinetics"]]
+
+
+def test_a_kept_bar_reads_no_questions_and_scans_for_no_leaks(tmp_path, monkeypatch):
+    router, spec = build(tmp_path, meta={"source": "hand"})  # hand-written: a leak scan scrolls
+    db.set_route_profile(router.conn, "c", "enzyme kinetics")
+    gate, route = router.bar(spec), router.route_bar(spec)
+    assert gate.source == "set" and route.source == "set"
+
+    def refuse(*a, **k):
+        raise AssertionError("a kept bar read the questions or scanned for leaks")
+
+    monkeypatch.setattr(db, "get_questions", refuse)
+    router.evaluator.leaked_ids = refuse  # type: ignore[method-assign]
+    assert router.bar(spec) == gate and router.route_bar(spec) == route
+
+    # A restart: a new Router and Evaluator on the same file, nothing held in memory.
+    evaluator = Evaluator(
+        router.conn, router.retriever, router.retriever.models, router.evaluator.ai
+    )
+    evaluator.leaked_ids = refuse  # type: ignore[method-assign]
+    fresh = Router(router.conn, router.retriever, evaluator)
+    assert fresh.bar(spec) == gate and fresh.route_bar(spec) == route

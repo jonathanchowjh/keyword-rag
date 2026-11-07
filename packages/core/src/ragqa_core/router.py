@@ -58,18 +58,29 @@ class Router:
 
         return self._calibrate(spec, "gate", [], score_one)
 
-    def _sample(self, spec: CollectionSpec) -> tuple[str, str | None, list[Question]] | None:
-        """The questions a bar is set from: the dev slice of the store's eval set, less the
-        leaked ones, the first BAR_SAMPLE by id. None when the store has no eval set."""
+    def _set(self, spec: CollectionSpec) -> tuple[str, str | None] | None:
+        """The store's eval set and its version in force; None when it has none."""
         set_name = db.default_eval_set(self.conn, spec.name)
         if set_name is None:
             return None
         found = db.get_eval_set(self.conn, set_name)
-        version = found["version"] if found else None
+        return set_name, found["version"] if found else None
+
+    def _questions(
+        self, spec: CollectionSpec, set_name: str, version: str | None
+    ) -> list[Question]:
+        """The questions a bar is set from: the set version's dev slice, less the leaked
+        ones, the first BAR_SAMPLE by id. Reads the whole version, and may scan the store
+        for leaks, so a kept bar never calls it."""
         questions = db.get_questions(self.conn, set_name, version)
         leaked = self.evaluator.leaked_ids(spec, set_name)
         usable = [q for q in dev_slice(questions) if q.id not in leaked]
-        return set_name, version, sorted(usable, key=lambda q: q.id)[:BAR_SAMPLE]
+        return sorted(usable, key=lambda q: q.id)[:BAR_SAMPLE]
+
+    def _sample(self, spec: CollectionSpec) -> tuple[str, str | None, list[Question]] | None:
+        """The store's eval set, its version and the questions a bar is set from."""
+        found = self._set(spec)
+        return None if found is None else (*found, self._questions(spec, *found))
 
     def _calibrate(
         self,
@@ -80,17 +91,20 @@ class Router:
     ) -> Bar:
         """The BAR_QUANTILE of score_one over the sample's questions, kept in store_bars
         under `kind` until its key changes. The key is read before scoring, so a store that
-        changes meanwhile is scored again next time. A None score is left out."""
+        changes meanwhile is scored again next time, and is checked before the questions are
+        read: the leaked ones depend only on the count and the version, both in the key.
+        A None score is left out."""
         count = self.retriever.store.count(spec.name)
         disabled = tuple(db.disabled_sources(self.conn, spec.name))
-        sample = self._sample(spec)
-        if sample is None:
+        found = self._set(spec)
+        if found is None:
             return Bar(None, "none", None, 0)
-        set_name, version, usable = sample
+        set_name, version = found
         key = json.dumps([set_name, version, count, sorted(disabled), spec.dense_model, *key_extra])
         kept = db.get_store_bar(self.conn, spec.name, kind)
         if kept and kept["key"] == key:
             return self._made(kept["value"], kept["n"], set_name)
+        usable = self._questions(spec, set_name, version)
         value = None
         if len(usable) >= BAR_MIN:
             vectors = self._question_vectors(spec, set_name, version, usable)
