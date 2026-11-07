@@ -158,10 +158,13 @@ function passageHtml(text, key, ui) {
   return `<details data-expand="${esc(key)}"${open}><summary>${esc(text.slice(0, PASSAGE))}…</summary><div class="full">${esc(text)}</div></details>`;
 }
 
+// The store's name, marked when it has since been deleted.
+const storeText = (store) => (chat?.deleted_stores.includes(store) ? `${store} · deleted` : store);
+
 // One cited passage, listed under the answer.
 function sourceHtml(c, at, ui) {
   const part = c.parts > 1 ? ` · part ${esc(c.part)} of ${esc(c.parts)}` : "";
-  const from = (c.source ? ` · ${esc(c.source)}` : "") + part + (c.store ? ` · ${esc(c.store)}` : "");
+  const from = (c.source ? ` · ${esc(c.source)}` : "") + part + (c.store ? ` · ${esc(storeText(c.store))}` : "");
   return `<li><span class="what">[${Number(c.n)}] ${esc(c.id)}${from}</span>${passageHtml(c.text, `src-${at}-${Number(c.n)}`, ui)}</li>`;
 }
 
@@ -183,9 +186,11 @@ function attemptHtml(a, at, ui) {
   const sources = a.citations.length
     ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, at, ui)).join("")}</ul>`
     : "";
-  const none = a.decisions.length && !a.decisions.some((d) => d.kept)
-    ? '<div class="meta warn none-kept">No store was kept, so this answer used no store passages.</div>'
-    : "";
+  // Said whenever the answer had no passages: no store was kept, or the kept ones found none.
+  const why = a.decisions.some((d) => d.kept)
+    ? "The stores kept found no passages, so this answer used none."
+    : "No store was kept, so this answer used no store passages.";
+  const none = a.evidence.length ? "" : `<div class="meta warn none-kept">${why}</div>`;
   const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
   return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, cited, at)}</div>${sources}
     ${none}${note}<div class="meta muted">Cost ${usd(a.usd)}</div></div>`;
@@ -194,10 +199,14 @@ function attemptHtml(a, at, ui) {
 // -- the retrieval step ------------------------------------------------------------------------
 
 const two = (x) => (x == null ? "–" : Number(x).toFixed(2));
+const unset = (x, shown = x) => (x == null ? "unset" : shown);
 
+// The method, and for keyword_rag how its query tags were picked and the tags it picked (an
+// attempt saved before tags were kept has none).
 function methodText(d) {
   if (!d.method) return "–";
-  return d.method === "keyword_rag" && d.search?.query_tags ? `keyword_rag · query tags: ${d.search.query_tags}` : d.method;
+  if (d.method !== "keyword_rag" || !d.search?.query_tags) return d.method;
+  return `keyword_rag · query tags: ${d.search.query_tags}${d.tags?.length ? ` · ${d.tags.join(", ")}` : ""}`;
 }
 
 function barText(d) {
@@ -214,7 +223,7 @@ function keptText(d) {
 }
 
 function decisionHtml(d) {
-  return `<tr data-store="${esc(d.store)}"${d.kept ? "" : ' class="dropped"'}><th scope="row">${esc(d.store)}</th>
+  return `<tr data-store="${esc(d.store)}"${d.kept ? "" : ' class="dropped"'}><th scope="row">${esc(storeText(d.store))}</th>
     <td class="method">${esc(methodText(d))}</td><td class="num best">${esc(two(d.best))}</td>
     <td class="num bar">${esc(barText(d))}</td><td class="kept">${esc(keptText(d))}</td></tr>`;
 }
@@ -223,33 +232,42 @@ function decisionHtml(d) {
 // the answer's [n] links, so the attempts of one message never share an id.
 function evidenceHtml(e, at, ui) {
   const key = `ev-${at}-${Number(e.n)}`;
-  const what = [`[${Number(e.n)}] ${e.id}`, e.store, e.source, e.parts > 1 ? `part ${e.part} of ${e.parts}` : null]
+  const what = [`[${Number(e.n)}] ${e.id}`, e.store && storeText(e.store), e.source, e.parts > 1 ? `part ${e.part} of ${e.parts}` : null]
     .concat(e.rank != null ? [`rank ${e.rank}`] : [], e.channels?.length ? [e.channels.join(", ")] : [])
     .filter((x) => x != null && x !== "")
     .join(" · ");
   return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">${esc(what)}</span>${passageHtml(e.text, key, ui)}</li>`;
 }
 
+// The built-in method, used when none is saved: keyword_rag where it can run, else hybrid,
+// as Chats._decide picks it.
+const builtInMethod = (own) => (own?.methods_available?.includes("keyword_rag") ? "keyword_rag" : "hybrid");
+
 // What the chat's next search uses for the store, as the Edit form's input values: the
-// store's defaults with the chat's held override on top. The defaults come from the store's
-// detail; while it is missing (its fetch failed), from `d`, a decision of this chat.
+// store's saved defaults with the chat's held override on top. The defaults come from the
+// store's detail; while it is missing (its fetch failed), from `d`, a decision of this chat.
+// In the override, an absent field is the saved value and a null one the built-in default:
+// method "" (the built-in choice), k the chat's evidence size, and the eval set's bar.
 function nextBase(store, d) {
   const own = details[store];
   const held = chat.overrides?.[store] ?? {};
-  // With no method saved, Chats._decide picks keyword_rag where it can run, else hybrid.
-  const fallback = own?.methods_available?.includes("keyword_rag") ? "keyword_rag" : "hybrid";
-  const method = own ? (own.chat_method ?? fallback) : (d?.method ?? fallback);
-  const k = own ? (own.chat_k ?? chat.settings.evidence_size) : (d?.k ?? chat.settings.evidence_size);
+  const size = chat.settings.evidence_size;
+  const savedMethod = own ? (own.chat_method ?? builtInMethod(own)) : (d?.method ?? "hybrid");
+  const savedK = own ? (own.chat_k ?? size) : (d?.k ?? size);
+  const savedBar = own ? (own.chat_bar ?? null) : d?.bar_source === "manual" ? d.bar : null;
   const base = (own ? own.search : d?.search) ?? {};
   const weights = { ...base.weights, ...held.search?.weights };
   const tags = held.search?.query_tags ?? base.query_tags ?? "similarity";
+  const heldBar = "bar" in held && held.bar !== savedBar; // one equal to the saved bar is the store's
   const out = {
-    method: held.method ?? method,
-    k: String(held.k ?? k),
+    method: "method" in held ? (held.method ?? "") : savedMethod,
+    k: String("k" in held ? (held.k ?? size) : savedK),
     query_tags: tags === "oracle" ? "classifier" : tags, // a chat has no gold: as Chats._decide
-    ownBar: held.bar == null,
-    bar: held.bar == null ? "" : String(held.bar),
+    ownBar: !heldBar,
+    setBar: heldBar && held.bar === null,
+    bar: heldBar && held.bar !== null ? String(held.bar) : "",
     keep: Boolean(held.keep),
+    savedBar, // not a field: what "Use the store's bar" sends over a held bar
   };
   for (const c of CHANNELS) out[c] = String(weights[c] ?? 1);
   return out;
@@ -267,11 +285,15 @@ function changesOf(n, store) {
   return overrideOf(turnOf(chat.id, n).edits[store] ?? base, base);
 }
 
-// The override for what `edit` changes from `base`, only the fields changed; null for k or
-// bar means the store's own. Throws, with what to fix, on a value the route would refuse.
+const barFrom = (e) => (e.ownBar ? "store" : e.setBar ? "set" : "typed");
+
+// The override for what `edit` changes from `base`, only the fields changed. A null clears
+// the saved value: the built-in method, a blank k (the chat's evidence size), the eval set's
+// bar. "Use the store's bar" over a held bar sends the saved bar, or null with none saved:
+// what an absent bar would use. Throws, with what to fix, on a value the route would refuse.
 function overrideOf(edit, base) {
   const out = {};
-  if (edit.method !== base.method) out.method = edit.method;
+  if (edit.method !== base.method) out.method = edit.method || null;
   if (edit.k !== base.k) {
     const k = edit.k.trim() === "" ? null : Number(edit.k);
     if (k !== null && !(Number.isInteger(k) && k >= 1 && k <= MAX_EVIDENCE)) {
@@ -287,10 +309,11 @@ function overrideOf(edit, base) {
     (search.weights ??= {})[c] = weight;
   }
   if (Object.keys(search).length) out.search = search;
-  if (edit.ownBar !== base.ownBar || (!edit.ownBar && edit.bar !== base.bar)) {
+  const from = barFrom(edit);
+  if (from !== barFrom(base) || (from === "typed" && edit.bar !== base.bar)) {
     const bar = edit.bar.trim() === "" ? NaN : Number(edit.bar);
-    if (!edit.ownBar && !(bar >= -1 && bar <= 1)) throw new Error("A bar is a number from -1 to 1.");
-    out.bar = edit.ownBar ? null : bar;
+    if (from === "typed" && !(bar >= -1 && bar <= 1)) throw new Error("A bar is a number from -1 to 1.");
+    out.bar = { store: base.savedBar, set: null, typed: bar }[from];
   }
   if (edit.keep !== base.keep) out.keep = edit.keep;
   return out;
@@ -298,19 +321,28 @@ function overrideOf(edit, base) {
 
 function readEdit(box) {
   const field = (name) => box.querySelector(`[name="${name}"]`);
-  const out = { ownBar: field("ownBar").checked, keep: field("keep").checked };
+  const out = { ownBar: field("ownBar").checked, setBar: field("setBar").checked, keep: field("keep").checked };
   for (const name of ["method", "k", "query_tags", "bar", ...CHANNELS]) out[name] = field(name).value;
   return out;
 }
 
-const option = (value, chosen) => `<option value="${esc(value)}"${value === chosen ? " selected" : ""}>${esc(value)}</option>`;
+const option = (value, chosen, label = value) =>
+  `<option value="${esc(value)}"${value === chosen ? " selected" : ""}>${esc(label)}</option>`;
 
 // A store's Edit form: its unsent edit when there is one, else what the next search uses. `d`
 // is the store's decision in the attempt shown, if any.
 function editHtml(store, d, ui) {
   const base = nextBase(store, d);
   const e = ui.edits[store] ?? base;
-  const methods = [...new Set([...(details[store]?.methods_available ?? []), base.method, e.method])].filter(Boolean);
+  const own = details[store];
+  const methods = [...new Set([...(own?.methods_available ?? []), base.method, e.method])].filter(Boolean);
+  const methodLabel = (m) => (own?.chat_method === m ? `${m} (saved)` : m);
+  const builtIn = option("", e.method, `built-in default (${builtInMethod(own)})`);
+  const size = chat.settings.evidence_size;
+  const saved = own
+    ? `<p class="saved muted">Saved defaults: method ${esc(unset(own.chat_method))}, k ${esc(unset(own.chat_k))}, bar ${esc(unset(own.chat_bar, two(own.chat_bar)))}.
+        The built-in method, a blank k (the chat's evidence size, ${Number(size)}) and the eval set's bar clear a saved value: Re-run retrieval shows the result, and Set as default saves it.</p>`
+    : "";
   const weights = CHANNELS.map(
     (c) => `<label>${c[0].toUpperCase() + c.slice(1)} weight <input name="${c}" type="number" min="0" step="0.1" value="${esc(e[c])}"></label>`,
   ).join("");
@@ -322,14 +354,17 @@ function editHtml(store, d, ui) {
         <button type="button" data-save${off}>Yes, save</button> <button type="button" class="secondary" data-unsave>Cancel</button></div>`
       : "";
   return `<fieldset data-edit="${esc(store)}"><legend>${esc(store)}</legend><div class="row">
-      <label>Method <select name="method">${methods.map((m) => option(m, e.method)).join("")}</select></label>
-      <label>k <input name="k" type="number" min="1" max="${MAX_EVIDENCE}" step="1" value="${esc(e.k)}"></label>
+      <label>Method <select name="method">${builtIn}${methods.map((m) => option(m, e.method, methodLabel(m))).join("")}</select></label>
+      <label>k <input name="k" type="number" min="1" max="${MAX_EVIDENCE}" step="1" value="${esc(e.k)}" placeholder="${Number(size)}"></label>
+    </div><div class="row kw-only"><span class="muted">keyword_rag only:</span>
       <label>Query tags <select name="query_tags">${QUERY_TAGS.map((t) => option(t, e.query_tags)).join("")}</select></label>
       ${weights}
-      <label>Bar <input name="bar" type="number" min="-1" max="1" step="0.01" value="${esc(e.bar)}" placeholder="${esc(d && d.bar_source !== "override" ? two(d.bar) : "")}"${e.ownBar ? " disabled" : ""}></label>
-      <label class="check"><input name="ownBar" type="checkbox"${e.ownBar ? " checked" : ""}> Use the store's bar</label>
-      <label class="check"><input name="keep" type="checkbox"${e.keep ? " checked" : ""}> Search anyway</label>
     </div><div class="row">
+      <label>Bar <input name="bar" type="number" min="-1" max="1" step="0.01" value="${esc(e.bar)}" placeholder="${esc(d && d.bar_source !== "override" ? two(d.bar) : "")}"${e.ownBar || e.setBar ? " disabled" : ""}></label>
+      <label class="check"><input name="ownBar" type="checkbox"${e.ownBar ? " checked" : ""}> Use the store's bar</label>
+      <label class="check"><input name="setBar" type="checkbox"${e.setBar ? " checked" : ""}> Use the eval set's bar</label>
+      <label class="check"><input name="keep" type="checkbox"${e.keep ? " checked" : ""}> Search anyway</label>
+    </div>${saved}<div class="row">
       <button type="button" data-rerun${off}>Re-run retrieval</button>
       <button type="button" class="secondary" data-default${off}>Set as default</button>
       <span class="edit-note${note?.bad ? " err" : " muted"}" role="status">${esc(note?.text ?? "")}</span>
@@ -709,8 +744,6 @@ async function answerAttempt(n, number) {
   if (chat?.id === id) drawTurn(n);
 }
 
-const unset = (x, shown = x) => (x == null ? "unset" : shown);
-
 // Saves the store's settings, as its form shows them, as its default. The server saves the
 // override the chat holds, so a form that differs from it is re-run first.
 async function setDefault(n, store) {
@@ -901,9 +934,12 @@ const edited = (event) => {
   const box = event.target.closest("fieldset[data-edit]");
   const turn = event.target.closest(".turn");
   if (!box || !turn || !chat) return;
+  // The store's bar and the eval set's are one choice: checking one unchecks the other.
+  const other = { ownBar: "setBar", setBar: "ownBar" }[event.target.name];
+  if (other && event.target.checked) box.querySelector(`[name="${other}"]`).checked = false;
   const edit = readEdit(box);
   turnOf(chat.id, Number(turn.dataset.n)).edits[box.dataset.edit] = edit;
-  box.querySelector('[name="bar"]').disabled = edit.ownBar;
+  box.querySelector('[name="bar"]').disabled = edit.ownBar || edit.setBar;
 };
 $("log").addEventListener("input", edited);
 $("log").addEventListener("change", edited);

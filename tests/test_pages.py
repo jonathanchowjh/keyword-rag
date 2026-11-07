@@ -2406,6 +2406,11 @@ def test_a_deleted_store_shows_as_deleted(page, seeded):
     expect(page.locator("#doc-store option")).to_have_text(["c"])
     expect(page.locator("#log .user")).to_have_text("before it goes")  # the old chat reads whole
     expect(page.locator("#log .reply")).to_have_count(1)
+    step = retrieval_step(page)
+    expect(store_row(step, "doomed").locator("th")).to_have_text("doomed · deleted")
+    expect(store_row(step, "c").locator("th")).to_have_text("c")
+    passages = step.locator('ol.evidence li[data-store="doomed"] .what')
+    expect(passages.first).to_contain_text(" · doomed · deleted · ")
     with page.expect_response(lambda r: r.request.method == "PATCH"):
         page.get_by_role("button", name="Remove doomed").click()
     expect(chips).to_have_count(1)
@@ -2819,6 +2824,7 @@ def test_retrieval_step_shows_search_text_store_decisions_and_evidence(page, see
         attempt = message["attempts"][0]
         vo = next(d for d in attempt["decisions"] if d["store"] == "vo")
         vo.update(method="keyword_rag", search={**vo["search"], "query_tags": "classifier"})
+        vo["tags"] = ["enzyme", "rate"]
         first = next(e for e in attempt["evidence"] if e["n"] == 1)
         first["text"] += " and more" * 40
         route.fulfill(response=got, json=message)
@@ -2842,7 +2848,9 @@ def test_retrieval_step_shows_search_text_store_decisions_and_evidence(page, see
         expect(c.locator(".bar")).to_have_text("0.29")
         expect(c.locator(".kept")).to_have_text("kept · clears its bar")
         vo = store_row(step, "vo")
-        expect(vo.locator(".method")).to_have_text("keyword_rag · query tags: classifier")
+        expect(vo.locator(".method")).to_have_text(
+            "keyword_rag · query tags: classifier · enzyme, rate"
+        )
         expect(vo.locator(".kept")).to_have_text("kept · clears its bar")
 
         # Every passage the answer was given, by its number in the prompt.
@@ -3017,6 +3025,55 @@ def test_set_as_default_asks_then_saves(page, seeded):
     expect(box.get_by_label("Search anyway")).not_to_be_checked()
 
 
+def test_edit_clears_saved_defaults_and_set_as_default_saves_the_clear(page, seeded):
+    free_store(seeded, "cleared")  # no eval set: with no bar saved, it has none
+    conn = seeded.app.state.conn
+    db.set_chat_bar(conn, "cleared", 0.9)
+    db.set_chat_method(conn, "cleared", "vector")
+    db.set_chat_k(conn, "cleared", 3)
+    sent = attempt_posts(page)
+    open_chat(page, seeded, ("cleared",))
+    chat_ask(page, "volcano magma")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    step = retrieval_step(page)
+    row = store_row(step, "cleared")
+    expect(row.locator(".bar")).to_have_text("0.90 manual")
+    expect(row.locator(".method")).to_have_text("vector")
+    box = edit_box(step, "cleared")
+    expect(box.locator(".saved")).to_contain_text("Saved defaults: method vector, k 3, bar 0.90.")
+    expect(box.get_by_label("Method")).to_have_value("vector")
+    expect(box.locator('select[name="method"] option:checked')).to_have_text("vector (saved)")
+    expect(box.get_by_label("k", exact=True)).to_have_value("3")
+    expect(box.get_by_label("Use the store's bar")).to_be_checked()
+
+    # The built-in choices clear the saved values.
+    box.get_by_label("Method").select_option("")
+    box.get_by_label("k", exact=True).fill("")
+    box.get_by_label("Use the eval set's bar").check()
+    expect(box.get_by_label("Use the store's bar")).not_to_be_checked()
+    expect(box.get_by_label("Bar", exact=True)).to_be_disabled()
+    box.get_by_role("button", name="Set as default").click()
+    with page.expect_response(lambda r: r.url.endswith("/stores/cleared/default")):
+        box.get_by_role("button", name="Yes, save").click()
+    expect(box.locator(".edit-note")).to_have_text(
+        "Saved as cleared's default: method unset, k unset, bar unset."
+    )
+    assert sent == [{"overrides": {"cleared": {"method": None, "k": None, "bar": None}}}]
+    assert db.get_chat_method(conn, "cleared") is None and db.get_chat_k(conn, "cleared") is None
+    assert db.get_chat_bar(conn, "cleared") is None
+    assert httpx.get(f"{seeded.url}/collections/cleared/bar").json()["source"] == "none"
+    # The re-run made before the save already ran with the cleared values.
+    row = store_row(step, "cleared")
+    expect(row.locator(".bar")).to_have_text("none")
+    expect(row.locator(".kept")).to_have_text("kept · no bar")
+    expect(box.locator(".saved")).to_contain_text(
+        "Saved defaults: method unset, k unset, bar unset."
+    )
+    expect(box.get_by_label("k", exact=True)).to_have_value("8")
+    expect(box.get_by_label("Use the store's bar")).to_be_checked()
+    expect(box.get_by_label("Use the eval set's bar")).not_to_be_checked()
+
+
 DROPPED = {
     "store": "c",
     "method": "hybrid",
@@ -3050,6 +3107,7 @@ def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
         {**DROPPED, "store": "hand-bar", "bar": 0.4, "bar_source": "manual"},
         {**DROPPED, "store": "edited-bar", "bar": 0.35, "bar_source": "override"},
         {**DROPPED, "store": "no-set", "bar": None, "bar_source": "none"},
+        {**DROPPED, "store": "old-kw", "method": "keyword_rag"},  # saved before tags were kept
         {**DROPPED, "store": "broke", "best": None, "bar": None, "bar_source": None}
         | {"reason": "error", "error": "budget used up"},
         GONE,
@@ -3076,6 +3134,9 @@ def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
     expect(store_row(step, "hand-bar").locator(".bar")).to_have_text("0.40 manual")
     expect(store_row(step, "edited-bar").locator(".bar")).to_have_text("0.35 edited")
     expect(store_row(step, "no-set").locator(".bar")).to_have_text("none")
+    expect(store_row(step, "old-kw").locator(".method")).to_have_text(
+        "keyword_rag · query tags: similarity"
+    )
     broke = store_row(step, "broke")
     expect(broke.locator(".kept")).to_have_text("dropped · error: budget used up")
     expect(broke.locator(".best")).to_have_text("–")
@@ -3087,6 +3148,22 @@ def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
     expect(step.locator("fieldset[data-edit]")).to_have_count(2)
     expect(edit_box(step, "c")).to_be_visible()
     expect(edit_box(step, "vo")).to_be_visible()
+
+
+def test_a_kept_store_with_no_passages_says_the_answer_used_none(page, seeded):
+    kept = {**DROPPED, "kept": True, "reason": "no bar", "bar": None, "bar_source": "none"}
+    answer = {"answer": "Nothing matched.", "citations": [], "evidence": []}
+    chat_route(
+        page,
+        lambda route: route.fulfill(json=chat_message(route, decisions=[kept], **answer)),
+    )
+    open_chat(page, seeded, ("c",))
+    chat_ask(page, "something the store has no passage for")
+    expect(page.locator("#msg-1 .reply .none-kept")).to_have_text(
+        "The stores kept found no passages, so this answer used none."
+    )
+    step = retrieval_step(page)
+    expect(edit_box(step, "c").locator(".kw-only")).to_contain_text("keyword_rag only:")
 
 
 def test_edit_shows_the_chats_held_settings_and_set_as_default_saves_them(page, seeded):

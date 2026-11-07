@@ -144,3 +144,4 @@ td.num, td[data-said] { white-space:nowrap; }
 .edits { display:grid; gap:8px; }
 .edits input[type="number"] { width:6em; }
 .edits .row { margin:4px 0; }
+.edits .saved { margin:4px 0; font-size:12px; }
