@@ -3325,3 +3325,58 @@ def test_store_page_edits_and_resets_the_route_profile(page, seeded):
     expect(box).to_have_value(drafted)
     expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
     assert db.get_route_profile(conn, "routed") is None
+
+
+def test_check_routing_shows_both_modes(page, seeded):
+    sent = []
+    page.on(
+        "request",
+        lambda r: (
+            sent.append(json.loads(r.post_data or "{}"))
+            if r.url.endswith("/routing/eval")
+            else None
+        ),
+    )
+    open_chat(page, seeded, ("c",))
+    check = page.get_by_role("button", name="Check routing")
+    expect(check).to_be_disabled()  # one store: nothing to route between
+    open_chat(page, seeded, ("c", "vo"))
+    expect(check).to_be_enabled()
+    panel = page.locator("#routing-check")
+    expect(page.get_by_label("Questions to check on")).to_have_value("held_out")
+    with page.expect_response(lambda r: r.url.endswith("/routing/eval")):
+        check.click()
+    # c's and vo's 40 questions are all in their dev slices: none is held out.
+    expect(panel).to_contain_text("On 0 held-out questions")
+    expect(panel).to_contain_text("No questions to check")
+
+    page.get_by_label("Questions to check on").select_option("dev")
+    with page.expect_response(lambda r: r.url.endswith("/routing/eval")):
+        check.click()
+    expect(panel).to_contain_text(
+        "On 80 dev questions: these are the questions the bars were set on"
+    )
+    modes = panel.locator("table.modes tbody tr")
+    expect(modes.locator("th")).to_have_text(["Search every store", "By routing profile"])
+    expect(panel.locator("table.modes thead th")).to_have_text(
+        ["Mode", "Recall", "Precision", "None kept", "Stores searched"]
+    )
+    expect(modes.first.locator(".searched")).to_have_text("2.0")
+    expect(modes.first.locator(".recall")).to_have_text(re.compile(r"^\d+%$"))
+    stores_ = panel.locator("table.per-store tbody tr")
+    expect(stores_.locator("th")).to_have_text(["c", "vo"])
+    expect(stores_.locator(".questions")).to_have_text(["40", "40"])
+    assert sent == [
+        {"stores": ["c", "vo"], "split": "held_out"},
+        {"stores": ["c", "vo"], "split": "dev"},
+    ]
+
+    page.get_by_role("button", name="Hide").click()
+    expect(panel).to_be_empty()
+    page.expected = ["422"]
+    page.route(
+        "**/routing/eval",
+        lambda r: r.fulfill(status=422, json={"detail": "none of these <stores> has an eval set"}),
+    )
+    check.click()
+    expect(panel.locator(".err")).to_have_text("none of these <stores> has an eval set")

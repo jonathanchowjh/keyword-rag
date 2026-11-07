@@ -33,6 +33,10 @@
   .sources .what { color:var(--muted); font-size:12px; }
   .sources summary { cursor:pointer; }
   .sources .full { margin-top:4px; white-space:pre-wrap; }
+  #routing-check:empty { display:none; }
+  #routing-check { display:grid; gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; max-width:820px; }
+  #routing-check .tables { display:flex; flex-wrap:wrap; gap:16px; align-items:start; overflow-x:auto; }
+  #routing-check p { margin:0; }
   #compose { display:grid; gap:8px; max-width:820px; }
   #box { min-height:60px; }
   .spoken { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
@@ -69,6 +73,16 @@
           </select></span>
           <label>Model <select id="model"></select></label>
         </div>
+        <div class="row">
+          <button id="check-routing" type="button" class="secondary">Check routing</button>
+          <label>Questions to check on <select id="routing-split">
+            <option value="held_out">Held out: not the bars' own</option>
+            <option value="dev">Dev slice: the bars' own</option>
+            <option value="full">Whole eval sets</option>
+          </select></label>
+          <span class="muted">free: embeddings only</span>
+        </div>
+        <div id="routing-check" aria-live="polite"></div>
         <div class="row">
           <label>Add to <select id="doc-store"></select></label>
           <button id="add-doc" type="button" class="secondary">Add document</button>

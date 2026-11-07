@@ -1,4 +1,4 @@
-import { $, UNPRICED, api, esc, head, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
+import { $, UNPRICED, api, count, esc, head, modelOptions, pct, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
 
 const PASSAGE = 300; // characters of a source shown before it is expanded
 const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
@@ -23,6 +23,8 @@ const pending = {}; // chat id -> the message still on its way there
 const arrived = {}; // chat id -> a reply that came while its chat was loading, merged once it has
 const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes
 const turns = {}; // "chat id:message n" -> what the reader has open or edited there, kept across redraws
+let check = null; // the routing check shown: {id, stores, busy, result, error}, for one chat and its stores
+let checks = 0; // bumped by each check, so only the newest one draws
 
 // The chat's stores that still exist.
 const live = () => (chat ? chat.stores.filter((s) => !chat.deleted_stores.includes(s)) : []);
@@ -476,10 +478,80 @@ function drawHead() {
   $("evidence").value = chat.settings.evidence_size;
   $("rewrite").checked = Boolean(chat.settings.rewrite);
   $("routing").value = chat.settings.routing ?? "all";
+  drawCheck();
   const keep = $("doc-store").value;
   $("doc-store").innerHTML = live()
     .map((s) => `<option value="${esc(s)}"${s === keep ? " selected" : ""}>${esc(s)}</option>`)
     .join("");
+}
+
+// -- the routing check ------------------------------------------------------------------------
+
+// What the questions checked on are, by split.
+const SPLIT_SAYS = {
+  held_out: "held-out questions: those outside the dev slice the bars were set on",
+  dev: "dev questions: these are the questions the bars were set on",
+  full: "questions: the whole eval sets, the dev slice the bars were set on among them",
+};
+const MODES = { gate: "Search every store", profiles: "By routing profile" };
+
+function modeHtml(key, m) {
+  const searched = m.mean_searched == null ? "–" : Number(m.mean_searched).toFixed(1);
+  return `<tr><th scope="row">${esc(MODES[key])}</th><td class="num recall">${esc(pct(m.recall))}</td>
+    <td class="num precision">${esc(pct(m.precision))}</td><td class="num none">${esc(pct(m.none_rate))}</td>
+    <td class="num searched">${esc(searched)}</td></tr>`;
+}
+
+function perStoreHtml(store, s) {
+  return `<tr><th scope="row">${esc(store)}</th><td class="num questions">${esc(count(s.questions))}</td>
+    <td class="num recall-gate">${esc(pct(s.recall_gate))}</td><td class="num recall-profiles">${esc(pct(s.recall_profiles))}</td></tr>`;
+}
+
+function checkHtml(c) {
+  if (c.busy) return '<p class="muted">Checking routing…</p>';
+  const hide = '<div class="row"><button type="button" class="secondary" data-hide>Hide</button></div>';
+  if (c.error) return `<p class="err" role="status">${esc(c.error)}</p>${hide}`;
+  const r = c.result;
+  const said = `<p>On ${esc(count(r.questions))} ${esc(SPLIT_SAYS[r.split] ?? r.split)}.</p>`;
+  if (!r.questions) {
+    const why = r.split === "held_out" ? ": every question is in its eval set's dev slice. Check on the dev slice instead." : ".";
+    return `${said}<p class="muted">${esc(`No questions to check${why}`)}</p>${hide}`;
+  }
+  const modes = Object.keys(MODES).map((k) => modeHtml(k, r.modes[k])).join("");
+  const perStore = Object.entries(r.per_store).map(([store, s]) => perStoreHtml(store, s)).join("");
+  return `${said}<div class="tables">
+    <table class="modes decisions"><thead><tr><th scope="col">Mode</th><th scope="col">Recall</th><th scope="col">Precision</th>
+      <th scope="col">None kept</th><th scope="col">Stores searched</th></tr></thead><tbody>${modes}</tbody></table>
+    <table class="per-store decisions"><thead><tr><th scope="col">Store</th><th scope="col">Its questions</th>
+      <th scope="col">Kept, every store</th><th scope="col">Kept, by profile</th></tr></thead><tbody>${perStore}</tbody></table></div>
+    <p class="muted">Recall: the share of questions whose own store was kept. Precision: the share of the kept stores that
+      are the question's own. None kept: the share with no store kept. A store's own questions are its eval set's.</p>${hide}`;
+}
+
+// The check is shown while the page is on its chat and the chat has the stores it ran on.
+function drawCheck() {
+  const shown = check && chat && check.id === chat.id && check.stores.join("\n") === live().join("\n");
+  $("routing-check").innerHTML = shown ? checkHtml(check) : "";
+}
+
+// Scores the gate and the profile router on the chat's stores' own questions. Free: it embeds.
+async function checkRouting() {
+  if (!chat || live().length < 2) return;
+  const mine = ++checks;
+  const body = { stores: live(), split: $("routing-split").value };
+  check = { id: chat.id, stores: body.stores, busy: true };
+  drawCheck();
+  setBusy();
+  let done;
+  try {
+    done = { result: await api("/routing/eval", { method: "POST", body }) };
+  } catch (e) {
+    done = { error: e.message };
+  }
+  if (mine !== checks) return;
+  check = { ...check, busy: false, ...done };
+  drawCheck();
+  setBusy();
 }
 
 function drawLog() {
@@ -516,6 +588,7 @@ function setBusy() {
   $("send").disabled = !chat || waiting || !hasModel;
   $("add-doc").disabled = !chat || adding || !live().length;
   $("doc-store").disabled = adding;
+  $("check-routing").disabled = !chat || live().length < 2 || Boolean(check?.busy && check.id === chat.id);
   $("status").textContent = waiting ? "thinking…" : "";
 }
 
@@ -900,6 +973,12 @@ $("evidence").addEventListener("change", () => {
 });
 $("rewrite").addEventListener("change", () => patch({ rewrite: $("rewrite").checked }));
 $("routing").addEventListener("change", () => patch({ routing: $("routing").value }));
+$("check-routing").addEventListener("click", () => checkRouting().catch(said));
+$("routing-check").addEventListener("click", (event) => {
+  if (!event.target.closest("[data-hide]")) return;
+  check = null;
+  drawCheck();
+});
 $("add-doc").addEventListener("click", () => $("doc-file").click());
 $("doc-file").addEventListener("change", () => {
   const files = [...$("doc-file").files];

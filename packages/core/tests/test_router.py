@@ -5,13 +5,20 @@ import pytest
 
 from ragqa_core import db
 from ragqa_core.builder import Builder
+from ragqa_core.datasets import DEV_SLICE, dev_slice
 from ragqa_core.db import connect, replace_questions, set_source_enabled
 from ragqa_core.evaluator import Evaluator
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import Retriever
-from ragqa_core.router import CENTROID_SAMPLE, PROFILE_SAMPLE_CHARS, PROFILE_SAMPLES, Router
+from ragqa_core.router import (
+    CENTROID_SAMPLE,
+    PROFILE_SAMPLE_CHARS,
+    PROFILE_SAMPLES,
+    ROUTE_SAMPLE,
+    Router,
+)
 from ragqa_core.store import Store
 from ragqa_core.types import Bar, Item, Question, Skip
 
@@ -442,3 +449,135 @@ def test_best_match_and_route_score_take_the_texts_embedded_once(tmp_path):
     router.retriever.models.embed_query = None  # type: ignore[assignment]  # never embedded again
     assert router.best_match(spec, texts, vectors) == pytest.approx(1.0, abs=1e-3)
     assert router.route_score(spec, texts, vectors) is not None
+
+
+# -- the routing eval ------------------------------------------------------------------
+
+TOPICS = {"a": WORDS["enzyme"], "b": WORDS["volcano"], "n": WORDS["market"]}
+HELD_OUT = 30  # each set's questions past its dev slice
+
+
+def topic_questions(store: str) -> list[Question]:
+    """DEV_SLICE + HELD_OUT questions on the store's topic. The dev ones, which set its bars,
+    carry two of its words and the held-out ones four, so a held-out question clears its
+    home's bars by a margin, not by a tie; another topic shares no word with it."""
+    words = TOPICS[store].split()
+    qs = [Question(f"q{i:03d}", "", None, ["A"], [], {}) for i in range(DEV_SLICE + HELD_OUT)]
+    dev = {q.id for q in dev_slice(qs)}
+    return [replace(q, text=" ".join(words[: 2 if q.id in dev else 4] + [q.id])) for q in qs]
+
+
+def routed(tmp_path, names=("a", "b"), sets=("a", "b")) -> Router:
+    """A store per name, ten items on its topic each, and an eval set of topic_questions
+    for each name in `sets`, the default of the store named after it."""
+    conn = connect(tmp_path / "r.db")
+    store, models = Store(None, None), fake_models()
+    ai = fake_ai(conn, lambda p: "A")
+    ix = Indexer(conn, store, models, ai)
+    for name in names:
+        topic = TOPICS[name[0]]  # a copy, "a2", holds what "a" holds
+        spec = ix.create(name, "mcq", False)
+        ix.add(spec, [Item(f"{name}-{i}", f"{topic} note{i}", "A", "e") for i in range(10)], "x")
+    for name in sets:
+        replace_questions(conn, name, topic_questions(name), None)
+    retriever = Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix))
+    return Router(conn, retriever, Evaluator(conn, retriever, models, ai))
+
+
+def test_routing_eval_scores_gate_and_profiles_on_home_stores(tmp_path):
+    router = routed(tmp_path)
+    spec = {s: router.retriever.spec(s) for s in "ab"}
+    bars = {s: (router.bar(spec[s]).value, router.route_bar(spec[s]).value) for s in "ab"}
+    held = {s: [q for q in topic_questions(s) if q.text.count(" ") == 4] for s in "ab"}
+    for home, other in ("ab", "ba"):  # clear margins, by construction
+        for q in held[home]:
+            mine = router.best_match(spec[home], [q.text])
+            theirs = router.best_match(spec[other], [q.text])
+            route_mine = router.route_score(spec[home], [q.text])
+            route_theirs = router.route_score(spec[other], [q.text])
+            assert mine > bars[home][0] + 0.05 and theirs < bars[other][0] - 0.1  # type: ignore[operator]
+            assert route_mine > bars[home][1] + 0.05 and route_theirs < bars[other][1] - 0.1  # type: ignore[operator]
+
+    got = router.evaluate(["a", "b"])
+    assert got["split"] == "held_out" and got["questions"] == 2 * HELD_OUT
+    assert got["modes"] == {
+        "gate": {"recall": 1.0, "precision": 1.0, "none_rate": 0.0, "mean_searched": 2.0},
+        "profiles": {"recall": 1.0, "precision": 1.0, "none_rate": 0.0, "mean_searched": 1.0},
+    }
+    one = {"questions": HELD_OUT, "recall_gate": 1.0, "recall_profiles": 1.0}
+    assert got["per_store"] == {"a": one, "b": one}
+    row = next(r for r in got["rows"] if r["eval_set"] == "b")
+    assert row == {
+        "eval_set": "b",
+        "id": row["id"],
+        "homes": ["b"],
+        "gate_kept": ["b"],
+        "routed": ["b"],
+        "profiles_kept": ["b"],
+    }
+
+
+def test_routing_eval_defaults_to_held_out_questions(tmp_path):
+    router = routed(tmp_path)
+    dev = {q.id for q in dev_slice(topic_questions("a"))}
+    rows = router.evaluate(["a", "b"])["rows"]
+    assert len(rows) == 2 * HELD_OUT and not {r["id"] for r in rows} & dev
+    assert {r["id"] for r in router.evaluate(["a", "b"], "dev")["rows"]} == dev
+    full = router.evaluate(["a", "b"], "full")
+    every = sorted(q.id for q in topic_questions("a"))
+    assert full["questions"] == 2 * ROUTE_SAMPLE  # the first ROUTE_SAMPLE of each set, by id
+    assert [r["id"] for r in full["rows"] if r["eval_set"] == "a"] == every[:ROUTE_SAMPLE]
+    with pytest.raises(ValueError):
+        router.evaluate(["a", "b"], "train")  # type: ignore[arg-type]
+
+
+def test_routing_eval_counts_every_store_sharing_a_set_as_home(tmp_path, monkeypatch):
+    router = routed(tmp_path, names=("a", "a2", "b"))
+    db.set_default_eval_set(router.conn, "a2", "a")
+    first = router.evaluate(["a", "a2", "b"])
+    reads: list[str] = []
+    real = db.get_questions
+
+    def get_questions(conn, name, version=None):
+        reads.append(name)
+        return real(conn, name, version)
+
+    monkeypatch.setattr(db, "get_questions", get_questions)
+    got = router.evaluate(["a", "a2", "b"])
+    assert got == first
+    assert sorted(reads) == ["a", "b"]  # the bars are kept; each set is read once
+    assert got["questions"] == 2 * HELD_OUT
+    shared = [r for r in got["rows"] if r["eval_set"] == "a"]
+    assert len(shared) == HELD_OUT and all(r["homes"] == ["a", "a2"] for r in shared)
+    assert all(r["gate_kept"] == ["a", "a2"] for r in shared)
+    one = {"questions": HELD_OUT, "recall_gate": 1.0, "recall_profiles": 1.0}
+    assert got["per_store"]["a2"] == one
+    assert got["modes"]["gate"]["recall"] == 1.0 and got["modes"]["gate"]["precision"] == 1.0
+
+
+def test_routing_eval_handles_a_store_without_an_eval_set(tmp_path):
+    router = routed(tmp_path, names=("a", "b", "n"))
+    got = router.evaluate(["a", "b", "n"])
+    assert got["questions"] == 2 * HELD_OUT  # n has no questions of its own
+    assert got["per_store"]["n"] == {"questions": 0, "recall_gate": None, "recall_profiles": None}
+    # With no bar and no route bar, n is kept for every question: a wrong destination.
+    assert all(r["gate_kept"] == [r["eval_set"], "n"] for r in got["rows"])
+    assert all(r["profiles_kept"] == [r["eval_set"], "n"] for r in got["rows"])
+    gate, profiles = got["modes"]["gate"], got["modes"]["profiles"]
+    assert (gate["recall"], gate["precision"], gate["mean_searched"]) == (1.0, 0.5, 3.0)
+    assert (profiles["recall"], profiles["precision"], profiles["mean_searched"]) == (1.0, 0.5, 2.0)
+    with pytest.raises(ValueError, match="eval set"):
+        router.evaluate(["n"])
+
+
+def test_routing_eval_leaves_out_each_questions_excluded_ids(tmp_path):
+    router = routed(tmp_path)
+    qs = topic_questions("a")
+    dev = {q.id for q in dev_slice(qs)}
+    blind = {"excluded_ids": [f"a-{i}" for i in range(10)]}  # every item a holds
+    qs = [q if q.id in dev else replace(q, meta=blind) for q in qs]
+    replace_questions(router.conn, "a", qs, None)
+    got = router.evaluate(["a", "b"])
+    assert got["per_store"]["a"]["recall_gate"] == 0.0
+    assert got["per_store"]["b"]["recall_gate"] == 1.0
+    assert all(r["routed"] == ["a"] for r in got["rows"] if r["eval_set"] == "a")

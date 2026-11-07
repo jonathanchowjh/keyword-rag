@@ -22,6 +22,9 @@ PROFILE_TERMS = 20
 PROFILE_SAMPLES = 5
 PROFILE_SAMPLE_CHARS = 200
 CENTROID_SAMPLE = 2000
+ROUTE_SAMPLE = 200  # the most questions the routing eval takes from each eval set
+SPLITS = ("held_out", "dev", "full")  # the routing eval's: held_out is all but the dev slice
+MODE_SCORES = ("recall", "precision", "none_rate", "mean_searched")
 
 
 class Router:
@@ -75,20 +78,30 @@ class Router:
         return set_name, found["version"] if found else None
 
     def _questions(
-        self, spec: CollectionSpec, set_name: str, version: str | None
+        self,
+        homes: list[CollectionSpec],
+        set_name: str,
+        version: str | None,
+        split: str = "dev",
+        limit: int = BAR_SAMPLE,
     ) -> list[Question]:
-        """The questions a bar is set from: the set version's dev slice, less the leaked
-        ones, the first BAR_SAMPLE by id. Reads the whole version, and may scan the store
-        for leaks, so a kept bar never calls it."""
+        """The set version's questions in `split`, less those leaked into any of the homes'
+        stores, the first `limit` by id. With the defaults, the questions a bar is set from:
+        the dev slice. "held_out" is the rest of the set and "full" all of it. Reads the
+        whole version, and may scan the stores for leaks, so a kept bar never calls it."""
         questions = db.get_questions(self.conn, set_name, version)
-        leaked = self.evaluator.leaked_ids(spec, set_name)
-        usable = [q for q in dev_slice(questions) if q.id not in leaked]
-        return sorted(usable, key=lambda q: q.id)[:BAR_SAMPLE]
+        leaked = set().union(*(self.evaluator.leaked_ids(h, set_name) for h in homes))
+        if split != "full":
+            dev = dev_slice(questions)
+            in_dev = {q.id for q in dev}
+            questions = dev if split == "dev" else [q for q in questions if q.id not in in_dev]
+        usable = [q for q in questions if q.id not in leaked]
+        return sorted(usable, key=lambda q: q.id)[:limit]
 
     def _sample(self, spec: CollectionSpec) -> tuple[str, str | None, list[Question]] | None:
         """The store's eval set, its version and the questions a bar is set from."""
         found = self._set(spec)
-        return None if found is None else (*found, self._questions(spec, *found))
+        return None if found is None else (*found, self._questions([spec], *found))
 
     def _calibrate(
         self,
@@ -112,7 +125,7 @@ class Router:
         kept = db.get_store_bar(self.conn, spec.name, kind)
         if kept and kept["key"] == key:
             return self._made(kept["value"], kept["n"], set_name)
-        usable = self._questions(spec, set_name, version)
+        usable = self._questions([spec], set_name, version)
         value = None
         if len(usable) >= BAR_MIN:
             vectors = self._question_vectors(spec, set_name, version, usable)
@@ -250,3 +263,103 @@ class Router:
             centroid = mean / norm if norm > 0 else None
         self._centroids[spec.name] = (key, centroid)
         return centroid
+
+    # -- the routing eval ----------------------------------------------------------------
+
+    def evaluate(self, stores: list[str], split: str = "held_out") -> dict:
+        """How well the gate, and the router before it, send the listed stores' own eval set
+        questions to their homes: the listed stores whose default set the question is from.
+        Each store's set is read once at its version in force, in `split`, leaked questions
+        dropped and at most ROUTE_SAMPLE taken by id. A store with no set adds no questions,
+        but may still be kept for others'. Mode "gate" is a chat routing "all", "profiles" one
+        routing by profile, neither with a sticky store or one searched anyway. Embeddings
+        only: it spends nothing."""
+        if split not in SPLITS:
+            raise ValueError(f"unknown split '{split}'; known: {', '.join(SPLITS)}")
+        specs = [self.retriever.spec(name) for name in dict.fromkeys(stores)]
+        sets: dict[str, tuple[str | None, list[CollectionSpec]]] = {}
+        for spec in specs:
+            if (found := self._set(spec)) is not None:
+                sets.setdefault(found[0], (found[1], []))[1].append(spec)
+        if not sets:
+            raise ValueError("none of these stores has an eval set to check routing on")
+        asked = [
+            (q, {"eval_set": name, "id": q.id, "homes": [h.name for h in homes]})
+            for name, (version, homes) in sets.items()
+            for q in self._questions(homes, name, version, split, ROUTE_SAMPLE)
+        ]
+        rows = [row | {"gate_kept": [], "routed": [], "profiles_kept": []} for _, row in asked]
+        questions = [q for q, _ in asked]
+        embedded: dict[str, np.ndarray] = {}  # the questions as queries, once per qa type
+        for spec in specs:
+            if not questions:
+                break
+            if spec.qa_type not in embedded:
+                embedded[spec.qa_type] = self.embed(spec, [q.text for q in questions])
+            self._judge(spec, questions, embedded[spec.qa_type], rows)
+        per_store = {}
+        for spec in specs:
+            mine = [r for r in rows if spec.name in r["homes"]]
+            per_store[spec.name] = {
+                "questions": len(mine),
+                "recall_gate": share([spec.name in r["gate_kept"] for r in mine]),
+                "recall_profiles": share([spec.name in r["profiles_kept"] for r in mine]),
+            }
+        modes = {
+            "gate": mode_scores(rows, "gate_kept", [len(specs)] * len(rows)),
+            "profiles": mode_scores(rows, "profiles_kept", [len(r["routed"]) for r in rows]),
+        }
+        return {
+            "split": split,
+            "questions": len(rows),
+            "per_store": per_store,
+            "modes": modes,
+            "rows": rows,
+        }
+
+    def _judge(
+        self,
+        spec: CollectionSpec,
+        questions: list[Question],
+        vectors: np.ndarray,
+        rows: list[dict],
+    ) -> None:
+        """Adds the store to each question's row where the gate keeps it, the router routes
+        to it, and both: the rules a chat follows. Its best match leaves out the question's
+        excluded_ids, as its bar does; a store with no profile or no route bar is routed."""
+        bar = self.bar(spec)
+        _, targets = self._targets(spec)
+        route_bar = self.route_bar(spec).value if targets else None
+        disabled = tuple(db.disabled_sources(self.conn, spec.name))
+        for q, vector, row in zip(questions, vectors, rows, strict=True):
+            excluded = frozenset(q.meta.get("excluded_ids", []))
+            kept = self.kept(self._top(spec.name, vector, Skip(disabled, excluded)), bar)
+            routed = route_bar is None or self._closest(targets, vector) >= route_bar
+            if kept:
+                row["gate_kept"].append(spec.name)
+            if routed:
+                row["routed"].append(spec.name)
+            if kept and routed:
+                row["profiles_kept"].append(spec.name)
+
+
+def share(flags: list[bool]) -> float | None:
+    """The share of the flags that are true; None for none."""
+    return sum(flags) / len(flags) if flags else None
+
+
+def mode_scores(rows: list[dict], kept: str, searched: list[int]) -> dict:
+    """A routing mode's scores over the rows, where row[kept] lists the stores it kept:
+    recall, the share of questions with a home kept; precision, the mean share of homes
+    among the stores kept, over questions with any kept; none_rate, the share with none
+    kept; mean_searched, the mean of `searched`. All None for no rows."""
+    if not rows:
+        return dict.fromkeys(MODE_SCORES)
+    some = [r for r in rows if r[kept]]
+    homes = lambda r: len(set(r["homes"]) & set(r[kept]))  # noqa: E731
+    return {
+        "recall": share([homes(r) > 0 for r in rows]),
+        "precision": sum(homes(r) / len(r[kept]) for r in some) / len(some) if some else None,
+        "none_rate": share([not r[kept] for r in rows]),
+        "mean_searched": sum(searched) / len(rows),
+    }

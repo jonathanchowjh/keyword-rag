@@ -825,6 +825,7 @@ PUBLIC = {
     "/ai",
     "/chat",
     "/chats",
+    "/routing",
 }
 PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab", "/chat")
 
@@ -3577,3 +3578,38 @@ def test_deleting_a_store_drops_its_bar(client):
     assert client.get("/collections/c/bar").status_code == 404
     build_store()
     assert client.get("/collections/c/bar").json() == first
+
+
+def ledger(client) -> int:
+    return client.app.state.ai.sql("select count(*) as n from ai_ledger")[0]["n"]
+
+
+def test_routing_eval_route(client):
+    conn = client.app.state.conn
+    add_collection(client, name="c", questions=False)
+    add_collection(client, name="d", questions=False)
+    db.create_eval_set(conn, "e", "mcq")
+    qs = [Question(f"q{i:03d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(210)]
+    db.replace_questions(conn, "e", qs, None)
+    db.set_default_eval_set(conn, "c", "e")
+    spent = ledger(client)
+
+    r = client.post("/routing/eval", json={"stores": ["c", "d"]})
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["split"] == "held_out" and got["questions"] == 10
+    assert set(got["modes"]) == {"gate", "profiles"}
+    assert set(got["modes"]["gate"]) == {"recall", "precision", "none_rate", "mean_searched"}
+    assert got["per_store"]["c"]["questions"] == 10 and got["per_store"]["d"]["questions"] == 0
+    assert all(row["homes"] == ["c"] for row in got["rows"])
+    r = client.post("/routing/eval", json={"stores": ["c", "d"], "split": "dev"})
+    assert r.json()["split"] == "dev" and r.json()["questions"] == 200
+    assert ledger(client) == spent
+
+    assert client.post("/routing/eval", json={"stores": ["c", "nope"]}).status_code == 404
+    assert client.post("/routing/eval", json={"stores": ["c"]}).status_code == 422  # min 2
+    r = client.post("/routing/eval", json={"stores": ["c", "d"], "split": "train"})
+    assert r.status_code == 422
+    db.set_default_eval_set(conn, "c", None)
+    r = client.post("/routing/eval", json={"stores": ["c", "d"]})
+    assert r.status_code == 422 and "eval set" in r.json()["detail"]

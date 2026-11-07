@@ -285,6 +285,11 @@ class NewAttempt(BaseModel):
     drop: dict[str, list[Literal["method", "k", "search", "bar", "keep"]]] = {}
 
 
+class RoutingEval(BaseModel):
+    stores: list[str] = Field(min_length=2)
+    split: Literal["held_out", "dev", "full"] = "held_out"  # held_out: not the bars' dev slice
+
+
 class AnswerRequest(BaseModel):
     model: str | None = None
 
@@ -1321,6 +1326,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/chats/{chat_id}/stores/{store}/default")
     def chat_default(chat_id: str, store: str) -> dict:
         return state.chats.set_default(chat_id, store)
+
+    @app.post("/routing/eval")
+    def routing_eval(body: RoutingEval) -> dict:
+        """The gate and the profile router scored on the stores' own eval set questions, in
+        the request: embeddings only, so it spends nothing."""
+        return state.router.evaluate(body.stores, body.split)
 
     @app.post("/query")
     def query(body: QueryRequest) -> dict:
