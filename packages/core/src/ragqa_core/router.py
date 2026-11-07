@@ -33,10 +33,18 @@ class Router:
         self._profiles: dict[str, tuple[str, np.ndarray]] = {}  # store: (text sha256, vector)
         self._centroids: dict[str, tuple[tuple, np.ndarray | None]] = {}  # store: (key, centroid)
 
-    def best_match(self, spec: CollectionSpec, texts: list[str]) -> float:
-        """The highest top-1 meaning cosine over the texts; 0.0 for an empty store."""
+    def embed(self, spec: CollectionSpec, texts: list[str]) -> np.ndarray:
+        """The texts embedded as queries to a store of spec's type: what best_match and
+        route_score take as `vectors`, so a chat embeds a message once per type."""
+        return self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
+
+    def best_match(
+        self, spec: CollectionSpec, texts: list[str], vectors: np.ndarray | None = None
+    ) -> float:
+        """The highest top-1 meaning cosine over the texts (or their `vectors`, from embed);
+        0.0 for an empty store."""
         self.retriever.indexer.check_model(spec)
-        vectors = self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
+        vectors = self.embed(spec, texts) if vectors is None else vectors
         skip = Skip(tuple(db.disabled_sources(self.conn, spec.name)))
         return max((self._top(spec.name, v, skip) for v in vectors), default=0.0)
 
@@ -128,8 +136,7 @@ class Router:
         ids = [q.id for q in usable]
         have = self._vectors.get(key)
         if have is None or have[0] != ids:
-            texts = [q.text for q in usable]
-            vectors = self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
+            vectors = self.embed(spec, [q.text for q in usable])
             have = self._vectors[key] = (ids, vectors)
         return have[1]
 
@@ -177,14 +184,17 @@ class Router:
             return stored, False
         return self.draft_route_profile(spec), True
 
-    def route_score(self, spec: CollectionSpec, texts: list[str]) -> float | None:
-        """The highest cosine of the texts with the store's routing profile or its centroid;
-        None when it has neither, so a store that says nothing of itself is never left out."""
+    def route_score(
+        self, spec: CollectionSpec, texts: list[str], vectors: np.ndarray | None = None
+    ) -> float | None:
+        """The highest cosine of the texts (or their `vectors`, from embed) with the store's
+        routing profile or its centroid; None when it has neither, so a store that says
+        nothing of itself is never left out."""
         self.retriever.indexer.check_model(spec)
         _, targets = self._targets(spec)
         if not targets:
             return None
-        vectors = self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
+        vectors = self.embed(spec, texts) if vectors is None else vectors
         return max((self._closest(targets, v) for v in vectors), default=None)
 
     def route_bar(self, spec: CollectionSpec) -> Bar:

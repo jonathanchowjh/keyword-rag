@@ -23,7 +23,7 @@ from anyio import from_thread
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aiconnect.ai import (
     AI,
@@ -245,10 +245,22 @@ class NewChat(BaseModel):
 
 
 class ChatPatch(BaseModel):
+    """An absent field changes nothing; an explicit null is refused, not ignored."""
+
     title: str | None = None
     stores: list[str] | None = None
     evidence_size: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
     rewrite: bool | None = None
+    routing: Literal["all", "profiles"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_nulls(cls, data: object) -> object:
+        if isinstance(data, dict):
+            nulls = [f for f, value in data.items() if value is None and f in cls.model_fields]
+            if nulls:
+                raise ValueError(f"{', '.join(nulls)} cannot be null: leave a field out to keep it")
+        return data
 
 
 class NewMessage(BaseModel):
@@ -268,6 +280,9 @@ class StoreOverride(BaseModel):
 
 class NewAttempt(BaseModel):
     overrides: dict[str, StoreOverride] = {}
+    # fields of the chat's held overrides to drop, so they are what is in force again;
+    # dropped before the overrides are merged in
+    drop: dict[str, list[Literal["method", "k", "search", "bar", "keep"]]] = {}
 
 
 class AnswerRequest(BaseModel):
@@ -1296,7 +1311,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/chats/{chat_id}/messages/{n}/attempts")
     def chat_attempt(chat_id: str, n: int, body: NewAttempt) -> dict:
         overrides = {s: o.model_dump(exclude_unset=True) for s, o in body.overrides.items()}
-        return state.chats.rerun(chat_id, n, overrides)
+        drop = {s: list(fields) for s, fields in body.drop.items()}
+        return state.chats.rerun(chat_id, n, overrides, drop)
 
     @app.post("/chats/{chat_id}/messages/{n}/attempts/{attempt}/answer")
     def chat_answer(chat_id: str, n: int, attempt: int, body: AnswerRequest | None = None) -> dict:

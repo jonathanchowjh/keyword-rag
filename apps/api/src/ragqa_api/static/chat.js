@@ -222,11 +222,20 @@ function keptText(d) {
   return `${d.kept ? "kept" : "dropped"} · ${d.reason}`;
 }
 
-function decisionHtml(d) {
+// One store's row; with `routed`, its route score and route bar too (a decision saved
+// before routing has neither key: a dash).
+function decisionHtml(d, routed) {
+  const route = routed
+    ? `<td class="num route">${esc(two(d.route))}</td><td class="num route-bar">${esc(two(d.route_bar))}</td>`
+    : "";
   return `<tr data-store="${esc(d.store)}"${d.kept ? "" : ' class="dropped"'}><th scope="row">${esc(storeText(d.store))}</th>
-    <td class="method">${esc(methodText(d))}</td><td class="num best">${esc(two(d.best))}</td>
+    <td class="method">${esc(methodText(d))}</td>${route}<td class="num best">${esc(two(d.best))}</td>
     <td class="num bar">${esc(barText(d))}</td><td class="kept">${esc(keptText(d))}</td></tr>`;
 }
+
+// The Stores table shows route columns while the chat routes by profile, and always for an
+// attempt that was routed so.
+const routedBy = (a) => chat.settings.routing === "profiles" || a.decisions.some((d) => d.route != null || d.route_bar != null);
 
 // One passage the answer was given. Its id, ev-<message n>-<attempt>-<passage n>, is where
 // the answer's [n] links, so the attempts of one message never share an id.
@@ -254,7 +263,7 @@ function nextBase(store, d) {
   const size = chat.settings.evidence_size;
   const savedMethod = own ? (own.chat_method ?? builtInMethod(own)) : (d?.method ?? "hybrid");
   const savedK = own ? (own.chat_k ?? size) : (d?.k ?? size);
-  const savedBar = own ? (own.chat_bar ?? null) : d?.bar_source === "manual" ? d.bar : null;
+  const savedBar = own ? (own.chat_bar ?? null) : d?.bar_source === "manual" ? d.bar : null; // a held bar equal to it is the store's
   const base = (own ? own.search : d?.search) ?? {};
   const weights = { ...base.weights, ...held.search?.weights };
   const tags = held.search?.query_tags ?? base.query_tags ?? "similarity";
@@ -267,7 +276,6 @@ function nextBase(store, d) {
     setBar: heldBar && held.bar === null,
     bar: heldBar && held.bar !== null ? String(held.bar) : "",
     keep: Boolean(held.keep),
-    savedBar, // not a field: what "Use the store's bar" sends over a held bar
   };
   for (const c of CHANNELS) out[c] = String(weights[c] ?? 1);
   return out;
@@ -279,7 +287,8 @@ function decisionOf(n, store) {
   return m ? shownAttempt(m, turnOf(chat.id, n))?.decisions.find((d) => d.store === store) : undefined;
 }
 
-// The store's override for what the form changes from the next search's settings.
+// The store's override for what the form changes from the next search's settings, and the
+// held fields to drop: [override, drop].
 function changesOf(n, store) {
   const base = nextBase(store, decisionOf(n, store));
   return overrideOf(turnOf(chat.id, n).edits[store] ?? base, base);
@@ -287,10 +296,11 @@ function changesOf(n, store) {
 
 const barFrom = (e) => (e.ownBar ? "store" : e.setBar ? "set" : "typed");
 
-// The override for what `edit` changes from `base`, only the fields changed. A null clears
-// the saved value: the built-in method, a blank k (the chat's evidence size), the eval set's
-// bar. "Use the store's bar" over a held bar sends the saved bar, or null with none saved:
-// what an absent bar would use. Throws, with what to fix, on a value the route would refuse.
+// The override for what `edit` changes from `base`, only the fields changed, and the held
+// fields to drop: [override, drop]. A null clears the saved value: the built-in method, a
+// blank k (the chat's evidence size), the eval set's bar. "Use the store's bar" over a held
+// bar drops the held one, so the next search uses what is saved. Throws, with what to fix,
+// on a value the route would refuse.
 function overrideOf(edit, base) {
   const out = {};
   if (edit.method !== base.method) out.method = edit.method || null;
@@ -309,14 +319,16 @@ function overrideOf(edit, base) {
     (search.weights ??= {})[c] = weight;
   }
   if (Object.keys(search).length) out.search = search;
+  const drop = [];
   const from = barFrom(edit);
-  if (from !== barFrom(base) || (from === "typed" && edit.bar !== base.bar)) {
+  if (from === "store" && barFrom(base) !== "store") drop.push("bar");
+  else if (from !== barFrom(base) || (from === "typed" && edit.bar !== base.bar)) {
     const bar = edit.bar.trim() === "" ? NaN : Number(edit.bar);
     if (from === "typed" && !(bar >= -1 && bar <= 1)) throw new Error("A bar is a number from -1 to 1.");
-    out.bar = { store: base.savedBar, set: null, typed: bar }[from];
+    out.bar = from === "set" ? null : bar;
   }
   if (edit.keep !== base.keep) out.keep = edit.keep;
-  return out;
+  return [out, drop];
 }
 
 function readEdit(box) {
@@ -376,9 +388,11 @@ function editHtml(store, d, ui) {
 // of the chat's stores still there, showing what the chat's next search uses.
 function retrievalHtml(a, at, ui, latest) {
   const passages = [...a.evidence].sort((x, y) => x.n - y.n).map((e) => evidenceHtml(e, at, ui)).join("");
+  const routed = routedBy(a);
+  const routeHeads = routed ? '<th class="num">Route score</th><th class="num">Route bar</th>' : "";
   const stores = a.decisions.length
-    ? `<div class="scroll"><table class="decisions"><thead><tr><th>Store</th><th>Method</th><th class="num">Best match</th>
-        <th class="num">Bar</th><th>Kept</th></tr></thead><tbody>${a.decisions.map(decisionHtml).join("")}</tbody></table></div>`
+    ? `<div class="scroll"><table class="decisions"><thead><tr><th>Store</th><th>Method</th>${routeHeads}<th class="num">Best match</th>
+        <th class="num">Bar</th><th>Kept</th></tr></thead><tbody>${a.decisions.map((d) => decisionHtml(d, routed)).join("")}</tbody></table></div>`
     : '<p class="muted">No store was searched.</p>';
   const decision = (store) => a.decisions.find((d) => d.store === store);
   const edits = latest ? live().map((store) => editHtml(store, decision(store), ui)).join("") : "";
@@ -461,6 +475,7 @@ function drawHead() {
   $("add-store").disabled = !others.length;
   $("evidence").value = chat.settings.evidence_size;
   $("rewrite").checked = Boolean(chat.settings.rewrite);
+  $("routing").value = chat.settings.routing ?? "all";
   const keep = $("doc-store").value;
   $("doc-store").innerHTML = live()
     .map((s) => `<option value="${esc(s)}"${s === keep ? " selected" : ""}>${esc(s)}</option>`)
@@ -609,7 +624,7 @@ function askDelete(id) {
   });
 }
 
-// Saves a change to the open chat's title, stores, evidence size or rewrite.
+// Saves a change to the open chat's title, stores, evidence size, rewrite or routing.
 async function patch(body) {
   if (!chat) return;
   const id = chat.id;
@@ -690,9 +705,9 @@ async function rerun(n, store) {
   const id = chat.id;
   const ui = turnOf(id, n);
   if (ui.busy) return null;
-  let override;
+  let override, drop;
   try {
-    override = changesOf(n, store);
+    [override, drop] = changesOf(n, store);
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
     drawTurn(n);
@@ -703,8 +718,9 @@ async function rerun(n, store) {
   drawTurn(n);
   let attempt = null;
   try {
-    const overrides = Object.keys(override).length ? { [store]: override } : {};
-    attempt = await api(`/chats/${encodeURIComponent(id)}/messages/${Number(n)}/attempts`, { method: "POST", body: { overrides } });
+    const body = { overrides: Object.keys(override).length ? { [store]: override } : {} };
+    if (drop.length) body.drop = { [store]: drop };
+    attempt = await api(`/chats/${encodeURIComponent(id)}/messages/${Number(n)}/attempts`, { method: "POST", body });
     delete ui.edits[store]; // the new attempt ran with them
     ui.notes[store] = null;
     ui.tab = attempt.attempt;
@@ -752,7 +768,8 @@ async function setDefault(n, store) {
   ui.confirm = null;
   let edited = false;
   try {
-    edited = Object.keys(changesOf(n, store)).length > 0;
+    const [override, drop] = changesOf(n, store);
+    edited = Object.keys(override).length > 0 || drop.length > 0;
   } catch (e) {
     ui.notes[store] = { text: e.message, bad: true };
     drawTurn(n);
@@ -882,6 +899,7 @@ $("evidence").addEventListener("change", () => {
   }
 });
 $("rewrite").addEventListener("change", () => patch({ rewrite: $("rewrite").checked }));
+$("routing").addEventListener("change", () => patch({ routing: $("routing").value }));
 $("add-doc").addEventListener("click", () => $("doc-file").click());
 $("doc-file").addEventListener("change", () => {
   const files = [...$("doc-file").files];

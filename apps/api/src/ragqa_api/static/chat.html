@@ -63,6 +63,10 @@
           <label>Evidence size <input id="evidence" type="number" min="1" max="20" step="1"></label>
           <span><label class="check"><input id="rewrite" type="checkbox"> Rewrite follow-ups with AI</label>
             <span class="muted">costs one AI call per follow-up</span></span>
+          <span><label for="routing">Routing</label> <select id="routing">
+            <option value="all">Search every store</option>
+            <option value="profiles">By routing profile</option>
+          </select></span>
           <label>Model <select id="model"></select></label>
         </div>
         <div class="row">

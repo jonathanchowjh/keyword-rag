@@ -3219,6 +3219,85 @@ def test_edit_shows_the_chats_held_settings_and_set_as_default_saves_them(page, 
     assert (ran["k"], ran["reason"]) == (2, "search anyway")
 
 
+def test_retrieval_step_shows_route_columns_when_routing_by_profiles(page, seeded):
+    routed = {**DROPPED, "kept": True, "reason": "clears its bar", "route": 0.812}
+    routed["route_bar"] = 0.42
+    unrouted = {**DROPPED, "store": "vo", "best": None, "bar": None, "bar_source": None}
+    unrouted |= {"reason": "not routed", "route": 0.111, "route_bar": 0.4}
+    replies = [[DROPPED], [routed, unrouted]]  # DROPPED was saved before routing: no route keys
+
+    def reply(route):
+        n = 3 - len(replies)
+        route.fulfill(json=chat_message(route, n=n, decisions=replies.pop(0)))
+
+    chat_route(page, reply)
+    chat_id = open_chat(page, seeded, ("c", "vo"))
+    routing = page.get_by_label("Routing", exact=True)
+    expect(routing).to_have_value("all")
+    chat_ask(page, "one")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    one = retrieval_step(page, 1)
+    plain = ["Store", "Method", "Best match", "Bar", "Kept"]
+    expect(one.locator("table.decisions thead th")).to_have_text(plain)
+
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        routing.select_option("profiles")
+    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["settings"]["routing"] == "profiles"
+    routed_by = ["Store", "Method", "Route score", "Route bar", "Best match", "Bar", "Kept"]
+    expect(one.locator("table.decisions thead th")).to_have_text(routed_by)
+    expect(store_row(one, "c").locator(".route")).to_have_text("–")  # no route kept then
+    expect(store_row(one, "c").locator(".route-bar")).to_have_text("–")
+
+    chat_ask(page, "two")
+    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+    two = retrieval_step(page, 2)
+    c, vo = store_row(two, "c"), store_row(two, "vo")
+    expect(c.locator(".route")).to_have_text("0.81")
+    expect(c.locator(".route-bar")).to_have_text("0.42")
+    expect(c.locator(".kept")).to_have_text("kept · clears its bar")
+    expect(vo.locator(".route")).to_have_text("0.11")
+    expect(vo.locator(".route-bar")).to_have_text("0.40")
+    expect(vo.locator(".best")).to_have_text("–")
+    expect(vo.locator(".bar")).to_have_text("–")
+    expect(vo.locator(".kept")).to_have_text("dropped · not routed")
+
+    # Back on all, an attempt routed by profile keeps its columns; one that was not loses them.
+    with page.expect_response(lambda r: r.request.method == "PATCH"):
+        routing.select_option("all")
+    expect(one.locator("table.decisions thead th")).to_have_text(plain)
+    expect(two.locator("table.decisions thead th")).to_have_text(routed_by)
+
+
+def test_use_the_stores_bar_over_a_held_bar_drops_it(page, seeded):
+    free_store(seeded, "hb")  # no eval set: its bar is the saved one
+    db.set_chat_bar(seeded.app.state.conn, "hb", 0.05)
+    sent = attempt_posts(page)
+    chat_id = open_chat(page, seeded, ("hb",))
+    chat_ask(page, "volcano magma")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    step = retrieval_step(page)
+    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.05 manual")
+    box = edit_box(step, "hb")
+    box.get_by_label("Use the store's bar").uncheck()
+    box.get_by_label("Bar", exact=True).fill("0.25")
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+        box.get_by_role("button", name="Re-run retrieval").click()
+    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.25 edited")
+    expect(box.get_by_label("Use the store's bar")).not_to_be_checked()
+
+    box.get_by_label("Use the store's bar").check()
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+        box.get_by_role("button", name="Re-run retrieval").click()
+    assert sent == [
+        {"overrides": {"hb": {"bar": 0.25}}},
+        {"overrides": {}, "drop": {"hb": ["bar"]}},
+    ]
+    expect(page.locator("#msg-1").get_by_role("tab", name="Attempt 3")).to_be_visible()
+    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.05 manual")  # not "edited"
+    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["overrides"] == {}
+    expect(box.get_by_label("Use the store's bar")).to_be_checked()
+
+
 def test_store_page_edits_and_resets_the_route_profile(page, seeded):
     seeded.build("routed")
     conn = seeded.app.state.conn  # type: ignore[attr-defined]

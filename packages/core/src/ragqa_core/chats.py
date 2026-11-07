@@ -1,8 +1,9 @@
 """Saved chats: each message is searched across the chat's stores. A store is kept when its
 best match clears its bar, it has no bar, the last message kept it, or it is searched
-anyway; the kept stores' passages merge by RRF and answer the message. Each attempt is saved
-with its decisions and a snapshot of its evidence, so an old chat reads the same after a
-store is rebuilt or deleted.
+anyway. With routing "profiles", a store whose route score is below its route bar is not
+searched at all, unless the last message kept it or it is searched anyway. The kept stores'
+passages merge by RRF and answer the message. Each attempt is saved with its decisions and a
+snapshot of its evidence, so an old chat reads the same after a store is rebuilt or deleted.
 
 Overrides, the edits made to a store in the retrieval step, live here in memory until a
 restart. Only set_default writes them to the store.
@@ -12,6 +13,8 @@ import copy
 import math
 import threading
 from dataclasses import asdict, replace
+
+import numpy as np
 
 from aiconnect.ai import AI, NoConnection, UnknownModel, UnknownPrice
 from ragqa_core import db
@@ -49,7 +52,11 @@ RRF_K = 60
 NEW_TITLE = "New chat"
 TITLE_CHARS = 60
 OVERRIDE_FIELDS = ("method", "k", "search", "bar", "keep")
-ON_MERIT = ("search anyway", "clears its bar", "no bar")  # a store kept so is sticky
+ROUTING = ("all", "profiles")
+# A store kept so is sticky: on its own merit, past the gate. Not one only the last message
+# kept, and never one dropped ("below its bar", "not routed").
+ON_MERIT = ("search anyway", "clears its bar", "no bar", "no profile", "no route bar")
+DROPPED = ("below its bar", "not routed")
 
 
 class AlreadyAnswered(Exception):
@@ -69,6 +76,12 @@ def error_text(e: Exception) -> str:
 
 def whole(value: object, low: int, high: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def check_fields(fields) -> None:
+    unknown = [f for f in fields if f not in OVERRIDE_FIELDS]
+    if unknown:
+        raise ValueError(f"unknown override fields {unknown}; known: {list(OVERRIDE_FIELDS)}")
 
 
 def merge(lists: dict[str, list[Hit]], size: int) -> list[tuple[str, Hit, int, float]]:
@@ -154,6 +167,7 @@ class Chats:
         stores: list[str] | None = None,
         evidence_size: int | None = None,
         rewrite: bool | None = None,
+        routing: str | None = None,
     ) -> dict:
         """Only stores being added must exist, so a list naming a deleted store still saves."""
         chat = self._chat(chat_id)
@@ -175,6 +189,10 @@ class Chats:
             if not isinstance(rewrite, bool):
                 raise ValueError("rewrite must be true or false")
             settings["rewrite"] = rewrite
+        if routing is not None:
+            if routing not in ROUTING:
+                raise ValueError(f"routing must be one of {', '.join(ROUTING)}")
+            settings["routing"] = routing
         db.update_chat(self.conn, chat_id, title=title, stores=stores, settings=settings)
         if stores is not None:
             with self._lock:
@@ -234,19 +252,24 @@ class Chats:
             db.update_chat(self.conn, chat_id, title=" ".join(content.split())[:TITLE_CHARS])
         return {"n": n, "content": content, "attempts": [attempt]}
 
-    def rerun(self, chat_id: str, n: int, overrides: dict[str, dict]) -> dict:
-        """Merges the overrides into the chat's (all checked first: a bad one keeps none),
-        then adds an unanswered attempt to message n, searched with attempt 1's text."""
+    def rerun(
+        self,
+        chat_id: str,
+        n: int,
+        overrides: dict[str, dict],
+        drop: dict[str, list[str]] | None = None,
+    ) -> dict:
+        """Drops the named fields from the chat's overrides, so they are what is in force
+        again, and merges the overrides in (all checked first: a bad one keeps none), then
+        adds an unanswered attempt to message n, searched with attempt 1's text."""
         chat = self._chat(chat_id)
         message = self._message(chat_id, n)
         first = self._attempt_row(chat_id, n, 1)
         with self._lock:  # checked and merged in one hold, so no other edit lands between
-            current = self.overrides.get(chat_id, {})
-            merged = {
-                store: self._merged(chat, store, current.get(store, {}), override)
-                for store, override in overrides.items()
-            }
-            self.overrides.setdefault(chat_id, {}).update(merged)
+            current = self._dropped(chat, self.overrides.get(chat_id, {}), drop or {})
+            for store, override in overrides.items():
+                current[store] = self._merged(chat, store, current.get(store, {}), override)
+            self.overrides[chat_id] = {s: o for s, o in current.items() if o}
         return self._attempt(chat, n, message["content"], False, None, first["search_text"])
 
     def answer(self, chat_id: str, n: int, attempt: int, model: str | None = None) -> dict:
@@ -314,16 +337,23 @@ class Chats:
         with self._lock:
             overrides = copy.deepcopy(self.overrides.get(chat["id"], {}))
         sticky = self._sticky(chat["id"], n)
-        size = chat["settings"]["evidence_size"]
+        texts = list(dict.fromkeys([content, search_text]))
+        embedded: dict[str, np.ndarray] = {}  # qa type -> the texts' vectors, made once
         decisions, lists = [], {}
         for store in chat["stores"]:
             decision, hits = self._decide(
-                store, content, search_text, overrides.get(store, {}), store in sticky, size
+                store,
+                texts,
+                search_text,
+                embedded,
+                overrides.get(store, {}),
+                store in sticky,
+                chat["settings"],
             )
             decisions.append(decision)
             if hits:
                 lists[store] = hits
-        evidence = evidence_of(merge(lists, size))
+        evidence = evidence_of(merge(lists, chat["settings"]["evidence_size"]))
         row = {
             "search_text": search_text,
             "decisions": decisions,
@@ -345,15 +375,26 @@ class Chats:
         return self._attempt_row(chat["id"], n, number)
 
     def _decide(
-        self, store: str, content: str, search_text: str, override: dict, sticky: bool, size: int
+        self,
+        store: str,
+        texts: list[str],
+        search_text: str,
+        embedded: dict[str, np.ndarray],
+        override: dict,
+        sticky: bool,
+        settings: dict,
     ) -> tuple[dict, list[Hit]]:
-        """One store's decision and, when kept, its passages. A failure in its best match,
-        bar or retrieval is the decision's error, and the other stores still run."""
+        """One store's decision on the texts (the message and its search text) and, when
+        kept, its passages. A failure in its route, best match, bar or retrieval is the
+        decision's error, and the other stores still run. `embedded` holds the texts'
+        vectors by qa type, made by the first store of that type that needs them."""
         decision = {
             "store": store,
             "method": None,
             "k": None,
             "search": None,
+            "route": None,  # the route score and its bar; None unless routing by profile
+            "route_bar": None,
             "best": None,
             "bar": None,
             "bar_source": None,
@@ -372,7 +413,7 @@ class Chats:
         method = override["method"] if "method" in override else saved_method
         method = method or ("keyword_rag" if reasons["keyword_rag"] is None else "hybrid")
         k = override["k"] if "k" in override else db.get_chat_k(self.conn, store)
-        k = k or size
+        k = k or settings["evidence_size"]
         search = search_settings(spec.search or SearchSettings(), override.get("search"))
         if search.query_tags == "oracle":  # it needs a question's gold; a chat has none
             search = replace(search, query_tags="classifier")
@@ -380,22 +421,12 @@ class Chats:
         hits: list[Hit] = []
         with self.ai.tally() as spent:
             try:
-                texts = list(dict.fromkeys([content, search_text]))
-                best = decision["best"] = self.router.best_match(spec, texts)
-                if override.get("bar") is not None:
-                    bar = Bar(override["bar"], "override", None, 0)
-                else:  # a None bar is the eval set's, as if none were saved
-                    bar = self.router.bar(spec, saved="bar" not in override)
-                decision.update(bar=bar.value, bar_source=bar.source)
-                if override.get("keep"):
-                    reason = "search anyway"
-                elif sticky:
-                    reason = "kept from the last message"
-                elif self.router.kept(best, bar):
-                    reason = "no bar" if bar.value is None else "clears its bar"
-                else:
-                    reason = "below its bar"
-                decision.update(kept=reason != "below its bar", reason=reason)
+                if spec.qa_type not in embedded:
+                    embedded[spec.qa_type] = self.router.embed(spec, texts)
+                vectors = embedded[spec.qa_type]
+                routing = settings.get("routing", "all")
+                reason = self._reason(spec, texts, vectors, override, sticky, routing, decision)
+                decision.update(kept=reason not in DROPPED, reason=reason)
                 if decision["kept"]:
                     if reasons[method]:
                         raise MethodUnavailable(f"{method} {reasons[method]} on '{store}'")
@@ -405,6 +436,47 @@ class Chats:
                 hits = []
         decision["usd"] = spent["usd"]
         return decision, hits
+
+    def _reason(
+        self,
+        spec: CollectionSpec,
+        texts: list[str],
+        vectors: np.ndarray,
+        override: dict,
+        sticky: bool,
+        routing: str,
+        decision: dict,
+    ) -> str:
+        """Why the store is kept or dropped, the first that holds: search anyway, kept from
+        the last message, then with routing "profiles" no profile, no route bar or not
+        routed, then the gate's reasons. A store routed for want of a profile or a route bar
+        still goes through the gate; one not routed is never matched. Fills in the
+        decision's route, best match and bar as they are found."""
+        forced = bool(override.get("keep")) or sticky
+        routed_by = None  # why a store the router could not judge is searched
+        if routing == "profiles":
+            route = decision["route"] = self.router.route_score(spec, texts, vectors)
+            route_bar = self.router.route_bar(spec)
+            decision["route_bar"] = route_bar.value
+            if route is None:
+                routed_by = "no profile"
+            elif route_bar.value is None:
+                routed_by = "no route bar"
+            elif route < route_bar.value and not forced:
+                return "not routed"
+        best = decision["best"] = self.router.best_match(spec, texts, vectors)
+        if override.get("bar") is not None:
+            bar = Bar(override["bar"], "override", None, 0)
+        else:  # a None bar is the eval set's, as if none were saved
+            bar = self.router.bar(spec, saved="bar" not in override)
+        decision.update(bar=bar.value, bar_source=bar.source)
+        if override.get("keep"):
+            return "search anyway"
+        if sticky:
+            return "kept from the last message"
+        if not self.router.kept(best, bar):
+            return "below its bar"
+        return routed_by or ("no bar" if bar.value is None else "clears its bar")
 
     def _retrieve(
         self, spec: CollectionSpec, text: str, method: str, k: int, search: SearchSettings
@@ -488,6 +560,18 @@ class Chats:
             return
         self.ai.need_rates(*self.ai.resolve(ref))
 
+    def _dropped(self, chat: dict, held: dict[str, dict], drop: dict[str, list[str]]) -> dict:
+        """A copy of the chat's held overrides less the fields `drop` names, store by store,
+        checked: each store must be on the chat and each field an override field."""
+        out = {store: dict(override) for store, override in held.items()}
+        for store, fields in drop.items():
+            if store not in chat["stores"]:
+                raise ValueError(f"'{store}' is not on this chat")
+            check_fields(fields)
+            for field in fields:
+                out.get(store, {}).pop(field, None)
+        return out
+
     def _merged(self, chat: dict, store: str, current: dict, override: dict) -> dict:
         """The store's override with `override` merged in, checked. None for method, k or
         bar is the built-in default (see self.overrides); a search is merged into the one
@@ -495,9 +579,7 @@ class Chats:
         if store not in chat["stores"]:
             raise UnknownCollection(f"'{store}' is not on this chat")
         spec = self.retriever.spec(store)
-        unknown = [f for f in override if f not in OVERRIDE_FIELDS]
-        if unknown:
-            raise ValueError(f"unknown override fields {unknown}; known: {list(OVERRIDE_FIELDS)}")
+        check_fields(override)
         out = dict(current)
         for field, value in override.items():
             if field == "search":

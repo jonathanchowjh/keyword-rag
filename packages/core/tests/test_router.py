@@ -432,3 +432,13 @@ def test_a_kept_bar_reads_no_questions_and_scans_for_no_leaks(tmp_path, monkeypa
     evaluator.leaked_ids = refuse  # type: ignore[method-assign]
     fresh = Router(router.conn, router.retriever, evaluator)
     assert fresh.bar(spec) == gate and fresh.route_bar(spec) == route
+
+
+def test_best_match_and_route_score_take_the_texts_embedded_once(tmp_path):
+    router, spec = build(tmp_path, n_questions=0)
+    texts = ["nothing alike zzz", WORDS["volcano"]]
+    vectors = router.embed(spec, texts)
+    assert np.allclose(vectors, router.retriever.models.embed_query(texts, task=QUERY_TASK["mcq"]))
+    router.retriever.models.embed_query = None  # type: ignore[assignment]  # never embedded again
+    assert router.best_match(spec, texts, vectors) == pytest.approx(1.0, abs=1e-3)
+    assert router.route_score(spec, texts, vectors) is not None

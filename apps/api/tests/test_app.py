@@ -3391,6 +3391,50 @@ def test_chats_crud_and_errors(client):
     assert client.get(f"/chats/{chat['id']}").status_code == 404
 
 
+def test_routing_setting_patch(client):
+    add_collection(client)
+    chat = new_chat(client)
+    assert chat["settings"]["routing"] == "all"
+    url = f"/chats/{chat['id']}"
+    r = client.patch(url, json={"routing": "profiles"})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["routing"] == "profiles"
+    assert client.get(url).json()["settings"]["routing"] == "profiles"
+    assert client.patch(url, json={"routing": "nope"}).status_code == 422
+    # An explicit null is refused, not ignored: leave a field out to keep it.
+    for field in ("title", "stores", "evidence_size", "rewrite", "routing"):
+        r = client.patch(url, json={field: None})
+        assert r.status_code == 422, field
+        assert field in r.text
+    got = client.get(url).json()
+    assert got["title"] == "New chat" and got["stores"] == ["c"]
+    assert got["settings"] == {"evidence_size": 8, "rewrite": False, "routing": "profiles"}
+    message = client.post(f"{url}/messages", json={"content": "enzyme rate"}).json()
+    (d,) = message["attempts"][0]["decisions"]
+    assert "route" in d and "route_bar" in d
+    assert client.patch(url, json={"routing": "all"}).json()["settings"]["routing"] == "all"
+
+
+def test_chat_attempt_drop_removes_a_held_field_before_the_merge(client):
+    add_collection(client)
+    chat = new_chat(client)
+    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    r = client.post(url, json={"overrides": {"c": {"bar": 0.25, "k": 2}}})
+    assert r.json()["decisions"][0]["bar_source"] == "override"
+    r = client.post(url, json={"overrides": {}, "drop": {"c": ["bar"]}})
+    assert r.status_code == 200, r.text
+    assert r.json()["decisions"][0]["bar_source"] != "override"
+    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}
+    for drop in ({"other": ["bar"]}, {"c": ["colour"]}, {"c": "bar"}):
+        r = client.post(url, json={"drop": drop})
+        assert r.status_code == 422, drop
+    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}
+    r = client.post(url, json={"overrides": {"c": {"bar": 0.3}}, "drop": {"c": ["bar", "k"]}})
+    assert r.json()["decisions"][0]["bar"] == 0.3
+    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"bar": 0.3}}
+
+
 def test_chat_message_returns_decisions_evidence_and_cost(client):
     add_collection(client)
     chat = new_chat(client)

@@ -15,7 +15,7 @@ from ragqa_core.prompts import CHAT_TURNS
 from ragqa_core.retriever import MethodUnavailable, Retriever, UnknownCollection
 from ragqa_core.router import BAR_MIN, Router
 from ragqa_core.store import Store
-from ragqa_core.types import Item, Question
+from ragqa_core.types import Bar, Item, Question
 
 WORDS = {
     "a": "enzyme kinetics catalyst assay substrate",
@@ -131,6 +131,9 @@ def test_create_list_get_update_delete_a_chat(tmp_path):
         chats.update(first["id"], evidence_size=21)
     with pytest.raises(UnknownCollection):
         chats.update(first["id"], stores=["a", "nope"])
+    assert chats.update(first["id"], routing="profiles")["settings"]["routing"] == "profiles"
+    with pytest.raises(ValueError):
+        chats.update(first["id"], routing="nope")
 
     drop_store(chats, "b")
     got = chats.get(first["id"])
@@ -574,3 +577,140 @@ def test_a_deleted_store_is_skipped_and_old_messages_keep_their_evidence(tmp_pat
     assert two["answer"] and two["error"] is None
     with pytest.raises(UnknownCollection):
         chats.rerun(chat["id"], 2, {"a": {"k": 2}})
+
+
+# -- routing by profile ------------------------------------------------------------
+
+
+def profiles(chats: Chats, stores: list[str]) -> dict:
+    return chats.update(chats.create(stores)["id"], routing="profiles")
+
+
+def test_profiles_routing_skips_unrouted_stores_without_searching_them(tmp_path):
+    chats, _ = build(tmp_path)
+    everything = chats.create(["a", "b"])
+    one = attempt(chats.ask(everything["id"], ENZYME))
+    for d in one["decisions"]:  # routing "all": no route is computed
+        assert (d["route"], d["route_bar"]) == (None, None)
+    assert decision(one, "b")["reason"] == "below its bar"
+
+    matched: list[str] = []
+    real = chats.router.best_match
+
+    def best_match(spec, texts, vectors=None):
+        matched.append(spec.name)
+        return real(spec, texts, vectors)
+
+    chats.router.best_match = best_match  # type: ignore[method-assign]
+    chat = profiles(chats, ["a", "b"])
+    two = attempt(chats.ask(chat["id"], ENZYME))
+    a, b = decision(two, "a"), decision(two, "b")
+    assert a["route"] >= a["route_bar"] and (a["kept"], a["reason"]) == (True, "clears its bar")
+    assert a["best"] is not None and a["bar"] is not None
+    assert b["route"] < b["route_bar"]
+    assert (b["kept"], b["reason"]) == (False, "not routed")
+    assert (b["best"], b["bar"], b["bar_source"], b["error"]) == (None, None, None, None)
+    assert matched == ["a"]  # b's best match was never computed
+    assert {e["store"] for e in two["evidence"]} == {"a"}
+
+
+def test_profiles_routing_respects_sticky_and_search_anyway(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = profiles(chats, ["a", "b"])
+    one = attempt(chats.ask(chat["id"], ENZYME))
+    assert decision(one, "a")["reason"] == "clears its bar"
+    assert decision(one, "b")["reason"] == "not routed"
+    chats.router.route_bar = lambda spec: Bar(0.999, "set", spec.name, BAR_MIN)  # type: ignore[method-assign]
+
+    two = attempt(chats.ask(chat["id"], "and its rate?"))
+    a, b = decision(two, "a"), decision(two, "b")
+    assert a["route"] < a["route_bar"] == 0.999  # not routed, but the last message kept it
+    assert (a["kept"], a["reason"]) == (True, "kept from the last message")
+    assert a["best"] is not None and a["bar"] is not None
+    assert (b["kept"], b["reason"]) == (False, "not routed")  # "not routed" is not sticky
+    assert {e["store"] for e in two["evidence"]} == {"a"}
+
+    forced = chats.rerun(chat["id"], 2, {"b": {"keep": True}})
+    b = decision(forced, "b")
+    assert b["route"] < b["route_bar"] and b["best"] is not None
+    assert (b["kept"], b["reason"]) == (True, "search anyway")
+    assert {e["store"] for e in forced["evidence"]} == {"a", "b"}
+
+    chats.rerun(chat["id"], 2, {}, drop={"b": ["keep"]})  # b is no longer forced
+    three = attempt(chats.ask(chat["id"], "and its cost?"))
+    # a was kept on message 2 only by stickiness, b only when forced in an unanswered re-run.
+    assert [d["reason"] for d in three["decisions"]] == ["not routed", "not routed"]
+    assert three["evidence"] == []
+
+
+def test_a_store_without_a_route_bar_is_routed(tmp_path):
+    chats, _ = build(tmp_path)
+    copy_store(chats, "a_copy", "a")  # no eval set: no route bar, and no gate bar
+    ix = chats.retriever.indexer
+    ix.create("empty", "multihop", False)  # no items, no profile: no route score
+    chat = profiles(chats, ["b", "a_copy", "empty"])
+    one = attempt(chats.ask(chat["id"], ENZYME))
+    assert decision(one, "b")["reason"] == "not routed"
+    copied = decision(one, "a_copy")
+    assert copied["route"] is not None and copied["route_bar"] is None
+    assert (copied["kept"], copied["reason"]) == (True, "no route bar")
+    assert copied["bar_source"] == "none"
+    empty = decision(one, "empty")
+    assert (empty["route"], empty["route_bar"]) == (None, None)
+    assert (empty["kept"], empty["reason"]) == (True, "no profile")
+    assert {e["store"] for e in one["evidence"]} == {"a_copy"}
+
+    # Routed that way, a store still goes through the gate.
+    db.set_chat_bar(chats.conn, "a_copy", 0.999)
+    db.set_chat_bar(chats.conn, "empty", 0.5)
+    rerun = chats.rerun(chat["id"], 1, {})
+    assert decision(rerun, "a_copy")["reason"] == "below its bar"
+    assert decision(rerun, "empty")["reason"] == "below its bar"
+    # Kept for want of a profile or a route bar, a store is sticky, as one that clears its
+    # bar is: message 1's answered attempt kept both.
+    two = attempt(chats.ask(chat["id"], "and its rate?"))
+    assert decision(two, "a_copy")["reason"] == "kept from the last message"
+    assert decision(two, "empty")["reason"] == "kept from the last message"
+
+
+def test_one_attempt_embeds_its_texts_once_per_qa_type(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = profiles(chats, ["a", "b"])
+    chats.ask(chat["id"], ENZYME)  # the bars are set and kept
+    models = chats.retriever.models
+    real = models.embed_query
+    embedded: list[list[str]] = []
+
+    def embed_query(texts, task=""):
+        embedded.append(list(texts))
+        return real(texts, task=task)
+
+    models.embed_query = embed_query  # type: ignore[method-assign]
+    chats.retriever.retrieve = lambda *a, **k: []  # type: ignore[method-assign]
+    rerun = chats.rerun(chat["id"], 1, {"b": {"keep": True}})  # both stores' best matches
+    assert all(d["route"] is not None and d["best"] is not None for d in rerun["decisions"])
+    assert embedded == [[ENZYME]]
+
+
+def test_rerun_drop_removes_held_fields_before_the_merge(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = chats.create(["a", "b"])
+    chats.ask(chat["id"], ENZYME)
+    edited = decision(chats.rerun(chat["id"], 1, {"a": {"bar": 0.5, "k": 3}}), "a")
+    assert edited["bar_source"] == "override"
+    dropped = decision(chats.rerun(chat["id"], 1, {}, drop={"a": ["bar"]}), "a")
+    assert (dropped["bar_source"], dropped["k"]) == ("set", 3)
+    assert chats.overrides[chat["id"]] == {"a": {"k": 3}}
+    chats.rerun(chat["id"], 1, {"a": {"bar": 0.2}}, drop={"a": ["bar", "k"]})
+    assert chats.overrides[chat["id"]] == {"a": {"bar": 0.2}}  # dropped, then merged
+    kept = {"a": {"bar": 0.2}}
+    for overrides, drop in [
+        ({}, {"c": ["bar"]}),  # not on the chat
+        ({}, {"a": ["colour"]}),
+        ({"a": {"k": 0}}, {"a": ["bar"]}),  # a bad override keeps no drop either
+    ]:
+        with pytest.raises(ValueError):
+            chats.rerun(chat["id"], 1, overrides, drop=drop)
+        assert chats.overrides[chat["id"]] == kept
+    chats.rerun(chat["id"], 1, {}, drop={"a": ["bar"], "b": ["keep"]})
+    assert chats.overrides[chat["id"]] == {}  # nothing held is no override
