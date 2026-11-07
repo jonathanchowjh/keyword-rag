@@ -4,21 +4,30 @@
 
 - Store routing: a store has a routing profile (`route_profile`, set with
   `PATCH /collections/{name}`; `POST /collections/{name}/route-profile/draft`
-  drafts one from the store's top 20 terms and 5 sample passages; `GET` returns
+  drafts one: a Store line, the store's top 20 terms, a Sources line and 5 sample
+  passages; `GET` returns
   `route_profile` and `route_profile_drafted`). A chat's new Routing setting
   (`all` or `profiles`, `PATCH /chats/{id}`) gives each store a route score, the
   higher of the cosine to its profile and to its average item (centroid of up to
-  2,000 items), against a route bar calibrated like the gate's bar and recomputed
-  when the profile changes. Reasons: "no profile" and "no route bar" (always
-  searched), "not routed" (not searched), then the gate; sticky and "search
-  anyway" still apply. Decisions gain `route` and `route_bar`.
+  2,000 items), over the message and its search text as the gate's best match is,
+  against a route bar calibrated like the gate's bar and recomputed when the
+  profile changes. Reasons: "no profile" (no saved profile, an empty draft and no
+  items) and "no route bar" (always routed: the gate still decides, so such a
+  store can be "below its bar"), "not routed" (not searched), then the gate;
+  sticky and "search anyway" still apply. Decisions gain `route` and `route_bar`.
+  On the store page, Use the drafted profile fills the box with the draft; Save
+  keeps it.
 - Routing eval: `POST /routing/eval` and a Check routing panel score the gate and
   the profile router on the stores' own eval set questions (held out by default,
   dev and full selectable; up to 200 per set): recall, precision, none rate, mean
-  searched and per-store recall. It uses embeddings only and runs in the request.
+  searched and per-store recall. The panel checks the chat's stores (at least two)
+  and says why a store adds no questions (no eval set, or a set of 200 or fewer,
+  all dev slice); the API takes any list and names each store's `eval_set`. It
+  uses embeddings only and runs in the request.
 - Chat API: `PATCH /chats/{id}` refuses an explicit null for title, stores,
   evidence_size, rewrite or routing (422). The attempts body takes an optional
-  `drop: {store: [field, ...]}` that removes held edits before the new ones merge.
+  `drop: {store: [field, ...]}` that removes held edits before the new ones merge;
+  a store not on the chat is a 404.
 - Roadmap: profiles and routing are built; a learned router is next.
 - Chat across stores: chats are saved on the server (`/chats`) and search several
   stores. Each store has a bar, the 5th percentile of the best matches of its own

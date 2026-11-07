@@ -474,16 +474,19 @@ For each message the service does this:
 every store goes to the gate) or `profiles` ("By routing profile"). With `profiles`, each store is first given a
 route score, the higher of two cosines: the message's to the store's
 [routing profile](#routing-profiles), and its to the store's average item (the
-normalised centroid of up to 2,000 of its items). Like the bar, a route bar is
+normalised centroid of up to 2,000 of its items). As the gate takes the higher of
+the message's and the search text's best match, the route score takes the higher
+of the message's and the search text's. Like the bar, a route bar is
 worked out from the store's own default eval set (the 5th percentile of its
 questions' route scores, dev slice, up to 200) and recomputed when the routing
 profile, the eval set or the store changes. A store's reason in the retrieval
 step, in the order they are checked:
 
-- **no profile**: no saved profile and an empty draft, or no items. Always
-  searched.
+- **no profile**: nothing to compare the message with: no saved profile, a
+  draft with no topics and no sample passages, and no items to average. Always
+  routed: the gate still decides, so a store below its bar shows "below its bar".
 - **no route bar**: no eval set, or fewer than 20 usable questions. Always
-  searched.
+  routed, and the gate decides, as for no profile.
 - **not routed**: the route score is below the route bar. Not searched.
 - otherwise the gate decides, as above.
 
@@ -495,18 +498,22 @@ embeddings only.
 
 A store's page has a **Routing profile** section: a short text saying what the
 store is about, which routing compares a message against. Until you save one the
-router uses a draft it writes from the store (its top 20 terms and 5 sample
-passages of up to 200 characters) and keeps it up to date as the store changes;
-the section says "Drafted from the store" or "Edited by hand". Edit and save to
-set your own, or **Use the drafted profile** to go back. Saving a profile
-recomputes the route bar.
+router uses a draft it writes from the store (a Store line with its name and
+types, its top 20 terms, a Sources line naming its switched-on sources, and 5
+sample passages of up to 200 characters) and keeps it up to date as the store
+changes; the section says "Drafted from the store" or "Edited by hand". Edit and
+save to set your own. **Use the drafted profile** fills the box with the draft
+and saves nothing: your text is kept until you press Save, which then goes back
+to the draft (saving a blank box does too). Saving a profile recomputes the
+route bar.
 
 ### Check routing
 
 The Chat page's **Check routing** button (with a **Questions to check on**
 choice) scores the gate and the profile router
-on the stores' own questions, and costs nothing. Pick the stores (at least two)
-and a split: **held out** (the default) uses the questions outside the dev slice
+on the stores' own questions, and costs nothing. It checks the chat's stores (it
+needs at least two; `POST /routing/eval` takes any list of stores) on a split:
+**held out** (the default) uses the questions outside the dev slice
 the bars were set on, so the score is not marked by the same questions that set
 the bars; **dev** and **full** are also offered, and dev is in-sample. Up to 200
 questions are taken from each store's default eval set, and a question's homes
@@ -518,8 +525,12 @@ profiles) it shows:
 - **none rate**: how often no store was kept;
 - **mean searched**: how many stores were searched per question;
 
-and, per store, its recall: that store was kept on its home questions. It runs
-in the request (the call may be slow for many stores).
+and, per store, its recall: that store was kept on its home questions. A store
+whose eval set has no more than 200 questions has all of them in the dev slice,
+so it adds no held-out questions: the panel says so and suggests the dev split
+(a store with no eval set adds none either, and is still scored when kept for
+another store's question). It runs in the request (the call may be slow for many
+stores).
 
 **The retrieval step.** Under each answer you can open the step to see every
 store's decision; for `keyword_rag`, the Method column also shows the query
@@ -744,7 +755,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `POST /eval-sets/{name}/uploads?filename=` | The raw file as the body; returns `{upload_id, preview}` |
 | `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
 | `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, its saved chat defaults `chat_method`, `chat_k` and `chat_bar` (null when none is saved), `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
-| `PATCH /collections/{name}` | `{eval_set}`: make that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or while a load or question import is queued or running on the store |
+| `PATCH /collections/{name}` | `{eval_set, route_profile}`, each optional: a field left out is kept. `eval_set` makes that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. `route_profile` is below. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or, for `eval_set` only, while a load or question import is queued or running on the store |
 | `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
 | `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost. `accept=text` takes only `.txt` and `.md` files (422 otherwise); the chat uses it. A source name is cleaned to letters, digits, space, `_`, `.` and `-`, at most 64 characters |
@@ -763,12 +774,12 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
 | `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept. 409 when the store was built with another embedding model |
-| `PATCH /collections/{name}` also takes `route_profile`; `POST /collections/{name}/route-profile/draft` | `route_profile` is the store's routing profile text (null or blank clears it); `GET /collections/{name}` returns `route_profile` and `route_profile_drafted` (true when the text is the router's draft, not a saved one). The draft endpoint returns `{route_profile}`, the router's draft, without saving it |
-| `POST /routing/eval` | `{stores (at least 2), split = held_out\|dev\|full}`: the gate and the profile router scored on the stores' own eval set questions (see [Check routing](#check-routing)). Returns `{split, questions, per_store, modes, rows}`: `modes` has `gate` and `profiles`, each with recall, precision, none rate and mean searched. Embeddings only, so it spends nothing; 422 when none of the stores has an eval set |
+| `PATCH /collections/{name}` also takes `route_profile`; `POST /collections/{name}/route-profile/draft` | `route_profile` is the store's routing profile text (null or blank goes back to the draft); `GET /collections/{name}` returns `route_profile` and `route_profile_drafted` (true when the text is the router's draft, not a saved one). The draft endpoint returns `{route_profile}`, the router's draft, without saving it |
+| `POST /routing/eval` | `{stores (at least 2), split = held_out\|dev\|full}`: the gate and the profile router scored on the stores' own eval set questions (see [Check routing](#check-routing)). Returns `{split, questions, per_store, modes, rows}`: `per_store` has each store's `eval_set` (null for none), `questions` and its recall in each mode; `modes` has `gate` and `profiles`, each with recall, precision, none rate and mean searched. Embeddings only, so it spends nothing. 404 for an unknown store; 409 when a store was built with another embedding model; 422 for fewer than two stores, an unknown split, or none of the stores having an eval set |
 | `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}`. 404 for an unknown store; 422 for no stores |
 | `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, and the `overrides` it holds; change `{title, stores, evidence_size, rewrite, routing}` (`routing` is `all` or `profiles`); delete. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, or an explicit null for any of the fields |
 | `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt; each decision has the store's `method`, `k`, `search`, `best`, `bar`, `bar_source`, `route` and `route_bar` (null with routing `all`), `tags` (the query tags `keyword_rag` picked, else null), `kept`, `reason`, `usd` and `error`. 404 for an unknown chat; 422 for empty text, or an answer model that is unknown or has no price, before anything is saved |
-| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}, drop?: {store: [field, ...]}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. `drop` removes the named fields (`method`, `k`, `search`, `bar`, `keep`) from the edits the chat already holds for a store before the new overrides merge; the page uses it for Use the store's bar. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
+| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}, drop?: {store: [field, ...]}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. `drop` removes the named fields (`method`, `k`, `search`, `bar`, `keep`) from the edits the chat already holds for a store before the new overrides merge; the page uses it for Use the store's bar. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store, or a store in `overrides` or `drop` that is not on the chat; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
 | `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered. An answer model that is unknown or has no price becomes the attempt's `error` |
 | `POST /chats/{id}/stores/{store}/default` | Set as default: save, as the store's own, only the fields the chat's override for it names (method, k, search settings, bar), where `null` clears the saved value, then drop the override; "search anyway" is not saved. Returns `{search, chat_method, chat_k, chat_bar}`. 404 for an unknown chat, or a store not on it |
 | `POST /chat` | The single-store chat, unchanged. `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
