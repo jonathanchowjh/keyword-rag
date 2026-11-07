@@ -4,6 +4,7 @@ router before it: how well a message matches a store's routing profile and avera
 import hashlib
 import json
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 
@@ -98,11 +99,6 @@ class Router:
         usable = [q for q in questions if q.id not in leaked]
         return sorted(usable, key=lambda q: q.id)[:limit]
 
-    def _sample(self, spec: CollectionSpec) -> tuple[str, str | None, list[Question]] | None:
-        """The store's eval set, its version and the questions a bar is set from."""
-        found = self._set(spec)
-        return None if found is None else (*found, self._questions([spec], *found))
-
     def _calibrate(
         self,
         spec: CollectionSpec,
@@ -114,14 +110,18 @@ class Router:
         under `kind` until its key changes. The key is read before scoring, so a store that
         changes meanwhile is scored again next time, and is checked before the questions are
         read: the leaked ones depend only on the count and the version, both in the key.
-        A None score is left out."""
+        It holds the last finished load, import or copy too, so a worker job that lands while
+        the bar is set (and drops the kept row) leaves no row under its key. A None score is
+        left out."""
+        job = db.last_item_job(self.conn, spec.name)
         count = self.retriever.store.count(spec.name)
         disabled = tuple(db.disabled_sources(self.conn, spec.name))
         found = self._set(spec)
         if found is None:
             return Bar(None, "none", None, 0)
         set_name, version = found
-        key = json.dumps([set_name, version, count, sorted(disabled), spec.dense_model, *key_extra])
+        key = [set_name, version, count, sorted(disabled), job, spec.dense_model, *key_extra]
+        key = json.dumps(key)
         kept = db.get_store_bar(self.conn, spec.name, kind)
         if kept and kept["key"] == key:
             return self._made(kept["value"], kept["n"], set_name)
@@ -186,7 +186,7 @@ class Router:
             lines.append("Sources: " + ", ".join(sources))
         first = next(store.scroll(spec.name, PROFILE_SAMPLES, disabled), [])
         samples = [" ".join(h.text.split())[:PROFILE_SAMPLE_CHARS] for h in first]
-        samples = [t for t in samples[:PROFILE_SAMPLES] if t]
+        samples = [t for t in samples if t]
         lines += [f"- {t}" for t in samples]
         return "\n".join(lines), bool(terms or samples)
 
@@ -198,35 +198,45 @@ class Router:
         return self.draft_route_profile(spec), True
 
     def route_score(
-        self, spec: CollectionSpec, texts: list[str], vectors: np.ndarray | None = None
+        self,
+        spec: CollectionSpec,
+        texts: list[str],
+        vectors: np.ndarray | None = None,
+        targets: tuple[str | None, list[np.ndarray]] | None = None,
     ) -> float | None:
         """The highest cosine of the texts (or their `vectors`, from embed) with the store's
-        routing profile or its centroid; None when it has neither, so a store that says
-        nothing of itself is never left out."""
+        routing profile or its centroid (or the `targets` given, from `targets`); None when
+        it has neither, so a store that says nothing of itself is never left out."""
         self.retriever.indexer.check_model(spec)
-        _, targets = self._targets(spec)
-        if not targets:
+        _, near = self.targets(spec) if targets is None else targets
+        if not near:
             return None
         vectors = self.embed(spec, texts) if vectors is None else vectors
-        return max((self._closest(targets, v) for v in vectors), default=None)
+        return max((self._closest(near, v) for v in vectors), default=None)
 
-    def route_bar(self, spec: CollectionSpec) -> Bar:
+    def route_bar(
+        self, spec: CollectionSpec, targets: tuple[str | None, list[np.ndarray]] | None = None
+    ) -> Bar:
         """The bar the store's eval set sets for its route score, the way `bar` sets the
-        gate's: its key also holds the profile's sha256, so an edit sets it again."""
+        gate's: its key also holds the profile's sha256, so an edit sets it again. Pass the
+        store's `targets` when route_score was given them, so the profile is drafted once."""
         self.retriever.indexer.check_model(spec)
-        sha, targets = self._targets(spec)
+        sha, near = self.targets(spec) if targets is None else targets
 
         def score_one(q: Question, vector: np.ndarray, skip: tuple[str, ...]) -> float | None:
-            return self._closest(targets, vector) if targets else None
+            return self._closest(near, vector) if near else None
 
         return self._calibrate(spec, "route", [sha], score_one)
 
     def _closest(self, targets: list[np.ndarray], vector: np.ndarray) -> float:
         return max(float(t @ vector) for t in targets)
 
-    def _targets(self, spec: CollectionSpec) -> tuple[str | None, list[np.ndarray]]:
+    def targets(self, spec: CollectionSpec) -> tuple[str | None, list[np.ndarray]]:
         """The profile text's sha256 (None when the profile is missing) and the vectors a
-        message is compared with: the profile's and the centroid, those the store has."""
+        message is compared with: the profile's and the centroid, those the store has.
+        Drafting the profile scrolls the store, so a caller that needs both route_score and
+        route_bar makes these once and passes them to each."""
+        self.retriever.indexer.check_model(spec)
         sha, profile = self._profile(spec)
         centroid = self._centroid(spec)
         return sha, [v for v in (profile, centroid) if v is not None]
@@ -266,20 +276,26 @@ class Router:
 
     # -- the routing eval ----------------------------------------------------------------
 
-    def evaluate(self, stores: list[str], split: str = "held_out") -> dict:
+    def evaluate(
+        self, stores: list[str], split: Literal["held_out", "dev", "full"] = "held_out"
+    ) -> dict:
         """How well the gate, and the router before it, send the listed stores' own eval set
         questions to their homes: the listed stores whose default set the question is from.
         Each store's set is read once at its version in force, in `split`, leaked questions
         dropped and at most ROUTE_SAMPLE taken by id. A store with no set adds no questions,
-        but may still be kept for others'. Mode "gate" is a chat routing "all", "profiles" one
-        routing by profile, neither with a sticky store or one searched anyway. Embeddings
-        only: it spends nothing."""
+        but may still be kept for others'; per_store names each store's set (None for none),
+        so a store that adds none can be told apart from one whose set is all dev slice.
+        Mode "gate" is a chat routing "all", "profiles" one routing by profile, neither with
+        a sticky store or one searched anyway. Embeddings only: it spends nothing."""
         if split not in SPLITS:
             raise ValueError(f"unknown split '{split}'; known: {', '.join(SPLITS)}")
         specs = [self.retriever.spec(name) for name in dict.fromkeys(stores)]
         sets: dict[str, tuple[str | None, list[CollectionSpec]]] = {}
+        set_of: dict[str, str | None] = {}
         for spec in specs:
-            if (found := self._set(spec)) is not None:
+            found = self._set(spec)
+            set_of[spec.name] = found[0] if found else None
+            if found is not None:
                 sets.setdefault(found[0], (found[1], []))[1].append(spec)
         if not sets:
             raise ValueError("none of these stores has an eval set to check routing on")
@@ -301,6 +317,7 @@ class Router:
         for spec in specs:
             mine = [r for r in rows if spec.name in r["homes"]]
             per_store[spec.name] = {
+                "eval_set": set_of[spec.name],
                 "questions": len(mine),
                 "recall_gate": share([spec.name in r["gate_kept"] for r in mine]),
                 "recall_profiles": share([spec.name in r["profiles_kept"] for r in mine]),
@@ -328,8 +345,9 @@ class Router:
         to it, and both: the rules a chat follows. Its best match leaves out the question's
         excluded_ids, as its bar does; a store with no profile or no route bar is routed."""
         bar = self.bar(spec)
-        _, targets = self._targets(spec)
-        route_bar = self.route_bar(spec).value if targets else None
+        found = self.targets(spec)
+        targets = found[1]
+        route_bar = self.route_bar(spec, found).value if targets else None
         disabled = tuple(db.disabled_sources(self.conn, spec.name))
         for q, vector, row in zip(questions, vectors, rows, strict=True):
             excluded = frozenset(q.meta.get("excluded_ids", []))
@@ -356,7 +374,10 @@ def mode_scores(rows: list[dict], kept: str, searched: list[int]) -> dict:
     if not rows:
         return dict.fromkeys(MODE_SCORES)
     some = [r for r in rows if r[kept]]
-    homes = lambda r: len(set(r["homes"]) & set(r[kept]))  # noqa: E731
+
+    def homes(r: dict) -> int:
+        return len(set(r["homes"]) & set(r[kept]))
+
     return {
         "recall": share([homes(r) > 0 for r in rows]),
         "precision": sum(homes(r) / len(r[kept]) for r in some) / len(some) if some else None,

@@ -441,6 +441,34 @@ def test_a_kept_bar_reads_no_questions_and_scans_for_no_leaks(tmp_path, monkeypa
     assert fresh.bar(spec) == gate and fresh.route_bar(spec) == route
 
 
+def test_a_job_finished_while_a_bar_is_set_leaves_no_bar_under_the_old_key(tmp_path):
+    router, spec = build(tmp_path)
+    conn = router.conn
+    db.set_route_profile(conn, "c", "enzyme kinetics")
+    real = router._questions
+
+    def worker_finishes_meanwhile(*a, **k):
+        # An import in the worker replaces items at the same count and drops the bars.
+        db.update_job(conn, db.create_job(conn, "import", "c", {}), status="done")
+        db.delete_store_bars(conn, "c")
+        return real(*a, **k)
+
+    read: list[int] = []
+
+    def questions_(*a, **k):
+        read.append(1)
+        return real(*a, **k)
+
+    for set_bar in (router.bar, router.route_bar):
+        router._questions = worker_finishes_meanwhile  # type: ignore[method-assign]
+        set_bar(spec)
+        router._questions = questions_  # type: ignore[method-assign]
+        set_bar(spec)
+        set_bar(spec)
+        assert len(read) == 1  # saved under the key read before the job: set again, once
+        read.clear()
+
+
 def test_best_match_and_route_score_take_the_texts_embedded_once(tmp_path):
     router, spec = build(tmp_path, n_questions=0)
     texts = ["nothing alike zzz", WORDS["volcano"]]
@@ -505,7 +533,7 @@ def test_routing_eval_scores_gate_and_profiles_on_home_stores(tmp_path):
         "profiles": {"recall": 1.0, "precision": 1.0, "none_rate": 0.0, "mean_searched": 1.0},
     }
     one = {"questions": HELD_OUT, "recall_gate": 1.0, "recall_profiles": 1.0}
-    assert got["per_store"] == {"a": one, "b": one}
+    assert got["per_store"] == {"a": {"eval_set": "a", **one}, "b": {"eval_set": "b", **one}}
     row = next(r for r in got["rows"] if r["eval_set"] == "b")
     assert row == {
         "eval_set": "b",
@@ -551,7 +579,7 @@ def test_routing_eval_counts_every_store_sharing_a_set_as_home(tmp_path, monkeyp
     assert len(shared) == HELD_OUT and all(r["homes"] == ["a", "a2"] for r in shared)
     assert all(r["gate_kept"] == ["a", "a2"] for r in shared)
     one = {"questions": HELD_OUT, "recall_gate": 1.0, "recall_profiles": 1.0}
-    assert got["per_store"]["a2"] == one
+    assert got["per_store"]["a2"] == {"eval_set": "a", **one}  # a's set, a2's default
     assert got["modes"]["gate"]["recall"] == 1.0 and got["modes"]["gate"]["precision"] == 1.0
 
 
@@ -559,7 +587,9 @@ def test_routing_eval_handles_a_store_without_an_eval_set(tmp_path):
     router = routed(tmp_path, names=("a", "b", "n"))
     got = router.evaluate(["a", "b", "n"])
     assert got["questions"] == 2 * HELD_OUT  # n has no questions of its own
-    assert got["per_store"]["n"] == {"questions": 0, "recall_gate": None, "recall_profiles": None}
+    no_set = {"eval_set": None, "questions": 0, "recall_gate": None, "recall_profiles": None}
+    assert got["per_store"]["n"] == no_set
+    assert got["per_store"]["a"]["eval_set"] == "a"  # so the page can say why one adds none
     # With no bar and no route bar, n is kept for every question: a wrong destination.
     assert all(r["gate_kept"] == [r["eval_set"], "n"] for r in got["rows"])
     assert all(r["profiles_kept"] == [r["eval_set"], "n"] for r in got["rows"])

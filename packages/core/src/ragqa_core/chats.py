@@ -455,8 +455,9 @@ class Chats:
         forced = bool(override.get("keep")) or sticky
         routed_by = None  # why a store the router could not judge is searched
         if routing == "profiles":
-            route = decision["route"] = self.router.route_score(spec, texts, vectors)
-            route_bar = self.router.route_bar(spec)
+            targets = self.router.targets(spec)  # drafted once for the score and its bar
+            route = decision["route"] = self.router.route_score(spec, texts, vectors, targets)
+            route_bar = self.router.route_bar(spec, targets)
             decision["route_bar"] = route_bar.value
             if route is None:
                 routed_by = "no profile"
@@ -562,11 +563,12 @@ class Chats:
 
     def _dropped(self, chat: dict, held: dict[str, dict], drop: dict[str, list[str]]) -> dict:
         """A copy of the chat's held overrides less the fields `drop` names, store by store,
-        checked: each store must be on the chat and each field an override field."""
+        checked: each store must be on the chat, as in _merged, and each field an override
+        field."""
         out = {store: dict(override) for store, override in held.items()}
         for store, fields in drop.items():
             if store not in chat["stores"]:
-                raise ValueError(f"'{store}' is not on this chat")
+                raise UnknownCollection(f"'{store}' is not on this chat")
             check_fields(fields)
             for field in fields:
                 out.get(store, {}).pop(field, None)

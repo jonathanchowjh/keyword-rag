@@ -3406,7 +3406,7 @@ def test_routing_setting_patch(client):
     for field in ("title", "stores", "evidence_size", "rewrite", "routing"):
         r = client.patch(url, json={field: None})
         assert r.status_code == 422, field
-        assert field in r.text
+        assert field in r.json()["detail"][0]["msg"]  # r.text echoes the input: no test
     got = client.get(url).json()
     assert got["title"] == "New chat" and got["stores"] == ["c"]
     assert got["settings"] == {"evidence_size": 8, "rewrite": False, "routing": "profiles"}
@@ -3427,7 +3427,8 @@ def test_chat_attempt_drop_removes_a_held_field_before_the_merge(client):
     assert r.status_code == 200, r.text
     assert r.json()["decisions"][0]["bar_source"] != "override"
     assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}
-    for drop in ({"other": ["bar"]}, {"c": ["colour"]}, {"c": "bar"}):
+    assert client.post(url, json={"drop": {"other": ["bar"]}}).status_code == 404
+    for drop in ({"c": ["colour"]}, {"c": "bar"}):
         r = client.post(url, json={"drop": drop})
         assert r.status_code == 422, drop
     assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}

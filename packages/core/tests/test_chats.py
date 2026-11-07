@@ -620,7 +620,7 @@ def test_profiles_routing_respects_sticky_and_search_anyway(tmp_path):
     one = attempt(chats.ask(chat["id"], ENZYME))
     assert decision(one, "a")["reason"] == "clears its bar"
     assert decision(one, "b")["reason"] == "not routed"
-    chats.router.route_bar = lambda spec: Bar(0.999, "set", spec.name, BAR_MIN)  # type: ignore[method-assign]
+    chats.router.route_bar = lambda spec, targets=None: Bar(0.999, "set", spec.name, BAR_MIN)  # type: ignore[method-assign]
 
     two = attempt(chats.ask(chat["id"], "and its rate?"))
     a, b = decision(two, "a"), decision(two, "b")
@@ -673,6 +673,24 @@ def test_a_store_without_a_route_bar_is_routed(tmp_path):
     assert decision(two, "empty")["reason"] == "kept from the last message"
 
 
+def test_a_routed_decision_drafts_each_profile_once(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = profiles(chats, ["a", "b"])
+    drafted: list[str] = []
+    real = chats.router._draft
+
+    def draft(spec):
+        drafted.append(spec.name)
+        return real(spec)
+
+    chats.router._draft = draft  # type: ignore[method-assign]
+    chats.ask(chat["id"], ENZYME)  # the route bars are set
+    assert sorted(drafted) == ["a", "b"]  # the route score and its bar share one draft
+    drafted.clear()
+    chats.rerun(chat["id"], 1, {})  # the route bars are kept
+    assert sorted(drafted) == ["a", "b"]
+
+
 def test_one_attempt_embeds_its_texts_once_per_qa_type(tmp_path):
     chats, _ = build(tmp_path)
     chat = profiles(chats, ["a", "b"])
@@ -704,8 +722,10 @@ def test_rerun_drop_removes_held_fields_before_the_merge(tmp_path):
     chats.rerun(chat["id"], 1, {"a": {"bar": 0.2}}, drop={"a": ["bar", "k"]})
     assert chats.overrides[chat["id"]] == {"a": {"bar": 0.2}}  # dropped, then merged
     kept = {"a": {"bar": 0.2}}
+    with pytest.raises(UnknownCollection):  # not on the chat, as an override's store
+        chats.rerun(chat["id"], 1, {}, drop={"c": ["bar"]})
+    assert chats.overrides[chat["id"]] == kept
     for overrides, drop in [
-        ({}, {"c": ["bar"]}),  # not on the chat
         ({}, {"a": ["colour"]}),
         ({"a": {"k": 0}}, {"a": ["bar"]}),  # a bad override keeps no drop either
     ]:
