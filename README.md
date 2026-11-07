@@ -470,6 +470,57 @@ For each message the service does this:
    that evidence. When no store is kept, or the kept stores find nothing, the
    model answers without passages, and the page says the answer used none.
 
+**Routing.** A chat's **Routing** setting is `all` ("Search every store", the default:
+every store goes to the gate) or `profiles` ("By routing profile"). With `profiles`, each store is first given a
+route score, the higher of two cosines: the message's to the store's
+[routing profile](#routing-profiles), and its to the store's average item (the
+normalised centroid of up to 2,000 of its items). Like the bar, a route bar is
+worked out from the store's own default eval set (the 5th percentile of its
+questions' route scores, dev slice, up to 200) and recomputed when the routing
+profile, the eval set or the store changes. A store's reason in the retrieval
+step, in the order they are checked:
+
+- **no profile**: no saved profile and an empty draft, or no items. Always
+  searched.
+- **no route bar**: no eval set, or fewer than 20 usable questions. Always
+  searched.
+- **not routed**: the route score is below the route bar. Not searched.
+- otherwise the gate decides, as above.
+
+Sticky stores and "search anyway" still apply. The retrieval step shows the
+route score and route bar in two more columns. Routing costs nothing: it uses
+embeddings only.
+
+### Routing profiles
+
+A store's page has a **Routing profile** section: a short text saying what the
+store is about, which routing compares a message against. Until you save one the
+router uses a draft it writes from the store (its top 20 terms and 5 sample
+passages of up to 200 characters) and keeps it up to date as the store changes;
+the section says "Drafted from the store" or "Edited by hand". Edit and save to
+set your own, or **Use the drafted profile** to go back. Saving a profile
+recomputes the route bar.
+
+### Check routing
+
+The Chat page's **Check routing** button (with a **Questions to check on**
+choice) scores the gate and the profile router
+on the stores' own questions, and costs nothing. Pick the stores (at least two)
+and a split: **held out** (the default) uses the questions outside the dev slice
+the bars were set on, so the score is not marked by the same questions that set
+the bars; **dev** and **full** are also offered, and dev is in-sample. Up to 200
+questions are taken from each store's default eval set, and a question's homes
+are every listed store whose default set it came from. For each mode (gate,
+profiles) it shows:
+
+- **recall**: a home store was kept;
+- **precision**: homes kept over stores kept;
+- **none rate**: how often no store was kept;
+- **mean searched**: how many stores were searched per question;
+
+and, per store, its recall: that store was kept on its home questions. It runs
+in the request (the call may be slow for many stores).
+
 **The retrieval step.** Under each answer you can open the step to see every
 store's decision; for `keyword_rag`, the Method column also shows the query
 tags it picked. Edit a store's method, k, search settings or bar, or tick
@@ -712,10 +763,12 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
 | `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept. 409 when the store was built with another embedding model |
+| `PATCH /collections/{name}` also takes `route_profile`; `POST /collections/{name}/route-profile/draft` | `route_profile` is the store's routing profile text (null or blank clears it); `GET /collections/{name}` returns `route_profile` and `route_profile_drafted` (true when the text is the router's draft, not a saved one). The draft endpoint returns `{route_profile}`, the router's draft, without saving it |
+| `POST /routing/eval` | `{stores (at least 2), split = held_out\|dev\|full}`: the gate and the profile router scored on the stores' own eval set questions (see [Check routing](#check-routing)). Returns `{split, questions, per_store, modes, rows}`: `modes` has `gate` and `profiles`, each with recall, precision, none rate and mean searched. Embeddings only, so it spends nothing; 422 when none of the stores has an eval set |
 | `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}`. 404 for an unknown store; 422 for no stores |
-| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, and the `overrides` it holds; change `{title, stores, evidence_size, rewrite}`; delete. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores or an evidence size outside 1 to 20 |
-| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt; each decision has the store's `method`, `k`, `search`, `best`, `bar`, `bar_source`, `tags` (the query tags `keyword_rag` picked, else null), `kept`, `reason`, `usd` and `error`. 404 for an unknown chat; 422 for empty text, or an answer model that is unknown or has no price, before anything is saved |
-| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
+| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, and the `overrides` it holds; change `{title, stores, evidence_size, rewrite, routing}` (`routing` is `all` or `profiles`); delete. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, or an explicit null for any of the fields |
+| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt; each decision has the store's `method`, `k`, `search`, `best`, `bar`, `bar_source`, `route` and `route_bar` (null with routing `all`), `tags` (the query tags `keyword_rag` picked, else null), `kept`, `reason`, `usd` and `error`. 404 for an unknown chat; 422 for empty text, or an answer model that is unknown or has no price, before anything is saved |
+| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}, drop?: {store: [field, ...]}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. `drop` removes the named fields (`method`, `k`, `search`, `bar`, `keep`) from the edits the chat already holds for a store before the new overrides merge; the page uses it for Use the store's bar. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
 | `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered. An answer model that is unknown or has no price becomes the attempt's `error` |
 | `POST /chats/{id}/stores/{store}/default` | Set as default: save, as the store's own, only the fields the chat's override for it names (method, k, search settings, bar), where `null` clears the saved value, then drop the override; "search anyway" is not saved. Returns `{search, chat_method, chat_k, chat_bar}`. 404 for an unknown chat, or a store not on it |
 | `POST /chat` | The single-store chat, unchanged. `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
@@ -830,7 +883,8 @@ package's own: `BudgetExceeded`, `NoConnection`, `UnknownModel`,
 
 The bench is now a chat across your stores that shows its evidence and lets
 you edit and re-run the retrieval, with the keyword method brought up to date;
-store profiles and routing are next. Where each part stands:
+store profiles and routing by profile are built; a learned router is next.
+Where each part stands:
 
 - **Keyword-RAG v2** (built; its [experiments](#experiments) have not been run,
   so it is not yet known to beat the paper's method): build recipes per
@@ -842,7 +896,9 @@ store profiles and routing are next. Where each part stands:
   scored by nDCG@10.
 - **Chat across stores** (built): saved chats that search several stores,
   keep those that clear their bar and show an editable retrieval step under
-  every answer. Next, phase B: store profiles and routing.
+  every answer. Phase B is built too: store routing profiles, a chat setting
+  that routes each message to its stores by profile, and a routing eval. Next, a
+  learned router that uses the routing eval as its data.
 - **Library**: collections renamed to corpora, with PDF, Word and HTML
   imports.
 
