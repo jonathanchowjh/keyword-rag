@@ -3217,3 +3217,32 @@ def test_edit_shows_the_chats_held_settings_and_set_as_default_saves_them(page, 
     assert sent[-1] == {"overrides": {"held": {"keep": True}}}
     ran = next(d for d in got.value.json()["decisions"] if d["store"] == "held")
     assert (ran["k"], ran["reason"]) == (2, "search anyway")
+
+
+def test_store_page_edits_and_resets_the_route_profile(page, seeded):
+    seeded.build("routed")
+    conn = seeded.app.state.conn  # type: ignore[attr-defined]
+    page.goto(seeded.url + "/c/routed")
+    titles = page.locator("main h2").all_inner_texts()
+    assert titles[-2:] == ["Routing profile", "Delete this store"]
+    expect(
+        page.get_by_text(
+            "Routing compares each message with this text and with the store's average item."
+        )
+    ).to_be_visible()
+    box = page.get_by_label("Routing profile text")
+    drafted = re.compile(r"^Store routed \(mcq, ")
+    expect(box).to_have_value(drafted)
+    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
+
+    box.fill("Enzyme kinetics and assays.")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
+    assert db.get_route_profile(conn, "routed") == "Enzyme kinetics and assays."
+    page.reload()
+    expect(box).to_have_value("Enzyme kinetics and assays.")
+
+    page.get_by_role("button", name="Use the drafted profile").click()
+    expect(box).to_have_value(drafted)
+    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
+    assert db.get_route_profile(conn, "routed") is None

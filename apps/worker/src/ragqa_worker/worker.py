@@ -8,6 +8,9 @@ from ragqa_core.evaluator import Evaluator, ended
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
 
+# The jobs that add or replace a collection's items: the bars kept for it no longer hold.
+ITEM_ADDING = ("load", "import", "copy")
+
 
 class Worker:
     """Runs queued jobs one at a time on its own thread, so every cost lands on its job."""
@@ -68,6 +71,7 @@ class Worker:
 
         with self.ai.for_job(job_id, check, log), self.indexer.models.for_job(log):
             reason = "job ended without a final status"
+            job = None
             try:
                 log("started")
                 job = db.get_job(conn, job_id)
@@ -80,7 +84,18 @@ class Worker:
                 except Exception as e2:
                     self._failed(e2)
                     reason = f"worker could not record a final status: {e2!r}"
+            if job is not None and job["kind"] in ITEM_ADDING:
+                self._drop_bars(job["collection"])
             self._ensure_final(job_id, reason, log)
+
+    def _drop_bars(self, collection: str) -> None:
+        """The API's router keys a bar on the item count, which an edited re-add can leave
+        as it was; the rows are shared, so dropping them here reaches it. Even after a
+        failure, since a failed load still added items. A failure here is kept, not raised."""
+        try:
+            db.delete_store_bars(self.conn, collection)
+        except Exception as e:
+            self._failed(e)
 
     def _record_failure(self, job_id: str, e: Exception) -> None:
         db.update_job(self.conn, job_id, **ended(e))

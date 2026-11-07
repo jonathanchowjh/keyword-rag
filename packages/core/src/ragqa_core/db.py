@@ -143,6 +143,7 @@ NEW_COLLECTION_COLUMNS = (
     "chat_method",
     "chat_bar",
     "chat_k",
+    "route_profile",
 )
 
 
@@ -696,6 +697,30 @@ def get_chat_k(conn: Connection, name: str) -> int | None:
 
 def set_chat_k(conn: Connection, name: str, k: int | None) -> None:
     _set_chat_column(conn, name, "chat_k", k)
+
+
+def get_route_profile(conn: Connection, name: str) -> str | None:
+    """The routing profile written by hand; None means the router drafts one."""
+    return _chat_column(conn, name, "route_profile")
+
+
+def set_route_profile(conn: Connection, name: str, text: str | None) -> None:
+    _set_chat_column(conn, name, "route_profile", text)
+
+
+def last_item_job(conn: Connection, name: str) -> str | None:
+    """The load, import or copy job that last finished on the collection, as its id and
+    when it finished: a job resumed and finished again is a new mark. Whatever its status,
+    since a failed load still added items. None when there has been none."""
+    row = first(
+        conn.execute(
+            "select id, updated_at from jobs where collection = ?"
+            " and kind in ('load', 'import', 'copy') and status not in ('queued', 'running')"
+            " order by updated_at desc, rowid desc limit 1",
+            (name,),
+        )
+    )
+    return f"{row['id']}@{row['updated_at']}" if row else None
 
 
 def default_eval_set(conn: Connection, collection: str) -> str | None:

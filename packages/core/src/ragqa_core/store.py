@@ -371,6 +371,20 @@ class Store:
             if offset is None:
                 return
 
+    def vectors(self, name: str, using: str, limit: int, skip: tuple[str, ...] = ()) -> np.ndarray:
+        """Up to `limit` items' `using` vectors, one per row, leaving out skipped sources.
+        The items come in point-id order, which the uuid5 ids make an arbitrary sample."""
+        records, _ = self.client.scroll(
+            name,
+            limit=limit,
+            with_payload=False,
+            with_vectors=[using],
+            scroll_filter=skip_filter(skip),
+        )
+        held = [r.vector for r in records if isinstance(r.vector, dict)]
+        rows = [v[using] for v in held if using in v]
+        return np.array(rows, dtype=np.float32)
+
     def hashes(self, name: str, ids: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
         for start in range(0, len(ids), 1024):

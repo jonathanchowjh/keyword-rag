@@ -1,5 +1,7 @@
-"""The chat gate: how well a message matches a store, and the bar a store sets."""
+"""The chat gate: how well a message matches a store, and the bar a store sets. And the
+router before it: how well a message matches a store's routing profile and average item."""
 
+import hashlib
 import json
 from collections.abc import Callable
 
@@ -16,6 +18,10 @@ from ragqa_core.types import Bar, CollectionSpec, Question, Skip
 BAR_QUANTILE = 0.05
 BAR_SAMPLE = 200
 BAR_MIN = 20
+PROFILE_TERMS = 20
+PROFILE_SAMPLES = 5
+PROFILE_SAMPLE_CHARS = 200
+CENTROID_SAMPLE = 2000
 
 
 class Router:
@@ -24,6 +30,8 @@ class Router:
         self.retriever = retriever
         self.evaluator = evaluator
         self._vectors: dict[tuple[str, str | None, str, str], tuple[list[str], np.ndarray]] = {}
+        self._profiles: dict[str, tuple[str, np.ndarray]] = {}  # store: (text sha256, vector)
+        self._centroids: dict[str, tuple[tuple, np.ndarray | None]] = {}  # store: (key, centroid)
 
     def best_match(self, spec: CollectionSpec, texts: list[str]) -> float:
         """The highest top-1 meaning cosine over the texts; 0.0 for an empty store."""
@@ -112,10 +120,109 @@ class Router:
         return have[1]
 
     def forget(self, name: str) -> None:
-        """Drops the store's kept bars: what it holds changed in a way the key may miss, as
-        when a source is replaced by as many items. Question vectors are kept per eval set,
-        not per store, so none are dropped."""
+        """Drops the store's kept bars, centroid and profile vector: what it holds changed in
+        a way the keys may miss, as when a source is replaced by as many items. Question
+        vectors are kept per eval set, not per store, so none are dropped."""
         db.delete_store_bars(self.conn, name)
+        self._centroids.pop(name, None)
+        self._profiles.pop(name, None)
 
     def kept(self, best: float, bar: Bar) -> bool:
         return bar.value is None or best >= bar.value
+
+    # -- routing -----------------------------------------------------------------------
+
+    def draft_route_profile(self, spec: CollectionSpec) -> str:
+        """A routing profile made from what the store already knows of itself: its most
+        carried tags (else its vocabulary), its sources and the opening of a few items."""
+        return self._draft(spec)[0]
+
+    def _draft(self, spec: CollectionSpec) -> tuple[str, bool]:
+        """The draft, and whether it says what the store holds: a Topics line or a sample.
+        The tag counts are read as saved, never counted again: that would scroll the store."""
+        store = self.retriever.store
+        disabled = tuple(db.disabled_sources(self.conn, spec.name))
+        lines = [f"Store {spec.name} ({spec.qa_type}, {spec.corpus_type})."]
+        vocabulary = db.get_vocabulary(self.conn, spec.name, spec.vocabulary_version) or []
+        terms = list(spec.profile)[:PROFILE_TERMS] or vocabulary[:PROFILE_TERMS]
+        if terms:
+            lines.append("Topics: " + ", ".join(terms))
+        sources = [s for s in sorted(store.source_counts(spec.name)) if s not in disabled]
+        if sources:
+            lines.append("Sources: " + ", ".join(sources))
+        first = next(store.scroll(spec.name, PROFILE_SAMPLES, disabled), [])
+        samples = [" ".join(h.text.split())[:PROFILE_SAMPLE_CHARS] for h in first]
+        samples = [t for t in samples[:PROFILE_SAMPLES] if t]
+        lines += [f"- {t}" for t in samples]
+        return "\n".join(lines), bool(terms or samples)
+
+    def route_profile(self, spec: CollectionSpec) -> tuple[str, bool]:
+        """The routing profile and whether it is drafted (no text was saved by hand)."""
+        stored = db.get_route_profile(self.conn, spec.name)
+        if stored is not None:
+            return stored, False
+        return self.draft_route_profile(spec), True
+
+    def route_score(self, spec: CollectionSpec, texts: list[str]) -> float | None:
+        """The highest cosine of the texts with the store's routing profile or its centroid;
+        None when it has neither, so a store that says nothing of itself is never left out."""
+        self.retriever.indexer.check_model(spec)
+        _, targets = self._targets(spec)
+        if not targets:
+            return None
+        vectors = self.retriever.models.embed_query(texts, task=QUERY_TASK[spec.qa_type])
+        return max((self._closest(targets, v) for v in vectors), default=None)
+
+    def route_bar(self, spec: CollectionSpec) -> Bar:
+        """The bar the store's eval set sets for its route score, the way `bar` sets the
+        gate's: its key also holds the profile's sha256, so an edit sets it again."""
+        self.retriever.indexer.check_model(spec)
+        sha, targets = self._targets(spec)
+
+        def score_one(q: Question, vector: np.ndarray, skip: tuple[str, ...]) -> float | None:
+            return self._closest(targets, vector) if targets else None
+
+        return self._calibrate(spec, "route", [sha], score_one)
+
+    def _closest(self, targets: list[np.ndarray], vector: np.ndarray) -> float:
+        return max(float(t @ vector) for t in targets)
+
+    def _targets(self, spec: CollectionSpec) -> tuple[str | None, list[np.ndarray]]:
+        """The profile text's sha256 (None when the profile is missing) and the vectors a
+        message is compared with: the profile's and the centroid, those the store has."""
+        sha, profile = self._profile(spec)
+        centroid = self._centroid(spec)
+        return sha, [v for v in (profile, centroid) if v is not None]
+
+    def _profile(self, spec: CollectionSpec) -> tuple[str | None, np.ndarray | None]:
+        """The profile's sha256 and embedding, kept until its text changes. Missing when no
+        text was saved and the draft names no topic and holds no sample."""
+        stored = db.get_route_profile(self.conn, spec.name)
+        text, says = (stored, True) if stored is not None else self._draft(spec)
+        if not says:
+            return None, None
+        sha = hashlib.sha256(text.encode()).hexdigest()
+        have = self._profiles.get(spec.name)
+        if have is None or have[0] != sha:
+            have = self._profiles[spec.name] = (sha, self.retriever.models.embed([text])[0])
+        return sha, have[1]
+
+    def _centroid(self, spec: CollectionSpec) -> np.ndarray | None:
+        """The mean text_dense vector of up to CENTROID_SAMPLE items, at unit length: the
+        mean of unit vectors is shorter, and would lose to the profile. Kept until the count,
+        the switched-off sources or the last finished load, import or copy changes, which
+        a job run by the worker in another process also moves."""
+        store = self.retriever.store
+        disabled = tuple(db.disabled_sources(self.conn, spec.name))
+        key = (store.count(spec.name), disabled, db.last_item_job(self.conn, spec.name))
+        have = self._centroids.get(spec.name)
+        if have is not None and have[0] == key:
+            return have[1]
+        vectors = store.vectors(spec.name, "text_dense", CENTROID_SAMPLE, disabled)
+        centroid = None
+        if len(vectors):
+            mean = vectors.mean(axis=0)
+            norm = float(np.linalg.norm(mean))
+            centroid = mean / norm if norm > 0 else None
+        self._centroids[spec.name] = (key, centroid)
+        return centroid

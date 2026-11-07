@@ -145,7 +145,10 @@ class EvalSetPatch(BaseModel):
 
 
 class CollectionPatch(BaseModel):
-    eval_set: str | None  # null: the set named after the store, if any
+    """Only the fields sent change."""
+
+    eval_set: str | None = None  # null: the set named after the store, if any
+    route_profile: str | None = None  # null or blank: the router's draft
 
 
 class EvalSetImport(BaseModel):
@@ -608,6 +611,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         leaked = leaked_ids(spec, eval_set)
         questions = runnable(everything, leaked, include_leaked)
         fields = field_report(name, questions)
+        route_profile, drafted = state.router.route_profile(spec)
         return {
             **spec_json(spec),
             "count": count,
@@ -631,20 +635,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "eval_set": eval_set,
             "fields": fields,
             "measurable": measurable(spec.qa_type, fields),
+            "route_profile": route_profile,
+            "route_profile_drafted": drafted,
         }
 
     @app.patch("/collections/{name}")
     def patch_collection(name: str, body: CollectionPatch) -> dict:
-        """Makes the eval set the store's default; null clears it."""
+        """Makes the eval set the store's default, null clearing it, and saves the routing
+        profile, null or blank going back to the draft. A field left out stays as it is."""
         spec = state.retriever.spec(name)
-        if body.eval_set is not None:
-            found = known_set(body.eval_set)
-            if found["qa_type"] != spec.qa_type:
-                raise type_clash(body.eval_set, found["qa_type"], name, spec.qa_type)
-        if store_is_loading(name):
-            raise HTTPException(409, f"a load or question import is under way on '{name}'; wait")
-        db.set_default_eval_set(state.conn, name, body.eval_set)
+        sent = body.model_fields_set
+        if "eval_set" in sent:
+            if body.eval_set is not None:
+                found = known_set(body.eval_set)
+                if found["qa_type"] != spec.qa_type:
+                    raise type_clash(body.eval_set, found["qa_type"], name, spec.qa_type)
+            if store_is_loading(name):
+                raise HTTPException(
+                    409, f"a load or question import is under way on '{name}'; wait"
+                )
+            db.set_default_eval_set(state.conn, name, body.eval_set)
+        if "route_profile" in sent:
+            text = (body.route_profile or "").strip()
+            db.set_route_profile(state.conn, name, text or None)
         return get_collection(name)
+
+    @app.post("/collections/{name}/route-profile/draft")
+    def draft_route_profile(name: str) -> dict:
+        """What the router would draft for the store now; nothing is saved."""
+        return {"route_profile": state.router.draft_route_profile(state.retriever.spec(name))}
 
     @app.delete("/collections/{name}", status_code=204)
     def delete_collection(name: str) -> Response:

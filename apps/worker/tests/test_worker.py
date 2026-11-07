@@ -400,3 +400,51 @@ def test_worker_runs_copy(env):
     assert job["progress"] == 1.0 and job["result"]["added"] == len(ITEMS)
     assert job["result"]["sources"] == ["x"]
     assert w.indexer.store.count("r") == len(ITEMS)
+
+
+def kept_bars(conn) -> None:
+    for kind in ("gate", "route"):
+        db.save_store_bar(conn, "c", kind, {"key": "k", "value": 0.5, "n": 20})
+
+
+def test_an_import_or_load_drops_the_stores_kept_bars(env):
+    import json
+
+    from ragqa_core import imports
+
+    w, conn = env
+    kept_bars(conn)
+    row = {"id": "n1", "text": "a fresh note about tides"}
+    upload_id = imports.save_upload(w.loader.home, "c", "n.jsonl", [json.dumps(row).encode()])
+    setup = {
+        "upload_id": upload_id,
+        "kind": "items",
+        "mapping": {"id": "id", "text": "text"},
+        "source": "upload:notes",
+    }
+    j = db.create_job(conn, "import", "c", setup)
+    w.run_one()
+    assert get_job(conn, j)["status"] == "done"
+    assert db.get_store_bar(conn, "c", "gate") is None
+    assert db.get_store_bar(conn, "c", "route") is None
+
+    kept_bars(conn)  # a failed load still added items
+    w.loader.run = lambda job, progress: (_ for _ in ()).throw(RuntimeError("half way"))
+    j = db.create_job(conn, "load", "c", {"dataset": "x"})
+    w.run_one()
+    assert get_job(conn, j)["status"] == "failed"
+    assert db.get_store_bar(conn, "c", "gate") is None
+
+    kept_bars(conn)  # a job that adds no items keeps them
+    j = db.create_job(conn, "rekey", "c", {"version": w.other_version})
+    w.run_one()
+    assert get_job(conn, j)["status"] == "done"
+    assert db.get_store_bar(conn, "c", "gate") is not None
+
+    source = db.get_collection(conn, "c")
+    assert source is not None
+    j = w.loader.start_copy("c", w.loader.copy_spec(source, "r", "reference", None))
+    db.save_store_bar(conn, "r", "route", {"key": "k", "value": 0.5, "n": 20})
+    w.run_one()
+    assert get_job(conn, j)["status"] == "done"
+    assert db.get_store_bar(conn, "r", "route") is None

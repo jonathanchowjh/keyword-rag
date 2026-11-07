@@ -15,6 +15,7 @@ from ragqa_core import db
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
 from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
+from ragqa_core.router import PROFILE_SAMPLES
 from ragqa_core.settings import load_settings
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
@@ -3012,7 +3013,13 @@ def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
     wait(client, do_import(client, up, "qs", kind="questions", confirm=True).json()["job_id"])
     store, scans = client.app.state.store, []
     scroll = store.scroll
-    store.scroll = lambda *a, **kw: scans.append(1) or scroll(*a, **kw)
+
+    def counted(name, batch=256, skip=()):
+        if batch > PROFILE_SAMPLES:  # the routing profile's draft peeks at a few items
+            scans.append(1)
+        return scroll(name, batch, skip)
+
+    store.scroll = counted
     assert client.get("/collections/c").json()["leaked"] == 1
     assert client.get("/collections/c").json()["leaked"] == 1
     assert client.get("/collections/c/questions").json()["leaked"] == 1
@@ -3103,6 +3110,40 @@ def test_patch_is_refused_while_a_load_or_question_import_is_queued(client):
     db.create_job(conn, "load", "c", {"dataset": "scienceqa"})
     assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 409
     assert db.default_eval_set(conn, "c") == "c"
+
+
+def test_route_profile_routes(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
+    assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 200
+    body = client.get("/collections/c").json()
+    assert isinstance(body["profile"], dict)
+    assert body["route_profile_drafted"] is True
+    assert body["route_profile"].startswith("Store c (mcq, ")
+    draft = client.post("/collections/c/route-profile/draft")
+    assert draft.status_code == 200 and draft.json() == {"route_profile": body["route_profile"]}
+    assert db.get_route_profile(conn, "c") is None  # the draft route saves nothing
+
+    client.app.state.worker.stop()
+    db.create_job(conn, "load", "c", {"dataset": "scienceqa"})  # a load blocks only eval_set
+    r = client.patch("/collections/c", json={"route_profile": "Enzyme kinetics, by hand."})
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["route_profile"] == "Enzyme kinetics, by hand."
+    assert got["route_profile_drafted"] is False
+    assert got["eval_set"] == "e" and isinstance(got["profile"], dict)
+    assert db.get_route_profile(conn, "c") == "Enzyme kinetics, by hand."
+    assert client.patch("/collections/c", json={"eval_set": None}).status_code == 409
+    assert db.get_route_profile(conn, "c") == "Enzyme kinetics, by hand."
+
+    back = client.patch("/collections/c", json={"route_profile": None}).json()
+    assert back["route_profile_drafted"] is True
+    assert back["route_profile"] == body["route_profile"]
+    assert back["eval_set"] == "e"
+    blank = client.patch("/collections/c", json={"route_profile": "  \n"}).json()
+    assert blank["route_profile_drafted"] is True  # a blank text goes back to the draft too
+    assert client.post("/collections/nope/route-profile/draft").status_code == 404
 
 
 def test_a_store_and_an_eval_set_of_one_name_have_one_type(client):

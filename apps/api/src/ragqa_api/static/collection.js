@@ -26,6 +26,8 @@ let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
+let routeText = undefined; // the routing profile the textarea was filled from
+let routeDirty = false;
 
 shell(`c/${name}`);
 
@@ -508,6 +510,43 @@ function syncLists() {
   }
 }
 
+// -- routing profile ----------------------------------------------------------------------
+
+function buildRoute() {
+  $("route").innerHTML = `<p class="muted">Routing compares each message with this text and with the store's average item.</p>
+    <textarea id="rp-text" class="route-text" rows="8" spellcheck="false" aria-label="Routing profile text"></textarea>
+    <p id="rp-state" class="muted"></p>
+    <div class="actions"><button type="button" id="rp-save">Save</button>
+      <button type="button" id="rp-draft" class="secondary">Use the drafted profile</button></div>
+    <p id="rp-msg" role="status"></p>`;
+  $("rp-text").addEventListener("input", () => (routeDirty = true));
+  $("rp-save").addEventListener("click", () => saveRoute($("rp-text").value, "Saved."));
+  // null: the store's draft, which follows the store as it changes
+  $("rp-draft").addEventListener("click", () => saveRoute(null, "Using the drafted profile."));
+}
+
+async function saveRoute(text, done) {
+  $("rp-msg").textContent = "";
+  try {
+    col = await api(`/collections/${enc}`, { method: "PATCH", body: { route_profile: text } });
+    routeDirty = false;
+    routeText = undefined;
+    syncRoute();
+    $("rp-msg").innerHTML = `<span class="ok">${esc(done)}</span>`;
+  } catch (e) {
+    $("rp-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+// An edit in progress is kept across refreshes; otherwise the textarea follows the store.
+function syncRoute() {
+  $("rp-state").textContent = col.route_profile_drafted ? "Drafted from the store." : "Edited by hand.";
+  if (!routeDirty && col.route_profile !== routeText) {
+    $("rp-text").value = col.route_profile;
+    routeText = col.route_profile;
+  }
+}
+
 // -- delete ---------------------------------------------------------------------------
 
 function buildDelete() {
@@ -548,6 +587,7 @@ async function refresh() {
     paint("sources", sourcesHtml());
     if (paint("benchmark", benchmarkHtml())) bindLoad();
     syncLists();
+    syncRoute();
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
@@ -557,6 +597,7 @@ async function refresh() {
 
 $("new-run").addEventListener("click", toggleRunForm);
 buildLists();
+buildRoute();
 buildDelete();
 bindSources();
 bindAsked();

@@ -94,6 +94,7 @@ fieldset.bare { border:0; padding:0; } /* only there to disable what it holds */
 legend { color:var(--muted); font-size:12px; }
 .lists { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; }
 .lists textarea { min-height:140px; width:100%; }
+.route-text { min-height:120px; width:100%; }
 svg.gap { color:var(--fg); vertical-align:middle; }
 .verdict { font-size:16px; margin:4px 0; }
 .steps { margin:8px 0; padding-left:18px; }
