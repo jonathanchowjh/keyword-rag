@@ -2,6 +2,7 @@
 then give the collection lists or run its build steps."""
 
 import random
+import re
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -61,10 +62,14 @@ def stored_exclusions(q: Question, stored: set[str]) -> Question:
     return replace(q, meta={**q.meta, "excluded_ids": kept})
 
 
+CHUNK_MARK = re.compile(r"[0-9]+|[0-9a-f]{12}(?:-[0-9]+)?")
+
+
 def chunk_of(item_id: str) -> str | None:
-    """The file a `<file>#<digits>` chunk id names; None for any other id."""
+    """The file a chunk id names: `<file>#<digits>` (as loads before content ids named a
+    chunk by its place) or `<file>#<12 hex>`, maybe with `-<digits>`; None for any other id."""
     base, mark, part = item_id.rpartition("#")
-    return base if mark and part.isascii() and part.isdigit() else None
+    return base if mark and CHUNK_MARK.fullmatch(part) else None
 
 
 class Loader:
@@ -254,8 +259,9 @@ class Loader:
 
     def drop_stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> int:
         """Delete the source's items of these text files that the import no longer yields:
-        ids equal to a file name or `<file>#<digits>`, less the ids just written. A file that
-        shrank leaves none of its old chunks behind; a file named `a.md#b.md` is not a chunk
+        ids equal to a file name (an old load's one-chunk file) or a chunk id of one (chunk_of),
+        less the ids just written. A chunk whose text changed has a new id, so its old one
+        goes, and so do an old load's positional ids; a file named `a.md#b.md` is not a chunk
         of `a.md`. Returns how many went."""
         stale = [
             i
@@ -268,8 +274,9 @@ class Loader:
 
     def set_chunk_meta(self, name: str, source: str, items: list[Item]) -> None:
         """Write each chunk's current meta (its part and the file's parts) to the store as a
-        payload only: no embedding, no AI. The change hash leaves `parts` out, so a chunk
-        whose text did not change is not re-indexed when its file gains or loses a part."""
+        payload only: no embedding, no AI. The change hash leaves `part` and `parts` out, so
+        a chunk whose text did not change is not re-indexed when an edit above it moves it or
+        its file gains or loses a part."""
         meta = {i.id: {"meta": {**i.meta, "source": source}} for i in items if "parts" in i.meta}
         if meta:
             self.indexer.store.set_payloads(name, meta)
@@ -342,10 +349,11 @@ class Loader:
         self, source: CollectionSpec, name: str, recipe: str, override: dict | None
     ) -> CollectionSpec:
         """What a copy of the source under the recipe would be, not yet saved: the source's
-        qa type and the recipe's build with the override merged in. Raises ValueError for a
-        bad name, an unknown recipe or a bad override."""
+        qa type and embedding model, so the two compare like for like, and the recipe's
+        build with the override merged in. Raises ValueError for a bad name, an unknown
+        recipe or a bad override."""
         build = build_settings(build_for(recipe), override)
-        return self.indexer.new_spec(name, source.qa_type, False, recipe, build)
+        return self.indexer.new_spec(name, source.qa_type, False, recipe, build, source.dense_model)
 
     def estimate_copy(self, source: str, target: CollectionSpec) -> dict:
         """What copying the source's items into the target would spend: all of them for a
@@ -365,7 +373,12 @@ class Loader:
         copy job that fills it. Returns the job's id."""
         conn = self.conn
         self.indexer.create(
-            target.name, target.qa_type, target.summarize, target.recipe, target.build
+            target.name,
+            target.qa_type,
+            target.summarize,
+            target.recipe,
+            target.build,
+            target.dense_model,
         )
         # The copy stores the same item ids, so the source's eval set holds for it as it is.
         db.set_default_eval_set(conn, target.name, db.default_eval_set(conn, source))

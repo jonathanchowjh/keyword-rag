@@ -9,6 +9,7 @@ from ragqa_core.store import (
     chunks_of,
     item_hash,
     point_id,
+    rebuild_of,
     skip_filter,
 )
 from ragqa_core.types import Item
@@ -247,6 +248,17 @@ def test_item_hash_ignores_parts_only_for_a_text_chunk():
     )
 
 
+def test_item_hash_ignores_a_chunks_place_in_its_file():
+    def at(part: int, parts: int, file: str = "a.md", text: str = "t") -> Item:
+        return Item("a.md#x", text, meta={"file": file, "part": part, "parts": parts})
+
+    assert item_hash(at(2, 5)) == item_hash(at(5, 5)) == item_hash(at(1, 1))
+    assert item_hash(at(2, 5)) != item_hash(at(2, 5, file="b.md"))
+    assert item_hash(at(2, 5)) != item_hash(at(2, 5, text="u"))
+    plain = Item("x", "t", meta={"part": 2}), Item("x", "t", meta={"part": 5})
+    assert item_hash(plain[0]) != item_hash(plain[1])  # no file: not a chunk
+
+
 def test_hashes_reads_back_content_hash():
     s, _, items = sourced()
     assert s.hashes("c", ["a1"]) == {"a1": ""}  # upsert_items alone writes no hash
@@ -321,3 +333,57 @@ def test_excluded_items_are_left_out_of_every_search():
     assert {p for p, _ in s.search_chunks("c", q, 10, exclude=out)} == {"a2", "b1"}
     both = {h.id for h in s.search("c", "text_dense", q, 10, skip=("b",), exclude=out)}
     assert both == {"a2"}
+
+
+def every_point(s, collection):
+    return sorted((p for batch in s.points(collection) for p in batch), key=lambda p: p[0])
+
+
+def test_copy_moves_points_with_vectors_sparse_and_payload(setup):
+    s, m = setup
+    s.create("d", m.dense_dim())
+    assert s.copy("c", "d") == 2
+    assert s.search("d", "text_dense", m.embed_query(["enzyme rate"])[0], 1)[0].id == "1"
+    assert s.search_sparse("d", m.sparse_query(["enzyme"])[0], 1)[0].id == "1"
+    # A copy keeps its source's point ids, so it is read by them, not by point_id("d", ...).
+    assert every_point(s, "d") == every_point(s, "c")
+
+
+def test_recreate_changes_the_dimension_and_leaves_the_rebuild_alone(setup):
+    s, _ = setup
+    s.create(rebuild_of("c"), 64)
+    s.recreate("c", 64)
+    assert s.count("c") == 0
+    vectors = s.client.get_collection("c").config.params.vectors
+    assert isinstance(vectors, dict) and vectors["text_dense"].size == 64
+    assert s.exists(rebuild_of("c"))
+
+
+def test_drop_also_drops_a_left_over_rebuild(setup):
+    s, _ = setup
+    s.create(rebuild_of("c"), 64)
+    s.drop("c")
+    for name in ("c", chunks_of("c"), rebuild_of("c"), chunks_of(rebuild_of("c"))):
+        assert not s.exists(name)
+
+
+def test_drop_rebuild_drops_only_the_rebuild(setup):
+    s, _ = setup
+    s.create(rebuild_of("c"), 64)
+    s.drop_rebuild("c")
+    assert not s.exists(rebuild_of("c")) and not s.exists(chunks_of(rebuild_of("c")))
+    assert s.count("c") == 2 and s.exists(chunks_of("c"))
+
+
+def test_points_and_chunk_points_carry_ids_vectors_and_payloads(setup):
+    s, m = setup
+    points = [p for batch in s.points("c") for p in batch]
+    assert len(points) == 2
+    for pid, vectors, payload in points:
+        assert pid == point_id("c", payload["item_id"])
+        assert {"text_dense", SPARSE} <= set(vectors)
+    texts = ["enzyme kinetics", "rate", "stock market"]
+    s.upsert_chunks("c", ["1", "1", "2"], texts, m.embed(texts), [None] * 3)
+    chunks = s.chunk_points("c", ["1"])
+    assert sorted(p["text"] for _, p in chunks) == ["enzyme kinetics", "rate"]
+    assert {p["parent_id"] for _, p in chunks} == {"1"}

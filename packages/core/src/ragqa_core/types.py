@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-QaType = Literal["science", "mcq", "multihop", "table"]
+QaType = Literal["documents", "science", "mcq", "multihop", "table"]
 # The types that retrieve worked examples.
 EXAMPLE_TYPES: tuple[QaType, ...] = ("mcq", "science")
 FACETS = ("topic", "method", "common")
@@ -85,18 +85,6 @@ class Question:
     gold_answers: list[str]
     gold_ids: list[str]
     meta: dict = field(default_factory=dict)
-
-
-@dataclass
-class Bar:
-    """A store's chat gate: a message is kept when its best match reaches `value`. `none`:
-    the store has no default eval set; `few`: too few usable questions; both leave value
-    None. `override` is made only by Chats."""
-
-    value: float | None
-    source: Literal["set", "manual", "override", "none", "few"]
-    eval_set: str | None
-    n: int
 
 
 @dataclass

@@ -9,6 +9,7 @@ meta: ScienceQA's gold skill must not reach the vocabulary (spec §12).
 import re
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 
@@ -49,8 +50,9 @@ def build_of(spec: CollectionSpec) -> BuildSettings:
 
 
 def builds(spec: CollectionSpec) -> bool:
-    """Whether adding items runs the build steps: every recipe but paper 2024."""
-    return spec.recipe != "paper_2024"
+    """Whether adding items runs the build steps: every recipe but paper 2024 and documents,
+    which keeps a Documents store's passages as uploaded until keyword tags are added."""
+    return spec.recipe not in ("paper_2024", "documents")
 
 
 def picked_terms(text: str, terms: list[str], k: int) -> list[str]:
@@ -110,9 +112,10 @@ class Builder:
         self.models = models
         self.ai = ai
         self.indexer = indexer
-        # Term embeddings by vocabulary version, with the order they were embedded in:
-        # a vocabulary changes only when it is saved again, and every batch needs it.
-        self._term_vectors: dict[str, tuple[list[str], np.ndarray]] = {}
+        # Term embeddings by (model, vocabulary version), with the order they were embedded
+        # in: a vocabulary changes only when it is saved again, and every batch needs it. A
+        # copy shares its source's vocabulary, so the model is in the key too.
+        self._term_vectors: dict[tuple[str, str], tuple[list[str], np.ndarray]] = {}
 
     def _induce_prompts(self, spec: CollectionSpec, items: list[Item]) -> list[str]:
         build = build_of(spec)
@@ -147,15 +150,15 @@ class Builder:
             proposed = parse_json(reply.text).get("terms")
             if isinstance(proposed, list):
                 terms += clean_terms(proposed)
-        merged = self._merged(terms)
+        merged = self._merged(spec.dense_model, terms)
         progress(1.0)
         return merged
 
-    def _merged(self, terms: list[str]) -> list[str]:
+    def _merged(self, model: str, terms: list[str]) -> list[str]:
         if not terms:
             return []
         forms = list(dict.fromkeys(terms))
-        vectors = self.models.embed(forms)
+        vectors = self.models.embed(forms, model)
         row = {form: n for n, form in enumerate(forms)}
         return merge_terms(terms, vectors[[row[t] for t in terms]])
 
@@ -168,26 +171,27 @@ class Builder:
         db.save_vocabulary(self.conn, spec.name, cleaned, version)
         return version
 
-    def term_vectors(self, terms: list[str]) -> np.ndarray:
-        """The terms' embeddings, one row per term in the order given."""
-        version = terms_version(terms)
-        if version not in self._term_vectors:
-            self._term_vectors[version] = (list(terms), self.models.embed(terms))
-        embedded, vectors = self._term_vectors[version]
+    def term_vectors(self, model: str, terms: list[str]) -> np.ndarray:
+        """The terms' embeddings by the model, one row per term in the order given."""
+        key = (model, terms_version(terms))
+        if key not in self._term_vectors:
+            self._term_vectors[key] = (list(terms), self.models.embed(terms, model))
+        embedded, vectors = self._term_vectors[key]
         if embedded == terms:
             return vectors
         row = {t: n for n, t in enumerate(embedded)}
         return vectors[[row[t] for t in terms]]
 
     def similar(
-        self, terms: list[str], texts: list[str], k: int, cutoff: float | None = None
+        self, model: str, terms: list[str], texts: list[str], k: int, cutoff: float | None = None
     ) -> list[list[str]]:
-        """The k terms nearest each text; with a cut-off, every term at or above it (at
-        most CUTOFF_MOST) and never none. Ties go to the earlier term."""
+        """The k terms nearest each text, both embedded by the model; with a cut-off, every
+        term at or above it (at most CUTOFF_MOST) and never none. Ties go to the earlier
+        term."""
         if not texts:
             return []
         out = []
-        for row in self.models.embed(texts) @ self.term_vectors(terms).T:
+        for row in self.models.embed(texts, model) @ self.term_vectors(model, terms).T:
             order = np.argsort(-row, kind="stable")
             if cutoff is None:
                 picked = list(order[:k])
@@ -209,7 +213,8 @@ class Builder:
             cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
             tags: list[list[str]] = []
             for start in range(0, len(texts), BATCH):
-                tags += self.similar(terms, texts[start : start + BATCH], build.tag_k, cutoff)
+                part = texts[start : start + BATCH]
+                tags += self.similar(spec.dense_model, terms, part, build.tag_k, cutoff)
                 progress(min(start + BATCH, len(texts)) / len(texts))
             return tags
         # One call for every text, so a large corpus gets the Batch API's discount.
@@ -222,7 +227,7 @@ class Builder:
         tags = [picked_terms(reply.text, terms, build.tag_k) for reply in done]
         # A reply with no term of the vocabulary falls back to similarity: never no tags.
         unusable = [n for n, t in enumerate(tags) if not t]
-        nearest = self.similar(terms, [texts[n] for n in unusable], build.tag_k)
+        nearest = self.similar(spec.dense_model, terms, [texts[n] for n in unusable], build.tag_k)
         for n, fallback in zip(unusable, nearest, strict=True):
             tags[n] = fallback
         progress(1.0)
@@ -242,7 +247,14 @@ class Builder:
         if build.tagging != "ai":
             return 0.0, 0
         prompts = [tag_prompt(terms, describe_text(i, build.describes), build.tag_k) for i in items]
-        return self.ai.plan_many(prompts, TAG_TOKENS, role="keywords")
+        return self._plan(prompts, TAG_TOKENS)
+
+    def _plan(self, prompts: list[str], max_tokens: int) -> tuple[float, int]:
+        """plan_many on the keywords role, but nothing to send costs nothing and needs no
+        model: a store with its vocabulary in force adds and resumes without one."""
+        if not prompts:
+            return 0.0, 0
+        return self.ai.plan_many(prompts, max_tokens, role="keywords")
 
     def _tag(
         self,
@@ -267,7 +279,7 @@ class Builder:
         """Each item's tags and their kw_tags vector, a batch at a time."""
         for start in range(0, len(ids), BATCH):
             part = tags[start : start + BATCH]
-            vectors = self.models.embed([keyword_string(t, None) for t in part])
+            vectors = self.models.embed([keyword_string(t, None) for t in part], spec.dense_model)
             self.store.set_tags(spec.name, ids[start : start + BATCH], part, vectors)
             progress(min(start + BATCH, len(ids)) / len(ids))
         if not ids:
@@ -302,7 +314,7 @@ class Builder:
         terms = db.get_vocabulary(self.conn, name, version)
         if spec is None or not terms:
             raise ValueError(f"no vocabulary {version!r} for collection '{name}'")
-        self.indexer.check_model(spec)  # before any term is embedded with another model
+        self.indexer.check_model(spec)  # before any term is embedded by a model it can't load
         self._tag(spec, terms, self.stored_items(name), progress)
         db.set_vocabulary_version(self.conn, name, version)
         self.refresh_profile(spec)
@@ -318,7 +330,7 @@ class Builder:
         THE WHOLE SET IS CHECKED BEFORE ANYTHING IS WRITTEN, so a bad file changes nothing:
         ValueError for an unknown or missing id, an item without tags, a tag outside the
         vocabulary, or an abstracted form that is not usable."""
-        self.indexer.check_model(spec)  # before any tag is embedded with another model
+        self.indexer.check_model(spec)  # before any tag is embedded by a model it can't load
         vocabulary, tags, abstracted = self.checked_outputs(
             spec, self.stored_items(spec.name), terms, outputs
         )
@@ -451,25 +463,28 @@ class Builder:
 
     def plan_build(self, spec: CollectionSpec, items: list[Item]) -> tuple[float | None, int]:
         """What `build` would spend after adding the items, as estimate_build_usd, and how
-        many calls it would send: the cache misses, one complete_many per step. With no
-        model for keywords: None, and build_calls (cached or not)."""
+        many calls it would send: the cache misses, one complete_many per step. A step with
+        nothing to send is free. With no model for keywords to price a step that sends: None,
+        and build_calls (cached or not)."""
         if not builds(spec):
             return 0.0, 0
         todo = self.unbuilt(spec, items)
         terms = db.get_vocabulary(self.conn, spec.name)
         try:
             plans = [
-                self.ai.plan_many(
-                    self._induce_prompts(spec, todo["induce"]), INDUCE_TOKENS, role="keywords"
-                ),
+                self._plan(self._induce_prompts(spec, todo["induce"]), INDUCE_TOKENS),
                 self.plan_tag(spec, terms or GUESSED_TERMS, todo["tag"]),
-                self.ai.plan_many(
-                    self._abstract_prompts(spec, todo["abstract"]), ABSTRACT_TOKENS, role="keywords"
-                ),
+                self._plan(self._abstract_prompts(spec, todo["abstract"]), ABSTRACT_TOKENS),
             ]
         except NoConnection:
             return None, self.build_calls(spec, items)
         return sum(usd for usd, _ in plans), sum(calls for _, calls in plans)
+
+    def plan_tag_build(self, spec: CollectionSpec) -> tuple[float | None, int]:
+        """What Add keyword tags would spend, and how many calls it would send: plan_build
+        of the stored items with the store switched to documents_tagged."""
+        tagged = replace(spec, recipe="documents_tagged", build=build_for("documents_tagged"))
+        return self.plan_build(tagged, [])
 
     def build_calls(self, spec: CollectionSpec, items: list[Item]) -> int:
         """How many AI calls `build` would make after adding the items, cached or not."""

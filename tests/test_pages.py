@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import threading
 import time
 from contextlib import contextmanager
@@ -10,7 +11,7 @@ import httpx
 import pytest
 from playwright.sync_api import expect
 
-from ragqa_core import db
+from ragqa_core import db, search_defaults
 from ragqa_core.fakes import fake_replies
 from ragqa_core.types import Question
 
@@ -483,12 +484,19 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     assert len(seen["mq"]) == 1  # already queued by its first answer, never posted twice
 
 
-def test_new_collection_form_defaults_to_science(page, seeded):
+def test_new_store_form_defaults_to_documents(page, seeded):
     page.goto(seeded.url + "/")
     page.get_by_role("button", name="+ New store").click()
     select = page.locator("#f-type")
-    expect(select).to_have_value("science")
-    expect(select.locator("option:checked")).to_contain_text("Science problems")
+    expect(select).to_have_value("documents")
+    expect(select.locator("option:checked")).to_contain_text("Documents")
+    expect(page.locator("#f-recipe option")).to_have_count(1)
+    assert [o.get_attribute("value") for o in page.locator("#f-recipe option").all()] == [
+        "documents"
+    ]
+    expect(page.locator("#f-sum")).to_be_hidden()  # summaries are for the keyword lists
+    select.select_option("science")
+    expect(page.locator("#f-sum")).to_be_visible()
 
 
 def test_science_collection_offers_scibench_and_runs(page, seeded):
@@ -1432,6 +1440,59 @@ def test_run_page_shows_the_search_settings_and_rerun_repeats_them(page, seeded)
     assert sent and sent[0]["search"] == search
 
 
+def rerun_bodies(page, seeded, setup: dict) -> list[dict]:
+    """Opens the seeded run with `setup` merged into its own, and collects what Re-run POSTs."""
+    sent: list[dict] = []
+
+    def with_setup(route):
+        data = route.fetch().json()
+        data["setup"].update(setup)
+        for key in [k for k, v in setup.items() if v is None]:
+            del data["setup"][key]  # None: a setup recorded before the field
+        route.fulfill(json=data)
+
+    def capture(route):
+        if route.request.method == "POST":
+            sent.append(route.request.post_data_json)
+        route.continue_()
+
+    page.route(f"**/eval/{seeded.run_id}", with_setup)
+    page.route("**/eval", capture)
+    return sent
+
+
+def test_rerun_repeats_the_run_s_reranker_and_pool(page, seeded):
+    tiny = "jinaai/jina-reranker-v1-tiny-en"
+    setup = {"methods": ["hybrid", "hybrid_rerank"], "rerank_pool": 20, "rerank_model": tiny}
+    sent = rerun_bodies(page, seeded, setup)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#head")).to_contain_text("reranker jina-reranker-v1-tiny-en, pool 20")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    assert sent and sent[0]["rerank_model"] == tiny and sent[0]["rerank_pool"] == 20
+
+
+def test_rerun_of_a_run_from_before_the_reranker_was_recorded_uses_bge_at_50(page, seeded):
+    setup = {"methods": ["hybrid", "hybrid_rerank"], "rerank_pool": None, "rerank_model": None}
+    sent = rerun_bodies(page, seeded, setup)
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#head")).to_contain_text("reranker bge-reranker-v2-m3-int8, pool 50")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    assert sent and sent[0]["rerank_model"] == "BAAI/bge-reranker-v2-m3-int8"
+    assert sent[0]["rerank_pool"] == 50
+
+
+def test_a_run_without_hybrid_rerank_names_no_reranker(page, seeded):
+    sent = rerun_bodies(page, seeded, {})
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    expect(page.locator("#head")).to_contain_text("question")
+    expect(page.locator("#head")).not_to_contain_text("reranker")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    assert sent and "rerank_model" not in sent[0] and "rerank_pool" not in sent[0]
+
+
 def test_run_page_lists_what_the_run_left_out(page, seeded):
     def left_out(route):
         data = route.fetch().json()
@@ -1448,6 +1509,144 @@ def test_run_page_lists_what_the_run_left_out(page, seeded):
 
 
 # -- Settings page ------------------------------------------------------------------------
+
+
+@contextmanager
+def search_defaults_restored(seeded):
+    """Puts what a test changes back: store c's candidates, and every default but the fixture's."""
+    try:
+        yield
+    finally:
+        httpx.patch(seeded.url + "/collections/c", json={"chat_k": None})
+        httpx.put(
+            seeded.url + "/search-defaults", json={f: None for f in search_defaults.RECOMMENDED}
+        )
+        httpx.put(seeded.url + "/search-defaults", json={"rewrite": False})
+
+
+def test_store_page_shows_its_chat_settings_and_resets_to_settings(page, seeded):
+    with search_defaults_restored(seeded):
+        assert httpx.patch(seeded.url + "/collections/c", json={"chat_k": 12}).status_code == 200
+        page.goto(seeded.url + "/c/c")
+        row = page.locator('#chat-settings [data-chat-field="candidates"]')
+        expect(row.locator("[data-value]")).to_have_text("12")
+        expect(row.locator("[data-from]")).to_have_text("saved on this store")
+        row.get_by_role("button", name="Reset to Settings").click()
+        expect(row.locator("[data-value]")).to_have_text("20")
+        expect(row.locator("[data-from]")).to_have_text("recommended")
+        expect(row.get_by_role("button", name="Reset to Settings")).to_have_count(0)
+        assert httpx.get(seeded.url + "/collections/c").json()["chat_k"] is None
+
+
+def test_settings_page_search_defaults_save_and_reset_to_recommended(page, seeded):
+    with search_defaults_restored(seeded):
+        page.goto(seeded.url + "/settings")
+        box = page.locator('#search [name="candidates"]')
+        box.fill("30")
+        page.locator("#search-go").click()
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        got = httpx.get(seeded.url + "/search-defaults").json()
+        assert got["in_force"]["candidates"] == 30
+        page.get_by_role("button", name="Reset to recommended").click()
+        expect(page.locator("#search-msg")).to_have_text("Back to recommended")
+        got = httpx.get(seeded.url + "/search-defaults").json()
+        assert got["in_force"]["candidates"] == 20
+        expect(box).to_have_value("20")
+        expect(box.locator("..").locator("[data-recommended]")).to_have_text("Recommended: 20")
+
+
+def test_settings_page_says_what_each_job_does_and_what_works_without_ai(page, seeded):
+    page.goto(seeded.url + "/settings")
+    expect(page.locator("#head .sub")).to_have_text(
+        "AI writes chat answers, rewrites follow-ups, and builds keyword tags. "
+        "Search and eval runs on retrieval work without it."
+    )
+    expect(page.locator('#roles label:has([data-role="rewrite"]) .muted')).to_have_text(
+        "Rewrites a chat follow-up as one standalone question"
+    )
+    expect(
+        page.get_by_text("Used by chat and POST /chat, and by POST /query when no method is given.")
+    ).to_be_visible()
+
+
+def test_settings_says_why_rerank_is_off_by_default(page, seeded):
+    def with_note(route):
+        body = route.fetch().json()
+        route.fulfill(
+            json={**body, "notes": {"rerank": "Reranking is off until the model is ready."}}
+        )
+
+    page.route("**/search-defaults", with_note)
+    page.goto(seeded.url + "/settings")
+    expect(page.locator("#search [data-rerank-note]")).to_have_text(
+        "Reranking is off until the model is ready."
+    )
+
+
+def test_settings_page_picks_a_reranker_and_a_pool(page, seeded):
+    listed = httpx.get(seeded.url + "/search-defaults").json()
+    names = [r["name"] for r in listed["rerankers"]]
+    own = listed["recommended"]["rerank_model"]  # the fixture's own, not fastembed's
+    turbo = "jinaai/jina-reranker-v1-turbo-en"
+    tiny_name = "jinaai/jina-reranker-v1-tiny-en"
+    assert own not in names and turbo in names and tiny_name in names
+    with search_defaults_restored(seeded):
+        page.goto(seeded.url + "/settings")
+        select = page.locator('#search [name="rerank_model"]')
+        expect(select.locator("option")).to_have_count(len(names) + 1)
+        for name in [*names, own]:
+            expect(select.locator(f'option[value="{name}"]')).to_have_count(1)
+        expect(select.locator(f'option[value="{own}"]')).to_contain_text("(recommended)")
+        tiny = select.locator(f'option[value="{tiny_name}"]')
+        expect(tiny).to_contain_text("about 1.5 s for 20 passages on an M4 Pro")
+        bge = select.locator('option[value^="BAAI/bge-reranker-"]').first
+        expect(bge).to_contain_text("slower; for a faster machine")
+        select.select_option(turbo)
+        page.locator('#search [name="rerank_pool"]').fill("30")
+        page.locator("#search-go").click()
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        expect(page.locator("#search [data-downloading]")).to_have_count(0)  # the fake's is ready
+        got = httpx.get(seeded.url + "/search-defaults").json()
+        assert got["in_force"]["rerank_model"] == turbo
+        assert got["in_force"]["rerank_pool"] == 30
+
+
+def test_settings_shows_the_reranker_warm_up_the_service_reports(page, seeded):
+    state = {"rerank_status": "loading", "rerank_error": None}
+    puts: list[dict] = []
+
+    def reported(route):
+        if route.request.method == "PUT":
+            puts.append(route.request.post_data_json)
+        route.fulfill(json={**route.fetch().json(), **state})
+
+    page.route("**/search-defaults", reported)
+    page.goto(seeded.url + "/settings")
+    hint, error = (
+        page.locator("#search [data-downloading]"),
+        page.locator("#search [data-rerank-error]"),
+    )
+    expect(hint).to_have_text(
+        "Downloading in the background; chat merges by rank until it is ready."
+    )
+    expect(error).to_have_count(0)
+
+    state.update(rerank_status="failed", rerank_error="hub down")
+    page.reload()
+    expect(error).to_have_text(
+        "Could not load it: hub down. Chat merges by rank; Save tries again."
+    )
+    expect(hint).to_have_count(0)
+    with search_defaults_restored(seeded):
+        page.locator("#search-go").click()  # nothing edited: Save sends the reranker again
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        assert puts == [{"rerank_model": None}]  # as saved: the service's own
+
+    state.update(rerank_status="ready", rerank_error=None)
+    page.reload()
+    expect(page.locator('#search [name="rerank_model"]')).to_be_visible()
+    expect(hint).to_have_count(0)
+    expect(error).to_have_count(0)
 
 
 def ai_state(seeded):
@@ -1683,15 +1882,245 @@ def test_create_store_form_offers_the_recipes(page, seeded):
     page.get_by_role("button", name="+ New store").click()
     kind = page.locator("#f-recipe")
     options = kind.locator("option")
+    expect(options).to_have_count(1)  # Documents, the default type: its tagged recipe comes later
+    expect(options.first).to_have_attribute("value", "documents")
+    expect(options.first).to_contain_text("Your passages as uploaded")
+    page.locator("#f-type").select_option("science")
+    expect(options).to_have_count(3)
     expect(options.first).to_have_attribute("value", "paper_2024")
     expect(options.first).to_contain_text("Paper 2024")
     expect(options.first).to_contain_text("your three keyword lists")
+    values = [o.get_attribute("value") for o in options.all()]
+    assert values == ["paper_2024", "worked_examples", "reference"]
     expect(kind.locator("option[value=worked_examples]")).to_contain_text("Worked examples")
     kind.select_option("worked_examples")
     page.get_by_label("Name").fill("recipe-store")
     page.get_by_role("button", name="Create").click()
     expect(page.locator("main a.row-link", has_text="recipe-store")).to_be_visible()
     assert httpx.get(f"{seeded.url}/collections/recipe-store").json()["recipe"] == "worked_examples"
+
+
+def test_an_empty_documents_store_offers_no_benchmark(page, seeded):
+    r = httpx.post(f"{seeded.url}/collections", json={"name": "docs0", "qa_type": "documents"})
+    assert r.status_code == 201, r.text
+    page.goto(seeded.url + "/c/docs0")
+    expect(page.get_by_text("0 passages.", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name=re.compile(r"^(Load|Finish loading)"))).to_have_count(0)
+    expect(page.get_by_text("built-in benchmark")).to_have_count(0)
+    assert "undefined" not in page.locator("main").inner_text()
+
+
+# -- a Documents store -------------------------------------------------------------------------
+
+NEEDS_TAGS = "needs keyword tags: Add keyword tags on the store page"
+NOT_BUILT = (
+    "Not built. Keyword tags let keyword_rag search this store: an AI proposes a vocabulary "
+    "from your passages, then tags each passage by similarity."
+)
+
+
+def two_sections() -> str:
+    """A .md of two sections, each too long to share a chunk: two passages."""
+    return "# Alpha\n\n" + "alpha " * 160 + "\n\n# Brine\n\n" + "brine " * 160
+
+
+def documents_store(seeded, name, passages=True):
+    """A Documents store `name`; with `passages`, holding two_sections() as x.md."""
+    r = httpx.post(f"{seeded.url}/collections", json={"name": name, "qa_type": "documents"})
+    assert r.status_code == 201, r.text
+    if not passages:
+        return
+    up = httpx.post(
+        f"{seeded.url}/collections/{name}/uploads",
+        params={"filename": "x.md", "kind": "items"},
+        content=two_sections().encode(),
+    ).json()
+    body = {
+        "upload_id": up["upload_id"],
+        "kind": "items",
+        "source_name": "x",
+        "mapping": up["preview"]["mapping"],
+        "confirm": True,
+    }
+    r = httpx.post(f"{seeded.url}/collections/{name}/imports", json=body)
+    assert r.status_code == 202, r.text
+    assert seeded.wait(r.json()["job_id"])["status"] == "done"
+
+
+def test_documents_store_imports_md_without_a_mapping_table(page, seeded, tmp_path):
+    documents_store(seeded, "dmd", passages=False)
+    handbook = tmp_path / "handbook.md"
+    handbook.write_text(two_sections())
+    page.goto(seeded.url + "/c/dmd")
+    expect(page.locator("#imp-items-file")).to_have_attribute("accept", ".md,.txt")
+    upload_and_preview(page, "items", handbook)
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text("2 usable")
+    expect(preview).to_contain_text("2 passages")
+    expect(preview).to_contain_text("alpha alpha")  # a sample of the passages
+    expect(preview.locator("select[data-field]")).to_have_count(0)
+    page.locator("#imp-items-import").click()
+    expect(page.get_by_text(re.compile(r"Queued \(job \w{8}\)"))).to_be_visible()
+    jobs_done(seeded, "dmd")
+    assert httpx.get(f"{seeded.url}/collections/dmd").json()["count"] == 2
+    page.reload()
+    expect(page.get_by_text("2 passages.", exact=True)).to_be_visible()
+    expect(page.locator("#head .pill")).to_have_text("Ready")
+    expect(page.get_by_text("Or load the built-in benchmark")).to_have_count(0)
+    expect(page.get_by_text("How are items described?")).to_be_hidden()
+    expect(page.locator("#kw-topic")).to_be_hidden()
+    expect(page.get_by_role("button", name="Propose with AI")).to_be_hidden()
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("input[name=method][value=hybrid]")).to_be_checked()
+    expect(page.get_by_text("Have the AI answer")).to_have_count(0)
+    expect(page.locator("input[name=method][value=kw_individual]")).to_have_count(0)
+
+
+def tag_jobs(seeded, name):
+    return httpx.get(f"{seeded.url}/jobs", params={"collection": name, "kind": "tag_build"}).json()
+
+
+def test_documents_store_adds_keyword_tags_after_a_confirm(page, seeded):
+    documents_store(seeded, "dtag")
+    ai = seeded.app.state.ai
+    fake_replies(ai, lambda p: '{"terms": ["alpha", "brine", "cocoa"]}')
+    try:
+        page.goto(seeded.url + "/c/dtag")
+        tags = page.locator("#tags")
+        expect(tags.locator("h2")).to_have_text("Keyword tags")
+        expect(tags).to_contain_text(NOT_BUILT)
+        page.get_by_role("button", name="Add keyword tags").click()
+        confirm = page.locator("#tags-confirm")
+        expect(confirm).to_contain_text("AI call")
+        assert tag_jobs(seeded, "dtag") == []  # nothing queued before Start
+        confirm.get_by_role("button", name="Start").click()
+        deadline = time.time() + 10
+        while not tag_jobs(seeded, "dtag") and time.time() < deadline:
+            time.sleep(0.05)
+        (job,) = tag_jobs(seeded, "dtag")
+        assert seeded.wait(job["id"])["status"] == "done"
+        terms = httpx.get(f"{seeded.url}/collections/dtag").json()["keyword_tags"]["terms"]
+        expect(tags).to_contain_text(f"Built: {terms} terms.", timeout=15000)
+        expect(page.get_by_role("button", name="Add keyword tags")).to_have_count(0)
+    finally:
+        fake_replies(ai, lambda p: "Answer: A")
+
+
+def route_keyword_tags(page, name, shown):
+    """GET /collections/{name} answers with keyword_tags = shown["tags"]."""
+
+    def handle(route):
+        got = route.fetch().json()
+        got["keyword_tags"] = shown["tags"]
+        route.fulfill(json=got)
+
+    page.route(f"**/collections/{name}", handle)
+
+
+def test_keyword_tags_section_shows_progress_and_resume(page, seeded):
+    documents_store(seeded, "dprog", passages=False)
+    shown = {"tags": {"state": "building", "job_id": "tagjob01", "progress": 0.5}}
+    route_keyword_tags(page, "dprog", shown)
+    resumes = []
+
+    def resume(route):
+        body = route.request.post_data_json
+        resumes.append(body)
+        reply = (
+            {"job_id": "tagjob01"}
+            if body.get("confirm")
+            else {"estimate": {"est_usd": 0.02, "calls": 3}}
+        )
+        route.fulfill(json=reply)
+
+    page.route("**/jobs/tagjob01/resume", resume)
+    page.goto(seeded.url + "/c/dprog")
+    tags = page.locator("#tags")
+    expect(tags).to_contain_text("Adding keyword tags: 50%")
+    expect(page.get_by_role("button", name="Add keyword tags")).to_have_count(0)
+    shown["tags"] = {"state": "stopped", "job_id": "tagjob01"}
+    page.reload()
+    tags.get_by_role("button", name="Resume").click()
+    confirm = page.locator("#tags-confirm")
+    expect(confirm).to_contain_text("3 AI calls")
+    assert resumes == [{"confirm": False}]  # the click only asks for the estimate
+    confirm.get_by_role("button", name="Start").click()
+    expect(confirm.get_by_role("button", name="Start")).to_have_count(0)
+    assert resumes == [{"confirm": False}, {"confirm": True}]
+
+
+def test_keyword_tags_message_goes_when_the_state_changes(page, seeded):
+    documents_store(seeded, "dmsg", passages=False)
+    shown = {"tags": {"state": "none"}}
+    route_keyword_tags(page, "dmsg", shown)
+    refusal = {"detail": "connect a model for keywords first"}
+    page.route("**/collections/dmsg/keyword-tags", lambda r: r.fulfill(status=409, json=refusal))
+    page.expected = ["409"]  # the refusal is the point
+    page.clock.install()
+    page.goto(seeded.url + "/c/dmsg")
+    page.get_by_role("button", name="Add keyword tags").click()
+    msg = page.locator("#tags-msg")
+    expect(msg).to_have_text(refusal["detail"])
+    shown["tags"] = {"state": "building", "job_id": "tagjob03", "progress": 0}
+    page.clock.run_for(16000)  # the next poll repaints the section into the new state
+    expect(page.locator("#tags")).to_contain_text("Adding keyword tags")
+    expect(msg).to_have_text("")
+
+
+def test_run_form_says_why_keyword_rag_is_off(page, seeded):
+    documents_store(seeded, "dwhy", passages=False)
+    page.goto(seeded.url + "/c/dwhy")
+    page.get_by_role("button", name="New run").click()
+    box = page.locator("input[name=method][value=keyword_rag]")
+    expect(box).to_be_disabled()
+    label = page.locator("#run-form label.check", has=box)
+    expect(label).to_contain_text(f"({NEEDS_TAGS})")
+    expect(
+        page.locator("#run-form label.check", has=page.locator("[value=hybrid]"))
+    ).not_to_contain_text("(")
+
+
+def test_worker_page_names_a_tag_build_and_resumes_it(page, seeded):
+    stopped = {
+        "id": "tagjob02aaaa",
+        "kind": "tag_build",
+        "collection": "docs",
+        "status": "failed",
+        "error": None,
+        "progress": 0.4,
+        "created_at": "2026-11-08T10:00:00",
+        "updated_at": "2026-11-08T10:05:00",
+    }
+
+    def jobs(route):
+        route.fulfill(json=[stopped, *route.fetch().json()])
+
+    def status(route):
+        got = route.fetch().json()
+        got["problems"] = ["Tag_build tagjob02 on docs failed"]
+        route.fulfill(json=got)
+
+    resumes = []
+
+    def resume(route):
+        resumes.append(route.request.post_data_json)
+        route.fulfill(json={"estimate": {"est_usd": 0.02, "calls": 3}})
+
+    page.route(lambda url: url.endswith("/jobs?limit=200"), jobs)
+    page.route("**/status", status)
+    page.route("**/jobs/tagjob02aaaa/resume", resume)
+    page.goto(seeded.url + "/worker")
+    row = page.locator("[data-finished-job='tagjob02aaaa']")
+    expect(row).to_contain_text("Adding keyword tags docs")
+    expect(page.locator("[data-problem]")).to_have_text(
+        "Adding keyword tags tagjob02 on docs failed"
+    )
+    expect(page.locator("#worker-problem")).to_have_text(
+        "Adding keyword tags tagjob02 on docs failed"
+    )
+    row.get_by_role("button", name="Resume").click()
+    expect(page.locator("[data-resume-row]")).to_contain_text("3 AI calls")
+    assert resumes == [{"confirm": False}]
 
 
 def test_add_a_default_store_lists_every_dataset_and_loads_one(page, seeded):
@@ -2089,12 +2518,40 @@ CHAT_ATTEMPT = {
     "usd": 0.0123,
     "error": None,
     "model": "anthropic/fake",
+    "pipeline": {
+        "search_from": "message",
+        "rerank_text": "asked",
+        "merged_by": "rerank",
+        "rerank": True,
+        "rewrite": False,
+        "follow_up_turns": 2,
+        "evidence_size": 8,
+        "rrf_k": 60,
+        "pool": 2,
+        "notes": [],
+        "passages_only": False,
+        "rerank_model": "jinaai/jina-reranker-v1-tiny-en",
+        "rerank_pool": 20,
+    },
 }
 # The passages the answer was given, each with its number in the prompt: what [n] links to.
 CHAT_ATTEMPT["evidence"] = [
-    {**c, "rank": c["n"], "score": 0.016, "channels": ["meaning", "words"]}
+    {**c, "rank": c["n"], "score": 1.2, "relevance": 0.77, "channels": ["meaning", "words"]}
     for c in CHAT_ATTEMPT["citations"]
 ]
+# A store's decision as the pipeline saves it.
+CHAT_DECISION = {
+    "store": "c",
+    "method": "hybrid",
+    "candidates": 20,
+    "search": {"weights": {"meaning": 1, "words": 1, "keywords": 1}, "query_tags": "similarity"},
+    "tags": None,
+    "found": 20,
+    "used": 3,
+    "note": None,
+    "usd": 0.0,
+    "error": None,
+}
 
 
 def make_chat(seeded, stores=("c",), title=None) -> str:
@@ -2164,29 +2621,25 @@ def test_new_chat_picks_stores_and_lists_saved_chats(page, seeded):
     hrefs = page.locator("#chat-list a").evaluate_all("els => els.map(e => e.getAttribute('href'))")
     assert hrefs.index(f"#{second}") < hrefs.index(f"#{first}")
 
-    # The header's edits are saved on the chat.
+    # The header's edits are saved on the chat. Evidence size and rewrite are in the panel.
+    expect(page.locator("#chat-head").get_by_label("Evidence size")).to_have_count(0)
+    expect(page.locator("#chat-head").get_by_label(re.compile("Rewrite"))).to_have_count(0)
     with page.expect_response(lambda r: r.request.method == "PATCH"):
         page.locator("#add-store").select_option("vo")
     expect(page.locator("#chips .chip")).to_have_count(2)
+    expect(edit_box(settings_panel(page), "vo")).to_be_visible()  # the panel has it too
     with page.expect_response(lambda r: r.request.method == "PATCH"):
         page.get_by_role("button", name="Remove c").click()
     expect(page.locator("#chips .chip")).to_have_text([re.compile("^vo")])
     expect(page.get_by_role("button", name="Remove vo")).to_be_disabled()  # a chat needs one
-    page.locator("#evidence").fill("3")
-    with page.expect_response(lambda r: r.request.method == "PATCH"):
-        page.locator("#evidence").blur()
-    expect(page.locator("#chat-head")).to_contain_text("costs one AI call per follow-up")
-    with page.expect_response(lambda r: r.request.method == "PATCH"):
-        page.get_by_label("Rewrite follow-ups with AI").check()
+    expect(edit_box(settings_panel(page), "c")).to_have_count(0)
     saved = httpx.get(f"{seeded.url}/chats/{second}").json()
     assert saved["stores"] == ["vo"]
-    assert saved["settings"]["evidence_size"] == 3 and saved["settings"]["rewrite"] is True
 
     # Clicking a chat opens it.
     chat_link(page, first).click()
     expect(page).to_have_url(re.compile(f"#{first}$"))
     expect(page.locator("#log .user")).to_have_text("the first of two saved chats")
-    expect(page.locator("#evidence")).to_have_value("8")
 
     # Delete asks first.
     row = page.locator("#chat-list li", has=page.locator(f'a[href="#{second}"]'))
@@ -2392,6 +2845,76 @@ def test_a_reply_landing_while_its_chat_reopens_is_kept(page, seeded):
         expect(page.locator("#send")).to_be_enabled()
 
 
+def test_a_rerun_and_an_answer_landing_while_their_chat_reopens_are_kept(page, seeded):
+    chat_id = make_chat(seeded, ["c"], "re-run reopening chat")
+    other = make_chat(seeded, ["vo"], "re-run reopening other")
+    page.goto(f"{seeded.url}/chat#{chat_id}")
+    expect(page.locator("#chips .chip")).to_have_count(1)
+    chat_ask(page, "enzyme kinetics rate experiment")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    held = {"posts": [], "reopen": None, "hold": False}
+
+    def post(route):
+        held["posts"].append(route)  # sent on from the test
+
+    def get(route):
+        if not held["hold"] or route.request.method != "GET" or held["reopen"]:
+            route.fallback()
+            return
+        held["reopen"] = (route, route.fetch())  # read now, before the reply is saved
+
+    def until(ready):
+        for _ in range(200):
+            if ready():
+                return
+            page.wait_for_timeout(20)
+        raise AssertionError("never happened")
+
+    def reopen_while(check):
+        """With the clicked request held, reopens the chat, its read made before the reply is
+        saved (`check` says so), then lets the reply land, then the older read."""
+        until(lambda: len(held["posts"]) == 1)
+        chat_link(page, other).click()
+        expect(page.locator("#chat-title")).to_have_text("re-run reopening other")
+        held["hold"] = True
+        chat_link(page, chat_id).click()
+        until(lambda: held["reopen"] is not None)
+        route = held["posts"].pop()
+        with page.expect_request(lambda r: r.url.endswith("/budget")):  # the reply was taken
+            route.fulfill(response=route.fetch())
+        reopen, stale = held["reopen"]
+        check(stale.json())
+        held.update(hold=False, reopen=None)
+        reopen.fulfill(response=stale)
+
+    page.route(f"**/chats/{chat_id}/messages/1/attempts", post)
+    page.route(f"**/chats/{chat_id}/messages/1/attempts/2/answer", post)
+    page.route(f"**/chats/{chat_id}", get)
+    panel = settings_panel(page)
+    edit_box(panel, "c").get_by_label("Candidates").fill("2")
+    panel.get_by_role("button", name="Re-run", exact=True).click()
+
+    def no_rerun(read):
+        assert len(read["messages"][0]["attempts"]) == 1
+
+    reopen_while(no_rerun)
+    second = turn.get_by_role("tab", name="Attempt 2")
+    expect(second).to_have_attribute("aria-selected", "true")
+    expect(turn.locator(".reply")).to_have_count(0)
+    # The settings the re-run saved on the chat, read again after the older read.
+    expect(edit_box(settings_panel(page), "c").get_by_label("Candidates")).to_have_value("2")
+
+    turn.get_by_role("button", name="Answer from this attempt").click()
+
+    def no_answer(read):
+        assert read["messages"][0]["attempts"][1]["answer"] is None
+
+    reopen_while(no_answer)
+    expect(second).to_have_attribute("aria-selected", "true")
+    expect(turn.locator(".reply .md")).to_have_text("Answer: A")
+
+
 def test_a_deleted_store_shows_as_deleted(page, seeded):
     free_store(seeded, "doomed")
     chat_id = make_chat(seeded, ["c", "doomed"], "a chat that outlives a store")
@@ -2407,14 +2930,22 @@ def test_a_deleted_store_shows_as_deleted(page, seeded):
     expect(page.locator("#log .user")).to_have_text("before it goes")  # the old chat reads whole
     expect(page.locator("#log .reply")).to_have_count(1)
     step = retrieval_step(page)
-    expect(store_row(step, "doomed").locator("th")).to_have_text("doomed · deleted")
-    expect(store_row(step, "c").locator("th")).to_have_text("c")
+    expect(count_line(step, "doomed").locator(".count")).to_have_text(
+        re.compile(r"^doomed · deleted: \d+ candidates?, \d+ kept$")
+    )
+    expect(count_line(step, "c").locator(".count")).to_have_text(re.compile(r"^c: "))
     passages = step.locator('ol.evidence li[data-store="doomed"] .what')
     expect(passages.first).to_contain_text(" · doomed · deleted · ")
+    expect(edit_box(settings_panel(page), "doomed")).to_have_count(0)  # nothing to set there
     with page.expect_response(lambda r: r.request.method == "PATCH"):
         page.get_by_role("button", name="Remove doomed").click()
     expect(chips).to_have_count(1)
     assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["stores"] == ["c"]
+    # Off the chat, its old rows still name it, and still say it is deleted.
+    expect(count_line(step, "doomed")).to_contain_text("doomed · deleted")
+    page.reload()
+    step = retrieval_step(page)
+    expect(count_line(step, "doomed")).to_contain_text("doomed · deleted")
 
 
 def test_chat_page_sends_shows_citations_and_cost(page, seeded):
@@ -2565,14 +3096,37 @@ def test_chat_store_detail_failing_still_enables_send_and_add(page, seeded):
     expect(page.locator("#add-doc")).to_be_enabled()
 
 
-def test_chat_without_an_answer_model_says_what_to_set_up(page, seeded):
-    ai = httpx.get(seeded.url + "/ai").json()
-    page.route("**/ai", lambda route: route.fulfill(json={**ai, "models": []}))
-    open_chat(page, seeded)
-    note = page.locator("#note")
-    expect(note).to_contain_text("Chat needs an answer model: choose one on Settings")
-    expect(note.get_by_role("link", name="Settings")).to_have_attribute("href", "/settings")
-    expect(page.locator("#send")).to_be_disabled()
+def test_chat_without_an_answer_model_sends_and_shows_passages_only(page, seeded):
+    ai = seeded.app.state.ai
+    listed = httpx.get(seeded.url + "/ai").json()
+    page.route("**/ai", lambda route: route.fulfill(json={**listed, "models": []}))
+    ai.role_model = lambda role: None  # the server has no model for any role
+    try:
+        open_chat(page, seeded)
+        note = page.locator("#compose #note")
+        expect(note).to_have_text("Connect AI in Settings to get written answers")
+        expect(note.get_by_role("link", name="Settings")).to_have_attribute("href", "/settings")
+        expect(page.locator("#model")).to_be_hidden()
+        expect(page.locator("#send")).to_be_enabled()
+        chat_ask(page, "enzyme kinetics rate experiment")
+        turn = page.locator("#msg-1")
+        passages = turn.locator(".msg.passages")
+        expect(passages.locator(".said")).to_have_text("Passages only: no answer model")
+        expect(passages.locator("ol.evidence li")).to_have_count(3)  # open, under the message
+        expect(passages.locator("ol.evidence")).to_contain_text("enzyme kinetics rate experiment")
+        expect(turn.locator(".reply, .err")).to_have_count(0)
+        expect(turn.get_by_role("button", name="Answer from this attempt")).to_have_count(0)
+        expect(page.locator("#spoken")).to_have_text("Passages only: no answer model")
+        step = retrieval_step(page)
+        expect(step.locator("ol.evidence")).to_have_count(0)  # listed once, above
+        expect(step).to_contain_text("The passages are listed above.")
+        # A re-run without AI is passages only too.
+        with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+            settings_panel(page).get_by_role("button", name="Re-run", exact=True).click()
+        expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
+        expect(turn.locator(".msg.passages .said")).to_have_text("Passages only: no answer model")
+    finally:
+        del ai.role_model
 
 
 def test_chat_reply_error_keeps_the_conversation(page, seeded):
@@ -2781,7 +3335,7 @@ def test_chat_upload_refuses_other_files_without_uploading(page, seeded, tmp_pat
     expect(page.locator("#add-doc")).to_be_enabled()
 
 
-# -- The retrieval step under each answer --------------------------------------------------
+# -- The retrieval step under each answer, and the chat's settings panel --------------------
 
 
 def retrieval_step(page, n=1):
@@ -2793,12 +3347,32 @@ def retrieval_step(page, n=1):
     return step
 
 
+def settings_panel(page):
+    """The chat's one settings panel, under its latest message, opened."""
+    panel = page.locator("#log details.panel")
+    expect(panel).to_have_count(1)
+    if panel.get_attribute("open") is None:
+        panel.locator(":scope > summary").click()
+    expect(panel).to_have_attribute("open", "")
+    return panel
+
+
+def count_line(step, store):
+    """A store's line in an attempt's Retrieval step: what it found and what was kept."""
+    return step.locator(f'ul.counts li[data-store="{store}"]')
+
+
 def store_row(step, store):
+    """A store's row in an old attempt's Retrieval step, as it was recorded."""
     return step.locator(f'table.decisions tr[data-store="{store}"]')
 
 
-def edit_box(step, store):
-    return step.locator(f'fieldset[data-edit="{store}"]')
+def edit_box(panel, store):
+    return panel.locator(f'fieldset[data-edit="{store}"]')
+
+
+def rerun_button(panel):
+    return panel.get_by_role("button", name="Re-run", exact=True)
 
 
 def attempt_posts(page):
@@ -2815,99 +3389,422 @@ def attempt_posts(page):
     return sent
 
 
-def test_retrieval_step_shows_search_text_store_decisions_and_evidence(page, seeded):
-    def tagged(route):
-        # The real reply, with vo run as keyword_rag (no store has a vocabulary here) and
-        # its first passage longer than 300 characters.
+def test_retrieval_step_shows_counts_rerank_scores_and_notes(page, seeded):
+    unavailable = "reranker unavailable: merged by rank"
+    by_rank = {**CHAT_ATTEMPT["pipeline"], "merged_by": "rrf", "notes": [unavailable], "pool": 20}
+    vo = {**CHAT_DECISION, "store": "vo", "method": "keyword_rag", "found": 3, "used": 0}
+    vo.update(search={**vo["search"], "query_tags": "classifier"}, tags=["enzyme", "rate"])
+    broke = {**CHAT_DECISION, "store": "broke", "found": 0, "used": 0}
+    broke["error"] = "budget used up"
+    first = {
+        "search_text": "enzyme kinetics",
+        "decisions": [CHAT_DECISION, vo, broke],
+        "evidence": [{**e, "relevance": None} for e in CHAT_ATTEMPT["evidence"]],  # by RRF
+        "pipeline": by_rank,
+    }
+    follow_up = {**CHAT_ATTEMPT["pipeline"], "search_from": "joined", "rerank_text": "the rate?"}
+    second = {
+        "n": 2,
+        "search_text": "enzyme kinetics\nthe rate?",
+        "decisions": [CHAT_DECISION],
+        "pipeline": follow_up,
+    }
+    unnamed = {**CHAT_ATTEMPT["pipeline"], "rerank_model": None}  # no reranker recorded
+    third = {"n": 3, "search_text": "asked", "decisions": [CHAT_DECISION], "pipeline": unnamed}
+    replies = [first, second, third]
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, **replies.pop(0))))
+    chat_id = open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "enzyme kinetics")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    step = turn.locator("details.retrieval")
+    expect(step.locator(":scope > summary")).to_have_text("Retrieval step")
+    expect(step).not_to_have_attribute("open", "")  # collapsed until opened
+    step = retrieval_step(page)
+    expect(step.locator(".searched")).to_have_text("enzyme kinetics")
+    expect(step.locator(".from")).to_have_text("as typed")
+    expect(count_line(step, "c").locator(".count")).to_have_text("c: 20 candidates, 3 kept")
+    expect(count_line(step, "vo").locator(".count")).to_have_text("vo: 3 candidates, 0 kept")
+    expect(count_line(step, "vo").locator(".method")).to_have_text(
+        " · Keyword-RAG · query tags: classifier · enzyme, rate"
+    )
+    broken = count_line(step, "broke")
+    expect(broken.locator(".note")).to_have_text(" · error: budget used up")
+    expect(broken).to_have_class(re.compile("dropped"))
+    expect(count_line(step, "c")).not_to_have_class(re.compile("dropped"))
+    expect(step.locator(".notes li")).to_have_text([unavailable])
+    expect(step.locator(".reranked")).to_have_count(0)  # merged by rank: no reranker named
+    expect(step.locator(".pooled")).to_have_text("Pooled 20 of 23 (Rerank up to 20)")
+    passage = step.locator("#ev-1-1-1")
+    expect(passage.locator(".what")).to_have_text("[1] enzyme-item · c · hand · rank 1 in c")
+    expect(passage.locator("details")).to_have_count(1)  # longer than 300 characters
+    assert len(passage.locator("summary").inner_text()) <= 305
+
+    # Closed again, a citation opens it at the passage it cites.
+    step.locator(":scope > summary").click()
+    expect(step).not_to_have_attribute("open", "")
+    turn.locator(".reply a.cite").first.click()
+    expect(step).to_have_attribute("open", "")
+    expect(page.locator("#log li:target")).to_have_attribute("id", "ev-1-1-1")
+    expect(page).to_have_url(re.compile(f"#{chat_id}$"))
+
+    # A follow-up, reranked against the message alone by the reranker it names; what is
+    # open survives the log's redraw.
+    passage.locator("summary").click()
+    expect(passage.locator("details")).to_have_attribute("open", "")
+    chat_ask(page, "the rate?")
+    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+    expect(step).to_have_attribute("open", "")
+    expect(passage.locator("details")).to_have_attribute("open", "")
+    expect(page.locator("#msg-2 details.retrieval")).not_to_have_attribute("open", "")
+    two = retrieval_step(page, 2)
+    expect(two.locator(".from")).to_have_text("with the previous message")
+    reranked = two.locator(".reranked")
+    expect(reranked).to_contain_text("Reranked against: the rate?")
+    expect(reranked).to_contain_text("by jina-reranker-v1-tiny-en")
+    expect(two.locator("#ev-2-1-1 .what")).to_have_text(
+        "[1] enzyme-item · c · hand · rank 1 in c · rerank 0.77"
+    )
+    expect(two.locator(".notes")).to_have_count(0)
+    chat_ask(page, "asked")
+    expect(page.locator("#msg-3 .reply")).to_have_count(1)
+    expect(retrieval_step(page, 3).locator(".reranked")).to_have_text("Reranked")  # no "by "
+
+
+def test_an_old_attempt_shows_its_recorded_reasons_read_only(page, seeded):
+    chat_id = make_chat(seeded, ["c", "vo"], "a chat from before the pipeline")
+    r = httpx.post(f"{seeded.url}/chats/{chat_id}/messages", json={"content": "an old question"})
+    assert r.status_code == 200, r.text
+    old = {"method": "hybrid", "k": 8, "best": 0.6, "bar": 0.4, "usd": 0.0, "error": None}
+    decisions = [
+        {**old, "store": "c", "kept": True, "reason": "cleared its bar"},
+        {**old, "store": "vo", "kept": False, "reason": "below its bar"},
+        {**old, "store": "far", "method": None, "k": None, "kept": False, "reason": "not routed"},
+        {**old, "store": "broke", "kept": False, "reason": "error", "error": "budget used up"},
+    ]
+
+    def old_shape(route):
         got = route.fetch()
-        message = got.json()
-        attempt = message["attempts"][0]
-        vo = next(d for d in attempt["decisions"] if d["store"] == "vo")
-        vo.update(method="keyword_rag", search={**vo["search"], "query_tags": "classifier"})
-        vo["tags"] = ["enzyme", "rate"]
-        first = next(e for e in attempt["evidence"] if e["n"] == 1)
-        first["text"] += " and more" * 40
-        route.fulfill(response=got, json=message)
+        chat = got.json()
+        chat["messages"][0]["attempts"][0].update(pipeline=None, decisions=decisions)
+        route.fulfill(response=got, json=chat)
 
-    ai = seeded.app.state.ai
-    fake_replies(ai, lambda p: "Rates rise [1].")
+    page.route(f"**/chats/{chat_id}", old_shape)
+    page.goto(f"{seeded.url}/chat#{chat_id}")
+    step = retrieval_step(page)
+    expect(step.locator(".searched")).to_have_text("an old question")
+    expect(step.locator("table.decisions thead th")).to_have_text(["Store", "Method", "Result"])
+    expect(store_row(step, "c").locator(".kept")).to_have_text("kept · cleared its bar")
+    expect(store_row(step, "c")).not_to_have_class(re.compile("dropped"))
+    expect(store_row(step, "vo").locator(".method")).to_have_text("hybrid")
+    expect(store_row(step, "vo").locator(".kept")).to_have_text("dropped · below its bar")
+    expect(store_row(step, "vo")).to_have_class(re.compile("dropped"))
+    expect(store_row(step, "far").locator(".kept")).to_have_text("dropped · not routed")
+    expect(store_row(step, "far").locator(".method")).to_have_text("–")
+    expect(store_row(step, "broke").locator(".kept")).to_have_text(
+        "dropped · error: budget used up"
+    )
+    expect(step.locator("ul.counts")).to_have_count(0)
+    expect(step.locator("select, input, button")).to_have_count(0)  # read only
+    expect(rerun_button(step)).to_have_count(0)
+    # The chat's panel, outside it, re-runs the message with the settings in force.
+    expect(rerun_button(settings_panel(page))).to_be_enabled()
+
+
+def test_settings_panel_shows_only_under_the_latest_message_with_inherited_values(page, seeded):
+    conn = seeded.app.state.conn
+    search_defaults.save(conn, {"evidence_size": 6})
     try:
-        chat_route(page, tagged)
-        chat_id = open_chat(page, seeded, ("c", "vo"))
+        chat_id = open_chat(page, seeded, ("c",))
+        expect(page.locator("#log details.panel")).to_have_count(0)  # no message yet
         chat_ask(page, "enzyme kinetics rate experiment")
-        expect(page.locator("#msg-1 .reply")).to_have_count(1)
-        step = page.locator("#msg-1 details.retrieval")
-        expect(step.locator(":scope > summary")).to_have_text("Retrieval step")
-        expect(step).not_to_have_attribute("open", "")  # collapsed until opened
-        step = retrieval_step(page)
-        expect(step.locator(".searched")).to_have_text("enzyme kinetics rate experiment")
-
-        c = store_row(step, "c")
-        expect(c.locator(".method")).to_have_text("hybrid")
-        expect(c.locator(".best")).to_have_text("1.00")
-        expect(c.locator(".bar")).to_have_text("0.29")
-        expect(c.locator(".kept")).to_have_text("kept · clears its bar")
-        vo = store_row(step, "vo")
-        expect(vo.locator(".method")).to_have_text(
-            "keyword_rag · query tags: classifier · enzyme, rate"
-        )
-        expect(vo.locator(".kept")).to_have_text("kept · clears its bar")
-
-        # Every passage the answer was given, by its number in the prompt.
-        expect(step.locator("ol.evidence li")).to_have_count(6)
-        first = step.locator("#ev-1-1-1")
-        expect(first.locator(".what")).to_have_text("[1] enzyme-item · c · hand · rank 1")
-        expect(first.locator("details")).to_have_count(1)  # longer than 300 characters
-        assert len(first.locator("summary").inner_text()) <= 305
-        expect(step.locator("#ev-1-1-6 .what")).to_have_text("[6] enzyme-item · vo · hand · rank 1")
-        expect(step.locator("#ev-1-1-2")).to_contain_text("volcano magma lava pressure")
-
-        # Closed again, a citation opens it at the passage it cites.
-        step.locator(":scope > summary").click()
-        expect(step).not_to_have_attribute("open", "")
-        page.locator("#msg-1 .reply a.cite").click()
-        expect(step).to_have_attribute("open", "")
-        expect(page.locator("#log li:target")).to_have_attribute("id", "ev-1-1-1")
-        expect(page).to_have_url(re.compile(f"#{chat_id}$"))
-
-        # What is open survives the log's redraw on the next reply.
-        first.locator("summary").click()
-        expect(first.locator("details")).to_have_attribute("open", "")
+        expect(page.locator("#msg-1 details.panel")).to_have_count(1)
         chat_ask(page, "and the volcano?")
-        expect(page.locator("#log .turn")).to_have_count(2)
         expect(page.locator("#msg-2 .reply")).to_have_count(1)
-        expect(step).to_have_attribute("open", "")
-        expect(first.locator("details")).to_have_attribute("open", "")
-        expect(page.locator("#msg-2 details.retrieval")).not_to_have_attribute("open", "")
+        expect(page.locator("#log details.panel")).to_have_count(1)
+        expect(page.locator("#msg-2 details.panel")).to_have_count(1)
+        expect(page.locator("details.retrieval details.panel")).to_have_count(0)
+        panel = settings_panel(page)
+        size = panel.get_by_label("Evidence size")
+        expect(size).to_have_value("")
+        expect(size).to_have_attribute("placeholder", "6 · Settings")
+        rerank = panel.get_by_label("Rerank", exact=True)
+        expect(rerank.locator("option")).to_have_text(["Inherit (on · recommended)", "On", "Off"])
+        expect(rerank).to_have_value("")
+        rewrite = panel.get_by_label("Rewrite follow-ups")
+        expect(rewrite.locator("option")).to_have_text(["Inherit (off · Settings)", "On", "Off"])
+        c = edit_box(panel, "c")
+        expect(c.locator("legend")).to_have_text("c")
+        method = c.get_by_label("Method")
+        expect(method.locator("option:checked")).to_have_text("Inherit (Hybrid · recommended)")
+        expect(c.get_by_label("Candidates")).to_have_value("")
+        expect(c.get_by_label("Candidates")).to_have_attribute("placeholder", "20 · recommended")
+        expect(c.get_by_role("button", name="Set as default")).to_be_disabled()  # nothing to save
+
+        # A value the chat holds is shown; the placeholder still says what blank inherits.
+        r = httpx.patch(f"{seeded.url}/chats/{chat_id}", json={"evidence_size": 3, "rerank": False})
+        assert r.status_code == 200, r.text
+        page.reload()
+        panel = settings_panel(page)
+        size = panel.get_by_label("Evidence size")
+        expect(size).to_have_value("3")
+        expect(size).to_have_attribute("placeholder", "6 · Settings")
+        rerank = panel.get_by_label("Rerank", exact=True)
+        expect(rerank).to_have_value("off")
+        expect(rerank.locator("option").first).to_have_text("Inherit (on · recommended)")
+
+        # With Search defaults unread, what a held value inherits is unknown: its source is
+        # said, never a 0.
+        page.expected = ["500"]
+        page.route(
+            "**/search-defaults",
+            lambda r: r.fulfill(status=500, json={"detail": "search defaults broke"}),
+        )
+        page.reload()
+        panel = settings_panel(page)
+        expect(panel.get_by_label("Evidence size")).to_have_attribute("placeholder", "Settings")
+        rerank = panel.get_by_label("Rerank", exact=True)
+        expect(rerank.locator("option").first).to_have_text("Inherit (Settings)")
+        rewrite = panel.get_by_label("Rewrite follow-ups")  # the chat holds none: in force says
+        expect(rewrite.locator("option").first).to_have_text("Inherit (off · Settings)")
     finally:
-        fake_replies(ai, lambda p: "Answer: A")
+        search_defaults.save(conn, {"evidence_size": None})
+
+
+def test_one_rerun_sends_every_change_and_the_panel_survives_a_reload(page, seeded):
+    sent = attempt_posts(page)
+    open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "enzyme kinetics rate experiment")
+    turn = page.locator("#msg-1")
+    expect(turn.locator(".reply")).to_have_count(1)
+    panel = settings_panel(page)
+    panel.get_by_label("Evidence size").fill("3")
+    edit_box(panel, "c").get_by_label("Candidates").fill("5")
+    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")) as got:
+        rerun_button(panel).click()
+    assert sent == [{"settings": {"evidence_size": 3}, "stores": {"c": {"candidates": 5}}}]
+    ran = got.value.json()
+    assert ran["pipeline"]["evidence_size"] == 3
+    assert next(d for d in ran["decisions"] if d["store"] == "c")["candidates"] == 5
+    expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
+    page.reload()
+    panel = settings_panel(page)
+    expect(panel.get_by_label("Evidence size")).to_have_value("3")
+    expect(edit_box(panel, "c").get_by_label("Candidates")).to_have_value("5")
+    expect(edit_box(panel, "vo").get_by_label("Candidates")).to_have_value("")
+
+
+def test_chat_methods_have_plain_labels_and_no_hybrid_rerank(page, seeded):
+    chat_methods = httpx.get(f"{seeded.url}/catalog").json()["chat_methods"]
+    open_chat(page, seeded, ("c",))  # c has no vocabulary
+    chat_ask(page, "enzyme kinetics rate experiment")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    method = edit_box(settings_panel(page), "c").get_by_label("Method")
+    options = method.locator("option")
+    expect(options.filter(has_text=re.compile("^Hybrid$"))).to_have_count(1)
+    values = options.evaluate_all("os => os.map(o => o.value)")
+    assert values == ["", *chat_methods]
+    assert "hybrid_rerank" not in values and "iterative" not in values
+    expect(method.locator('option[value="kw_individual"]')).to_have_text(
+        "Keywords per list (may cost AI)"
+    )
+    keyword_rag = method.locator('option[value="keyword_rag"]')
+    expect(keyword_rag).to_have_attribute("disabled", "")
+    expect(keyword_rag).to_contain_text("needs a vocabulary")
+    expect(method.locator('option[value="hybrid"]')).not_to_have_attribute("disabled", "")
+
+
+def test_set_as_default_confirms_that_it_re_runs_then_saves(page, seeded):
+    conn = seeded.app.state.conn
+    before = db.get_chat_method(conn, "c"), db.get_chat_k(conn, "c")
+    defaults = []
+    page.on(
+        "request",
+        lambda r: defaults.append(r.url) if r.url.endswith("/stores/c/default") else None,
+    )
+    sent = attempt_posts(page)
+    try:
+        open_chat(page, seeded, ("c",))
+        chat_ask(page, "enzyme kinetics rate experiment")
+        turn = page.locator("#msg-1")
+        expect(turn.locator(".reply")).to_have_count(1)
+        expect(turn.get_by_role("tab")).to_have_count(0)  # one attempt
+        c = edit_box(settings_panel(page), "c")
+        default = c.get_by_role("button", name="Set as default")
+        expect(default).to_be_disabled()  # no chat value and no edit
+        c.get_by_label("Method").select_option("vector")
+        c.get_by_label("Candidates").fill("5")
+        expect(default).to_be_enabled()
+
+        default.click()
+        question = (
+            "Save Vector search and 5 candidates as c's chat settings? "
+            "This also re-runs this message."
+        )
+        expect(c.locator(".confirm .ask")).to_have_text(question)
+        c.get_by_role("button", name="Cancel").click()
+        expect(c.locator(".confirm")).to_have_count(0)
+        assert defaults == [] and sent == []
+        expect(c.get_by_label("Candidates")).to_have_value("5")  # the edit is kept
+
+        default.click()
+        with page.expect_response(lambda r: r.url.endswith("/stores/c/default")):
+            c.get_by_role("button", name="Yes, save").click()
+        expect(c.locator(".edit-note")).to_have_text("Saved as c's chat settings.")
+        assert sent == [{"settings": {}, "stores": {"c": {"method": "vector", "candidates": 5}}}]
+        expect(turn.get_by_role("tab")).to_have_count(2)  # the re-run came first
+        expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
+        chat_settings = httpx.get(f"{seeded.url}/collections/c").json()["chat_settings"]
+        assert chat_settings["method"] == {"value": "vector", "from": "store"}
+        assert chat_settings["candidates"] == {"value": 5, "from": "store"}
+        # The chat holds them no more: they are the store's.
+        method = c.get_by_label("Method")
+        expect(method.locator("option:checked")).to_have_text("Inherit (Vector search · store)")
+        expect(c.get_by_label("Candidates")).to_have_value("")
+        expect(c.get_by_label("Candidates")).to_have_attribute("placeholder", "5 · store")
+        expect(default).to_be_disabled()
+
+        # A value the chat holds, with nothing unsent, is saved without a re-run.
+        c.get_by_label("Candidates").fill("4")
+        with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+            rerun_button(settings_panel(page)).click()
+        expect(turn.get_by_role("tab")).to_have_count(3)
+        default.click()
+        expect(c.locator(".confirm .ask")).to_have_text(
+            "Save the inherited method and 4 candidates as c's chat settings?"
+        )
+        with page.expect_response(lambda r: r.url.endswith("/stores/c/default")):
+            c.get_by_role("button", name="Yes, save").click()
+        expect(c.locator(".edit-note")).to_have_text("Saved as c's chat settings.")
+        assert len(sent) == 2
+        expect(turn.get_by_role("tab")).to_have_count(3)
+        assert db.get_chat_k(conn, "c") == 4
+    finally:
+        db.set_chat_method(conn, "c", before[0])
+        db.set_chat_k(conn, "c", before[1])
+
+
+def test_a_panel_edit_that_changes_nothing_is_dropped_and_set_as_default_clears(page, seeded):
+    conn = seeded.app.state.conn
+    before = db.get_chat_method(conn, "c"), db.get_chat_k(conn, "c")
+    sent = attempt_posts(page)
+    try:
+        open_chat(page, seeded, ("c",))
+        chat_ask(page, "enzyme kinetics rate experiment")
+        turn = page.locator("#msg-1")
+        expect(turn.locator(".reply")).to_have_count(1)
+        panel = settings_panel(page)
+        method = edit_box(panel, "c").get_by_label("Method")
+        method.select_option("vector")
+        with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+            rerun_button(panel).click()  # the chat now holds vector for c
+        expect(turn.get_by_role("tab")).to_have_count(2)
+
+        # Away and back: no edit, so Set as default saves with no re-run.
+        c = edit_box(settings_panel(page), "c")
+        c.get_by_label("Method").select_option("hybrid")
+        c.get_by_label("Method").select_option("vector")
+        default = c.get_by_role("button", name="Set as default")
+        default.click()
+        ask = "Save Vector search and the inherited candidates as c's chat settings?"
+        expect(c.locator(".confirm .ask")).to_have_text(ask)
+        c.get_by_label("Candidates").fill("7")  # an edit while it asks: the question is gone
+        expect(c.locator(".confirm")).to_have_count(0)
+        c.get_by_label("Candidates").fill("")
+        default.click()
+        expect(c.locator(".confirm .ask")).to_have_text(ask)
+        with page.expect_response(lambda r: r.url.endswith("/stores/c/default")):
+            c.get_by_role("button", name="Yes, save").click()
+        expect(c.locator(".edit-note")).to_have_text("Saved as c's chat settings.")
+        assert len(sent) == 1
+        expect(c.get_by_label("Method").locator("option:checked")).to_have_text(
+            "Inherit (Vector search · store)"
+        )
+        expect(default).to_be_disabled()
+        with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
+            rerun_button(settings_panel(page)).click()
+        assert sent[-1] == {"settings": {}, "stores": {}}
+    finally:
+        db.set_chat_method(conn, "c", before[0])
+        db.set_chat_k(conn, "c", before[1])
+
+
+def test_rewrite_follow_ups_is_hidden_without_a_rewrite_model(page, seeded):
+    chat_id = make_chat(seeded, ["c"], "a chat with no rewrite model")
+    r = httpx.post(f"{seeded.url}/chats/{chat_id}/messages", json={"content": "enzyme kinetics"})
+    assert r.status_code == 200, r.text
+    page.goto(f"{seeded.url}/chat#{chat_id}")
+    panel = settings_panel(page)
+    expect(panel.get_by_label("Rewrite follow-ups")).to_be_visible()
+
+    def no_rewrite_model(route):
+        got = route.fetch()
+        chat = got.json()
+        chat["in_force"]["rewrite_available"] = False
+        route.fulfill(response=got, json=chat)
+
+    page.route(f"**/chats/{chat_id}", no_rewrite_model)
+    page.reload()
+    panel = settings_panel(page)
+    expect(panel.get_by_label("Rerank", exact=True)).to_be_visible()
+    expect(panel.get_by_label("Rewrite follow-ups")).to_be_hidden()
+
+
+def test_a_rerun_that_rewrites_again_asks_first(page, seeded):
+    sent = attempt_posts(page)
+    open_chat(page, seeded, ("c",))
+    chat_ask(page, "enzyme kinetics rate experiment")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    chat_ask(page, "and the rate?")
+    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+    expect(retrieval_step(page, 2).locator(".from")).to_have_text("with the previous message")
+    panel = settings_panel(page)
+    panel.get_by_label("Rewrite follow-ups").select_option("on")
+    rerun_button(panel).click()
+    question = "Re-run rewrites this follow-up with AI: one AI call."
+    expect(panel.locator(".confirm .ask")).to_have_text(question)
+    panel.get_by_role("button", name="Cancel").click()
+    expect(panel.locator(".confirm")).to_have_count(0)
+    assert sent == []
+    expect(panel.get_by_label("Rewrite follow-ups")).to_have_value("on")  # the edit is kept
+
+    rerun_button(panel).click()
+    with page.expect_response(lambda r: r.url.endswith("/messages/2/attempts")):
+        panel.get_by_role("button", name="Yes, re-run").click()
+    assert sent == [{"settings": {"rewrite": True}, "stores": {}}]
+    expect(retrieval_step(page, 2).locator(".from")).to_have_text("rewritten by AI")
+    # Rewritten already, a re-run keeps that text: nothing to ask.
+    with page.expect_response(lambda r: r.url.endswith("/messages/2/attempts")):
+        rerun_button(settings_panel(page)).click()
+    assert len(sent) == 2
+    expect(page.locator("#msg-2").get_by_role("tab")).to_have_count(3)
 
 
 def test_rerun_with_an_override_adds_an_attempt_tab_and_answer_from_it(page, seeded):
     sent = attempt_posts(page)
     chat_id = open_chat(page, seeded, ("c", "vo"))
-    chat_ask(page, "enzyme kinetics rate experiment")
+    chat_ask(page, "enzyme kinetics rate experiment, re-run")  # a prompt no other test caches
     turn = page.locator("#msg-1")
     expect(turn.locator(".reply")).to_have_count(1)
     expect(turn.get_by_role("tab")).to_have_count(0)  # one attempt: no tabs
     step = retrieval_step(page)
-    vo = edit_box(step, "vo")
-    expect(vo.get_by_label("Method")).to_have_value("hybrid")
-    expect(vo.get_by_label("k", exact=True)).to_have_value("8")
-    vo.get_by_label("k", exact=True).fill("2")
-    vo.get_by_label("Search anyway").check()
+    expect(count_line(step, "vo").locator(".count")).to_contain_text("vo: 3 candidates")
+    panel = settings_panel(page)
+    vo = edit_box(panel, "vo")
+    expect(vo.get_by_label("Method")).to_have_value("")
+    expect(vo.get_by_label("Candidates")).to_have_value("")
+    vo.get_by_label("Candidates").fill("2")
     with page.expect_response(lambda r: r.url.endswith(f"/chats/{chat_id}/messages/1/attempts")):
-        vo.get_by_role("button", name="Re-run retrieval").click()
-    assert sent == [{"overrides": {"vo": {"k": 2, "keep": True}}}]  # only what was changed
+        rerun_button(panel).click()
+    assert sent == [{"settings": {}, "stores": {"vo": {"candidates": 2}}}]  # only the change
 
     second = turn.get_by_role("tab", name="Attempt 2")
     expect(second).to_have_attribute("aria-selected", "true")
     expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "false")
     expect(step).to_have_attribute("open", "")
-    expect(store_row(step, "vo").locator(".kept")).to_have_text("kept · search anyway")
-    expect(step.locator('ol.evidence li[data-store="vo"]')).to_have_count(2)  # k = 2
+    expect(count_line(step, "vo").locator(".count")).to_contain_text("vo: 2 candidates")
     expect(turn.locator(".reply")).to_have_count(0)  # a re-run is not answered
-    expect(edit_box(step, "vo").get_by_label("k", exact=True)).to_have_value("2")
+    expect(edit_box(panel, "vo").get_by_label("Candidates")).to_have_value("2")  # now the chat's
 
     answer = turn.get_by_role("button", name="Answer from this attempt")
     with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts/2/answer")):
@@ -2917,26 +3814,24 @@ def test_rerun_with_an_override_adds_an_attempt_tab_and_answer_from_it(page, see
     saved = httpx.get(f"{seeded.url}/chats/{chat_id}").json()["messages"][0]["attempts"]
     assert saved[0]["answer"] and saved[1]["answer"] == "Answer: A"
 
-    # The first attempt is still there, as it was.
+    # The first attempt is still there, as it was; the panel stays under the message.
     turn.get_by_role("tab", name="Attempt 1").click()
     expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "true")
-    expect(store_row(step, "vo").locator(".kept")).to_have_text("kept · clears its bar")
-    expect(step.locator('ol.evidence li[data-store="vo"]')).to_have_count(3)
+    expect(count_line(step, "vo").locator(".count")).to_contain_text("vo: 3 candidates")
+    expect(turn.locator("details.panel")).to_have_count(1)
 
-    expect(step.locator("fieldset[data-edit]")).to_have_count(0)  # edits build on the latest
-    expect(step).to_contain_text("To edit and re-run, open the latest attempt.")
-
-    # The chosen tab and an edit not yet re-run survive the log's redraw on the next reply.
+    # The chosen tab and an edit not yet re-run survive the log's redraw on the next reply,
+    # and the panel moves under the newest message.
     chat_ask(page, "and the volcano?")
     expect(page.locator("#msg-2 .reply")).to_have_count(1)
     expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "true")
     expect(step).to_have_attribute("open", "")
-    second.click()
-    edit_box(step, "c").get_by_label("k", exact=True).fill("5")
+    edit_box(settings_panel(page), "c").get_by_label("Candidates").fill("5")
     chat_ask(page, "and the market?")
     expect(page.locator("#msg-3 .reply")).to_have_count(1)
-    expect(second).to_have_attribute("aria-selected", "true")
-    expect(edit_box(step, "c").get_by_label("k", exact=True)).to_have_value("5")
+    expect(page.locator("#msg-3 details.panel")).to_have_count(1)
+    expect(edit_box(settings_panel(page), "c").get_by_label("Candidates")).to_have_value("5")
+    expect(turn.get_by_role("tab", name="Attempt 1")).to_have_attribute("aria-selected", "true")
 
 
 def test_rerun_refused_shows_the_reason_and_keeps_the_edit(page, seeded):
@@ -2946,495 +3841,408 @@ def test_rerun_refused_shows_the_reason_and_keeps_the_edit(page, seeded):
     chat_ask(page, "enzyme kinetics rate experiment")
     turn = page.locator("#msg-1")
     expect(turn.locator(".reply")).to_have_count(1)
-    step = retrieval_step(page)
-    c = edit_box(step, "c")
-    for channel in ("Meaning", "Words", "Keywords"):
-        c.get_by_label(f"{channel} weight", exact=True).fill("0")
-    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")) as got:
-        c.get_by_role("button", name="Re-run retrieval").click()
-    assert got.value.status == 422
-    expect(c.locator(".edit-note")).to_have_text("at least one channel weight must be above 0")
-    expect(edit_box(step, "vo").locator(".edit-note")).to_have_text("")  # beside c only
-    expect(c.get_by_label("Meaning weight", exact=True)).to_have_value("0")
+    panel = settings_panel(page)
+    c = edit_box(panel, "c")
+    note = panel.locator(".panel-note")
+
+    # A value out of bounds is said in the panel, and nothing is sent.
+    c.get_by_label("Candidates").fill("61")
+    rerun_button(panel).click()
+    expect(note).to_have_text("Candidates is a whole number from 1 to 60.")
+    panel.get_by_label("Evidence size").fill("21")
+    c.get_by_label("Candidates").fill("4")
+    rerun_button(panel).click()
+    expect(note).to_have_text("Evidence size is a whole number from 1 to 20.")
+    assert sent == []
+    panel.get_by_label("Evidence size").fill("")
+
+    # The server's refusals, 422 and 409, are said in the panel, and the edits stay.
+    refusals = [
+        (422, "method 'x' is not a chat method"),
+        (409, "vector can't run on 'c' just now"),
+    ]
+
+    def refuse(route):
+        status, why = refusals.pop(0)
+        route.fulfill(status=status, json={"detail": why})
+
+    page.route("**/messages/1/attempts", refuse)
+    c.get_by_label("Method").select_option("vector")
+    rerun_button(panel).click()
+    expect(note).to_have_text("method 'x' is not a chat method")
+    expect(note).to_have_class(re.compile("err"))
+    rerun_button(panel).click()
+    expect(note).to_have_text("vector can't run on 'c' just now")
+    expect(c.get_by_label("Method")).to_have_value("vector")
+    expect(c.get_by_label("Candidates")).to_have_value("4")
+    assert sent == [{"settings": {}, "stores": {"c": {"method": "vector", "candidates": 4}}}] * 2
     expect(turn.get_by_role("tab")).to_have_count(0)  # no attempt was added
 
-    # A method the store can't run is refused with its reason (409), and the edits stay.
-    page.route(
-        "**/messages/1/attempts",
-        lambda r: r.fulfill(status=409, json={"detail": "vector can't run on 'c' just now"}),
-    )
-    c.get_by_label("Method").select_option("vector")
-    c.get_by_role("button", name="Re-run retrieval").click()
-    expect(c.locator(".edit-note")).to_have_text("vector can't run on 'c' just now")
-    expect(c.get_by_label("Method")).to_have_value("vector")
-    expect(c.get_by_label("Words weight", exact=True)).to_have_value("0")
 
-    # A k the route would refuse is said on the page, and nothing is sent.
-    count = len(sent)
-    c.get_by_label("k", exact=True).fill("30")
-    c.get_by_role("button", name="Re-run retrieval").click()
-    expect(c.locator(".edit-note")).to_have_text("k is a whole number from 1 to 20.")
-    assert len(sent) == count
-    expect(turn.get_by_role("tab")).to_have_count(0)
-
-
-def test_set_as_default_asks_then_saves(page, seeded):
-    free_store(seeded, "deflt")  # no eval set, so no bar
-    conn = seeded.app.state.conn
-    defaults = []
-    page.on(
-        "request",
-        lambda r: defaults.append(r.url) if r.url.endswith("/stores/deflt/default") else None,
-    )
-    sent = attempt_posts(page)
-    open_chat(page, seeded, ("deflt",))
-    chat_ask(page, "volcano magma")
-    turn = page.locator("#msg-1")
-    expect(turn.locator(".reply")).to_have_count(1)
-    step = retrieval_step(page)
-    expect(store_row(step, "deflt").locator(".bar")).to_have_text("none")
-    expect(store_row(step, "deflt").locator(".kept")).to_have_text("kept · no bar")
-    box = edit_box(step, "deflt")
-    box.get_by_label("k", exact=True).fill("3")
-    box.get_by_label("Use the store's bar").uncheck()
-    box.get_by_label("Bar", exact=True).fill("0.25")
-    box.get_by_label("Search anyway").check()
-
-    box.get_by_role("button", name="Set as default").click()
-    question = "Save these settings as deflt's default? Search anyway is not saved."
-    expect(box).to_contain_text(question)
-    box.get_by_role("button", name="Cancel").click()
-    expect(box).not_to_contain_text(question)
-    assert defaults == [] and sent == []
-    expect(box.get_by_label("k", exact=True)).to_have_value("3")  # the edit is kept
-
-    box.get_by_role("button", name="Set as default").click()
-    with page.expect_response(lambda r: r.url.endswith("/stores/deflt/default")):
-        box.get_by_role("button", name="Yes, save").click()
-    expect(box.locator(".edit-note")).to_contain_text("Saved as deflt's default")
-    # The edit is re-run first, so the server holds it as the chat's override, then saved.
-    assert sent == [{"overrides": {"deflt": {"k": 3, "bar": 0.25, "keep": True}}}]
-    assert db.get_chat_k(conn, "deflt") == 3
-    assert db.get_chat_bar(conn, "deflt") == 0.25
-    expect(turn.get_by_role("tab", name="Attempt 2")).to_have_attribute("aria-selected", "true")
-    expect(store_row(step, "deflt").locator(".bar")).to_have_text("0.25 edited")
-    expect(box).not_to_contain_text(question)
-    # The form now shows the saved defaults: Search anyway was not saved.
-    expect(box.get_by_label("k", exact=True)).to_have_value("3")
-    expect(box.get_by_label("Use the store's bar")).to_be_checked()
-    expect(box.get_by_label("Search anyway")).not_to_be_checked()
-
-
-def test_edit_clears_saved_defaults_and_set_as_default_saves_the_clear(page, seeded):
-    free_store(seeded, "cleared")  # no eval set: with no bar saved, it has none
-    conn = seeded.app.state.conn
-    db.set_chat_bar(conn, "cleared", 0.9)
-    db.set_chat_method(conn, "cleared", "vector")
-    db.set_chat_k(conn, "cleared", 3)
-    sent = attempt_posts(page)
-    open_chat(page, seeded, ("cleared",))
-    chat_ask(page, "volcano magma")
-    expect(page.locator("#msg-1 .reply")).to_have_count(1)
-    step = retrieval_step(page)
-    row = store_row(step, "cleared")
-    expect(row.locator(".bar")).to_have_text("0.90 manual")
-    expect(row.locator(".method")).to_have_text("vector")
-    box = edit_box(step, "cleared")
-    expect(box.locator(".saved")).to_contain_text("Saved defaults: method vector, k 3, bar 0.90.")
-    expect(box.get_by_label("Method")).to_have_value("vector")
-    expect(box.locator('select[name="method"] option:checked')).to_have_text("vector (saved)")
-    expect(box.get_by_label("k", exact=True)).to_have_value("3")
-    expect(box.get_by_label("Use the store's bar")).to_be_checked()
-
-    # The built-in choices clear the saved values.
-    box.get_by_label("Method").select_option("")
-    box.get_by_label("k", exact=True).fill("")
-    box.get_by_label("Use the eval set's bar").check()
-    expect(box.get_by_label("Use the store's bar")).not_to_be_checked()
-    expect(box.get_by_label("Bar", exact=True)).to_be_disabled()
-    box.get_by_role("button", name="Set as default").click()
-    with page.expect_response(lambda r: r.url.endswith("/stores/cleared/default")):
-        box.get_by_role("button", name="Yes, save").click()
-    expect(box.locator(".edit-note")).to_have_text(
-        "Saved as cleared's default: method unset, k unset, bar unset."
-    )
-    assert sent == [{"overrides": {"cleared": {"method": None, "k": None, "bar": None}}}]
-    assert db.get_chat_method(conn, "cleared") is None and db.get_chat_k(conn, "cleared") is None
-    assert db.get_chat_bar(conn, "cleared") is None
-    assert httpx.get(f"{seeded.url}/collections/cleared/bar").json()["source"] == "none"
-    # The re-run made before the save already ran with the cleared values.
-    row = store_row(step, "cleared")
-    expect(row.locator(".bar")).to_have_text("none")
-    expect(row.locator(".kept")).to_have_text("kept · no bar")
-    expect(box.locator(".saved")).to_contain_text(
-        "Saved defaults: method unset, k unset, bar unset."
-    )
-    expect(box.get_by_label("k", exact=True)).to_have_value("8")
-    expect(box.get_by_label("Use the store's bar")).to_be_checked()
-    expect(box.get_by_label("Use the eval set's bar")).not_to_be_checked()
-
-
-DROPPED = {
+DECISION = {
     "store": "c",
     "method": "hybrid",
     "k": 8,
     "search": {"weights": {"meaning": 1, "words": 1, "keywords": 1}, "query_tags": "similarity"},
-    "best": 0.123,
-    "bar": 0.3,
-    "bar_source": "set",
-    "kept": False,
-    "reason": "below its bar",
+    "tags": None,
     "usd": 0.0,
     "error": None,
+    "note": None,
 }
-GONE = {
-    **DROPPED,
-    "store": "gone",
-    "method": None,
-    "k": None,
-    "search": None,
-    "best": None,
-    "bar": None,
-    "bar_source": None,
-    "reason": "deleted",
-}
+GONE = {**DECISION, "store": "gone", "method": None, "k": None, "search": None, "note": "deleted"}
 
 
-def test_dropped_store_shows_its_reason_and_no_store_kept_note(page, seeded):
+def test_stores_table_shows_errors_deleted_stores_and_the_no_passages_note(page, seeded):
+    # An attempt saved before the pipeline, its decisions with notes but no counts.
+    old_gone = {k: v for k, v in GONE.items() if k != "note"}  # saved before decisions had notes
+    old_gone |= {"store": "old-gone", "kept": False, "reason": "deleted"}
     decisions = [
-        DROPPED,
-        {**DROPPED, "store": "vo", "bar": None, "bar_source": "few", "best": 0.5},
-        {**DROPPED, "store": "hand-bar", "bar": 0.4, "bar_source": "manual"},
-        {**DROPPED, "store": "edited-bar", "bar": 0.35, "bar_source": "override"},
-        {**DROPPED, "store": "no-set", "bar": None, "bar_source": "none"},
-        {**DROPPED, "store": "old-kw", "method": "keyword_rag"},  # saved before tags were kept
-        {**DROPPED, "store": "broke", "best": None, "bar": None, "bar_source": None}
-        | {"reason": "error", "error": "budget used up"},
+        DECISION,
+        {**DECISION, "store": "vo"},
+        {**DECISION, "store": "old-kw", "method": "keyword_rag"},  # saved before tags were kept
+        {**DECISION, "store": "broke", "error": "budget used up"},
         GONE,
+        old_gone,
     ]
     answer = {"answer": "No store passages were used.", "citations": [], "evidence": []}
-    chat_route(
-        page,
-        lambda route: route.fulfill(json=chat_message(route, decisions=decisions, **answer)),
-    )
+    answer |= {"decisions": decisions, "pipeline": None}
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, **answer)))
     open_chat(page, seeded, ("c", "vo"))
     chat_ask(page, "something no store holds")
     turn = page.locator("#msg-1")
     expect(turn.locator(".reply .md")).to_have_text("No store passages were used.")
     # Said under the answer, with the step still closed.
-    note = turn.locator(".reply .none-kept")
-    expect(note).to_have_text("No store was kept, so this answer used no store passages.")
+    note = turn.locator(".reply .no-passages")
+    expect(note).to_have_text("The stores found no passages, so this answer used none.")
     expect(note).to_be_visible()
     step = retrieval_step(page)
-    c = store_row(step, "c")
-    expect(c.locator(".best")).to_have_text("0.12")
-    expect(c.locator(".bar")).to_have_text("0.30")
-    expect(c.locator(".kept")).to_have_text("dropped · below its bar")
-    expect(store_row(step, "vo").locator(".bar")).to_have_text("too few questions")
-    expect(store_row(step, "hand-bar").locator(".bar")).to_have_text("0.40 manual")
-    expect(store_row(step, "edited-bar").locator(".bar")).to_have_text("0.35 edited")
-    expect(store_row(step, "no-set").locator(".bar")).to_have_text("none")
+    expect(step.locator("table.decisions thead th")).to_have_text(["Store", "Method", "Result"])
+    expect(store_row(step, "c").locator(".kept")).to_have_text("kept")
     expect(store_row(step, "old-kw").locator(".method")).to_have_text(
         "keyword_rag · query tags: similarity"
     )
-    broke = store_row(step, "broke")
-    expect(broke.locator(".kept")).to_have_text("dropped · error: budget used up")
-    expect(broke.locator(".best")).to_have_text("–")
+    expect(store_row(step, "broke").locator(".kept")).to_have_text(
+        "dropped · error: budget used up"
+    )
     gone = store_row(step, "gone")
     expect(gone.locator(".kept")).to_have_text("deleted")
     expect(gone.locator(".method")).to_have_text("–")
+    expect(gone).to_have_class(re.compile("dropped"))
+    expect(store_row(step, "old-gone").locator(".kept")).to_have_text("deleted")
     expect(step.locator("ol.evidence li")).to_have_count(0)
-    # Only the chat's own stores can be edited.
-    expect(step.locator("fieldset[data-edit]")).to_have_count(2)
-    expect(edit_box(step, "c")).to_be_visible()
-    expect(edit_box(step, "vo")).to_be_visible()
+    # Only the chat's own stores can be set.
+    panel = settings_panel(page)
+    expect(panel.locator("fieldset[data-edit]")).to_have_count(2)
+    expect(edit_box(panel, "c")).to_be_visible()
+    expect(edit_box(panel, "vo")).to_be_visible()
 
 
-def test_a_kept_store_with_no_passages_says_the_answer_used_none(page, seeded):
-    kept = {**DROPPED, "kept": True, "reason": "no bar", "bar": None, "bar_source": "none"}
+def test_no_passages_says_the_answer_used_none(page, seeded):
     answer = {"answer": "Nothing matched.", "citations": [], "evidence": []}
-    chat_route(
-        page,
-        lambda route: route.fulfill(json=chat_message(route, decisions=[kept], **answer)),
-    )
+    answer["decisions"] = [{**CHAT_DECISION, "found": 0, "used": 0}]
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, **answer)))
     open_chat(page, seeded, ("c",))
     chat_ask(page, "something the store has no passage for")
-    expect(page.locator("#msg-1 .reply .none-kept")).to_have_text(
-        "The stores kept found no passages, so this answer used none."
+    expect(page.locator("#msg-1 .reply .no-passages")).to_have_text(
+        "The stores found no passages, so this answer used none."
     )
     step = retrieval_step(page)
-    expect(edit_box(step, "c").locator(".kw-only")).to_contain_text("keyword_rag only:")
+    expect(count_line(step, "c").locator(".count")).to_have_text("c: 0 candidates, 0 kept")
+    expect(step).to_contain_text("No passages.")
 
 
-def test_edit_shows_the_chats_held_settings_and_set_as_default_saves_them(page, seeded):
-    free_store(seeded, "held")  # no eval set, so no bar; its own k is the evidence size
-    conn = seeded.app.state.conn
-    sent = attempt_posts(page)
-    chat_id = open_chat(page, seeded, ("held",))
-    chat_ask(page, "volcano magma")
-    expect(page.locator("#msg-1 .reply")).to_have_count(1)
-    chat_ask(page, "and the lava?")
-    expect(page.locator("#msg-2 .reply")).to_have_count(1)
+# -- The embedding model: Settings, the store page, the home form and the worker -------------
 
-    # Message 2 is re-run with k = 2 and Search anyway: the chat now holds both for the store.
-    two = retrieval_step(page, 2)
-    expect(two).to_contain_text("Edit: settings for the next search in this chat")
-    box = edit_box(two, "held")
-    box.get_by_label("k", exact=True).fill("2")
-    box.get_by_label("Search anyway").check()
-    with page.expect_response(lambda r: r.url.endswith("/messages/2/attempts")):
-        box.get_by_role("button", name="Re-run retrieval").click()
-    assert sent == [{"overrides": {"held": {"k": 2, "keep": True}}}]
-    expect(page.locator("#msg-2").get_by_role("tab", name="Attempt 2")).to_be_visible()
-
-    # Message 1's Edit shows what the next search will use, not what message 1 ran with.
-    one = retrieval_step(page, 1)
-    expect(store_row(one, "held").locator(".kept")).to_have_text("kept · no bar")
-    box = edit_box(one, "held")
-    expect(box.get_by_label("k", exact=True)).to_have_value("2")
-    expect(box.get_by_label("Search anyway")).to_be_checked()
-
-    # Set as default with nothing more edited saves exactly what the form shows, and sends
-    # no re-run.
-    box.get_by_role("button", name="Set as default").click()
-    with page.expect_response(lambda r: r.url.endswith("/stores/held/default")):
-        box.get_by_role("button", name="Yes, save").click()
-    expect(box.locator(".edit-note")).to_contain_text("Saved as held's default")
-    assert len(sent) == 1
-    assert db.get_chat_k(conn, "held") == 2
-    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["overrides"] == {}
-    # The server dropped the override, Search anyway with it; k = 2 is now the store's own.
-    expect(box.get_by_label("Search anyway")).not_to_be_checked()
-    expect(box.get_by_label("k", exact=True)).to_have_value("2")
-    expect(
-        edit_box(retrieval_step(page, 2), "held").get_by_label("Search anyway")
-    ).not_to_be_checked()
-
-    # Changing only Search anyway sends only that, and the search runs with the k shown.
-    box.get_by_label("Search anyway").check()
-    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")) as got:
-        box.get_by_role("button", name="Re-run retrieval").click()
-    assert sent[-1] == {"overrides": {"held": {"keep": True}}}
-    ran = next(d for d in got.value.json()["decisions"] if d["store"] == "held")
-    assert (ran["k"], ran["reason"]) == (2, "search anyway")
+REBUILD_MODEL = "BAAI/bge-small-en-v1.5"
 
 
-def test_retrieval_step_shows_route_columns_when_routing_by_profiles(page, seeded):
-    routed = {**DROPPED, "kept": True, "reason": "clears its bar", "route": 0.812}
-    routed["route_bar"] = 0.42
-    unrouted = {**DROPPED, "store": "vo", "best": None, "bar": None, "bar_source": None}
-    unrouted |= {"reason": "not routed", "route": 0.111, "route_bar": 0.4}
-    replies = [[DROPPED], [routed, unrouted]]  # DROPPED was saved before routing: no route keys
-
-    def reply(route):
-        n = 3 - len(replies)
-        route.fulfill(json=chat_message(route, n=n, decisions=replies.pop(0)))
-
-    chat_route(page, reply)
-    chat_id = open_chat(page, seeded, ("c", "vo"))
-    routing = page.get_by_label("Routing", exact=True)
-    expect(routing).to_have_value("all")
-    chat_ask(page, "one")
-    expect(page.locator("#msg-1 .reply")).to_have_count(1)
-    one = retrieval_step(page, 1)
-    plain = ["Store", "Method", "Best match", "Bar", "Kept"]
-    expect(one.locator("table.decisions thead th")).to_have_text(plain)
-
-    with page.expect_response(lambda r: r.request.method == "PATCH"):
-        routing.select_option("profiles")
-    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["settings"]["routing"] == "profiles"
-    routed_by = ["Store", "Method", "Route score", "Route bar", "Best match", "Bar", "Kept"]
-    expect(one.locator("table.decisions thead th")).to_have_text(routed_by)
-    expect(store_row(one, "c").locator(".route")).to_have_text("–")  # no route kept then
-    expect(store_row(one, "c").locator(".route-bar")).to_have_text("–")
-
-    chat_ask(page, "two")
-    expect(page.locator("#msg-2 .reply")).to_have_count(1)
-    two = retrieval_step(page, 2)
-    c, vo = store_row(two, "c"), store_row(two, "vo")
-    expect(c.locator(".route")).to_have_text("0.81")
-    expect(c.locator(".route-bar")).to_have_text("0.42")
-    expect(c.locator(".kept")).to_have_text("kept · clears its bar")
-    expect(vo.locator(".route")).to_have_text("0.11")
-    expect(vo.locator(".route-bar")).to_have_text("0.40")
-    expect(vo.locator(".best")).to_have_text("–")
-    expect(vo.locator(".bar")).to_have_text("–")
-    expect(vo.locator(".kept")).to_have_text("dropped · not routed")
-
-    # Back on all, an attempt routed by profile keeps its columns; one that was not loses them.
-    with page.expect_response(lambda r: r.request.method == "PATCH"):
-        routing.select_option("all")
-    expect(one.locator("table.decisions thead th")).to_have_text(plain)
-    expect(two.locator("table.decisions thead th")).to_have_text(routed_by)
-
-
-def test_use_the_stores_bar_over_a_held_bar_drops_it(page, seeded):
-    free_store(seeded, "hb")  # no eval set: its bar is the saved one
-    db.set_chat_bar(seeded.app.state.conn, "hb", 0.05)
-    sent = attempt_posts(page)
-    chat_id = open_chat(page, seeded, ("hb",))
-    chat_ask(page, "volcano magma")
-    expect(page.locator("#msg-1 .reply")).to_have_count(1)
-    step = retrieval_step(page)
-    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.05 manual")
-    box = edit_box(step, "hb")
-    box.get_by_label("Use the store's bar").uncheck()
-    box.get_by_label("Bar", exact=True).fill("0.25")
-    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
-        box.get_by_role("button", name="Re-run retrieval").click()
-    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.25 edited")
-    expect(box.get_by_label("Use the store's bar")).not_to_be_checked()
-
-    box.get_by_label("Use the store's bar").check()
-    with page.expect_response(lambda r: r.url.endswith("/messages/1/attempts")):
-        box.get_by_role("button", name="Re-run retrieval").click()
-    assert sent == [
-        {"overrides": {"hb": {"bar": 0.25}}},
-        {"overrides": {}, "drop": {"hb": ["bar"]}},
-    ]
-    expect(page.locator("#msg-1").get_by_role("tab", name="Attempt 3")).to_be_visible()
-    expect(store_row(step, "hb").locator(".bar")).to_have_text("0.05 manual")  # not "edited"
-    assert httpx.get(f"{seeded.url}/chats/{chat_id}").json()["overrides"] == {}
-    expect(box.get_by_label("Use the store's bar")).to_be_checked()
-
-
-def test_store_page_edits_and_resets_the_route_profile(page, seeded):
-    seeded.build("routed")
-    conn = seeded.app.state.conn  # type: ignore[attr-defined]
-    page.goto(seeded.url + "/c/routed")
-    titles = page.locator("main h2").all_inner_texts()
-    assert titles[-2:] == ["Routing profile", "Delete this store"]
-    expect(
-        page.get_by_text(
-            "Routing compares each message with this text and with the store's average item."
+def test_settings_page_picks_the_embedding_model_for_new_stores(page, seeded):
+    with search_defaults_restored(seeded):
+        page.goto(seeded.url + "/settings")
+        field = page.locator('#search label:has([name="dense_model"])')
+        expect(field).to_contain_text("Embedding model for new stores")
+        assert page.locator("#search label").first.inner_text().startswith("Embedding model")
+        select = page.locator('#search [name="dense_model"]')
+        small = select.locator('option[value^="BAAI/bge-small-en-v1.5"]')
+        expect(small).to_contain_text("BAAI/bge-small-en-v1.5 · ")
+        expect(small).to_contain_text("0.067 GB")
+        expect(small).to_contain_text("fast")
+        expect(select.locator('option[value="fake/dense"]')).to_contain_text("(recommended)")
+        expect(field.locator("[data-recommended]")).to_have_text("Recommended: fake/dense")
+        expect(field.locator("[data-embedder-note]")).to_have_text(
+            "Existing stores keep theirs; rebuild one from its page."
         )
-    ).to_be_visible()
-    box = page.get_by_label("Routing profile text")
-    drafted = re.compile(r"^Store routed \(mcq, ")
-    expect(box).to_have_value(drafted)
-    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
-
-    box.fill("Enzyme kinetics and assays.")
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
-    assert db.get_route_profile(conn, "routed") == "Enzyme kinetics and assays."
-    page.reload()
-    expect(box).to_have_value("Enzyme kinetics and assays.")
-
-    # The draft only fills the box: the profile written by hand is kept until Save.
-    page.get_by_role("button", name="Use the drafted profile").click()
-    expect(box).to_have_value(drafted)
-    expect(page.locator("#rp-msg")).to_have_text("The drafted profile, not saved: Save to use it.")
-    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
-    assert db.get_route_profile(conn, "routed") == "Enzyme kinetics and assays."
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
-    expect(page.locator("#rp-msg")).to_have_text("Using the drafted profile.")
-    assert db.get_route_profile(conn, "routed") is None  # the draft, following the store
-
-    box.fill("Volcanoes.")
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator("#rp-state")).to_have_text("Edited by hand.")
-    box.fill("   ")
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator("#rp-msg")).to_have_text("Blank: using the drafted profile.")
-    expect(page.locator("#rp-state")).to_have_text("Drafted from the store.")
-    expect(box).to_have_value(drafted)
-    assert db.get_route_profile(conn, "routed") is None
+        select.select_option("BAAI/bge-base-en-v1.5")
+        page.locator("#search-go").click()
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        got = httpx.get(seeded.url + "/search-defaults").json()
+        assert got["in_force"]["dense_model"] == "BAAI/bge-base-en-v1.5"
 
 
-def test_check_routing_shows_both_modes(page, seeded):
-    sent = []
-    page.on(
-        "request",
-        lambda r: (
-            sent.append(json.loads(r.post_data or "{}"))
-            if r.url.endswith("/routing/eval")
-            else None
-        ),
+def test_store_page_names_its_embedding_model_and_rebuilds_with_another(page, seeded):
+    seeded.build("rb")
+    page.goto(seeded.url + "/c/rb")
+    expect(page.locator("#embedding")).to_contain_text("Built with fake/dense · 256 dimensions")
+    select = page.locator("#embedding select")
+    expect(select.locator('option[value="fake/dense"]')).to_have_count(0)
+    select.select_option(REBUILD_MODEL)
+    page.get_by_role("button", name="Rebuild", exact=True).click()
+    expect(page.locator("#embedding-confirm")).to_contain_text(
+        f"Rebuild rb with {REBUILD_MODEL}? Every item is embedded again on this machine: free"
     )
-    open_chat(page, seeded, ("c",))
-    check = page.get_by_role("button", name="Check routing")
-    expect(check).to_be_disabled()  # one store: nothing to route between
-    open_chat(page, seeded, ("c", "vo"))
-    expect(check).to_be_enabled()
-    panel = page.locator("#routing-check")
-    expect(page.get_by_label("Questions to check on")).to_have_value("held_out")
-    with page.expect_response(lambda r: r.url.endswith("/routing/eval")):
-        check.click()
-    # c's and vo's 40 questions are all in their dev slices: none is held out.
-    expect(panel).to_contain_text("On 0 held-out questions")
-    expect(panel).to_contain_text("No questions to check")
+    page.get_by_role("button", name="Yes, rebuild").click()
+    job = httpx.get(seeded.url + "/collections/rb").json()["rebuild"]["job_id"]
+    for _ in range(600):  # the rebuild runs on fakes: moments
+        if httpx.get(f"{seeded.url}/jobs/{job}").json()["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.05)
+    assert httpx.get(f"{seeded.url}/jobs/{job}").json()["status"] == "done"
+    page.goto(seeded.url + "/c/rb")
+    expect(page.locator("#embedding")).to_contain_text(f"Built with {REBUILD_MODEL}")
 
-    page.get_by_label("Questions to check on").select_option("dev")
-    with page.expect_response(lambda r: r.url.endswith("/routing/eval")):
-        check.click()
-    expect(panel).to_contain_text(
-        "On 80 dev questions: these are the questions the bars were set on"
-    )
-    modes = panel.locator("table.modes tbody tr")
-    expect(modes.locator("th")).to_have_text(["Search every store", "By routing profile"])
-    expect(panel.locator("table.modes thead th")).to_have_text(
-        ["Mode", "Recall", "Precision", "None kept", "Stores searched"]
-    )
-    expect(modes.first.locator(".searched")).to_have_text("2.0")
-    expect(modes.first.locator(".recall")).to_have_text(re.compile(r"^\d+%$"))
-    stores_ = panel.locator("table.per-store tbody tr")
-    expect(stores_.locator("th")).to_have_text(["c", "vo"])
-    expect(stores_.locator(".questions")).to_have_text(["40", "40"])
-    expect(panel).to_contain_text(
-        "Kept, every store and Kept, by profile: the share of the store's own questions on"
-        " which it was kept, when every store is searched and when routing by profile."
-    )
-    expect(panel.locator(".adds-none")).to_have_count(0)
-    assert sent == [
-        {"stores": ["c", "vo"], "split": "held_out"},
-        {"stores": ["c", "vo"], "split": "dev"},
-    ]
 
-    # A store that adds no questions says why: its set is all dev slice, or it has none.
-    def mode(searched):
-        return {"recall": 1, "precision": 0.5, "none_rate": 0, "mean_searched": searched}
+def test_store_page_shows_rebuild_progress_cancel_and_a_stopped_switch(page, seeded):
+    seeded.build("rbp")
+    rebuild = {
+        "job_id": "job-1",
+        "status": "running",
+        "model": REBUILD_MODEL,
+        "from": "fake/dense",
+        "progress": 0.4,
+        "switching": False,
+    }
+    current = {"rebuild": rebuild, "state": "rebuilding"}
 
-    def faked(vo_set):
-        return {
-            "split": "held_out",
-            "questions": 30,
-            "per_store": {
-                "c": {"eval_set": "c", "questions": 30, "recall_gate": 1, "recall_profiles": 1},
-                "vo": {
-                    "eval_set": vo_set,
-                    "questions": 0,
-                    "recall_gate": None,
-                    "recall_profiles": None,
-                },
-            },
-            "modes": {"gate": mode(2), "profiles": mode(1.5)},
-            "rows": [],
-        }
+    def store(route):
+        body = route.fetch().json()
+        route.fulfill(json={**body, **current})
 
-    page.get_by_label("Questions to check on").select_option("held_out")
-    page.route("**/routing/eval", lambda r: r.fulfill(json=faked("vo")))
-    check.click()
-    expect(panel.locator(".adds-none")).to_have_text(
-        "vo adds no held-out questions: its eval set vo has no more than 200 questions, all in"
-        " the dev slice the bars were set on. Check on the dev slice to score it."
-    )
-    page.unroute("**/routing/eval")
-    page.route("**/routing/eval", lambda r: r.fulfill(json=faked(None)))
-    check.click()
-    expect(panel.locator(".adds-none")).to_have_text(
-        "vo adds no questions: it has no eval set. It still counts against the others"
-        " when it is kept for their questions."
-    )
-    page.unroute("**/routing/eval")
+    posts = []
 
-    page.get_by_role("button", name="Hide").click()
-    expect(panel).to_be_empty()
-    page.expected = ["422"]
-    page.route(
-        "**/routing/eval",
-        lambda r: r.fulfill(status=422, json={"detail": "none of these <stores> has an eval set"}),
+    def job(route):
+        posts.append((route.request.url.rsplit("/", 2)[-2:], route.request.post_data))
+        route.fulfill(status=202, json={})
+
+    page.route("**/collections/rbp", store)
+    page.route("**/jobs/job-1/*", job)
+    page.goto(seeded.url + "/c/rbp")
+    box = page.locator("#embedding")
+    expect(box).to_contain_text(f"Rebuilding with {REBUILD_MODEL}: 40%")
+    box.get_by_role("button", name="Cancel").click()
+    expect(box.locator("select")).to_be_disabled()
+    expect(box).to_contain_text("Wait for the rebuilding job to finish.")
+    assert posts and posts[0][0] == ["job-1", "cancel"]
+    posts.clear()
+    current["rebuild"] = {**rebuild, "status": "interrupted", "switching": True}
+    current["state"] = "ready"
+    page.goto(seeded.url + "/c/rbp")
+    expect(box).to_contain_text(
+        f"The switch to {REBUILD_MODEL} stopped part-way; search is refused until it finishes."
     )
-    check.click()
-    expect(panel.locator(".err")).to_have_text("none of these <stores> has an eval set")
+    with page.expect_request("**/jobs/job-1/resume"):
+        box.get_by_role("button", name="Resume").click()
+    assert posts[0][0] == ["job-1", "resume"] and json.loads(posts[0][1]) == {}
+    current["rebuild"] = {**rebuild, "status": "cancelled"}
+    page.goto(seeded.url + "/c/rbp")
+    expect(box).to_contain_text(
+        f"The rebuild with {REBUILD_MODEL} stopped; the store still uses fake/dense."
+    )
+    current["rebuild"] = {**rebuild, "switching": True}
+    page.goto(seeded.url + "/c/rbp")
+    expect(box).to_contain_text(f"Switching to {REBUILD_MODEL}…")
+    expect(box.get_by_role("button", name="Cancel")).to_have_count(0)
+
+
+def test_new_store_form_says_which_model_it_embeds_with(page, seeded):
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New store").click()
+    expect(page.locator("#form")).to_contain_text(
+        "Embedded with fake/dense (Settings → Search defaults)"
+    )
+
+
+def test_worker_page_offers_resume_for_a_stopped_rebuild(page, seeded):
+    job = {
+        "id": "abcdef12-0000",
+        "kind": "reembed",
+        "collection": "rb",
+        "status": "cancelled",
+        "error": None,
+        "progress": 0.2,
+        "created_at": "2026-11-08T10:00:00+00:00",
+        "updated_at": "2026-11-08T10:05:00+00:00",
+        "setup": {"model": REBUILD_MODEL},
+    }
+    page.route("**/jobs?limit=200", lambda route: route.fulfill(json=[job]))
+    page.goto(seeded.url + "/worker")
+    row = page.locator("[data-finished-job]")
+    expect(row).to_contain_text("Re-embedding rb")
+    expect(row.get_by_role("button", name="Resume")).to_be_visible()
+
+
+# -- Plan 1 page leftovers ---------------------------------------------------------------------
+
+
+def test_chat_shows_connect_ai_after_a_failed_ai_read(page, seeded):
+    failed = []
+
+    def ai(route):
+        if not failed:
+            failed.append(1)
+            route.fulfill(status=500, json={"detail": "down"})
+        else:
+            route.continue_()
+
+    page.expected = ["500"]  # the failed read, on purpose
+    page.route("**/ai", ai)
+    open_chat(page, seeded)
+    note = page.locator("#compose #note")
+    expect(note).to_have_text("Connect AI in Settings to get written answers")
+    expect(page.locator("#model-pick")).to_be_hidden()
+    page.evaluate("window.dispatchEvent(new Event('focus'))")  # no reload
+    expect(note).to_be_hidden()
+    expect(page.locator("#model option")).not_to_have_count(0)
+    expect(page.locator("#model-pick")).to_be_visible()
+    expect(page.locator("#send")).to_be_enabled()
+
+
+def test_chat_reads_ai_again_before_a_send_while_the_last_read_failed(page, seeded):
+    reads = []
+
+    def ai(route):
+        reads.append(1)
+        if len(reads) == 1:
+            route.fulfill(status=500, json={"detail": "down"})
+        else:
+            route.continue_()
+
+    page.expected = ["500"]  # the failed read, on purpose
+    page.route("**/ai", ai)
+    open_chat(page, seeded)
+    expect(page.locator("#compose #note")).to_be_visible()
+    chat_ask(page, "enzyme kinetics rate experiment")
+    expect(page.locator("#msg-1 .reply")).to_have_count(1)
+    assert len(reads) == 2
+    expect(page.locator("#compose #note")).to_be_hidden()
+
+
+def test_set_as_default_yes_is_disabled_while_a_message_is_pending(page, seeded):
+    conn = seeded.app.state.conn
+    before = db.get_chat_method(conn, "c"), db.get_chat_k(conn, "c")
+    held = []
+    try:
+        open_chat(page, seeded, ("c",))
+        chat_ask(page, "enzyme kinetics rate experiment")
+        expect(page.locator("#msg-1 .reply")).to_have_count(1)
+        c = edit_box(settings_panel(page), "c")
+        c.get_by_label("Method").select_option("vector")
+        c.get_by_role("button", name="Set as default").click()
+        yes = c.get_by_role("button", name="Yes, save")
+        expect(yes).to_be_enabled()
+        page.route("**/chats/*/messages", lambda route: held.append(route))
+        chat_ask(page, "a second question")
+        expect(page.locator("#send")).to_be_disabled()  # the message is on its way
+        expect(yes).to_be_disabled()
+        held[0].continue_()
+        expect(page.locator("#msg-2 .reply")).to_have_count(1)
+    finally:
+        db.set_chat_method(conn, "c", before[0])
+        db.set_chat_k(conn, "c", before[1])
+
+
+def test_settings_sends_null_when_the_reranker_pick_is_the_recommended_one(page, seeded):
+    listed = httpx.get(seeded.url + "/search-defaults").json()
+    own = listed["recommended"]["rerank_model"]
+    turbo = "jinaai/jina-reranker-v1-turbo-en"
+    puts: list[dict] = []
+
+    def record(route):
+        if route.request.method == "PUT":
+            puts.append(route.request.post_data_json)
+        route.continue_()
+
+    page.route("**/search-defaults", record)
+    with search_defaults_restored(seeded):
+        page.goto(seeded.url + "/settings")
+        select = page.locator('#search [name="rerank_model"]')
+        select.select_option(turbo)
+        page.locator("#search-go").click()
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        select.select_option(own)
+        page.locator("#search-go").click()
+        expect(page.locator("#search-msg")).to_have_text("Saved")
+        assert puts == [{"rerank_model": turbo}, {"rerank_model": None}]
+
+
+def test_chat_escapes_markup_in_store_names_notes_and_errors(page, seeded):
+    chat_id = make_chat(seeded, ("c",))
+    markup = "<b>x</b>"
+    decision = {**CHAT_DECISION, "store": markup, "note": markup, "found": 0, "used": 0}
+    broke = {**CHAT_DECISION, "store": "broke", "error": markup}
+    attempt = {**CHAT_ATTEMPT, "decisions": [decision, broke], "error": markup, "evidence": []}
+
+    def chat_get(route):
+        got = route.fetch().json()
+        got["messages"] = [{"n": 1, "content": "asked", "attempts": [attempt]}]
+        route.fulfill(json=got)
+
+    page.route(f"**/chats/{chat_id}", chat_get)
+    page.goto(f"{seeded.url}/chat#{chat_id}")
+    step = retrieval_step(page)
+    counts = step.locator("ul.counts")
+    expect(counts).to_contain_text(f"{markup}: 0 candidates, 0 kept")
+    expect(counts).to_contain_text(f"error: {markup}")
+    expect(counts).to_contain_text(f"· {markup}")
+    expect(page.locator("#msg-1 .meta.warn:not(.no-passages)")).to_have_text(markup)
+    expect(page.locator("#log b")).to_have_count(0)  # all of it is text
+
+
+# -- using a chat from your own app ---------------------------------------------------------------
+
+BRIEF_KEYS = {"n", "answer", "citations", "passages", "passages_only", "error", "usd"}
+
+
+def your_app(page):
+    """The chat's Use from your app section, opened: its two <pre> lines."""
+    page.locator("#chat-head summary", has_text="Use from your app").click()
+    return page.locator("#chat-head details pre")
+
+
+def test_chat_shows_the_curl_lines_for_this_chat(page, seeded):
+    a = make_chat(seeded, ("c",), title="first")
+    b = make_chat(seeded, ("c",), title="second")
+    page.goto(f"{seeded.url}/chat#{a}")
+    expect(page.locator("#chips .chip")).to_have_count(1)
+    details = page.locator("#chat-head details")
+    expect(details).not_to_have_attribute("open", "")
+    pres = your_app(page)
+    expect(details).to_contain_text("Send the next message:")
+    expect(details).to_contain_text("Start a new conversation set up like this one:")
+    expect(details).to_contain_text('Add "answer":false to get the passages without an answer')
+    expect(pres.nth(0)).to_have_text(
+        f"curl -s '{seeded.url}/chats/{a}/messages?brief=true' -H 'content-type: application/json'"
+        """ -d '{"content":"…"}'"""
+    )
+    expect(pres.nth(1)).to_have_text(
+        f"curl -s {seeded.url}/chats -H 'content-type: application/json'"
+        f""" -d '{{"from":"{a}"}}'"""
+    )
+    chat_link(page, b).click()
+    expect(pres.nth(0)).to_contain_text(f"'{seeded.url}/chats/{b}/messages?brief=true'")
+    expect(pres.nth(1)).to_contain_text(f'"from":"{b}"')
+
+
+def test_the_copied_message_curl_runs(page, seeded):
+    chat_id = open_chat(page, seeded, ("c",))
+    line = your_app(page).nth(0).inner_text().replace("…", "what speeds up an enzyme?")
+    words = shlex.split(line)
+    assert words[:2] == ["curl", "-s"] and words[3] == "-H" and words[5] == "-d"
+    url, header, body = words[2], words[4], words[6]
+    key, _, value = header.partition(": ")
+    r = page.request.post(url, headers={key: value}, data=body)
+    assert r.status == 200, r.text()
+    got = r.json()
+    assert set(got) == BRIEF_KEYS
+    assert got["n"] == 1 and got["error"] is None
+    saved = httpx.get(f"{seeded.url}/chats/{chat_id}").json()["messages"]
+    assert saved[-1]["content"] == "what speeds up an enzyme?"

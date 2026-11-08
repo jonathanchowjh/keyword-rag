@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -7,12 +8,13 @@ from ragqa_core import db
 from ragqa_core.builder import Builder
 from ragqa_core.db import connect, get_job, save_questions
 from ragqa_core.evaluator import Evaluator
-from ragqa_core.fakes import fake_ai, fake_models
-from ragqa_core.indexer import Indexer
+from ragqa_core.fakes import fake_ai, fake_embeddings, fake_models, fake_replies
+from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.loader import Loader
+from ragqa_core.recipes import build_for
 from ragqa_core.retriever import Retriever
-from ragqa_core.store import Store
-from ragqa_core.types import Item, KeywordLists, Question
+from ragqa_core.store import Store, rebuild_of
+from ragqa_core.types import Item, KeywordLists, Question, SearchSettings
 from ragqa_worker.worker import Worker
 
 TOPICS = ["enzyme", "market", "volcano", "optics", "genetics"]
@@ -337,7 +339,7 @@ def test_job_logs_when_a_model_loads(env, monkeypatch):
 
     monkeypatch.setattr(models_module, "TextEmbedding", Stub)
     models = w.indexer.models
-    models.embed = lambda texts: models._load("text", "BAAI/test") and None  # type: ignore[assignment]
+    models.embed = lambda texts, model=None: models._load("text", "BAAI/test") and None  # type: ignore[assignment]
     j = db.create_job(conn, "load", "c", {"dataset": "x"})
     w.loader.run = lambda job, progress: (models.embed(["a"]), models.embed(["b"]), {})[2]
     w.run_one()
@@ -402,49 +404,108 @@ def test_worker_runs_copy(env):
     assert w.indexer.store.count("r") == len(ITEMS)
 
 
-def kept_bars(conn) -> None:
-    for kind in ("gate", "route"):
-        db.save_store_bar(conn, "c", kind, {"key": "k", "value": 0.5, "n": 20})
+def queue_reembed(w, conn):
+    fake_embeddings(w.indexer.models, dims={"fake/small": 64})
+    return db.create_job(conn, "reembed", "c", {"model": "fake/small", "from": "fake/dense"})
 
 
-def test_an_import_or_load_drops_the_stores_kept_bars(env):
-    import json
-
-    from ragqa_core import imports
-
+def test_worker_runs_a_reembed_job_and_records_its_switch(env):
     w, conn = env
-    kept_bars(conn)
-    row = {"id": "n1", "text": "a fresh note about tides"}
-    upload_id = imports.save_upload(w.loader.home, "c", "n.jsonl", [json.dumps(row).encode()])
-    setup = {
-        "upload_id": upload_id,
-        "kind": "items",
-        "mapping": {"id": "id", "text": "text"},
-        "source": "upload:notes",
-    }
-    j = db.create_job(conn, "import", "c", setup)
+    j = queue_reembed(w, conn)
     w.run_one()
-    assert get_job(conn, j)["status"] == "done"
-    assert db.get_store_bar(conn, "c", "gate") is None
-    assert db.get_store_bar(conn, "c", "route") is None
+    job = get_job(conn, j)
+    assert job["status"] == "done", job["error"]
+    assert job["setup"]["switching"] is True and job["progress"] == 1.0
+    assert job["result"]["model"] == "fake/small" and job["result"]["items"] == len(ITEMS)
+    after = db.get_collection(conn, "c")
+    assert after is not None and (after.dense_model, after.dense_dim) == ("fake/small", 64)
 
-    kept_bars(conn)  # a failed load still added items
-    w.loader.run = lambda job, progress: (_ for _ in ()).throw(RuntimeError("half way"))
-    j = db.create_job(conn, "load", "c", {"dataset": "x"})
+
+def test_a_cancelled_reembed_job_is_cancelled_and_changes_nothing(env):
+    w, conn = env
+    j = queue_reembed(w, conn)
+    models, embed = w.indexer.models, w.indexer.models.embed
+    started, release = threading.Event(), threading.Event()
+
+    def held(texts, model=None):
+        started.set()
+        release.wait(5)
+        return embed(texts, model)
+
+    models.embed = held
+    runner = threading.Thread(target=w.run_one)
+    runner.start()
+    assert started.wait(5)
+    db.request_cancel(conn, j)
+    release.set()
+    runner.join(5)
+    assert get_job(conn, j)["status"] == "cancelled"
+    after = db.get_collection(conn, "c")
+    assert after is not None and (after.dense_model, after.dense_dim) == ("fake/dense", 256)
+    assert not w.indexer.store.exists(rebuild_of("c")) and w.indexer.store.count("c") == len(ITEMS)
+
+
+def test_a_reembed_stopped_during_its_switch_is_refused_until_resumed(env):
+    w, conn = env
+    j = queue_reembed(w, conn)
+    store, copy = w.indexer.store, w.indexer.store.copy
+
+    def dies(source, target):
+        raise RuntimeError("the process stopped")
+
+    store.copy = dies  # the store is emptied and recreated, then the copy back stops
     w.run_one()
     assert get_job(conn, j)["status"] == "failed"
-    assert db.get_store_bar(conn, "c", "gate") is None
-
-    kept_bars(conn)  # a job that adds no items keeps them
-    j = db.create_job(conn, "rekey", "c", {"version": w.other_version})
+    assert get_job(conn, j)["setup"]["switching"] is True
+    spec = db.get_collection(conn, "c")
+    assert spec is not None and store.count("c") == 0
+    with pytest.raises(ModelMismatch, match="store 'c' is switching to fake/small"):
+        w.indexer.check_model(spec)
+    store.copy = copy
+    assert db.requeue(conn, j)
     w.run_one()
-    assert get_job(conn, j)["status"] == "done"
-    assert db.get_store_bar(conn, "c", "gate") is not None
+    assert get_job(conn, j)["status"] == "done", get_job(conn, j)["error"]
+    spec = db.get_collection(conn, "c")
+    assert spec is not None and (spec.dense_model, spec.dense_dim) == ("fake/small", 64)
+    assert store.count("c") == len(ITEMS) and not store.exists(rebuild_of("c"))
+    w.indexer.check_model(spec)
 
-    source = db.get_collection(conn, "c")
-    assert source is not None
-    j = w.loader.start_copy("c", w.loader.copy_spec(source, "r", "reference", None))
-    db.save_store_bar(conn, "r", "route", {"key": "k", "value": 0.5, "n": 20})
+
+def documents_store(w) -> None:
+    """Store d: a Documents store of three passages, without keyword tags."""
+    spec = w.indexer.create("d", "documents", False, recipe="documents")
+    w.indexer.add(spec, [Item(f"p-{t}", f"a passage about {t} things") for t in TOPICS[:3]], "x")
+
+
+def test_worker_runs_a_tag_build_switching_the_recipe_in_place(env):
+    w, conn = env
+    documents_store(w)
+    saved = SearchSettings(weights={"meaning": 1.0, "words": 1.0, "keywords": 2.0})
+    db.set_search(conn, "d", saved)  # an override the switch must keep
+    fake_replies(w.ai, lambda p: '{"terms": ["enzyme", "market", "volcano"]}')
+    j = db.create_job(conn, "tag_build", "d", {})
+    assert w.run_one() == j
+    job = get_job(conn, j)
+    assert job["status"] == "done", job["error"]
+    assert job["progress"] == 1.0 and job["result"]["tagged"] == 3
+    after = db.get_collection(conn, "d")
+    assert after is not None and after.recipe == "documents_tagged"
+    assert after.build == build_for("documents_tagged") and after.search == saved
+    assert after.vocabulary_version == job["result"]["vocabulary_version"] is not None
+    assert all(h.tags for batch in w.builder.store.scroll("d") for h in batch)
+    assert not db.tag_build_unfinished(conn, "d")
+
+
+def test_a_tag_build_with_no_usable_terms_switches_back_and_ends_done(env):
+    w, conn = env
+    documents_store(w)
+    fake_replies(w.ai, lambda p: '{"terms": []}')
+    j = db.create_job(conn, "tag_build", "d", {})
     w.run_one()
-    assert get_job(conn, j)["status"] == "done"
-    assert db.get_store_bar(conn, "r", "route") is None
+    job = get_job(conn, j)
+    assert job["status"] == "done", job["error"]
+    assert job["result"]["note"] == "no usable terms: nothing was tagged"
+    after = db.get_collection(conn, "d")
+    assert after is not None and after.recipe == "documents" and after.vocabulary_version is None
+    assert after.build == build_for("documents")
+    assert not any(h.tags for batch in w.builder.store.scroll("d") for h in batch)

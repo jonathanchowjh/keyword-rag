@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Queue the method-v2 experiments X1-X4 through the API and compare their runs.
+"""Queue the method-v2 experiments X1-X5 through the API and compare their runs.
 
   experiments.py estimate X1 COLLECTION            price every arm; queues nothing
   experiments.py run X1 COLLECTION --confirm       queue the arms (--paid if any costs money)
@@ -69,10 +69,29 @@ def arms(experiment: str, collection: str) -> list[dict]:
             arm(collection, "keyword_rag", answer=True, search={"example": "abstracted"}),
             arm(collection, "random_example", answer=True, search={"example": "abstracted"}),
         ]
-    raise ValueError(f"unknown experiment {experiment!r}; known: x1, x2, x3, x4")
+    if experiment == "x5":
+        # Chat's way: hybrid's top 20 reranked, beside plain hybrid so the pair row is
+        # `hybrid_rerank - hybrid`. No rerank_model: the run takes the Settings one.
+        return [
+            {
+                "collection": collection,
+                "split": "dev",
+                "methods": ["hybrid_rerank", "hybrid"],
+                "answer": False,
+                "k": 10,
+                "rerank_pool": 20,
+            }
+        ]
+    raise ValueError(f"unknown experiment {experiment!r}; known: x1, x2, x3, x4, x5")
 
 
-def label(methods: list[str], rrf_k: int | None, search: dict) -> str:
+def label(
+    methods: list[str],
+    rrf_k: int | None,
+    search: dict,
+    rerank_pool: int | None = None,
+    rerank_model: str | None = None,
+) -> str:
     """A run's arm name: the method, and for keyword_rag the settings that vary between arms."""
     method = "+".join(methods) if len(methods) > 1 else methods[0]
     name = method
@@ -82,6 +101,11 @@ def label(methods: list[str], rrf_k: int | None, search: dict) -> str:
             name += " w=" + "/".join(f"{w[c]:g}" for c in CHANNELS)
         if search.get("query_tags"):
             name += f" tags={search['query_tags']}"
+    if "hybrid_rerank" in methods:
+        if rerank_pool is not None and rerank_pool != 50:
+            name += f" pool={rerank_pool}"
+        if rerank_model:
+            name += " " + rerank_model.rsplit("/", 1)[-1]
     if method in ("keyword_rag", "random_example") and search.get("example"):
         name += f" ex={search['example']}"
     if rrf_k is not None and rrf_k != 60:
@@ -90,7 +114,13 @@ def label(methods: list[str], rrf_k: int | None, search: dict) -> str:
 
 
 def body_label(body: dict) -> str:
-    return label(body["methods"], body.get("rrf_k"), body.get("search") or {})
+    return label(
+        body["methods"],
+        body.get("rrf_k"),
+        body.get("search") or {},
+        body.get("rerank_pool"),
+        body.get("rerank_model"),
+    )
 
 
 def make_client(api: str) -> httpx.Client:
@@ -137,7 +167,13 @@ def report(client: httpx.Client, job_ids: list[str]) -> int:
         # A stopped run's means cover only what it got to: say so beside every row of it.
         unfinished = table.get("status") not in (None, "done")
         for method, entry in table["methods"].items():
-            name = label([method], setup.get("rrf_k"), setup.get("search") or {})
+            name = label(
+                [method],
+                setup.get("rrf_k"),
+                setup.get("search") or {},
+                setup.get("rerank_pool"),
+                setup.get("rerank_model"),
+            )
             if unfinished:
                 name += f" [{table['status']}]"
             for metric, cell in entry.items():
@@ -157,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("estimate", "run"):
         p = sub.add_parser(name)
-        p.add_argument("experiment", choices=["x1", "x2", "x3", "x4"], type=str.lower)
+        p.add_argument("experiment", choices=["x1", "x2", "x3", "x4", "x5"], type=str.lower)
         p.add_argument("collection")
         p.add_argument("--model", help="the answer model for X4 (default: the one set up)")
         if name == "run":

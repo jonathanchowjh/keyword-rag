@@ -16,6 +16,8 @@ PerMethod = dict[str, dict[str, float]]
 def headline_metric(
     qa_type: QaType, has_answers: bool, proxy_trusted: bool | None, measurable: set[str]
 ) -> str:
+    if qa_type == "documents":  # retrieval only: its runs are refused answers
+        return "ndcg@10"
     if has_answers:
         return "accuracy" if qa_type in EXAMPLE_TYPES else "f1"
     if qa_type in EXAMPLE_TYPES:

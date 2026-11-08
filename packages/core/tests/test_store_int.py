@@ -4,7 +4,7 @@ import uuid
 import pytest
 
 from ragqa_core.fakes import fake_models
-from ragqa_core.store import Store
+from ragqa_core.store import Store, chunks_of, rebuild_of
 from ragqa_core.types import Item
 
 pytestmark = [
@@ -20,7 +20,7 @@ def store_and_name():
     store = Store(os.environ["RAGQA_TEST_QDRANT_URL"], None)
     name = f"test_{uuid.uuid4().hex[:8]}"
     yield store, name
-    store.drop(name)
+    store.drop(name)  # its rebuild too
 
 
 def test_server_dense_sparse_and_keywords(store_and_name):
@@ -56,3 +56,41 @@ def test_source_counts_work_on_a_fresh_collection_and_an_empty_one(store_and_nam
     s, name = store_and_name
     s.create(name, fake_models().dense_dim())
     assert s.source_counts(name) == {}
+
+
+def test_server_copy_keeps_sparse_vectors_and_payloads(store_and_name):
+    s, name = store_and_name
+    m = fake_models()
+    items = [
+        Item("1", "enzyme kinetics rate", "A", meta={"source": "a", "skill": "k"}),
+        Item("2", "stock market prices", "B", meta={"source": "b"}),
+    ]
+    texts = [i.text for i in items]
+    s.create(name, m.dense_dim())
+    s.upsert_items(name, items, m.embed(texts), m.sparse(texts), ["sum", None])
+    s.upsert_chunks(name, ["1", "2"], texts, m.embed(texts), ["a", "b"])
+    s.set_payloads(name, {"1": {"content_hash": "h1", "tags": ["enzymes"]}})
+    query = m.sparse_query(["market"])[0]
+    top = s.search_sparse(name, query, 1)[0]
+    s.create(rebuild_of(name), m.dense_dim())
+    assert s.copy(name, rebuild_of(name)) == 2
+    assert s.copy(chunks_of(name), chunks_of(rebuild_of(name))) == 2
+    s.recreate(name, m.dense_dim())
+    assert s.count(name) == 0 and s.count(chunks_of(name)) == 0
+    assert s.copy(rebuild_of(name), name) == 2
+    assert s.copy(chunks_of(rebuild_of(name)), chunks_of(name)) == 2
+    hit = s.search_sparse(name, query, 1)[0]
+    assert (hit.id, hit.text) == (top.id, top.text) == ("2", "stock market prices")
+    assert s.search(name, "text_dense", m.embed_query(["enzyme rate"])[0], 1)[0].id == "1"
+    assert s.search_chunks(name, m.embed(["market"])[0], 1)[0][0] == "2"
+    one = s.get(name, ["1"])[0]
+    assert (one.answer, one.summary, one.tags, one.meta) == (
+        "A",
+        "sum",
+        ["enzymes"],
+        {"source": "a", "skill": "k"},
+    )
+    assert s.hashes(name, ["1"]) == {"1": "h1"}
+    # recreate made the payload indexes again: a facet on meta.source needs one.
+    assert s.source_counts(name) == {"a": 1, "b": 1}
+    assert {p for p, _ in s.search_chunks(name, m.embed(["market"])[0], 5, skip=("b",))} == {"1"}

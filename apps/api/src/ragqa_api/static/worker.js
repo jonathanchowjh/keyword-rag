@@ -1,8 +1,9 @@
-import { $, BUSY, RESUMABLE, api, askResume, clock, esc, head, paint, pct, pill, shell, short } from "/static/ui.js";
+import { $, BUSY, RESUMABLE, api, askResume, clock, esc, head, paint, pct, pill, problemText, shell, short } from "/static/ui.js";
 
 const POLL_MS = 5000;
 const FINISHED = 50;
-const KIND_WORDS = { load: "Loading", rekey: "Re-keying", eval: "Evaluating" };
+const KIND_WORDS = { load: "Loading", rekey: "Re-keying", eval: "Evaluating", reembed: "Re-embedding", tag_build: "Adding keyword tags" };
+const RESUMES = new Set(["eval", "copy", "reembed", "tag_build"]); // the kinds whose stopped jobs can resume
 
 let jobs = []; // the latest GET /jobs, newest first
 let resumeFor = null; // the finished job whose Resume was clicked; its estimate shows under its row
@@ -40,7 +41,8 @@ function problemsHtml(problems) {
   if (!problems.length) return '<p class="muted">Nothing needs attention.</p>';
   const line = (p) => {
     const href = problemHref(p);
-    return href ? `<a href="${esc(href)}">${esc(p)}</a>` : esc(p);
+    const text = problemText(p);
+    return href ? `<a href="${esc(href)}">${esc(text)}</a>` : esc(text);
   };
   return `<ul>${problems.map((p) => `<li class="err" data-problem>${line(p)}</li>`).join("")}</ul>`;
 }
@@ -86,7 +88,7 @@ function finishedHtml(finished) {
   if (!finished.length) return '<p class="muted">Nothing has finished yet.</p>';
   const rows = finished
     .map((j) => {
-      const resume = (j.kind === "eval" || j.kind === "copy") && RESUMABLE.has(j.status)
+      const resume = RESUMES.has(j.kind) && RESUMABLE.has(j.status)
         ? `<button type="button" class="secondary" data-resume="${esc(j.id)}">Resume</button>` : "";
       const error = j.error ? ` <span class="err">${esc(j.error)}</span>` : "";
       const row = `<tr data-finished-job="${esc(j.id)}"><td>${named(j)}</td>
@@ -120,6 +122,15 @@ async function cancel(jobId) {
 // Money rule: the click only asks for the estimate (or the refusal); spending needs Start.
 async function resume(jobId) {
   say("");
+  if (jobs.find((j) => j.id === jobId)?.kind === "reembed") { // free: no estimate to confirm
+    try {
+      await api(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST", body: {} });
+    } catch (e) {
+      say(e.message);
+    }
+    await refresh();
+    return;
+  }
   resumeFor = jobId;
   resumeBox.innerHTML = "";
   await refresh(); // draws the row the box goes in

@@ -570,6 +570,23 @@ def test_copy_prices_summaries_for_a_summarising_target(tmp_path):
     assert ld.estimate_copy("p", worked)["est_usd"] is None
 
 
+def test_a_copy_keeps_its_sources_model(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(
+        conn, Store(None, None), fake_models(dims={"fake/small": 64}), fake_ai(conn, by_purpose)
+    )
+    source = ix.create("s", "multihop", False, dense_model="fake/small")
+    ld = loader_for(ix, tmp_path)
+    assert db.get_app_settings(conn, "search.") == {}  # Settings names no model
+    target = ld.copy_spec(source, "cp", "paper_2024", None)
+    assert target.dense_model == "fake/small"
+    ld.start_copy("s", target)
+    created = ix.spec("cp")
+    assert created is not None and (created.dense_model, created.dense_dim) == ("fake/small", 64)
+    ix.add(created, [Item("a", "enzyme rate rose", "A")], "x")
+    assert ix.store.vectors("cp", "text_dense", 3).shape[1] == 64
+
+
 def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
     conn, ix, ld, items = scibench_paper(tmp_path)
     source = ix.spec("p")
@@ -582,3 +599,15 @@ def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
         with pytest.raises(ValueError):
             ld.copy_spec(source, name, recipe, override)
     assert ix.spec("r") is None
+
+
+def test_chunk_of_reads_old_and_new_ids():
+    assert loader.chunk_of("a.md#3") == "a.md"
+    assert loader.chunk_of("a.md#0123456789ab") == "a.md"
+    assert loader.chunk_of("a.md#0123456789ab-2") == "a.md"
+    assert loader.chunk_of("a.md#b.md#0123456789ab") == "a.md#b.md"
+    assert loader.chunk_of("a.md#notes") is None
+    assert loader.chunk_of("a.md#0123456789AB") is None
+    assert loader.chunk_of("a.md#0123456789ab-") is None
+    assert loader.chunk_of("a.md#٣") is None  # an Arabic-Indic digit is not a part number
+    assert loader.chunk_of("a.md") is None

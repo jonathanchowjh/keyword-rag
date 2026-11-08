@@ -22,26 +22,39 @@ from ragqa_core.models import Models, normalise
 WORD = re.compile(r"[a-z0-9]+")
 
 
-def fake_models(dim: int = 256) -> Models:
+def fake_models(dim: int = 256, dims: dict[str, int] | None = None) -> Models:
     return fake_embeddings(
-        Models("fake/dense", "fake/judge", "fake/rerank", Path("/nonexistent")), dim
+        Models("fake/dense", "fake/judge", "fake/rerank", Path("/nonexistent")), dim, dims
     )
 
 
-def fake_embeddings(models: Models, dim: int = 256) -> Models:
+def fake_embeddings(models: Models, dim: int = 256, dims: dict[str, int] | None = None) -> Models:
     """Bag-of-words hashing: texts that share words get similar vectors, so
     retrieval behaves sensibly in tests without any model download. Patches
-    `models` in place, so everything already holding it sees the fake."""
+    `models` in place, so everything already holding it sees the fake.
 
-    def bucket(token: str) -> int:
-        return int(hashlib.md5(token.encode()).hexdigest(), 16) % dim
+    Every dense model has `dims.get(model, dim)` dimensions (None is models.dense_model,
+    read at each call), so any name loads; the judge keeps `dim`."""
+    widths = dims or {}
 
-    def vectors(texts: list[str]) -> np.ndarray:
-        rows = np.zeros((len(texts), dim), dtype=np.float32)
+    def width(model: str | None = None) -> int:
+        return widths.get(model or models.dense_model, dim)
+
+    def bucket(token: str, size: int = dim) -> int:
+        return int(hashlib.md5(token.encode()).hexdigest(), 16) % size
+
+    def vectors(texts: list[str], size: int = dim) -> np.ndarray:
+        rows = np.zeros((len(texts), size), dtype=np.float32)
         for row, text in enumerate(texts):
             for token in WORD.findall(text.lower()):
-                rows[row, bucket(token)] += 1
+                rows[row, bucket(token, size)] += 1
         return normalise(rows)
+
+    def embed(texts: list[str], model: str | None = None) -> np.ndarray:
+        return vectors(texts, width(model))
+
+    def embed_query(texts: list[str], task: str = "", model: str | None = None) -> np.ndarray:
+        return vectors(texts, width(model))
 
     def sparse(texts: list[str]) -> list[SparseVector]:
         out = []
@@ -51,17 +64,20 @@ def fake_embeddings(models: Models, dim: int = 256) -> Models:
             out.append(SparseVector(indices=indices, values=[float(counts[i]) for i in indices]))
         return out
 
-    def rerank(query: str, texts: list[str]) -> list[float]:
+    def rerank(query: str, texts: list[str], model: str | None = None) -> list[float]:
         q = set(WORD.findall(query.lower()))
         return [float(len(q & set(WORD.findall(t.lower())))) for t in texts]
 
-    models.embed = vectors  # type: ignore[method-assign]
-    models.embed_query = lambda texts, task="": vectors(texts)  # type: ignore[method-assign]
-    models.judge = vectors  # type: ignore[method-assign]
+    models.embed = embed  # type: ignore[method-assign]
+    models.embed_query = embed_query  # type: ignore[method-assign]
+    models.judge = lambda texts: vectors(texts)  # type: ignore[method-assign]
     models.sparse = sparse  # type: ignore[method-assign]
     models.sparse_query = sparse  # type: ignore[method-assign]
     models.rerank = rerank  # type: ignore[method-assign]
-    models.dense_dim = lambda: dim  # type: ignore[method-assign]
+    models.warm_rerank = lambda model=None: None  # type: ignore[method-assign]
+    models.warm_rerank_in_background = lambda model=None: None  # type: ignore[method-assign]
+    models.rerank_status = lambda model=None: "ready"  # type: ignore[method-assign]
+    models.dense_dim = width  # type: ignore[method-assign]
     return models
 
 

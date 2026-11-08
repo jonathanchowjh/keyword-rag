@@ -1,7 +1,8 @@
 """Plain-language names for methods, metrics and QA types (spec §7.1, §7.2, §8.4).
 Served by GET /catalog so the API and every page agree."""
 
-from ragqa_core.recipes import RECIPE_LABELS
+from ragqa_core.recipes import RECIPE_LABELS, recipes_for
+from ragqa_core.search_defaults import CHAT_METHODS
 from ragqa_core.types import QaType
 
 ANSWER_PAIR = ("kw_individual", "hybrid")  # the candidate, then the reference
@@ -112,6 +113,10 @@ METRICS: dict[str, dict] = {
         "Share of questions where the example tested the same skill",
         "retrieval",
     ),
+    "recall@10": _metric("Recall@10", "Share of the right items in the top 10", "retrieval"),
+    "mrr@10": _metric(
+        "MRR@10", "1 over the rank of the first right item in the top 10", "retrieval", unit="score"
+    ),
     "ndcg@10": _metric(
         "Relevant examples ranked first",
         "0 is none in the top 10, 100 every relevant example ranked ahead of the rest",
@@ -135,6 +140,11 @@ WORKED_RECALL_SAYS = {
     "with 4 relevant, at most 1 in 4"
 }
 METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
+    "documents": {
+        "ndcg@10": "Right passages ranked first",
+        "recall@10": "Right passages found (top 10)",
+        "mrr@10": "How soon the first right passage comes",
+    },
     "science": WORKED_RECALL_LABEL,
     "mcq": WORKED_RECALL_LABEL,
     "multihop": {},
@@ -142,6 +152,12 @@ METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
 }
 
 METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
+    "documents": {
+        "ndcg@10": "Right passages near the top count most",
+        "recall@10": "Share of a question's right passages in the top 10",
+        "mrr@10": "1 when the first hit is right, 1/2 when the second is, 0 when none is in the"
+        " top 10",
+    },
     "science": {
         "accuracy": "Share answered right: the choice, a number within 5% of the gold, "
         "or the exact short answer",
@@ -156,7 +172,13 @@ METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
     },
 }
 
+# Documents first: both the store form and the eval-set form lead with it.
 QA_TYPES: dict[QaType, dict] = {
+    "documents": {
+        "label": "Documents",
+        "item_noun": "passage",
+        "retrieves": "passages that answer the question",
+    },
     "science": {
         "label": "Science problems",
         "item_noun": "worked example",
@@ -184,6 +206,9 @@ RECIPE_SAYS = {
     "worked_examples": "Whole items, tagged by AI on how they are solved, with abstracted examples",
     "reference": "About 100-word chunks, title prefix, tagged by similarity, with a classifier",
     "paper_2024": "The 2024 paper's way: 100-word chunks, your three keyword lists",
+    "documents": "Your passages as uploaded, searched by meaning and by words; no AI",
+    "documents_tagged": "Your passages as uploaded, tagged by similarity with an AI-made"
+    " vocabulary",
 }
 RECIPES = {r: {"label": RECIPE_LABELS[r], "says": RECIPE_SAYS[r]} for r in RECIPE_LABELS}
 
@@ -196,5 +221,7 @@ def catalog() -> dict:
         "metric_says_by_type": METRIC_SAYS_BY_TYPE,
         "qa_types": QA_TYPES,
         "recipes": RECIPES,
+        "type_recipes": {t: list(recipes_for(t)) for t in QA_TYPES},
         "answer_pair": list(ANSWER_PAIR),
+        "chat_methods": list(CHAT_METHODS),
     }

@@ -266,11 +266,20 @@ export function gapBar(lo, diff, hi, span) {
     stroke-width="1" opacity=".6"/>${bar}${dot}</svg>`;
 }
 
+// An embedder's option text: name, dimensions, size and note, then its timing when it has one.
+export function embedderLabel(e, machine, recommended) {
+  const timed = e.seconds_per_1000 != null && machine
+    ? `about ${Math.round(e.seconds_per_1000)} s per 1,000 passages on ${machine}` : "";
+  const parts = [e.name, e.dim == null ? "" : `${e.dim} dimensions`, e.size_gb == null ? "" : `${e.size_gb} GB`, e.note ?? "", timed]
+    .filter(Boolean).join(" · ");
+  return e.name === recommended ? `${parts} (recommended)` : parts;
+}
+
 // -- layout ---------------------------------------------------------------------
 
 export function pill(state) {
   const kind =
-    { ready: "ok", done: "ok", loading: "run", rekeying: "run", retagging: "run", copying: "run", evaluating: "run", importing: "run", labelling: "run", running: "run",
+    { ready: "ok", done: "ok", loading: "run", rekeying: "run", retagging: "run", tagging: "run", copying: "run", evaluating: "run", importing: "run", labelling: "run", rebuilding: "run", running: "run",
       busy: "run", queued: "idle", failed: "bad", interrupted: "bad", stopped_budget: "bad",
       stopped_no_key: "bad", stopped_replies: "idle", cancelled: "idle" }[state] ?? "idle";
   const text = String(state ?? "").replace(/_/g, " ").replace("rekeying", "re-keying").replace("retagging", "re-tagging");
@@ -385,6 +394,12 @@ export function refreshSpend() {
     .catch(() => {});
 }
 
+// A /status problem line as the pages say it: the server names a job by its kind, and a tag
+// build's kind reads as what it does.
+export function problemText(line) {
+  return String(line).replace(/^Tag_build /, "Adding keyword tags ");
+}
+
 function refreshDot() {
   return api("/status")
     .then((s) => {
@@ -400,7 +415,7 @@ function refreshDot() {
       if (box) {
         const more = s.problems.length - 1;
         box.innerHTML = s.problems.length
-          ? `${esc(s.problems[0])}${more ? ` and ${more} more` : ""}`
+          ? `${esc(problemText(s.problems[0]))}${more ? ` and ${more} more` : ""}`
           : "";
       }
     })
@@ -434,6 +449,8 @@ export function shell(active) {
 
 // The upload-preview-import widget for a store's items (queues a job, priced first) or an eval set's
 // questions (imported in the request, no estimate). Fills `el`; `done` runs after an import.
+// A Documents store's items (`qaType` "documents") are .md and .txt files of passages: the
+// preview shows the passages, with no column mapping to pick, and the guessed one is sent.
 class ImportBox {
   constructor(el, { uploadPath, importPath, kind, qaType, done }) {
     this.el = el;
@@ -441,10 +458,12 @@ class ImportBox {
     this.importPath = importPath;
     this.kind = kind;
     this.done = done;
+    this.passages = kind === "items" && qaType === "documents";
+    this.guessed = {}; // the preview's own mapping, sent when there are no selects
     this.uploadId = null; // the upload being previewed, or null
     this.ticket = 0; // the newest preview request, so an older answer is ignored
     this.own = (what) => el.querySelector(`#imp-${kind}-${what}`);
-    const accept = ".jsonl,.json,.csv,.tsv,.txt,.md,.zip";
+    const accept = this.passages ? ".md,.txt" : ".jsonl,.json,.csv,.tsv,.txt,.md,.zip";
     const hint = kind === "questions" && qaType ? `<p class="muted">Questions for a ${esc(qaType)} eval set.</p>` : "";
     el.innerHTML = `<div class="card form">${hint}
       <label>File<input type="file" id="imp-${kind}-file" accept="${accept}"></label>
@@ -496,6 +515,7 @@ class ImportBox {
   }
 
   mapping() {
+    if (this.passages) return this.guessed;
     const out = {};
     for (const select of this.own("preview").querySelectorAll("select[data-field]")) {
       out[select.dataset.field] = select.value || null;
@@ -521,10 +541,20 @@ class ImportBox {
     }
   }
 
+  // A Documents store's preview: how many passages, and the first few.
+  passagesHtml(p) {
+    const sample = p.sample.length
+      ? `<div class="scroll"><table><thead><tr><th>Passage</th></tr></thead>
+          <tbody>${p.sample.map((row) => `<tr><td>${esc(row.text ?? "")}</td></tr>`).join("")}</tbody></table></div>`
+      : "";
+    return `<p>${esc(p.format)} · ${esc(plural(p.rows, "passage"))} · ${esc(count(p.usable))} usable</p>${sample}`;
+  }
+
   html(p, estimate) {
     const problems = p.problems.length
       ? `<ul class="warn">${p.problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
       : "";
+    if (this.passages) return this.passagesHtml(p) + problems + this.footHtml(p, estimate);
     const sample = p.sample.length
       ? `<div class="scroll"><table><thead><tr>${p.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
           <tbody>${p.sample.map((row) => `<tr>${p.columns.map((c) => `<td>${esc(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
@@ -538,19 +568,24 @@ class ImportBox {
         return `<label>${esc(field)}${star}<select data-field="${esc(field)}">${options}</select></label>`;
       })
       .join("");
+    const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
+    return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}
+      <div class="row">${selects}</div>${missing}${this.footHtml(p, estimate)}`;
+  }
+
+  // The Import button with what the import costs.
+  footHtml(p, estimate) {
     const cost = estimate
       ? `<span class="muted">${esc(estimate.est_usd == null ? UNPRICED : usd(estimate.est_usd))} · ${esc(plural(estimate.calls ?? 0, "AI call"))}</span>`
       : "";
-    const missing = p.missing.length ? `<p class="err">Map these fields first: ${esc(p.missing.join(", "))}.</p>` : "";
     // A questions import cannot be previewed again under a new mapping: the server judges it.
     const open = p.ready || this.kind === "questions";
-    return `<p>${esc(p.format)} · ${esc(plural(p.rows, "row"))} · ${esc(count(p.usable))} usable</p>${problems}${sample}
-      <div class="row">${selects}</div>${missing}
-      <div class="row"><button type="button" id="imp-${this.kind}-import" ${open ? "" : "disabled"}>Import</button>
+    return `<div class="row"><button type="button" id="imp-${this.kind}-import" ${open ? "" : "disabled"}>Import</button>
         ${cost}<span id="imp-${this.kind}-confirm"></span></div>`;
   }
 
   show(preview, estimate) {
+    this.guessed = preview.mapping;
     this.own("preview").innerHTML = this.html(preview, estimate);
     this.own("import").addEventListener("click", () => this.start(estimate));
   }

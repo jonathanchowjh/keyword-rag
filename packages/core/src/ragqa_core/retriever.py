@@ -71,14 +71,23 @@ PER_METHOD_ERRORS = (
 )
 
 
-def available_methods(spec: CollectionSpec, has_lists: bool) -> dict[str, str | None]:
-    """Each method with why it can't run on the store, or None when it can."""
+NEEDS_TAGS = "needs keyword tags: Add keyword tags on the store page"
+
+
+def available_methods(
+    spec: CollectionSpec, has_lists: bool, tagging: bool = False
+) -> dict[str, str | None]:
+    """Each method with why it can't run on the store, or None when it can. `tagging`: an
+    Add keyword tags job is unfinished (db.tag_build_unfinished), so the vocabulary in
+    force may have tagged only some passages."""
     out: dict[str, str | None] = {}
     for m in METHOD_NAMES:
         if m in KEYWORD_METHODS and not has_lists:
             out[m] = "needs keyword lists"
+        elif m == "keyword_rag" and tagging:
+            out[m] = NEEDS_TAGS
         elif m == "keyword_rag" and spec.vocabulary_version is None:
-            out[m] = "needs a vocabulary"
+            out[m] = NEEDS_TAGS if spec.qa_type == "documents" else "needs a vocabulary"
         else:
             out[m] = None
     return out
@@ -160,20 +169,26 @@ class Retriever:
         search: SearchSettings | None = None,
         tags: list[str] | None = None,
         exclude: Collection[str] = (),
+        pool: int = POOL,
+        rerank_model: str | None = None,
     ) -> list[Hit]:
         """`search` None means the collection's own settings; `tags` None means the query's
         tags are predicted as the settings say. Only keyword_rag uses either. `exclude` names
-        items no channel may find, so every pool and k counts only the others."""
+        items no channel may find, so every pool and k counts only the others. `pool` and
+        `rerank_model` are read by hybrid_rerank alone: how many of hybrid's top it reranks,
+        and with which model (None is the service's)."""
         if method not in METHOD_NAMES:
             raise ValueError(f"unknown method {method!r}; known: {', '.join(METHOD_NAMES)}")
         spec = self.spec(collection)
-        # A query embedded by another model is either a dimension crash or,
-        # worse, silently meaningless; refuse it by name instead.
+        # Every query is embedded with the store's own model; a store whose model this
+        # service can't load, or whose dimension is not its model's, is refused by name.
         self.indexer.check_model(spec)
         skip = Skip(tuple(db.disabled_sources(self.conn, collection)), frozenset(exclude))
         if method == "keyword_rag":
             settings = search or spec.search or SearchSettings()
             return self._keyword_rag(spec, question, k, rrf_k, skip, settings, tags)
+        if method == "hybrid_rerank":
+            return self._hybrid_rerank(spec, question, k, rrf_k, skip, pool, rerank_model)
         return self._methods[method](spec, question, k, rrf_k, skip)
 
     def is_paid(self, spec: CollectionSpec, method: str) -> bool:
@@ -246,15 +261,20 @@ class Retriever:
     # -- modern additions ------------------------------------------------------
 
     def _hybrid_rerank(
-        self, spec: CollectionSpec, q: str, k: int, rrf_k: int, skip: Skip
+        self,
+        spec: CollectionSpec,
+        q: str,
+        k: int,
+        rrf_k: int,
+        skip: Skip,
+        pool: int = POOL,
+        rerank_model: str | None = None,
     ) -> list[Hit]:
-        pool = self._hybrid(spec, q, POOL, rrf_k, skip)
-        if not pool:
+        top = self._hybrid(spec, q, pool, rrf_k, skip)
+        if not top:
             return []
-        scores = self.models.rerank(q, [h.text for h in pool])
-        ranked = sorted(
-            zip(scores, range(len(pool)), pool, strict=True), key=lambda t: (-t[0], t[1])
-        )
+        scores = self.models.rerank(q, [h.text for h in top], rerank_model)
+        ranked = sorted(zip(scores, range(len(top)), top, strict=True), key=lambda t: (-t[0], t[1]))
         out = []
         for score, _, hit in ranked[:k]:
             hit.score = score
@@ -298,7 +318,7 @@ class Retriever:
                 spec.name, sparse, POOL, skip.sources, skip.items
             )
         if weights.get("keywords", 0.0) > 0 and tags:
-            vector = self.models.embed([keyword_string(tags, None)])[0]
+            vector = self.models.embed([keyword_string(tags, None)], spec.dense_model)[0]
             rankings["keywords"] = self.store.search(
                 spec.name, "kw_tags", vector, POOL, skip.sources, skip.items
             )
@@ -339,9 +359,10 @@ class Retriever:
             )
             # A reply naming no term falls back to similarity, as an item's does: never none.
             picked = picked_terms(reply.text, terms, build.tag_k)
-            return picked or self.builder.similar(terms, [question], build.tag_k)[0]
+            model = spec.dense_model
+            return picked or self.builder.similar(model, terms, [question], build.tag_k)[0]
         cutoff = build.tag_cutoff if build.tagging == "similarity_cutoff" else None
-        return self.builder.similar(terms, [question], build.tag_k, cutoff)[0]
+        return self.builder.similar(spec.dense_model, terms, [question], build.tag_k, cutoff)[0]
 
     def _classify(self, spec: CollectionSpec, q: str, k: int, skip: Skip) -> list[str]:
         """The nearest-neighbour vote (D6): each of the NEIGHBOURS nearest units adds its
@@ -418,7 +439,8 @@ class Retriever:
     # -- shared ------------------------------------------------------------------
 
     def _dense_query(self, spec: CollectionSpec, q: str) -> np.ndarray:
-        return self.models.embed_query([q], task=QUERY_TASK[spec.qa_type])[0]
+        task = QUERY_TASK[spec.qa_type]
+        return self.models.embed_query([q], task=task, model=spec.dense_model)[0]
 
     def _query_keywords(self, spec: CollectionSpec, q: str) -> tuple[dict, dict]:
         if db.job_running(self.conn, "rekey", spec.name):
@@ -438,7 +460,8 @@ class Retriever:
 
     def vocabulary(self, spec: CollectionSpec) -> list[str]:
         """The terms in force; refused while a retag is switching them, after one stopped
-        partway (items hold two versions' tags), or when there are none."""
+        partway (items hold two versions' tags), until Add keyword tags finishes (its
+        vocabulary is in force before every passage is tagged), or when there are none."""
         if db.job_running(self.conn, "retag", spec.name):
             raise MethodUnavailable(
                 "the vocabulary is being re-tagged; try again when the job finishes"
@@ -447,7 +470,11 @@ class Retriever:
             raise MethodUnavailable(
                 f"the vocabulary of collection '{spec.name}' is partly re-tagged; save it again"
             )
+        if db.tag_build_unfinished(self.conn, spec.name):
+            raise MethodUnavailable(NEEDS_TAGS)
         terms = db.get_vocabulary(self.conn, spec.name)
+        if not terms and spec.qa_type == "documents":  # its other recipes are not for it
+            raise MethodUnavailable(NEEDS_TAGS)
         if not terms:
             raise MethodUnavailable(
                 f"no vocabulary for collection '{spec.name}';"

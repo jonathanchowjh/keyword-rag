@@ -11,10 +11,12 @@ from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.prompts import QUERY_TASK
 from ragqa_core.retriever import (
+    KEYWORD_METHODS,
     METHOD_NAMES,
     MethodUnavailable,
     Retriever,
     UnknownCollection,
+    available_methods,
     rrf,
 )
 from ragqa_core.store import Store
@@ -189,7 +191,9 @@ def test_dense_query_carries_the_collection_task(tmp_path):
     r, _ = build(tmp_path)
     tasks: list[str] = []
     real = r.models.embed_query
-    r.models.embed_query = lambda texts, task="": tasks.append(task) or real(texts)
+    r.models.embed_query = lambda texts, task="", model=None: (
+        tasks.append(task) or real(texts, task, model)
+    )
     r.retrieve("c", "enzyme", "hybrid", k=1)
     assert tasks == [QUERY_TASK["mcq"]]
 
@@ -275,15 +279,19 @@ def test_is_paid(tmp_path):
     assert r.is_paid(plain, "iterative") and not r.is_paid(summarizing, "hybrid")
 
 
-def test_retrieve_refuses_model_mismatch(tmp_path):
-    from ragqa_core.indexer import ModelMismatch
-
+def test_retrieve_embeds_the_question_with_the_stores_model(tmp_path):
     r, _ = build(tmp_path)
-    r.models.dense_model = "other/model"
-    with pytest.raises(
-        ModelMismatch, match="built with fake/dense; service is running other/model"
-    ):
-        r.retrieve("c", "enzyme", "hybrid")
+    r.models.dense_model = "other/model"  # the service's default changed; the store's did not
+    asked: list[str | None] = []
+    real = r.models.embed_query
+
+    def embed_query(texts, task="", model=None):
+        asked.append(model)
+        return real(texts, task, model)
+
+    r.models.embed_query = embed_query  # type: ignore[method-assign]
+    assert r.retrieve("c", "enzyme", "hybrid")
+    assert asked and all(m == "fake/dense" for m in asked)
 
 
 def test_kw_hybrid_computes_query_keywords_once(tmp_path):
@@ -579,3 +587,62 @@ def test_keyword_rag_is_not_paid(tmp_path):
     r, _ = build(tmp_path)
     summarizing = CollectionSpec("s", "mcq", True, "fake/dense", 256)
     assert not r.is_paid(summarizing, "keyword_rag")
+
+
+def test_hybrid_rerank_reranks_only_its_pool(tmp_path):
+    r, _ = build(tmp_path)
+    spec = r.spec("c")
+    r.indexer.add(spec, [Item(f"extra-{n}", f"filler text {n}", "A", "e") for n in range(26)], "y")
+    sizes, models = [], []
+    real = r.models.rerank
+
+    def rerank(query, texts, model=None):
+        sizes.append(len(texts))
+        models.append(model)
+        return real(query, texts, model)
+
+    r.models.rerank = rerank  # type: ignore[method-assign]
+    r.retrieve("c", "enzyme rate", "hybrid_rerank", k=5, pool=20, rerank_model="m/x")
+    r.retrieve("c", "enzyme rate", "hybrid_rerank", k=5)
+    assert sizes == [20, 30] and models == ["m/x", None]
+
+
+def test_keyword_rag_says_to_add_keyword_tags_on_a_documents_store():
+    docs = CollectionSpec("d", "documents", False, "fake/dense", 4, recipe="documents")
+    reasons = available_methods(docs, False)
+    assert reasons["keyword_rag"] == "needs keyword tags: Add keyword tags on the store page"
+    mcq = CollectionSpec("m", "mcq", False, "fake/dense", 4, recipe="reference")
+    assert available_methods(mcq, False)["keyword_rag"] == "needs a vocabulary"
+    free = {m for m, why in reasons.items() if why is None}
+    assert {"vector", "keyword", "hybrid"} <= free
+    assert free == set(METHOD_NAMES) - set(KEYWORD_METHODS) - {"keyword_rag"}
+    tagged = replace(docs, recipe="documents_tagged", vocabulary_version="v1")
+    assert available_methods(tagged, False)["keyword_rag"] is None
+
+
+def test_keyword_rag_waits_for_an_unfinished_tag_build(tmp_path):
+    """The vocabulary is switched to before tagging, so keyword_rag waits for the job."""
+    needs = "needs keyword tags: Add keyword tags on the store page"
+    r, conn = build(tmp_path, qa_type="documents", recipe="documents_tagged")
+    spec = r.spec("c")
+    assert available_methods(spec, True)["keyword_rag"] is None
+    assert available_methods(spec, True, tagging=True)["keyword_rag"] == needs
+    assert available_methods(spec, True, tagging=True)["hybrid"] is None
+    assert not db.tag_build_unfinished(conn, "c")
+    job = create_job(conn, "tag_build", "c", {})
+    for status in ("queued", "running", "interrupted", "failed", "cancelled"):
+        db.update_job(conn, job, status=status)
+        assert db.tag_build_unfinished(conn, "c"), status
+        with pytest.raises(MethodUnavailable, match=needs):
+            r.retrieve("c", "enzyme kinetics", "keyword_rag")
+    assert r.retrieve("c", "enzyme kinetics", "hybrid")  # the other methods still answer
+    db.update_job(conn, job, status="done")
+    assert not db.tag_build_unfinished(conn, "c")
+    assert r.retrieve("c", "enzyme kinetics", "keyword_rag")
+    create_job(conn, "tag_build", "other", {})  # another store's, or another kind, is not it
+    create_job(conn, "retag", "c", {"version": "v"})
+    assert not db.tag_build_unfinished(conn, "c")
+    newer = create_job(conn, "tag_build", "c", {})  # only the newest counts
+    assert db.tag_build_unfinished(conn, "c")
+    db.update_job(conn, newer, status="done")
+    assert not db.tag_build_unfinished(conn, "c")

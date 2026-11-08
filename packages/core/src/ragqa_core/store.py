@@ -62,13 +62,20 @@ def chunks_of(name: str) -> str:
     return f"{name}__chunks"
 
 
+def rebuild_of(name: str) -> str:
+    """The side collection a store is re-embedded into before it switches; its chunks
+    live in chunks_of(rebuild_of(name))."""
+    return f"{name}__rebuild"
+
+
 def item_hash(item: Item) -> str:
-    """What decides whether an item changed. A text chunk's `parts` (a meta with `file`
-    and `part`) is left out: a file that gains or loses a part re-indexes only the chunks
-    whose text changed (the loader writes the new count as a payload). Any other item's
-    `parts` is content like the rest of its meta."""
+    """What decides whether an item changed. A text chunk's place in its file, `part` and
+    `parts` (a meta with `file` and `part`), is left out: an edit that moves a chunk or
+    changes the file's count re-indexes only the chunks whose text changed (the loader
+    writes the new place as a payload). Any other item's `part` and `parts` are content
+    like the rest of its meta."""
     chunk = "file" in item.meta and "part" in item.meta
-    meta = {k: v for k, v in item.meta.items() if not (chunk and k == "parts")}
+    meta = {k: v for k, v in item.meta.items() if not (chunk and k in ("part", "parts"))}
     content = [item.text, item.answer, item.explanation, meta]
     return hashlib.sha1(
         json.dumps(content, sort_keys=True, ensure_ascii=False).encode()
@@ -155,9 +162,85 @@ class Store:
                 )
 
     def drop(self, name: str) -> None:
-        for collection in (name, chunks_of(name)):
+        """Deletes the store, its chunks, and any rebuild it left part-way."""
+        self._delete(name, chunks_of(name), rebuild_of(name), chunks_of(rebuild_of(name)))
+
+    def drop_rebuild(self, name: str) -> None:
+        self._delete(rebuild_of(name), chunks_of(rebuild_of(name)))
+
+    def recreate(self, name: str, dim: int) -> None:
+        """The store and its chunks, empty, at `dim` dimensions; a rebuild stays."""
+        self._delete(name, chunks_of(name))
+        self.create(name, dim)
+
+    def _delete(self, *collections: str) -> None:
+        for collection in collections:
             if self.client.collection_exists(collection):
                 self.client.delete_collection(collection)
+
+    def points(self, collection: str, batch: int = 256) -> Iterator[list[tuple[str, dict, dict]]]:
+        """Every point as (point id, vectors by name, payload), a batch at a time."""
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection, limit=batch, offset=offset, with_payload=True, with_vectors=True
+            )
+            if records:
+                yield [
+                    (
+                        str(r.id),
+                        dict(r.vector) if isinstance(r.vector, dict) else {},
+                        r.payload or {},
+                    )
+                    for r in records
+                ]
+            if offset is None:
+                return
+
+    def chunk_points(self, name: str, parent_ids: list[str]) -> list[tuple[str, dict]]:
+        """(point id, payload) of the chunks of these items, without their vectors."""
+        of_parents = Filter(must=[FieldCondition(key="parent_id", match=MatchAny(any=parent_ids))])
+        out: list[tuple[str, dict]] = []
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                chunks_of(name),
+                limit=1024,
+                offset=offset,
+                with_payload=True,
+                scroll_filter=of_parents,
+            )
+            out.extend((str(r.id), r.payload or {}) for r in records)
+            if offset is None:
+                return out
+
+    def write(self, collection: str, points: list[tuple[str, dict, dict]]) -> None:
+        """Upserts (point id, vectors by name, payload) with their own ids; a dense vector
+        may be a numpy row."""
+        if not points:
+            return
+        self.client.upsert(
+            collection,
+            points=[
+                PointStruct(
+                    id=pid,
+                    vector={
+                        v: vec.tolist() if isinstance(vec, np.ndarray) else vec
+                        for v, vec in vectors.items()
+                    },
+                    payload=payload,
+                )
+                for pid, vectors, payload in points
+            ],
+        )
+
+    def copy(self, src: str, dst: str) -> int:
+        """Every point of `src`, vectors and payload, into `dst` under the same id."""
+        n = 0
+        for batch in self.points(src):
+            self.write(dst, batch)
+            n += len(batch)
+        return n
 
     def exists(self, name: str) -> bool:
         return self.client.collection_exists(name)

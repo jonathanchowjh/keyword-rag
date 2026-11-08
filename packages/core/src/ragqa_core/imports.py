@@ -143,7 +143,7 @@ def read_format(path: Path, filename: str, fmt: str) -> tuple[str, list[dict], l
     if fmt == "zip":
         return (fmt, *read_zip(path))
     if fmt == "text":
-        return fmt, text_rows(filename, decode(path.read_bytes())), []
+        return fmt, text_rows(filename, decode_text(path.read_bytes(), filename)), []
     if fmt == "json":
         data = json.loads(decode(path.read_bytes()))
         if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
@@ -159,26 +159,50 @@ def read_format(path: Path, filename: str, fmt: str) -> tuple[str, list[dict], l
 
 
 def decode(data: bytes) -> str:
+    """JSON, CSV and TSV: a bad byte becomes U+FFFD, as the benchmark files need."""
     return data.decode("utf-8", errors="replace")
 
 
+def decode_text(data: bytes, filename: str) -> str:
+    """A .txt or .md file's text, without a UTF-8 BOM. Strict: a file that is not UTF-8 is
+    refused by name rather than read with characters replaced."""
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError(
+            f"{filename} is not UTF-8 text; save it as UTF-8 and upload it again"
+        ) from None
+
+
+def chunk_id(filename: str, text: str, seen: dict[str, int]) -> str:
+    """`<file>#<first 12 hex of the text's sha256>`; a text met again in the same file (as
+    `seen` counts) takes `-2`, `-3`, and so on, in file order."""
+    digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+    seen[digest] = seen.get(digest, 0) + 1
+    return f"{filename}#{digest}" if seen[digest] == 1 else f"{filename}#{digest}-{seen[digest]}"
+
+
 def text_rows(filename: str, text: str) -> list[dict]:
-    """A text file's rows: one {file, text} when it is one chunk (as it is, unless only its
-    padding made it too long), else one row per chunk, with the id `<file>#<i>` and its
-    place in the file in meta."""
-    chunks = chunk_text(text, filename)
-    if len(chunks) <= 1:
-        return [{"file": filename, "text": chunks[0] if chunks else text}]
+    """A text file's rows, one per chunk: {file: its content id, text: the chunk stripped,
+    meta: {file, part, parts}}; a file that fits in one chunk is part 1 of 1. The id names
+    the text, so an edit elsewhere in the file leaves a chunk's id as it was. A blank file
+    is one row with no text, which build_items counts as no_text."""
+    chunks = [c.strip() for c in chunk_text(text, filename)] or [""]
+    seen: dict[str, int] = {}
     n = len(chunks)
     return [
-        {"file": f"{filename}#{i}", "text": c, "meta": {"file": filename, "part": i, "parts": n}}
+        {
+            "file": chunk_id(filename, c, seen),
+            "text": c,
+            "meta": {"file": filename, "part": i, "parts": n},
+        }
         for i, c in enumerate(chunks, 1)
     ]
 
 
 def text_files(rows: list[dict]) -> set[str]:
     """The file names text rows were read from, as text_rows names them."""
-    return {r["meta"]["file"] if "meta" in r else r["file"] for r in rows}
+    return {r["meta"]["file"] for r in rows}
 
 
 # -- chunking a text file --------------------------------------------------------------------
@@ -460,7 +484,7 @@ def read_zip(path: Path) -> tuple[list[dict], list[str]]:
             if not name.lower().endswith(TEXT_SUFFIXES):
                 skipped += 1
                 continue
-            rows.extend(text_rows(name, decode(z.read(info))))
+            rows.extend(text_rows(name, decode_text(z.read(info), name)))
     problems = [f"{skipped} files skipped; only .txt and .md are read"] if skipped else []
     return rows, problems
 
@@ -474,7 +498,7 @@ def columns(rows: list[dict]) -> list[str]:
 
 
 def required(kind: str, qa_type: QaType) -> tuple[str, ...]:
-    if kind == "items":
+    if kind == "items" or qa_type == "documents":  # a documents question needs only gold ids
         return ("text",)
     return ("text", "choices", "answer") if qa_type == "mcq" else ("text", "answer")
 
@@ -607,13 +631,13 @@ def build_questions(
         if not text:
             report["no_text"] += 1
             continue
-        if not answer:
+        if not answer and qa_type != "documents":  # its gold is the passages it names
             report["no_answer"] += 1
             continue
         if qa_type == "mcq" and not choices:
             report["no_choices"] += 1
             continue
-        if choices:
+        if choices and answer:
             letter = to_letter(answer, choices)
             if letter is None:
                 report["unreadable_answers"] += 1

@@ -10,7 +10,7 @@ import pytest
 import uvicorn
 
 from ragqa_api.app import create_app
-from ragqa_core import db
+from ragqa_core import db, search_defaults
 from ragqa_core.fakes import fake_embeddings, fake_replies
 from ragqa_core.settings import load_settings
 from ragqa_core.types import Question
@@ -140,6 +140,7 @@ def seeded(tmp_path_factory):
     app = create_app(replace(base, home=home, **fake))
     fake_embeddings(app.state.models)
     fake_replies(app.state.ai, lambda p: "Answer: A")
+    search_defaults.save(app.state.conn, {"rewrite": False})  # follow-ups search the joined text
     app.state.worker.idle_seconds = 0.01
     port = free_port()
     url = f"http://127.0.0.1:{port}"

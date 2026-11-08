@@ -63,25 +63,46 @@ const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 // -- new store ------------------------------------------------------------
 
 async function showForm() {
+  let embedded = "";
+  try {
+    const d = await api("/search-defaults");
+    embedded = `Embedded with ${d.in_force.dense_model} (Settings → Search defaults)`;
+  } catch {
+    embedded = "";
+  }
   cat = await catalog();
   const types = Object.entries(cat.qa_types)
     .map(([id, t]) => `<option value="${esc(id)}">${esc(t.label)}: retrieves ${esc(t.retrieves)}</option>`)
-    .join("");
-  const recipes = Object.entries(cat.recipes)
-    .sort(([a], [b]) => (b === "paper_2024") - (a === "paper_2024"))
-    .map(([id, r]) => `<option value="${esc(id)}">${esc(capital(r.label))}: ${esc(r.says)}</option>`)
     .join("");
   $("form").hidden = false;
   $("form").innerHTML = `<div class="card form">
     <label>Name<input id="f-name" autocomplete="off"></label>
     <label>Type<select id="f-type">${types}</select></label>
-    <label>Kind<select id="f-recipe">${recipes}</select></label>
-    <label class="check"><input type="checkbox" id="f-sum"> Summarise each item with AI <span class="cost muted">costs money</span></label>
+    <label>Kind<select id="f-recipe"></select></label>
+    <p class="muted" data-embedded-with>${esc(embedded)}</p>
+    <label class="check" id="f-sum-row"><input type="checkbox" id="f-sum"> Summarise each item with AI <span class="cost muted">costs money</span></label>
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
       <span id="f-msg" class="err" role="status"></span></div></div>`;
+  showType();
+  $("f-type").addEventListener("change", showType);
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));
   $("f-create").addEventListener("click", create);
+}
+
+// The selected type's own recipes, paper 2024 first where it is one. documents_tagged is
+// reached by adding keyword tags to a Documents store, never chosen here. Summaries feed the
+// keyword lists, which a Documents store has none of: the switch is hidden and off there.
+function showType() {
+  const type = $("f-type").value;
+  $("f-sum-row").hidden = type === "documents";
+  if (type === "documents") $("f-sum").checked = false;
+  const own = cat.type_recipes[type] ?? [];
+  $("f-recipe").innerHTML = own
+    .filter((id) => id !== "documents_tagged")
+    .sort((a, b) => (b === "paper_2024") - (a === "paper_2024"))
+    .map((id) => `<option value="${esc(id)}">${esc(capital(cat.recipes[id].label))}: ${esc(cat.recipes[id].says)}</option>`)
+    .join("");
 }
 
 async function create() {

@@ -94,7 +94,6 @@ fieldset.bare { border:0; padding:0; } /* only there to disable what it holds */
 legend { color:var(--muted); font-size:12px; }
 .lists { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; }
 .lists textarea { min-height:140px; width:100%; }
-.route-text { min-height:120px; width:100%; }
 svg.gap { color:var(--fg); vertical-align:middle; }
 .verdict { font-size:16px; margin:4px 0; }
 .steps { margin:8px 0; padding-left:18px; }
@@ -125,7 +124,7 @@ td.num, td[data-said] { white-space:nowrap; }
   border:1px solid var(--line); border-radius:12px; }
 .chip.gone { color:var(--muted); border-style:dashed; }
 .chip button { padding:0 6px; border:0; background:transparent; color:inherit; font-size:14px; line-height:1.2; }
-/* A chat answer's Retrieval step: attempt tabs, the stores' decisions, the passages, the edits. */
+/* A chat answer's Retrieval step: attempt tabs, the stores' counts, the passages; and the panel. */
 .tabs { display:flex; flex-wrap:wrap; gap:4px; }
 .tabs button { padding:3px 10px; font-size:12px; }
 .tabs button[aria-selected="true"] { background:var(--fg); color:var(--bg); }
@@ -135,14 +134,22 @@ td.num, td[data-said] { white-space:nowrap; }
 .retrieval h3 { font-size:12px; color:var(--muted); font-weight:normal; margin:12px 0 4px; }
 .retrieval .searched { white-space:pre-wrap; }
 .decisions th, .decisions td { padding:4px 8px; font-size:12px; }
-.decisions tr.dropped { color:var(--muted); }
+.decisions tr.dropped, .counts li.dropped { color:var(--muted); }
+.counts, .notes { margin:0; padding:0; list-style:none; display:grid; gap:2px; font-size:12px; }
+.notes { margin-top:6px; }
+.reranked { margin:4px 0; }
+.passages .said { margin:0 0 6px; color:var(--muted); }
 .evidence { margin:0; padding:0; list-style:none; }
 .evidence li { border-top:1px solid var(--line); padding:6px 0; overflow-wrap:anywhere; }
 .evidence li:target { background:var(--hl); }
 .evidence .what { color:var(--muted); font-size:12px; }
 .evidence summary { cursor:pointer; }
 .evidence .full { margin-top:4px; white-space:pre-wrap; }
-.edits { display:grid; gap:8px; }
-.edits input[type="number"] { width:6em; }
-.edits .row { margin:4px 0; }
-.edits .saved { margin:4px 0; font-size:12px; }
+.passages { border:1px dashed var(--line); }
+.panel { border:1px solid var(--line); border-radius:8px; padding:6px 12px; font-size:13px; }
+.panel > summary { cursor:pointer; color:var(--muted); }
+.panel > p { margin:6px 0; font-size:12px; }
+.panel .stores { display:grid; gap:8px; margin:8px 0; }
+.panel input[type="number"] { width:9em; }
+.panel .row { margin:4px 0; }
+label[hidden] { display:none; }

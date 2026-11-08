@@ -33,6 +33,15 @@ def recall_at(hit_ids: list[str], gold_ids: list[str], k: int) -> float:
     return len(set(hit_ids[:k]) & set(gold_ids)) / len(set(gold_ids))
 
 
+def mrr_at(ids: list[str], gold: list[str], k: int) -> float:
+    """1 over the rank of the first gold id in the top k; 0 when none is there."""
+    relevant = set(gold)
+    for rank, item_id in enumerate(ids[:k], start=1):
+        if item_id in relevant:
+            return 1 / rank
+    return 0.0
+
+
 def ndcg_at(ids: list[str], gold: list[str], k: int) -> float:
     """Binary-relevance nDCG: each gold id in the top k gains 1 / log2(rank + 1), once;
     the ideal ranks min(len(gold), k) gold ids first."""

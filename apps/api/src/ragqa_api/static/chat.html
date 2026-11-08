@@ -20,6 +20,9 @@
   #chat-head { display:grid; gap:10px; margin:0 0 12px; }
   #chat-head[hidden] { display:none; }
   #chat-title { margin:0; }
+  #your-app summary { cursor:pointer; }
+  #your-app p { margin:8px 0 4px; }
+  #your-app pre { margin:0; padding:8px 10px; background:var(--card); border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere; }
   #log { display:grid; gap:10px; max-width:820px; margin:0 0 14px; }
   .turn { display:grid; gap:10px; }
   .msg { border-radius:8px; padding:10px 12px; overflow-wrap:anywhere; }
@@ -33,12 +36,9 @@
   .sources .what { color:var(--muted); font-size:12px; }
   .sources summary { cursor:pointer; }
   .sources .full { margin-top:4px; white-space:pre-wrap; }
-  #routing-check:empty { display:none; }
-  #routing-check { display:grid; gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; max-width:820px; }
-  #routing-check .tables { display:flex; flex-wrap:wrap; gap:16px; align-items:start; overflow-x:auto; }
-  #routing-check p { margin:0; }
   #compose { display:grid; gap:8px; max-width:820px; }
   #box { min-height:60px; }
+  #compose #note { margin:0; }
   .spoken { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
   @media (max-width: 768px) { #chat-page { grid-template-columns:minmax(0, 1fr); } }
 </style>
@@ -64,32 +64,20 @@
           <select id="add-store" aria-label="Add a store"></select>
         </div>
         <div class="row">
-          <label>Evidence size <input id="evidence" type="number" min="1" max="20" step="1"></label>
-          <span><label class="check"><input id="rewrite" type="checkbox"> Rewrite follow-ups with AI</label>
-            <span class="muted">costs one AI call per follow-up</span></span>
-          <span><label for="routing">Routing</label> <select id="routing">
-            <option value="all">Search every store</option>
-            <option value="profiles">By routing profile</option>
-          </select></span>
-          <label>Model <select id="model"></select></label>
-        </div>
-        <div class="row">
-          <button id="check-routing" type="button" class="secondary">Check routing</button>
-          <label>Questions to check on <select id="routing-split">
-            <option value="held_out">Held out: not the bars' own</option>
-            <option value="dev">Dev slice: the bars' own</option>
-            <option value="full">Whole eval sets</option>
-          </select></label>
-          <span class="muted">free: embeddings only</span>
-        </div>
-        <div id="routing-check" aria-live="polite"></div>
-        <div class="row">
+          <label id="model-pick" hidden>Model <select id="model"></select></label>
           <label>Add to <select id="doc-store"></select></label>
           <button id="add-doc" type="button" class="secondary">Add document</button>
           <input id="doc-file" type="file" accept=".txt,.md" multiple hidden>
         </div>
+        <details id="your-app">
+          <summary>Use from your app</summary>
+          <p>Send the next message:</p>
+          <pre id="curl-send"></pre>
+          <p>Start a new conversation set up like this one:</p>
+          <pre id="curl-copy"></pre>
+          <p class="muted">With a login set, add -u user:password. Add "answer":false to get the passages without an answer, for your own model. The reply's error says when an answer failed; answer is null with passages_only true when no answer was written.</p>
+        </details>
       </div>
-      <p id="note" class="muted" role="status"></p>
 
       <div id="adding" class="muted" aria-live="polite"></div>
       <div id="log"></div>
@@ -97,6 +85,7 @@
 
       <form id="compose">
         <label>Message <textarea id="box" placeholder="Ask this chat's stores. Enter sends, Shift+Enter adds a line."></textarea></label>
+        <p id="note" class="muted" role="status" hidden></p>
         <div class="row"><button id="send">Send</button><span id="status" class="muted" role="status"></span></div>
       </form>
     </section>

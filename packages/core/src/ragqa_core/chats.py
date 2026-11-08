@@ -1,23 +1,28 @@
-"""Saved chats: each message is searched across the chat's stores. A store is kept when its
-best match clears its bar, it has no bar, the last message kept it, or it is searched
-anyway. With routing "profiles", a store whose route score is below its route bar is not
-searched at all, unless the last message kept it or it is searched anyway. The kept stores'
-passages merge by RRF and answer the message. Each attempt is saved with its decisions and a
-snapshot of its evidence, so an old chat reads the same after a store is rebuilt or deleted.
+"""Saved chats: each message is searched in every store on the chat. The stores' candidates
+pool round-robin by rank (a passage two stores hold takes one slot), the reranker scores the
+pool against the question, and the best answer the message. With no reranker the pool keeps
+its order, which is RRF's over separate lists. Stores built with different embedding models
+pool together: each store is searched in its own model's space, and neither the reranker nor
+the merge by rank compares vectors across stores. With no answer model the attempt is
+passages only. Each attempt is saved with its decisions, its pipeline and a snapshot of its
+evidence, so an old chat reads the same after a store is rebuilt or deleted.
 
-Overrides, the edits made to a store in the retrieval step, live here in memory until a
-restart. Only set_default writes them to the store.
+A chat's settings are saved with it: its evidence size, rerank and rewrite, and for each
+store a method and candidates (the k it is searched with). Null means inherit, highest level
+first: a store's fields from the chat, the store, Settings, then the recommended value; the
+chat's own from the chat, Settings, then recommended. Only set_default writes to a store.
 """
 
 import copy
+import hashlib
 import math
 import threading
+from collections import Counter
 from dataclasses import asdict, replace
-
-import numpy as np
+from typing import Any
 
 from aiconnect.ai import AI, NoConnection, UnknownModel, UnknownPrice
-from ragqa_core import db
+from ragqa_core import db, search_defaults
 from ragqa_core.connection import Connection
 from ragqa_core.evaluator import no_ai
 from ragqa_core.prompts import (
@@ -30,33 +35,26 @@ from ragqa_core.prompts import (
     edge_order,
     rewrite_prompt,
 )
-from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
-    METHOD_NAMES,
     PER_METHOD_ERRORS,
     MethodUnavailable,
     Retriever,
     UnknownCollection,
     available_methods,
 )
-from ragqa_core.router import Router
-from ragqa_core.types import Bar, CollectionSpec, Hit, SearchSettings
+from ragqa_core.search_defaults import RECOMMENDED
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings
 
 # What a store's step or an answer may raise and still leave a saved attempt: it becomes
 # the decision's or the attempt's `error`.
 CHAT_ERRORS = PER_METHOD_ERRORS + (UnknownPrice, UnknownModel)
-EVIDENCE_SIZE = 8
-MAX_EVIDENCE = 20  # also the most passages an override's k may ask of one store
-FOLLOW_UP_TURNS = 2  # the previous user messages joined to a follow-up's search text
-RRF_K = 60
 NEW_TITLE = "New chat"
 TITLE_CHARS = 60
-OVERRIDE_FIELDS = ("method", "k", "search", "bar", "keep")
-ROUTING = ("all", "profiles")
-# A store kept so is sticky: on its own merit, past the gate. Not one only the last message
-# kept, and never one dropped ("below its bar", "not routed").
-ON_MERIT = ("search anyway", "clears its bar", "no bar", "no profile", "no route bar")
-DROPPED = ("below its bar", "not routed")
+CHAT_FIELDS = ("evidence_size", "rerank", "rewrite")  # the chat's own; null: Settings
+STORE_FIELDS = ("method", "candidates")  # per store; null: the store's own
+UPDATE_FIELDS = ("title", "stores", *CHAT_FIELDS)
+RERANK_LOADING = "reranker still loading: merged by rank"
+RERANK_UNAVAILABLE = "reranker unavailable: merged by rank"
 
 
 class AlreadyAnswered(Exception):
@@ -74,33 +72,61 @@ def error_text(e: Exception) -> str:
     return no_ai(e.role) if isinstance(e, NoConnection) else str(e)
 
 
-def whole(value: object, low: int, high: int) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
-
-
-def check_fields(fields) -> None:
-    unknown = [f for f in fields if f not in OVERRIDE_FIELDS]
+def known(fields, allowed: tuple[str, ...], what: str) -> None:
+    unknown = [f for f in fields if f not in allowed]
     if unknown:
-        raise ValueError(f"unknown override fields {unknown}; known: {list(OVERRIDE_FIELDS)}")
+        raise ValueError(f"unknown {what} {unknown}; known: {list(allowed)}")
 
 
-def merge(lists: dict[str, list[Hit]], size: int) -> list[tuple[str, Hit, int, float]]:
-    """The stores' lists fused by RRF and cut to `size`, as (store, hit, rank in its store's
-    list, fused score). Passages are keyed by (store, id): a copied store keeps the same ids.
-    Ties keep the stores' order, so equal ranks interleave."""
-    scores: dict[tuple[str, str], float] = {}
-    first: dict[tuple[str, str], tuple[Hit, int]] = {}
-    for store, hits in lists.items():
-        for rank, hit in enumerate(hits, start=1):
-            key = (store, hit.id)
-            scores[key] = scores.get(key, 0.0) + 1 / (RRF_K + rank)
-            first.setdefault(key, (hit, rank))
-    order = {key: i for i, key in enumerate(first)}
-    fused = sorted(first, key=lambda key: (-scores[key], order[key]))[:size]
-    return [(key[0], first[key][0], first[key][1], scores[key]) for key in fused]
+def inherited(levels: dict[str, object]) -> dict[str, Any]:
+    """The first level, highest first, that holds a value, as {"value", "from"}. The last
+    level, the recommended value, always holds one."""
+    source = next((s for s, v in levels.items() if v is not None), "recommended")
+    return {"value": levels[source], "from": source}
 
 
-def evidence_of(merged: list[tuple[str, Hit, int, float]]) -> list[dict]:
+def chat_search(spec: CollectionSpec) -> SearchSettings:
+    """The store's search settings as a chat runs them: oracle tags need a question's gold,
+    which a chat has none of."""
+    search = spec.search or SearchSettings()
+    return replace(search, query_tags="classifier") if search.query_tags == "oracle" else search
+
+
+def text_key(text: str) -> str:
+    """A passage's key: the same text in two stores (a copied store) is one passage."""
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
+
+
+def round_robin(lists: dict[str, list[Hit]], cap: int) -> list[tuple[str, Hit, int]]:
+    """The stores' lists pooled as (store, hit, rank in its store's list): rank 1 of each
+    store in the chat's order, then rank 2, and so on, skipping a text already taken, up to
+    `cap`. With every key distinct this is RRF's order over separate lists."""
+    pool: list[tuple[str, Hit, int]] = []
+    taken: set[str] = set()
+    longest = max((len(hits) for hits in lists.values()), default=0)
+    for i in range(longest):
+        for store, hits in lists.items():
+            if i >= len(hits):
+                continue
+            key = text_key(hits[i].text)
+            if key in taken:
+                continue
+            taken.add(key)
+            pool.append((store, hits[i], i + 1))
+            if len(pool) >= cap:
+                return pool
+    return pool
+
+
+def relevance(score: float) -> float:
+    """A reranker score as 0..1: the logistic of the score, written so it never overflows."""
+    if score >= 0:
+        return 1 / (1 + math.exp(-score))
+    e = math.exp(score)
+    return e / (1 + e)
+
+
+def evidence_of(merged: list[tuple[str, Hit, int, float, float | None]]) -> list[dict]:
     """The merged passages in merged order, each with `n`, its number in the prompt, which
     chat_prompt gives in edge order: the number the answer cites."""
     numbers = {i: n for n, i in enumerate(edge_order(list(range(len(merged)))), start=1)}
@@ -115,23 +141,20 @@ def evidence_of(merged: list[tuple[str, Hit, int, float]]) -> list[dict]:
             "store": store,
             "rank": rank,
             "score": score,
+            "relevance": rel,
             "channels": list(hit.channels),
         }
-        for i, (store, hit, rank, score) in enumerate(merged)
+        for i, (store, hit, rank, score, rel) in enumerate(merged)
     ]
 
 
 class Chats:
-    def __init__(self, conn: Connection, retriever: Retriever, router: Router, ai: AI):
+    def __init__(self, conn: Connection, retriever: Retriever, ai: AI):
         self.conn = conn
         self.retriever = retriever
-        self.router = router
         self.ai = ai
-        # chat id -> store -> {method?, k?, search?, bar?, keep?}. An absent field is what is
-        # in force (the store's saved value, else the built-in default); None for method, k
-        # or bar is the built-in default, ignoring a saved value, so a re-run previews what
-        # Set as default then saves.
-        self.overrides: dict[str, dict[str, dict]] = {}
+        self._answering: set[tuple[str, int, int]] = set()  # (chat, n, attempt) being answered
+        # Held over each read, change and write of a chat's settings, so no edit is lost.
         self._lock = threading.Lock()
 
     # -- chats -------------------------------------------------------------------
@@ -142,85 +165,116 @@ class Chats:
             raise ValueError("a chat needs at least one store")
         for store in stores:
             self.retriever.spec(store)
-        settings = {"evidence_size": EVIDENCE_SIZE, "rewrite": False, "routing": "all"}
+        settings = {"evidence_size": None, "rewrite": None, "rerank": None, "stores": {}}
+        return self._chat(db.create_chat(self.conn, title or NEW_TITLE, stores, settings))
+
+    def create_like(self, chat_id: str, title: str | None = None) -> dict:
+        """A new chat with the template's stores that still exist and a copy of its saved
+        settings, nulls kept so the copy keeps following the store and Settings. No messages."""
+        template = self._chat(chat_id)
+        stores = [s for s in template["stores"] if db.get_collection(self.conn, s)]
+        if not stores:
+            raise ValueError("a chat needs at least one store")
+        settings = copy.deepcopy(template["settings"])
+        chosen = settings.get("stores") or {}
+        settings["stores"] = {s: v for s, v in chosen.items() if s in stores}
         return self._chat(db.create_chat(self.conn, title or NEW_TITLE, stores, settings))
 
     def get(self, chat_id: str) -> dict:
         chat = self._chat(chat_id)
         attempts: dict[int, list[dict]] = {}
+        named = list(chat["stores"])  # every store the chat or its old rows name
         for a in db.chat_attempts(self.conn, chat_id):
             attempts.setdefault(a["n"], []).append(a)
+            named += [d["store"] for d in a["decisions"]] + [e["store"] for e in a["evidence"]]
         messages = [
             {"n": m["n"], "content": m["content"], "attempts": attempts.get(m["n"], [])}
             for m in db.chat_messages(self.conn, chat_id)
         ]
-        deleted = [s for s in chat["stores"] if db.get_collection(self.conn, s) is None]
-        with self._lock:  # what the next search uses for each store, beyond its defaults
-            overrides = copy.deepcopy(self.overrides.get(chat_id, {}))
-        return {**chat, "deleted_stores": deleted, "messages": messages, "overrides": overrides}
+        named = list(dict.fromkeys(named))
+        deleted = [s for s in named if db.get_collection(self.conn, s) is None]
+        in_force = self._in_force(chat)  # what the next search uses
+        return {**chat, "deleted_stores": deleted, "messages": messages, "in_force": in_force}
 
-    def update(
-        self,
-        chat_id: str,
-        *,
-        title: str | None = None,
-        stores: list[str] | None = None,
-        evidence_size: int | None = None,
-        rewrite: bool | None = None,
-        routing: str | None = None,
-    ) -> dict:
-        """Only stores being added must exist, so a list naming a deleted store still saves."""
-        chat = self._chat(chat_id)
-        if title is not None and not title.strip():
+    def in_force(self, chat_id: str) -> dict[str, Any]:
+        return self._in_force(self._chat(chat_id))
+
+    def store_in_force(self, store: str, chosen: dict | None = None) -> dict[str, Any]:
+        """The store's method and candidates, each with the level it comes from. `chosen`
+        holds the chat's values for the store."""
+        chosen = chosen or {}
+        saved = search_defaults.saved(self.conn)
+        own = {
+            "method": search_defaults.chat_method(db.get_chat_method(self.conn, store)),
+            "candidates": db.get_chat_k(self.conn, store),
+        }
+        return {
+            f: inherited(
+                {
+                    "chat": chosen.get(f),
+                    "store": own[f],
+                    "settings": saved[f],
+                    "recommended": RECOMMENDED[f],
+                }
+            )
+            for f in STORE_FIELDS
+        }
+
+    def update(self, chat_id: str, changes: dict[str, object]) -> dict:
+        """Only stores being added must exist, so a list naming a deleted store still saves.
+        None for evidence_size, rewrite or rerank inherits; a store taken off the chat drops
+        its values."""
+        known(changes, UPDATE_FIELDS, "chat fields")
+        for field in ("title", "stores"):
+            if field in changes and changes[field] is None:
+                raise ValueError(f"{field} cannot be null: leave it out to keep it")
+        for field in CHAT_FIELDS:
+            if field in changes:
+                search_defaults.check(field, changes[field])
+        title, stores = changes.get("title"), changes.get("stores")
+        if title is not None and (not isinstance(title, str) or not title.strip()):
             raise ValueError("a chat needs a title")
-        if stores is not None:
-            stores = list(dict.fromkeys(stores))
-            if not stores:
-                raise ValueError("a chat needs at least one store")
-            for store in stores:
-                if store not in chat["stores"]:
-                    self.retriever.spec(store)
-        settings = dict(chat["settings"])
-        if evidence_size is not None:
-            if not whole(evidence_size, 1, MAX_EVIDENCE):
-                raise ValueError(f"evidence size must be a whole number from 1 to {MAX_EVIDENCE}")
-            settings["evidence_size"] = evidence_size
-        if rewrite is not None:
-            if not isinstance(rewrite, bool):
-                raise ValueError("rewrite must be true or false")
-            settings["rewrite"] = rewrite
-        if routing is not None:
-            if routing not in ROUTING:
-                raise ValueError(f"routing must be one of {', '.join(ROUTING)}")
-            settings["routing"] = routing
-        db.update_chat(self.conn, chat_id, title=title, stores=stores, settings=settings)
-        if stores is not None:
-            with self._lock:
-                edits = self.overrides.get(chat_id, {})
-                for store in [s for s in edits if s not in stores]:
-                    del edits[store]
+        with self._lock:
+            chat = self._chat(chat_id)
+            if stores is not None:
+                if not isinstance(stores, list) or not all(isinstance(s, str) for s in stores):
+                    raise ValueError("stores must be a list of store names")
+                stores = list(dict.fromkeys(stores))
+                if not stores:
+                    raise ValueError("a chat needs at least one store")
+                for store in stores:
+                    if store not in chat["stores"]:
+                        self.retriever.spec(store)
+            settings = {**chat["settings"], **{f: changes[f] for f in CHAT_FIELDS if f in changes}}
+            if stores is not None:
+                chosen = settings.get("stores") or {}
+                settings["stores"] = {s: v for s, v in chosen.items() if s in stores}
+            db.update_chat(self.conn, chat_id, title=title, stores=stores, settings=settings)
         return self._chat(chat_id)
 
     def delete(self, chat_id: str) -> None:
         self._chat(chat_id)
         db.delete_chat(self.conn, chat_id)
-        with self._lock:
-            self.overrides.pop(chat_id, None)
 
     # -- messages and attempts -----------------------------------------------------
 
-    def search_text(self, chat_id: str, n: int, content: str) -> tuple[str, float, str | None]:
-        """Message n's search text, what its rewrite spent, and the rewrite's error. By
-        default the last FOLLOW_UP_TURNS user messages before n and `content`, one per line;
-        the assistant's replies are never searched. With rewrite on, a follow-up is rewritten
-        by the AI as one standalone question, and a failed rewrite falls back to the join."""
-        chat = self._chat(chat_id)
+    def search_text(self, chat_id: str, n: int, content: str, rewrite: bool, turns: int) -> dict:
+        """Message n's search text and the text its pool is reranked against, where they came
+        from, what the rewrite spent and its error. A first message is itself. A follow-up is
+        the last `turns` user messages before n and `content`, one per line, reranked against
+        `content` alone; the assistant's replies are never searched. With `rewrite` and a
+        rewrite model, it is the AI's standalone question, both searched and reranked against;
+        a failed rewrite falls back to the join. With no rewrite model nothing is tried."""
         earlier = [m["content"] for m in db.chat_messages(self.conn, chat_id) if m["n"] < n]
-        joined = "\n".join([*earlier[-FOLLOW_UP_TURNS:], content])
-        if not chat["settings"]["rewrite"] or not earlier:
-            return joined, 0.0, None
+        out: dict[str, Any] = {"search_text": content, "rerank_text": content, "from": "message"}
+        out.update(usd=0.0, error=None)
+        if not earlier:
+            return out
+        out["search_text"] = "\n".join([*(earlier[-turns:] if turns else []), content])
+        out["from"] = "joined"
+        if not (rewrite and self._resolves("rewrite")):
+            return out
         system, user = rewrite_prompt(earlier[-CHAT_TURNS:], content)
-        text, error = joined, None
         with self.ai.tally() as spent:
             try:
                 done = self.ai.complete(
@@ -230,21 +284,28 @@ class Chats:
                     max_tokens=REWRITE_TOKENS,
                     purpose="chat_rewrite",
                 )
-                text = done.text.strip() or joined
+                text = done.text.strip()
+                if text:
+                    out.update(search_text=text, rerank_text=text)
+                    out["from"] = "rewrite"
             except CHAT_ERRORS as e:
-                error = error_text(e)
-        return text, spent["usd"], error
+                out["error"] = error_text(e)
+        out["usd"] = spent["usd"]
+        return out
 
-    def ask(self, chat_id: str, content: str, model: str | None = None) -> dict:
-        """Saves the message and its first attempt, answered. An answer model that does not
-        resolve or has no price is refused first, so nothing is saved."""
+    def ask(
+        self, chat_id: str, content: str, model: str | None = None, answer: bool = True
+    ) -> dict:
+        """Saves the message and its first attempt, answered unless answer is False. An
+        answer model that does not resolve or has no price is refused first, so nothing is
+        saved."""
         chat = self._chat(chat_id)
         if not content.strip():
             raise ValueError("a message needs some text")
         self._check_model(model)
         n = db.add_chat_message(self.conn, chat_id, content)
         try:
-            attempt = self._attempt(chat, n, content, True, model)
+            attempt = self._attempt(chat, n, content, answer, model)
         except BaseException:
             db.delete_chat_message(self.conn, chat_id, n)  # never a message with no attempt
             raise
@@ -256,64 +317,109 @@ class Chats:
         self,
         chat_id: str,
         n: int,
-        overrides: dict[str, dict],
-        drop: dict[str, list[str]] | None = None,
+        settings: dict | None = None,
+        stores: dict[str, dict] | None = None,
     ) -> dict:
-        """Drops the named fields from the chat's overrides, so they are what is in force
-        again, and merges the overrides in (all checked first: a bad one keeps none), then
-        adds an unanswered attempt to message n, searched with attempt 1's text."""
-        chat = self._chat(chat_id)
-        message = self._message(chat_id, n)
-        first = self._attempt_row(chat_id, n, 1)
-        with self._lock:  # checked and merged in one hold, so no other edit lands between
-            current = self._dropped(chat, self.overrides.get(chat_id, {}), drop or {})
-            for store, override in overrides.items():
-                current[store] = self._merged(chat, store, current.get(store, {}), override)
-            self.overrides[chat_id] = {s: o for s, o in current.items() if o}
-        return self._attempt(chat, n, message["content"], False, None, first["search_text"])
-
-    def answer(self, chat_id: str, n: int, attempt: int, model: str | None = None) -> dict:
-        """Answers an attempt from its evidence snapshot; one already answered is refused."""
+        """Checks every value first (a bad one saves none), saves them onto the chat, then
+        adds an unanswered attempt to message n, searched with the latest attempt's text
+        unless the rewrite or follow-up turns it was made with changed. `settings`
+        holds the chat's own fields, `stores` each store's {method?, candidates?}; None
+        inherits, and an absent field keeps the chat's value."""
+        settings, stores = settings or {}, stores or {}
         self._chat(chat_id)
         message = self._message(chat_id, n)
-        found = self._attempt_row(chat_id, n, attempt)
-        if found["answer"] is not None:
-            raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
-        answered = self._answer(chat_id, n, message["content"], found["evidence"], model)
-        answered["usd"] += found["usd"]
-        db.answer_chat_attempt(self.conn, chat_id, n, attempt, answered)
+        self._attempt_row(chat_id, n, 1)
+        with self._lock:  # checked and saved in one hold, so no other edit lands between
+            chat = self._chat(chat_id)
+            db.update_chat(self.conn, chat_id, settings=self._changed(chat, settings, stores))
+        chat = self._chat(chat_id)
+        text = self._rerun_text(chat, n, message["content"])
+        return self._attempt(chat, n, message["content"], False, None, text)
+
+    def answer(self, chat_id: str, n: int, attempt: int, model: str | None = None) -> dict:
+        """Answers an attempt from its evidence snapshot. One already answered, or being
+        answered by another request, is refused before anything is paid. The attempt keeps
+        its search's error (a failed rewrite's note); the answer's own replaces the last."""
+        self._chat(chat_id)
+        message = self._message(chat_id, n)
+        key = (chat_id, n, attempt)
+        with self._lock:  # claimed before the paid call, so a second request pays nothing
+            if key in self._answering:
+                raise AlreadyAnswered(f"attempt {attempt} of message {n} is being answered")
+            self._answering.add(key)
+        try:
+            found = self._attempt_row(chat_id, n, attempt)
+            if found["answer"] is not None:
+                raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
+            answered = self._answer(chat_id, n, message["content"], found["evidence"], model)
+            answered["usd"] += found["usd"]
+            if not db.answer_chat_attempt(self.conn, chat_id, n, attempt, answered):
+                raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
+        finally:
+            with self._lock:
+                self._answering.discard(key)
         return self._attempt_row(chat_id, n, attempt)
 
     def set_default(self, chat_id: str, store: str) -> dict:
-        """Saves the fields the chat's override for the store names (None clears the saved
-        value), then drops the override. "Search anyway" is chat-only and is not saved."""
-        chat = self._chat(chat_id)
-        if store not in chat["stores"]:
-            raise UnknownCollection(f"'{store}' is not on this chat")
-        spec = self.retriever.spec(store)
+        """Saves the chat's method and candidates for the store, those it sets, as the
+        store's own, then clears them on the chat. With none set it changes nothing; a method
+        the store can't run is MethodUnavailable and saves nothing."""
         with self._lock:
-            override = dict(self.overrides.get(chat_id, {}).get(store, {}))
-        with self.conn.lock:
-            if "search" in override:
-                base = spec.search or SearchSettings()
-                db.set_search(self.conn, store, search_settings(base, override["search"]))
-            if "method" in override:
-                db.set_chat_method(self.conn, store, override["method"])
-            if "k" in override:
-                db.set_chat_k(self.conn, store, override["k"])
-            if "bar" in override:
-                db.set_chat_bar(self.conn, store, override["bar"])
-        with self._lock:
-            self.overrides.get(chat_id, {}).pop(store, None)
-        search = self.retriever.spec(store).search or SearchSettings()
+            chat = self._chat(chat_id)
+            if store not in chat["stores"]:
+                raise UnknownCollection(f"'{store}' is not on this chat")
+            spec = self.retriever.spec(store)
+            stores = dict(chat["settings"].get("stores") or {})
+            chosen = stores.get(store) or {}
+            method = chosen.get("method")
+            why = self._reasons(spec)[method] if method is not None else None
+            if why:  # saved on the store, it would fail every chat that inherits it
+                raise MethodUnavailable(f"{method} {why} on '{store}'")
+            if any(chosen.get(f) is not None for f in STORE_FIELDS):
+                stores[store] = dict.fromkeys(STORE_FIELDS)
+                with self.conn.lock:
+                    if chosen.get("method") is not None:
+                        db.set_chat_method(self.conn, store, chosen["method"])
+                    if chosen.get("candidates") is not None:
+                        db.set_chat_k(self.conn, store, chosen["candidates"])
+                    settings = {**chat["settings"], "stores": stores}
+                    db.update_chat(self.conn, chat_id, settings=settings)
         return {
-            "search": asdict(search),
-            "chat_method": db.get_chat_method(self.conn, store),
+            "chat_method": search_defaults.chat_method(db.get_chat_method(self.conn, store)),
             "chat_k": db.get_chat_k(self.conn, store),
-            "chat_bar": db.get_chat_bar(self.conn, store),
+            "in_force": self.store_in_force(store),
         }
 
     # -- one attempt -------------------------------------------------------------
+
+    def _rerun_text(self, chat: dict, n: int, content: str) -> dict:
+        """The search text for a re-run of message n: the latest attempt's, unless the way it
+        was made differs from the way in force (message, rewrite, or joined with so many
+        turns), then made again. Follow-up turns don't count while rewriting: the rewrite
+        reads CHAT_TURNS messages, so no rewrite is paid for nothing. An attempt from before
+        the pipeline, or a re-run of one ("legacy"), keeps its text whatever is in force."""
+        force = self._in_force(chat)
+        rewrite = bool(force["rewrite"]["value"])
+        turns = int(force["follow_up_turns"])
+        latest = db.chat_attempts(self.conn, chat["id"], n)[-1]
+        first = not any(m["n"] < n for m in db.chat_messages(self.conn, chat["id"]))
+        pipeline = latest.get("pipeline")
+        if pipeline is None or pipeline["search_from"] == "legacy":  # its text as it was
+            rerank_text = content if pipeline is None else pipeline["rerank_text"]
+            reused = {"search_text": latest["search_text"], "rerank_text": rerank_text}
+            return {**reused, "from": "legacy", "usd": 0.0, "error": None}
+        if first:
+            wanted: tuple = ("message",)
+        elif rewrite and force["rewrite_available"]:
+            wanted = ("rewrite",)
+        else:
+            wanted = ("joined", turns)
+        made = pipeline["search_from"]
+        had = (made,) if made in ("message", "rewrite") else ("joined", pipeline["follow_up_turns"])
+        if wanted != had:
+            return self.search_text(chat["id"], n, content, rewrite, turns)
+        reused = {"search_text": latest["search_text"], "rerank_text": pipeline["rerank_text"]}
+        return {**reused, "from": made, "usd": 0.0, "error": None}
 
     def _attempt(
         self,
@@ -322,50 +428,61 @@ class Chats:
         content: str,
         answer: bool,
         model: str | None,
-        search_text: str | None = None,
+        text: dict | None = None,
     ) -> dict:
-        """Searches every store on the chat for message n, merges the kept stores' passages,
+        """Searches every store on the chat for message n, pools and reranks their passages,
         answers when asked, and saves the attempt. Its usd is the rewrite's, every store's
-        and the answer's, tallied one after another (tallies never nest)."""
-        rewrite_usd, errors = 0.0, []
-        if search_text is None:
-            search_text, rewrite_usd, rewrite_error = self.search_text(chat["id"], n, content)
-            if rewrite_error:
-                errors.append(
-                    f"the rewrite failed, so the joined text was searched: {rewrite_error}"
-                )
-        with self._lock:
-            overrides = copy.deepcopy(self.overrides.get(chat["id"], {}))
-        sticky = self._sticky(chat["id"], n)
-        texts = list(dict.fromkeys([content, search_text]))
-        embedded: dict[str, np.ndarray] = {}  # qa type -> the texts' vectors, made once
-        decisions, lists = [], {}
-        for store in chat["stores"]:
-            decision, hits = self._decide(
-                store,
-                texts,
-                search_text,
-                embedded,
-                overrides.get(store, {}),
-                store in sticky,
-                chat["settings"],
-            )
-            decisions.append(decision)
-            if hits:
-                lists[store] = hits
-        evidence = evidence_of(merge(lists, chat["settings"]["evidence_size"]))
+        and the answer's, tallied one after another (tallies never nest). With no answer
+        model, the attempt is passages only: nothing is asked and nothing is an error."""
+        force = self._in_force(chat)
+        if text is None:
+            rewrite, turns = bool(force["rewrite"]["value"]), int(force["follow_up_turns"])
+            text = self.search_text(chat["id"], n, content, rewrite, turns)
+        errors = []
+        if text["error"]:
+            errors.append(f"the rewrite failed, so the joined text was searched: {text['error']}")
+        live = force["stores"]  # a deleted store has no values: its decision says so
+        plan = {
+            s: {f: live[s][f]["value"] if s in live else None for f in STORE_FIELDS}
+            for s in chat["stores"]
+        }
+        size = int(force["evidence_size"]["value"])
+        rerank, rrf_k = bool(force["rerank"]["value"]), int(force["rrf_k"])
+        reranker, pool_cap = str(force["rerank_model"]), int(force["rerank_pool"])
+        found = self.search(
+            plan, text["search_text"], text["rerank_text"], size, rerank, rrf_k, reranker, pool_cap
+        )
+        # No answer model was available when this attempt was made, re-runs included.
+        passages_only = model is None and not self._resolves("answer")
         row = {
-            "search_text": search_text,
-            "decisions": decisions,
-            "evidence": evidence,
+            "search_text": text["search_text"],
+            "decisions": found["decisions"],
+            "evidence": found["evidence"],
             "answer": None,
             "citations": [],
-            "usd": rewrite_usd + sum(d["usd"] for d in decisions),
+            "usd": text["usd"] + found["usd"],
+            "search_error": "; ".join(errors) or None,  # kept when the attempt is answered later
             "error": None,
             "model": None,
+            "pipeline": {
+                "search_from": text["from"],
+                "rerank_text": text["rerank_text"],
+                "merged_by": found["merged_by"],
+                "rerank": rerank,
+                "rerank_model": reranker,
+                "rerank_pool": pool_cap,
+                "rewrite": bool(force["rewrite"]["value"]),
+                "follow_up_turns": int(force["follow_up_turns"]),
+                "evidence_size": size,
+                "rrf_k": rrf_k,
+                "pool": found["pool"],
+                "notes": found["notes"],
+                "passages_only": passages_only,
+                "answer_skipped": not answer,
+            },
         }
-        if answer:
-            answered = self._answer(chat["id"], n, content, evidence, model)
+        if answer and not passages_only:
+            answered = self._answer(chat["id"], n, content, found["evidence"], model)
             row.update(answer=answered["answer"], citations=answered["citations"])
             row.update(model=answered["model"], usd=row["usd"] + answered["usd"])
             if answered["error"]:
@@ -374,113 +491,130 @@ class Chats:
         number = db.add_chat_attempt(self.conn, chat["id"], n, row)
         return self._attempt_row(chat["id"], n, number)
 
-    def _decide(
+    def search(
         self,
-        store: str,
-        texts: list[str],
+        plan: dict[str, dict],
         search_text: str,
-        embedded: dict[str, np.ndarray],
-        override: dict,
-        sticky: bool,
-        settings: dict,
+        rerank_text: str,
+        evidence_size: int,
+        rerank: bool,
+        rrf_k: int,
+        rerank_model: str,
+        rerank_pool: int,
+    ) -> dict:
+        """Searches each store in `plan` ({store: {method, candidates}}) with search_text,
+        pools their passages round-robin by rank up to rerank_pool, reranks the pool against
+        rerank_text when `rerank` is set and the reranker is ready, and cuts to
+        evidence_size. The pool is never smaller than evidence_size. Without a rerank the
+        pool keeps its order, scored 1 / (rrf_k + rank); a loading or failed reranker leaves
+        a note, and is never waited for."""
+        decisions, lists = [], {}
+        for store, chosen in plan.items():
+            decision, hits = self._decide(
+                store, search_text, chosen["method"], chosen["candidates"], rrf_k
+            )
+            decisions.append(decision)
+            if hits:
+                lists[store] = hits
+        pool = round_robin(lists, max(rerank_pool, evidence_size))  # never fewer passages
+        notes: list[str] = []
+        merged: list[tuple[str, Hit, int, float, float | None]] = [
+            (store, hit, rank, 1 / (rrf_k + rank), None) for store, hit, rank in pool
+        ]
+        merged_by = "rrf"
+        scores = self._rerank(rerank_text, pool, rerank_model, notes) if rerank and pool else None
+        if scores is not None:
+            order = sorted(range(len(pool)), key=lambda i: (-scores[i], i))
+            merged = [(*pool[i], scores[i], relevance(scores[i])) for i in order]
+            merged_by = "rerank"
+        evidence = evidence_of(merged[:evidence_size])
+        used = Counter(e["store"] for e in evidence)
+        for decision in decisions:
+            decision["used"] = used[decision["store"]]
+        return {
+            "decisions": decisions,
+            "evidence": evidence,
+            "merged_by": merged_by,
+            "pool": len(pool),
+            "notes": notes,
+            "usd": sum(d["usd"] for d in decisions),
+        }
+
+    def _rerank(
+        self, text: str, pool: list[tuple[str, Hit, int]], model: str, notes: list[str]
+    ) -> list[float] | None:
+        """The reranker's score of each pooled passage against `text`, or None, with a note
+        saying why, when it is still loading or unavailable. A failed one is retried in the
+        background; an idle one loads now."""
+        models = self.retriever.models
+        status = models.rerank_status(model)
+        if status == "loading":
+            notes.append(RERANK_LOADING)
+            return None
+        if status == "failed":
+            notes.append(RERANK_UNAVAILABLE)
+            models.warm_rerank_in_background(model)
+            return None
+        try:
+            return models.rerank(text, [hit.text for _, hit, _ in pool], model)
+        except Exception:
+            notes.append(RERANK_UNAVAILABLE)
+            return None
+
+    def _decide(
+        self, store: str, search_text: str, method: str | None, candidates: int | None, rrf_k: int
     ) -> tuple[dict, list[Hit]]:
-        """One store's decision on the texts (the message and its search text) and, when
-        kept, its passages. A failure in its route, best match, bar or retrieval is the
-        decision's error, and the other stores still run. `embedded` holds the texts'
-        vectors by qa type, made by the first store of that type that needs them."""
+        """One store's decision and its passages, searched with `method` and k = candidates.
+        A method the store can't run is replaced by hybrid, with a note saying why. A failure
+        in its retrieval is the decision's error, and the other stores still run. `used` is
+        filled in once the evidence is chosen."""
         decision = {
             "store": store,
             "method": None,
-            "k": None,
+            "candidates": None,
             "search": None,
-            "route": None,  # the route score and its bar; None unless routing by profile
-            "route_bar": None,
-            "best": None,
-            "bar": None,
-            "bar_source": None,
             "tags": None,  # the query tags keyword_rag picked; None for other methods
-            "kept": False,
-            "reason": "deleted",
+            "found": 0,
+            "used": 0,
+            "note": "deleted",
             "usd": 0.0,
             "error": None,
         }
         spec = db.get_collection(self.conn, store)
         if spec is None:
             return decision, []
-        reasons = self._reasons(spec)
-        # An absent field is the saved value; None, set in the override, is the built-in one.
-        saved_method = db.get_chat_method(self.conn, store)
-        method = override["method"] if "method" in override else saved_method
-        method = method or ("keyword_rag" if reasons["keyword_rag"] is None else "hybrid")
-        k = override["k"] if "k" in override else db.get_chat_k(self.conn, store)
-        k = k or settings["evidence_size"]
-        search = search_settings(spec.search or SearchSettings(), override.get("search"))
-        if search.query_tags == "oracle":  # it needs a question's gold; a chat has none
-            search = replace(search, query_tags="classifier")
-        decision.update(method=method, k=k, search=asdict(search))
+        decision["note"] = None
+        if method is None or candidates is None:  # not given: the store's own chain
+            force = self.store_in_force(store)
+            method = method or str(force["method"]["value"])
+            candidates = candidates or int(force["candidates"]["value"])
+        search = chat_search(spec)
+        why = self.why_not(spec, method)
+        if why:
+            decision["note"] = f"{method} {why}, so hybrid was used"
+            method = "hybrid"
+        decision.update(method=method, candidates=candidates, search=asdict(search))
         hits: list[Hit] = []
         with self.ai.tally() as spent:
             try:
-                if spec.qa_type not in embedded:
-                    embedded[spec.qa_type] = self.router.embed(spec, texts)
-                vectors = embedded[spec.qa_type]
-                routing = settings.get("routing", "all")
-                reason = self._reason(spec, texts, vectors, override, sticky, routing, decision)
-                decision.update(kept=reason not in DROPPED, reason=reason)
-                if decision["kept"]:
-                    if reasons[method]:
-                        raise MethodUnavailable(f"{method} {reasons[method]} on '{store}'")
-                    hits, decision["tags"] = self._retrieve(spec, search_text, method, k, search)
+                hits, decision["tags"] = self._retrieve(
+                    spec, search_text, method, candidates, rrf_k, search
+                )
             except CHAT_ERRORS as e:
-                decision.update(kept=False, reason="error", error=error_text(e))
+                decision["error"] = error_text(e)
                 hits = []
         decision["usd"] = spent["usd"]
+        decision["found"] = len(hits)
         return decision, hits
 
-    def _reason(
+    def _retrieve(
         self,
         spec: CollectionSpec,
-        texts: list[str],
-        vectors: np.ndarray,
-        override: dict,
-        sticky: bool,
-        routing: str,
-        decision: dict,
-    ) -> str:
-        """Why the store is kept or dropped, the first that holds: search anyway, kept from
-        the last message, then with routing "profiles" no profile, no route bar or not
-        routed, then the gate's reasons. A store routed for want of a profile or a route bar
-        still goes through the gate; one not routed is never matched. Fills in the
-        decision's route, best match and bar as they are found."""
-        forced = bool(override.get("keep")) or sticky
-        routed_by = None  # why a store the router could not judge is searched
-        if routing == "profiles":
-            targets = self.router.targets(spec)  # drafted once for the score and its bar
-            route = decision["route"] = self.router.route_score(spec, texts, vectors, targets)
-            route_bar = self.router.route_bar(spec, targets)
-            decision["route_bar"] = route_bar.value
-            if route is None:
-                routed_by = "no profile"
-            elif route_bar.value is None:
-                routed_by = "no route bar"
-            elif route < route_bar.value and not forced:
-                return "not routed"
-        best = decision["best"] = self.router.best_match(spec, texts, vectors)
-        if override.get("bar") is not None:
-            bar = Bar(override["bar"], "override", None, 0)
-        else:  # a None bar is the eval set's, as if none were saved
-            bar = self.router.bar(spec, saved="bar" not in override)
-        decision.update(bar=bar.value, bar_source=bar.source)
-        if override.get("keep"):
-            return "search anyway"
-        if sticky:
-            return "kept from the last message"
-        if not self.router.kept(best, bar):
-            return "below its bar"
-        return routed_by or ("no bar" if bar.value is None else "clears its bar")
-
-    def _retrieve(
-        self, spec: CollectionSpec, text: str, method: str, k: int, search: SearchSettings
+        text: str,
+        method: str,
+        k: int,
+        rrf_k: int,
+        search: SearchSettings,
     ) -> tuple[list[Hit], list[str] | None]:
         """The store's passages and, for keyword_rag, the query tags it picked first, as
         POST /chat runs them."""
@@ -488,15 +622,22 @@ class Chats:
         if method == "keyword_rag":
             skip = tuple(db.disabled_sources(self.conn, spec.name))
             tags = self.retriever.query_tags(spec, text, search, skip)
-        return self.retriever.retrieve(spec.name, text, method, k, RRF_K, search, tags), tags
+        return self.retriever.retrieve(spec.name, text, method, k, rrf_k, search, tags), tags
 
     def _answer(
         self, chat_id: str, n: int, content: str, evidence: list[dict], model: str | None
     ) -> dict:
-        """The answer to message n from an evidence snapshot (kept in merged order, so the
-        prompt numbers it as `n` says), with its citations, cost, error and model."""
+        """The answer to message n from an evidence snapshot, after its history."""
+        return self.answer_from(content, self._history(chat_id, n), evidence, model)
+
+    def answer_from(
+        self, content: str, history: list, evidence: list[dict], model: str | None
+    ) -> dict:
+        """The answer to `content` after `history` ([{role, content}]) from evidence (kept in
+        merged order, so the prompt numbers it as `n` says), with its citations, usd, error
+        and model. POST /chat answers through it too."""
         hits = [Hit(e["id"], e["text"], e["score"], {}, [], None, None, {}) for e in evidence]
-        system, user = chat_prompt(content, self._history(chat_id, n), hits)
+        system, user = chat_prompt(content, history, hits)
         out: dict = {"answer": None, "citations": [], "error": None, "model": None}
         with self.ai.tally() as spent:
             try:
@@ -538,82 +679,80 @@ class Chats:
                 history.append({"role": "assistant", "content": answers[m["n"]]})
         return history[-CHAT_TURNS:]
 
-    def _sticky(self, chat_id: str, n: int) -> set[str]:
-        """The stores message n-1's latest answered attempt kept on their own merit. One
-        kept there only by stickiness is not sticky again, so the list never grows alone."""
-        attempts = db.chat_attempts(self.conn, chat_id, n - 1)
-        answered = [a for a in attempts if a["answer"] is not None]
-        if not answered:
-            return set()
-        return {
-            d["store"] for d in answered[-1]["decisions"] if d["kept"] and d["reason"] in ON_MERIT
-        }
-
     # -- checks and reads --------------------------------------------------------
 
     def _check_model(self, model: str | None) -> None:
         """Refuses, as POST /chat does, an answer model that does not resolve (UnknownModel)
-        or has no price (UnknownPrice). With no answer model at all, the attempt records
-        it, as POST /chat's reply does."""
+        or has no price (UnknownPrice). With no answer model at all, the attempt is
+        passages only."""
         try:
             ref = model or self.ai.model_for("answer")
         except NoConnection:
             return
         self.ai.need_rates(*self.ai.resolve(ref))
 
-    def _dropped(self, chat: dict, held: dict[str, dict], drop: dict[str, list[str]]) -> dict:
-        """A copy of the chat's held overrides less the fields `drop` names, store by store,
-        checked: each store must be on the chat, as in _merged, and each field an override
-        field."""
-        out = {store: dict(override) for store, override in held.items()}
-        for store, fields in drop.items():
+    def _changed(self, chat: dict, settings: dict, stores: dict[str, dict]) -> dict:
+        """The chat's settings with `settings` and `stores` saved over them, every value
+        checked first. A method the store can't run, or that needs AI when none resolves,
+        is MethodUnavailable."""
+        known(settings, CHAT_FIELDS, "chat settings")
+        for field, value in settings.items():
+            search_defaults.check(field, value)
+        for store, values in stores.items():
             if store not in chat["stores"]:
                 raise UnknownCollection(f"'{store}' is not on this chat")
-            check_fields(fields)
-            for field in fields:
-                out.get(store, {}).pop(field, None)
-        return out
+            known(values, STORE_FIELDS, f"settings for '{store}'")
+            for field, value in values.items():
+                search_defaults.check(field, value)
+            spec = self.retriever.spec(store)
+            method = values.get("method")
+            why = self.why_not(spec, method) if method is not None else None
+            if why:
+                raise MethodUnavailable(f"{method} {why} on '{store}'")
+        chosen = dict(chat["settings"].get("stores") or {})
+        for store, values in stores.items():
+            chosen[store] = {**dict.fromkeys(STORE_FIELDS), **chosen.get(store, {}), **values}
+        return {**chat["settings"], **settings, "stores": chosen}
 
-    def _merged(self, chat: dict, store: str, current: dict, override: dict) -> dict:
-        """The store's override with `override` merged in, checked. None for method, k or
-        bar is the built-in default (see self.overrides); a search is merged into the one
-        already edited, and a None search drops it."""
-        if store not in chat["stores"]:
-            raise UnknownCollection(f"'{store}' is not on this chat")
-        spec = self.retriever.spec(store)
-        check_fields(override)
-        out = dict(current)
-        for field, value in override.items():
-            if field == "search":
-                if value is None:
-                    out.pop("search", None)
-                    continue
-                if not isinstance(value, dict):
-                    raise ValueError("search must be an object")
-                old = out.get("search", {})
-                value = {**old, **value}
-                if isinstance(old.get("weights"), dict) and isinstance(value.get("weights"), dict):
-                    value["weights"] = {**old["weights"], **value["weights"]}
-                search_settings(spec.search or SearchSettings(), value)
-            elif field == "method" and value is not None:
-                if value not in METHOD_NAMES:
-                    raise ValueError(f"unknown method {value!r}; known: {', '.join(METHOD_NAMES)}")
-                why = self._reasons(spec)[value]
-                if why:
-                    raise MethodUnavailable(f"{value} {why} on '{store}'")
-            elif field == "k" and value is not None and not whole(value, 1, MAX_EVIDENCE):
-                raise ValueError(f"k must be a whole number from 1 to {MAX_EVIDENCE}")
-            elif field == "bar" and value is not None:
-                number = isinstance(value, int | float) and not isinstance(value, bool)
-                if not number or not math.isfinite(value):
-                    raise ValueError("a bar must be a number")
-            elif field == "keep" and not isinstance(value, bool):
-                raise ValueError("keep must be true or false")
-            out[field] = value
+    def why_not(self, spec: CollectionSpec, method: str) -> str | None:
+        """Why the chat can't run `method` on the store, or None when it can: what
+        available_methods says, else "needs AI" for a method that would call AI (a paid one,
+        or keyword_rag picking its tags by AI) when no AI resolves."""
+        why = self._reasons(spec)[method]
+        paid = self.retriever.is_paid(spec, method)
+        paid = paid or (method == "keyword_rag" and chat_search(spec).query_tags == "model")
+        if why is None and paid and not self._resolves("query"):
+            why = "needs AI"
+        return why
+
+    def _resolves(self, role: str) -> bool:
+        try:
+            self.ai.model_for(role)
+        except NoConnection:
+            return False
+        return True
+
+    def _in_force(self, chat: dict) -> dict[str, Any]:
+        """What the chat's next search uses, each chat field with the level it comes from."""
+        own = chat["settings"]
+        saved, settings = search_defaults.saved(self.conn), search_defaults.in_force(self.conn)
+        out: dict[str, Any] = {
+            f: inherited({"chat": own.get(f), "settings": saved[f], "recommended": RECOMMENDED[f]})
+            for f in CHAT_FIELDS
+        }
+        for field in ("follow_up_turns", "rrf_k", "rerank_pool"):
+            out[field] = settings[field]
+        out["rerank_model"] = settings["rerank_model"] or self.retriever.models.rerank_model
+        out["rewrite_available"] = self._resolves("rewrite")
+        out["answer_available"] = self._resolves("answer")
+        chosen = own.get("stores") or {}
+        live = [s for s in chat["stores"] if db.get_collection(self.conn, s) is not None]
+        out["stores"] = {s: self.store_in_force(s, chosen.get(s)) for s in live}
         return out
 
     def _reasons(self, spec: CollectionSpec) -> dict[str, str | None]:
-        return available_methods(spec, db.get_keyword_lists(self.conn, spec.name) is not None)
+        has_lists = db.get_keyword_lists(self.conn, spec.name) is not None
+        return available_methods(spec, has_lists, db.tag_build_unfinished(self.conn, spec.name))
 
     def _chat(self, chat_id: str) -> dict:
         chat = db.get_chat(self.conn, chat_id)

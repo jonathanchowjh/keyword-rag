@@ -6,6 +6,7 @@ import pytest
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
+    mrr_at,
     ndcg_at,
     paired_diff_ci,
     recall_at,
@@ -27,6 +28,16 @@ def test_ndcg_at():
     assert ndcg_at(["x", "a"], ["a", "b", "c"], 1) == 0.0  # past the cut-off
     assert ndcg_at(["a"], ["a", "b", "c"], 1) == pytest.approx(1.0)  # ideal is min(gold, k)
     assert ndcg_at(["a", "a"], ["a", "b"], 10) == pytest.approx(1 / (1 + 1 / math.log2(3)))
+
+
+def test_mrr_at():
+    assert mrr_at(["a", "b", "c"], ["b"], 10) == 0.5
+    assert mrr_at(["a"], ["z"], 10) == 0.0
+    eleventh = [f"x{n}" for n in range(10)] + ["g"]
+    assert mrr_at(eleventh, ["g"], 10) == 0.0  # past the cut-off
+    assert mrr_at(eleventh, ["g"], 11) == pytest.approx(1 / 11)
+    assert mrr_at(["a", "b"], ["b", "a"], 10) == 1.0  # the first right one counts
+    assert mrr_at(["a"], [], 10) == 0.0
 
 
 def test_recall():

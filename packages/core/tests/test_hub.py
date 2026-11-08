@@ -103,16 +103,24 @@ LOAD_ITEMS = [
 
 
 def hub_load(
-    tmp_path, monkeypatch, newest: str | None = "c1", stored=(), rows=ROWS, build=BUILD, held=False
+    tmp_path,
+    monkeypatch,
+    newest: str | None = "c1",
+    stored=(),
+    rows=ROWS,
+    build=BUILD,
+    held=False,
+    dense_model: str | None = None,
 ):
     """A worked-examples collection, a load job of bright_aops limit 2, and a loader whose
     Hub serves one entry for it at commit c1; with what the Hub was asked for. `held`: the
-    job was queued unconfirmed because the entry made it free."""
+    job was queued unconfirmed because the entry made it free. `dense_model`: the store's
+    model (fake/small has 64 dimensions), else the service's."""
     conn = connect(tmp_path / "r.db")
     reply = '{"terms": ["relative speed"], "principle": "P", "method": "M", "answer": "4"}'
     ai = fake_ai(conn, lambda p: reply)
-    ix = Indexer(conn, Store(None, None), fake_models(), ai)
-    spec = ix.create("aops", "science", False, "worked_examples")
+    ix = Indexer(conn, Store(None, None), fake_models(dims={"fake/small": 64}), ai)
+    spec = ix.create("aops", "science", False, "worked_examples", dense_model=dense_model)
     if stored:
         ix.add(spec, list(stored), "hand")
     ident = entry_id("bright_aops", 2, "worked_examples")
@@ -142,6 +150,18 @@ def test_a_load_with_an_entry_sends_no_ai_call(tmp_path, monkeypatch):
     assert by_id["ba-d1"].tags == ["relative speed"] and by_id["ba-d2"].tags == ["unit conversion"]
     assert by_id["ba-d1"].abstracted == "Principle: P\nMethod: M\nAnswer: 4"
     assert db.get_vocabulary(conn, "aops") == TERMS
+
+
+def test_a_hub_build_applies_to_a_store_of_any_embedding_model(tmp_path, monkeypatch):
+    # The Hub publishes text only, so its build applies whatever the store embeds with.
+    conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch, dense_model="fake/small")
+    ld.ai.update_connection("anthropic", api_key=None)
+    result = ld.run(job, lambda p: None)
+    assert result["hub"] == {"entry": "bright_aops-2-worked_examples", "items": 2}
+    assert conn.execute("select count(*) from ai_ledger")[0][0] == 0
+    assert db.get_vocabulary(conn, "aops") == TERMS
+    assert ix.spec("aops").dense_model == "fake/small"
+    assert ix.store.vectors("aops", "kw_tags", 3).shape[1] == 64
 
 
 def test_a_reload_with_nothing_to_build_never_reads_the_hub(tmp_path, monkeypatch):

@@ -16,7 +16,7 @@ from ragqa_core.db import (
     run_items,
     save_questions,
 )
-from ragqa_core.evaluator import EvalSetMismatch, Evaluator, changes_since
+from ragqa_core.evaluator import ANSWERS_LATER, EvalSetMismatch, Evaluator, changes_since
 from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.retriever import Retriever
@@ -195,6 +195,21 @@ def test_setup_records_full_configuration(env):
     assert setup["dataset_filter"] == "items you added or imported"
 
 
+def test_a_run_records_the_stores_model_and_its_query_instruction(env):
+    conn, ev = env
+    qwen = "Qwen/Qwen3-Embedding-0.6B-Q"  # the fake gives any model a dimension
+    ix = ev.retriever.indexer
+    ix.add(ix.create("q", "mcq", False, dense_model=qwen), ITEMS, "x")
+    save_questions(conn, "q", QUESTIONS)
+    job = ev.queue("q", "dev", ["hybrid"], False, None)
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["dense_model"] == qwen and setup["query_instruction"].startswith("Instruct: ")
+    plain = ev.queue("c", "dev", ["hybrid"], False, None)
+    ev.run(plain)
+    assert get_job(conn, plain)["setup"]["query_instruction"] == ""
+
+
 def test_items_wrong_only(env):
     conn, ev = env
     ev.ai = fake_ai(conn, lambda p: "Answer: B")
@@ -298,6 +313,16 @@ def test_setup_is_recorded_on_first_run_only(env):
     assert "q-new" not in {r["question_id"] for r in run_items(conn, job)}
 
 
+def test_queue_refuses_an_unknown_rerank_model(env):
+    conn, ev = env
+    with pytest.raises(ValueError, match="unknown reranker nope/x"):
+        ev.queue("c", "dev", ["hybrid_rerank"], False, None, rerank_model="nope/x")
+    assert list_jobs(conn, kind="eval") == []
+    for model in (None, ev.models.rerank_model):  # the fakes' reranker is not on fastembed's list
+        job = ev.queue("c", "dev", ["hybrid_rerank"], False, None, rerank_model=model)
+        assert get_job(conn, job)["setup"]["rerank_model"] == ev.models.rerank_model
+
+
 def test_queue_stores_only_the_request(env):
     conn, ev = env
     search = {"weights": {"words": 0.5}}
@@ -312,6 +337,7 @@ def test_queue_stores_only_the_request(env):
         "rrf_k": 10,
         "search": search,  # the override as asked; the effective settings are recorded on run
         "eval_set": "c",
+        "rerank_pool": 50,
     }
     assert get_job(conn, job)["status"] == "queued"
     ev.run(job)
@@ -1668,3 +1694,91 @@ def test_leaked_ids_reads_no_questions_while_the_scan_is_kept(env, monkeypatch):
     ev.forget("c")
     assert ev._leaked == {}
     assert ev.leaked_ids(spec, "c") == {"h1"} and len(reads) == 1
+
+
+# -- Documents stores -----------------------------------------------------------------
+
+PASSAGES = [
+    Item("p1", "alpha beta gamma"),
+    Item("p2", "alpha beta zeta"),
+    Item("p3", "alpha beta omicron theta"),
+    *(Item(f"p{n}", f"filler{n} padding{n} other{n}") for n in range(4, 13)),
+]
+
+
+def documents_env(tmp_path, questions: list[Question]):
+    """A Documents store of 12 passages, and its eval set imported from a file: questions
+    with gold ids and no answers."""
+    from ragqa_core import imports
+
+    conn = connect(tmp_path / "d.db")
+    store, models = Store(None, None), fake_models()
+    ai = fake_ai(conn, lambda p: "Answer: x")
+    ix = Indexer(conn, store, models, ai)
+    spec = ix.create("d", "documents", False, "documents")
+    ix.add(spec, PASSAGES, "upload:docs")
+    rows = [{"id": q.id, "text": q.text, "gold_ids": q.gold_ids} for q in questions]
+    mapping = imports.guess_mapping(imports.columns(rows), "questions")
+    built, _ = imports.build_questions(rows, mapping, "documents")
+    save_questions(conn, "d", [replace(q, meta={"source": "upload:set"}) for q in built])
+    retriever = Retriever(conn, store, models, ai, ix, Builder(conn, store, models, ai, ix))
+    return conn, Evaluator(conn, retriever, models, ai)
+
+
+def test_a_documents_run_scores_recall_mrr_and_ndcg_at_10(tmp_path):
+    import math
+
+    asked = [
+        Question("d1", "alpha beta gamma", None, [], ["p2", "p3"], {}),
+        Question("d2", "filler5 padding5", None, [], ["p5"], {}),
+    ]
+    conn, ev = documents_env(tmp_path, asked)
+    job = ev.queue("d", "full", ["vector", "hybrid"], False, None)  # k is 5
+    ev.run(job)
+    rows = {(r["method"], r["question_id"]): r for r in run_items(conn, job)}
+    assert all(len(r["hit_ids"]) == 10 for r in rows.values())  # gold ids keep 10
+    assert all(set(r["retrieval"]) == {"ndcg@10", "recall@10", "mrr@10"} for r in rows.values())
+    # By meaning d1 ranks p1 (all its words), p2 (two of three), p3 (two of four): gold 2nd, 3rd.
+    vector = rows[("vector", "d1")]
+    assert vector["hit_ids"][:3] == ["p1", "p2", "p3"]
+    assert vector["retrieval"]["recall@10"] == 1.0
+    assert vector["retrieval"]["mrr@10"] == 0.5
+    ideal = 1 + 1 / math.log2(3)
+    assert vector["retrieval"]["ndcg@10"] == pytest.approx((1 / math.log2(3) + 1 / 2) / ideal)
+    table = ev.table(job)
+    assert table["headline"] == "ndcg@10"
+    assert {m for m in table["methods"]["vector"] if "@" in m} == {"ndcg@10", "recall@10", "mrr@10"}
+    assert table["gaps"] and {p["metric"] for p in table["pairs"]} == {"ndcg@10"}
+    # Best of each asks "do keywords help?": the best keyword-list method against the best
+    # other. A Documents store has no keyword lists and a Documents run doesn't lead with that
+    # question (spec section 1), so with no lists there is nothing to set against.
+    assert table["best_of_each"] is None
+    # Best of each sets the best keyword-list method against the best other: lists let one run.
+    ev.retriever.indexer.set_lists(ev.retriever.spec("d"), LISTS)
+    pair = ev.queue("d", "full", ["kw_individual", "hybrid"], False, None)
+    ev.run(pair)
+    table = ev.table(pair)
+    assert table["headline"] == "ndcg@10" and table["gaps"] and table["best_of_each"]
+    assert table["answer"] is not None
+
+
+def test_a_documents_run_with_answers_is_refused_when_queued(tmp_path):
+    conn, ev = documents_env(tmp_path, [Question("d1", "alpha beta", None, [], ["p1"], {})])
+    with pytest.raises(ValueError, match=ANSWERS_LATER):
+        ev.queue("d", "full", ["hybrid"], True, None)
+    assert db.list_jobs(conn, kind="eval") == []
+
+
+def test_documents_questions_are_never_leaked(tmp_path):
+    words = "alpha beta gamma alpha beta gamma alpha"  # every word is inside p1, 7 of them
+    conn, ev = documents_env(tmp_path, [Question("d1", words, None, [], ["p1"], {})])
+    from ragqa_core import imports
+
+    held = Item("p0", f"{words} and more")  # the question's whole text inside a passage
+    ev.retriever.indexer.add(ev.retriever.spec("d"), [held], "upload:docs")
+    assert imports.leaked_ids(db.get_questions(conn, "d"), [held.text]) == {"d1"}  # it would be
+    assert ev.leaked_ids(ev.retriever.spec("d"), "d") == set()
+    job = ev.queue("d", "full", ["hybrid"], False, None)
+    ev.run(job)
+    setup = get_job(conn, job)["setup"]
+    assert setup["leaked_excluded"] == 0 and setup["question_ids"] == ["d1"]

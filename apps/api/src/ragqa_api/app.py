@@ -1,6 +1,6 @@
 """The HTTP API. Thin: every decision lives in ragqa_core; this maps it to HTTP.
 
-Loads, imports, copies, re-keys and evals are queued as jobs, and the worker thread
+Loads, imports, copies, re-keys, rebuilds and evals are queued as jobs, and the worker thread
 (ragqa_worker), started by the lifespan, runs them in order. A few routes still
 work in the request: /documents indexes its items, and /query and a confirmed
 proposal call the AI.
@@ -17,13 +17,13 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from anyio import from_thread
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aiconnect.ai import (
     AI,
@@ -36,12 +36,13 @@ from aiconnect.ai import (
     UnknownPrice,
 )
 from aiconnect.presets import PRESETS
-from ragqa_core import db, imports
+from ragqa_core import db, imports, search_defaults
 from ragqa_core.builder import Builder, builds
 from ragqa_core.catalog import catalog
-from ragqa_core.chats import MAX_EVIDENCE, AlreadyAnswered, Chats, UnknownChat
+from ragqa_core.chats import AlreadyAnswered, Chats, UnknownChat
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import (
+    ANSWERS_LATER,
     EvalSetMismatch,
     Evaluator,
     answer_hits,
@@ -56,24 +57,20 @@ from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
 from ragqa_core.loader import Loader, sample_items
 from ragqa_core.models import Models
 from ragqa_core.prompts import (
-    CHAT_PASSAGE_CHARS,
-    CHAT_TOKENS,
     CHAT_TURNS,
     answer_prompt,
-    chat_prompt,
-    cited_numbers,
-    edge_order,
 )
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     METHOD_NAMES,
     PER_METHOD_ERRORS,
+    POOL,
     MethodUnavailable,
     Retriever,
     UnknownCollection,
     available_methods,
 )
-from ragqa_core.router import Router
+from ragqa_core.search_defaults import MAX_CANDIDATES, MAX_EVIDENCE
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import (
@@ -97,10 +94,27 @@ BUSY_STATE = {
     "eval": "evaluating",
     "import": "importing",
     "backfill": "labelling",
+    "reembed": "rebuilding",
+    "tag_build": "tagging",
 }
 DOCUMENT_FIELDS = ("id", "text", "answer", "explanation", "meta")
 SYNC_ITEMS = 20  # more items than this are imported by the worker
-TEXT_SUFFIXES = (".txt", ".md")  # what the chat can add to a store
+# The jobs a sync add of items waits for: each adds, keys, tags or reads the items.
+ADD_WAITS_FOR = (
+    "load",
+    "rekey",
+    "retag",
+    "copy",
+    "eval",
+    "import",
+    "backfill",
+    "reembed",
+    "tag_build",
+)
+TEXT_SUFFIXES = (".txt", ".md")  # what the chat can add to a store, and a Documents store takes
+DOCUMENTS_ONLY = "A Documents store takes .md and .txt files"
+NOT_UNTAGGED = "only a Documents store without keyword tags can add them"
+NO_KEYWORDS_MODEL = "connect a model for keywords first"
 STALL_AFTER = timedelta(minutes=10)
 PROBLEM = {
     "failed": "failed",
@@ -119,6 +133,12 @@ class NewCollection(BaseModel):
     qa_type: QaType
     summarize: bool = False
     recipe: str | None = None
+    dense_model: str | None = None  # None takes the Settings model, else the service's
+
+
+class ReembedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
 
 
 class NewEvalSet(BaseModel):
@@ -145,10 +165,13 @@ class EvalSetPatch(BaseModel):
 
 
 class CollectionPatch(BaseModel):
-    """Only the fields sent change."""
+    """Only the fields sent change; an unknown field is refused."""
+
+    model_config = ConfigDict(extra="forbid")
 
     eval_set: str | None = None  # null: the set named after the store, if any
-    route_profile: str | None = None  # null or blank: the router's draft
+    chat_method: str | None = None  # a chat's method on the store; null: Settings'
+    chat_k: int | None = Field(None, ge=1, le=MAX_CANDIDATES)  # candidates; null: Settings'
 
 
 class EvalSetImport(BaseModel):
@@ -218,9 +241,9 @@ class QueryRequest(BaseModel):
     collection: str
     question: str
     choices: list[str] | None = None
-    methods: list[str] = Field(default_factory=lambda: ["hybrid", "kw_individual"])
+    methods: list[str] | None = None  # None: the Settings method
     k: int = Field(5, ge=1, le=50)
-    rrf_k: int = Field(60, ge=0)
+    rrf_k: int | None = Field(None, ge=0)  # None: the Settings RRF k
     answer: bool = False
     model: str | None = None
     search: dict | None = None  # overrides the collection's search settings in part
@@ -234,60 +257,76 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     collection: str
     messages: list[ChatTurn] = Field(min_length=1)  # the last is the user's question
-    method: str | None = None  # keyword_rag with a vocabulary, else hybrid
-    k: int = Field(5, ge=1, le=20)
+    method: str | None = None  # None: the store's chat method, as a chat inherits it
+    k: int | None = Field(None, ge=1, le=MAX_EVIDENCE)  # passages answered from; None: Settings
     model: str | None = None
 
 
 class NewChat(BaseModel):
-    stores: list[str]
+    """Stores to chat over, or the id of a chat to copy (from). The route checks that exactly
+    one is given, so the 422's detail is a plain string."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    stores: list[str] | None = None
+    from_: str | None = Field(None, alias="from")
     title: str | None = None
 
 
 class ChatPatch(BaseModel):
-    """An absent field changes nothing; an explicit null is refused, not ignored."""
+    """An absent field changes nothing; null for evidence_size, rewrite or rerank inherits
+    (from Settings). A null title or stores, or an unknown field, is refused, not ignored."""
+
+    model_config = ConfigDict(extra="forbid")
 
     title: str | None = None
     stores: list[str] | None = None
     evidence_size: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
     rewrite: bool | None = None
-    routing: Literal["all", "profiles"] | None = None
+    rerank: bool | None = None
 
     @model_validator(mode="before")
     @classmethod
     def no_nulls(cls, data: object) -> object:
         if isinstance(data, dict):
-            nulls = [f for f, value in data.items() if value is None and f in cls.model_fields]
+            nulls = [f for f, value in data.items() if value is None and f in ("title", "stores")]
             if nulls:
                 raise ValueError(f"{', '.join(nulls)} cannot be null: leave a field out to keep it")
         return data
 
 
 class NewMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt answer must not pay for one
+
     content: str = Field(min_length=1)
     model: str | None = None
+    answer: bool = True  # False: the passages only, nothing is paid for an answer
 
 
-class StoreOverride(BaseModel):
-    """null for method, k or bar means the store's own; an absent field changes nothing."""
+class ChatSettingsIn(BaseModel):
+    """The chat's own values a re-run saves; null inherits, an absent field keeps the chat's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_size: int | None = Field(default=None, ge=1, le=MAX_EVIDENCE)
+    rerank: bool | None = None
+    rewrite: bool | None = None
+
+
+class StoreSettingsIn(BaseModel):
+    """A store's values on the chat; null inherits, an absent field keeps the chat's."""
+
+    model_config = ConfigDict(extra="forbid")
 
     method: str | None = None
-    k: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
-    search: dict | None = None
-    bar: float | None = Field(None, ge=-1, le=1)
-    keep: bool = False
+    candidates: int | None = Field(None, ge=1, le=MAX_CANDIDATES)
 
 
 class NewAttempt(BaseModel):
-    overrides: dict[str, StoreOverride] = {}
-    # fields of the chat's held overrides to drop, so they are what is in force again;
-    # dropped before the overrides are merged in
-    drop: dict[str, list[Literal["method", "k", "search", "bar", "keep"]]] = {}
+    model_config = ConfigDict(extra="forbid")
 
-
-class RoutingEval(BaseModel):
-    stores: list[str] = Field(min_length=2)
-    split: Literal["held_out", "dev", "full"] = "held_out"  # held_out: not the bars' dev slice
+    settings: ChatSettingsIn = ChatSettingsIn()
+    stores: dict[str, StoreSettingsIn] = {}
 
 
 class AnswerRequest(BaseModel):
@@ -304,10 +343,17 @@ class EvalRequest(BaseModel):
     rrf_k: int = Field(60, ge=0)
     search: dict | None = None  # overrides the collection's search settings in part
     eval_set: str | None = None  # the store's default eval set when None
+    rerank_pool: int = Field(POOL, ge=1, le=POOL)  # hybrid_rerank: hybrid's top N it reranks
+    rerank_model: str | None = None  # hybrid_rerank: None takes the Settings model
     confirm: bool = False
 
 
 class ResumeRequest(BaseModel):
+    confirm: bool = False
+
+
+class KeywordTagsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     confirm: bool = False
 
 
@@ -348,12 +394,47 @@ class BudgetSet(BaseModel):
     cap_usd: float
 
 
+class SearchDefaultsIn(BaseModel):
+    """A partial change: a field left out keeps its value, null puts it back to recommended.
+    Strict, so "yes" is not read as true: search_defaults.check says what each field takes."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    method: str | None = None
+    candidates: int | None = None
+    evidence_size: int | None = None
+    rerank: bool | None = None
+    rewrite: bool | None = None
+    follow_up_turns: int | None = None
+    rrf_k: int | None = None
+    rerank_model: str | None = None
+    rerank_pool: int | None = None
+    dense_model: str | None = None
+
+
 def spec_json(spec: CollectionSpec) -> dict:
     return asdict(spec)
 
 
 def type_clash(eval_set: str, set_type: str, store: str, store_type: str) -> EvalSetMismatch:
     return EvalSetMismatch(f"eval set '{eval_set}' is {set_type}; store '{store}' is {store_type}")
+
+
+def brief_reply(message: dict) -> dict:
+    """A message's first attempt, short: the answer, its citations and the passages, for an
+    app that calls the API. The raw score is left out; relevance is 0 to 1 or null."""
+    one = message["attempts"][0]
+    pipeline = one["pipeline"]
+    keys = ("n", "store", "id", "text", "source", "part", "parts", "relevance")
+    return {
+        "n": message["n"],
+        "answer": one["answer"],
+        "citations": one["citations"],
+        "passages": [{k: e[k] for k in keys} for e in one["evidence"]],
+        "passages_only": pipeline["passages_only"] or pipeline.get("answer_skipped", False),
+        "error": one["error"],
+        "usd": one["usd"],
+    }
 
 
 def check_mapping(kind: str, mapping: dict | None) -> None:
@@ -396,6 +477,9 @@ async def lifespan(app: FastAPI):
             app.state.conn, "backfill", spec.name
         ):
             db.create_job(app.state.conn, "backfill", spec.name, {})
+    # Chat's first rerank need not wait for it; None is the service's own reranker.
+    reranker = search_defaults.in_force(app.state.conn)["rerank_model"]
+    app.state.models.warm_rerank_in_background(reranker if isinstance(reranker, str) else None)
     app.state.worker.start()
     try:
         yield
@@ -428,8 +512,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.conn, state.store, state.models, state.ai, state.indexer, state.builder
     )
     state.evaluator = Evaluator(state.conn, state.retriever, state.models, state.ai)
-    state.router = Router(state.conn, state.retriever, state.evaluator)
-    state.chats = Chats(state.conn, state.retriever, state.router, state.ai)
+    state.chats = Chats(state.conn, state.retriever, state.ai)
     state.loader = Loader(
         state.conn, state.indexer, state.builder, state.ai, settings.home, settings.build_hub
     )
@@ -500,6 +583,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(NoConnection, no_connection)
 
     # -- helpers ---------------------------------------------------------------
+
+    def refuse_busy(name: str, stopped_switch_ok: bool = False) -> None:
+        """409 while any job is running or queued on the collection, or while a rebuild's
+        switch stopped part-way: the store is then emptied or partly refilled, and the
+        resume refills it from the rebuilt copy. Only resuming that switch may pass it."""
+        for status in ("running", "queued"):
+            busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
+            if busy:
+                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        # switching_model reads the newest rebuild: a new one would hide the stopped switch.
+        switching = db.switching_model(state.conn, name)
+        if switching and not stopped_switch_ok:
+            raise HTTPException(409, f"the switch to {switching} stopped part-way; resume it first")
 
     def need_ai(role: str, model: str | None = None) -> None:
         """Refuse at once a request that would spend on a job with no usable model.
@@ -608,10 +704,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         found = db.get_eval_set(state.conn, body.name)
         if found and found["qa_type"] != body.qa_type:  # it would be the store's default
             raise type_clash(body.name, found["qa_type"], body.name, body.qa_type)
+        model = body.dense_model
+        known = (*search_defaults.supported_embedders(), state.models.dense_model)
+        if model is not None and model not in known:
+            raise HTTPException(422, f"unknown embedding model {model}")
+        recipe = body.recipe or ("documents" if body.qa_type == "documents" else "paper_2024")
         return spec_json(
-            state.indexer.create(
-                body.name, body.qa_type, body.summarize, body.recipe or "paper_2024"
-            )
+            state.indexer.create(body.name, body.qa_type, body.summarize, recipe, None, model)
         )
 
     @app.get("/collections")
@@ -622,28 +721,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_collection(name: str) -> dict:
         spec = state.retriever.spec(name)
         lists = db.get_keyword_lists(state.conn, name)
-        available = [m for m, why in available_methods(spec, lists is not None).items() if not why]
+        reasons = available_methods(
+            spec, lists is not None, db.tag_build_unfinished(state.conn, name)
+        )
+        available = [m for m, why in reasons.items() if not why]
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
-        busy, job = collection_state(jobs, count, lists is not None)
+        busy, job = collection_state(jobs, count, lists is not None or spec.qa_type == "documents")
         eval_set, everything = store_questions(name)
         include_leaked = db.get_include_leaked(state.conn, eval_set) if eval_set else False
         leaked = leaked_ids(spec, eval_set)
         questions = runnable(everything, leaked, include_leaked)
         fields = field_report(name, questions)
-        route_profile, drafted = state.router.route_profile(spec)
         return {
             **spec_json(spec),
             "count": count,
             "keyword_lists": asdict(lists) if lists else None,
             "methods_available": available,
-            # A chat's search defaults, as Set as default saves them; null is the store's own.
-            "chat_method": db.get_chat_method(state.conn, name),
+            "methods_unavailable": {m: why for m, why in reasons.items() if why},
+            # A chat's method and candidates on the store, as Set as default saves them;
+            # null inherits from Settings. chat_settings says what is in force, and whence.
+            # one saved before it left the chat list (hybrid_rerank) reads as null
+            "chat_method": search_defaults.chat_method(db.get_chat_method(state.conn, name)),
             "chat_k": db.get_chat_k(state.conn, name),
-            "chat_bar": db.get_chat_bar(state.conn, name),
+            "chat_settings": state.chats.store_in_force(name),
             "state": busy,
             "progress": job["progress"] if job and job["status"] == "running" else None,
             "job": job,
+            "rebuild": rebuild_state(jobs),
+            "keyword_tags": keyword_tags_state(spec, jobs, db.get_vocabulary(state.conn, name)),
             "questions": len(questions),
             "dev_questions": len(dev_slice(questions)),
             "answer": state.evaluator.collection_answer(name),
@@ -655,16 +761,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "eval_set": eval_set,
             "fields": fields,
             "measurable": measurable(spec.qa_type, fields),
-            "route_profile": route_profile,
-            "route_profile_drafted": drafted,
         }
 
     @app.patch("/collections/{name}")
     def patch_collection(name: str, body: CollectionPatch) -> dict:
-        """Makes the eval set the store's default, null clearing it, and saves the routing
-        profile, null or blank going back to the draft. A field left out stays as it is."""
+        """Makes the eval set the store's default, null clearing it, and sets a chat's
+        method and candidates on the store, null inheriting. Every field is checked before
+        any is saved; a field left out stays as it is."""
         spec = state.retriever.spec(name)
         sent = body.model_fields_set
+        if "chat_method" in sent and body.chat_method is not None:
+            search_defaults.check("method", body.chat_method)  # not a chat method: 422
+            lists = db.get_keyword_lists(state.conn, name)
+            tagging = db.tag_build_unfinished(state.conn, name)
+            why = available_methods(spec, lists is not None, tagging)[body.chat_method]
+            if why:
+                raise MethodUnavailable(f"{body.chat_method} {why} on '{name}'")
         if "eval_set" in sent:
             if body.eval_set is not None:
                 found = known_set(body.eval_set)
@@ -675,15 +787,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     409, f"a load or question import is under way on '{name}'; wait"
                 )
             db.set_default_eval_set(state.conn, name, body.eval_set)
-        if "route_profile" in sent:
-            text = (body.route_profile or "").strip()
-            db.set_route_profile(state.conn, name, text or None)
+        if "chat_method" in sent:
+            db.set_chat_method(state.conn, name, body.chat_method)
+        if "chat_k" in sent:
+            db.set_chat_k(state.conn, name, body.chat_k)
         return get_collection(name)
-
-    @app.post("/collections/{name}/route-profile/draft")
-    def draft_route_profile(name: str) -> dict:
-        """What the router would draft for the store now; nothing is saved."""
-        return {"route_profile": state.router.draft_route_profile(state.retriever.spec(name))}
 
     @app.delete("/collections/{name}", status_code=204)
     def delete_collection(name: str) -> Response:
@@ -701,7 +809,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.store.drop(name)
         state.retriever.forget(name)
         state.evaluator.forget(name)
-        state.router.forget(name)
         db.delete_collection_rows(state.conn, name)
         imports.delete_uploads(state.settings.home, name)
         return Response(status_code=204)
@@ -713,7 +820,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # under the lock, so no job is queued between this check and the add's end.
         now = len(body.items) <= SYNC_ITEMS
         with state.adding_lock:
-            for kind in ("load", "rekey", "retag", "copy", "eval", "import", "backfill"):
+            for kind in ADD_WAITS_FOR:
                 if db.job_waiting_or_running(state.conn, kind, name):
                     raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
             if name in state.adding:
@@ -780,6 +887,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec = state.retriever.spec(name)
         if accept == "text" and Path(filename).suffix.lower() not in TEXT_SUFFIXES:
             raise HTTPException(422, "only .txt and .md files can be added here")
+        # Each file becomes passages: a zip, a table or json lines is not a Documents file.
+        is_text = Path(filename).suffix.lower() in TEXT_SUFFIXES
+        if kind == "items" and spec.qa_type == "documents" and not is_text:
+            raise HTTPException(422, DOCUMENTS_ONLY)
         length = request.headers.get("content-length", "")
         if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
             raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
@@ -835,6 +946,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "source": source,
         }
         with not_adding(name):
+            # It was priced on the recipe now; a queued tag_build would switch it first.
+            if db.job_waiting_or_running(state.conn, "tag_build", name):
+                raise HTTPException(409, f"a tag_build job is queued or running on '{name}'; wait")
             return {"job_id": db.create_job(state.conn, "import", name, setup)}
 
     @app.get("/collections/{name}/sources")
@@ -866,16 +980,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "at least one source must stay on")
         db.set_source_enabled(state.conn, name, source, body.enabled)
         state.evaluator.forget(name)  # what the store holds changed: scan for leaks again
-        state.router.forget(name)
         return {**row, "enabled": body.enabled}
 
     @app.delete("/collections/{name}/sources/{source}", status_code=204)
     def delete_source(name: str, source: str) -> Response:
         known_source(name, source)
-        for status in ("running", "queued"):
-            busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
-            if busy:
-                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        refuse_busy(name)
         left = [r for r in source_rows(name) if r["source"] != source and r["items"] > 0]
         if left and not any(r["enabled"] for r in left):
             raise HTTPException(409, "at least one source must stay on")
@@ -883,7 +993,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.set_source_enabled(state.conn, name, source, True)
         state.retriever.forget(name)
         state.evaluator.forget(name)  # a re-import of as many items must scan again
-        state.router.forget(name)  # and set its bar again
         return Response(status_code=204)
 
     @app.get("/collections/{name}/questions")
@@ -1147,10 +1256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise type_clash(body.name, found["qa_type"], body.name, source.qa_type)
         target = state.loader.copy_spec(source, body.name, body.recipe, body.build)
         # A job on the source could change the items while the copy reads them.
-        for status in ("running", "queued"):
-            busy = db.list_jobs(state.conn, collection=name, status=status, limit=1)
-            if busy:
-                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        refuse_busy(name)
         if target.summarize:
             need_ai("summary")
         estimate = state.loader.estimate_copy(name, target)
@@ -1160,6 +1266,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"estimate": estimate}, 200)
         with not_adding(name):  # the copy reads the source's items
             return {"name": body.name, "job_id": state.loader.start_copy(name, target)}
+
+    @app.post("/collections/{name}/reembed", status_code=202)
+    def reembed(name: str, body: ReembedRequest) -> dict:
+        """Queues a rebuild of the store with another embedding model. It is free: every
+        item is embedded again on this machine, so there is nothing to estimate or confirm."""
+        spec = state.retriever.spec(name)
+        model = body.model
+        if model not in (*search_defaults.supported_embedders(), state.models.dense_model):
+            raise HTTPException(422, f"unknown embedding model {model}")
+        # Under the lock, so no job is queued between these checks and this one's queueing.
+        with not_adding(name):
+            refuse_busy(name)  # items added or changed meanwhile would miss the rebuilt copy
+            if model == spec.dense_model:
+                raise HTTPException(409, f"'{name}' is already built with {model}")
+            setup = {"model": model, "from": spec.dense_model}
+            return {"job_id": db.create_job(state.conn, "reembed", name, setup)}
+
+    @app.post("/collections/{name}/keyword-tags", status_code=202)
+    def add_keyword_tags(name: str, body: KeywordTagsRequest | None = None):
+        """Add keyword tags: a Documents store switches to documents_tagged in place, and a
+        queued tag_build job induces its vocabulary and tags every passage. Without confirm,
+        what that would spend."""
+        spec = state.retriever.spec(name)
+        if spec.qa_type != "documents" or spec.recipe != "documents":
+            raise HTTPException(409, NOT_UNTAGGED)
+        # Under the lock, so no job is queued and no passage added between these checks and
+        # this one's queueing.
+        with not_adding(name):
+            if state.store.count(name) == 0:
+                raise HTTPException(409, "add passages first")
+            refuse_busy(name)
+            estimate, calls = state.builder.plan_tag_build(spec)
+            if estimate is None:
+                raise HTTPException(409, NO_KEYWORDS_MODEL)
+            if not (body and body.confirm):
+                return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
+            if estimate != 0:  # all cached: the build sends nothing
+                need_ai("keywords")
+            return {"job_id": db.create_job(state.conn, "tag_build", name, {})}
 
     @app.post("/collections/{name}/keyword-lists/propose")
     def propose(name: str, body: ProposeRequest | None = None):
@@ -1226,6 +1371,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Without confirm, what re-tagging every item would cost; with it, saves the terms
         as a version and a queued retag job switches to it once every item is tagged."""
         spec = state.retriever.spec(name)
+        if spec.recipe == "documents":  # a vocabulary comes with Add keyword tags
+            raise HTTPException(
+                409, f"'{name}' has no keyword tags yet; use Add keyword tags on the store page"
+            )
         build = spec.build
         if build is None or build.vocabulary == "lists":
             raise HTTPException(
@@ -1235,7 +1384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         busy = db.busy_job(state.conn, name)
         if busy:
             raise HTTPException(409, f"a {busy} job is queued or running on '{name}'; wait")
-        state.indexer.check_model(spec)  # the retag would embed with another model
+        state.indexer.check_model(spec)  # the retag would embed with a model it can't load
         terms = clean_terms(body.terms)
         if not terms:
             raise ValueError("the vocabulary is empty")
@@ -1284,17 +1433,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # -- chats -----------------------------------------------------------------
     # Chats tallies its own spending, so these routes never open a tally.
 
-    @app.get("/collections/{name}/bar")
-    def collection_bar(name: str) -> dict:
-        return asdict(state.router.bar(state.retriever.spec(name)))
-
     @app.get("/chats")
     def list_chats() -> list[dict]:
         return state.chats.list()
 
     @app.post("/chats", status_code=201)
     def create_chat(body: NewChat) -> dict:
-        return state.chats.create(body.stores, body.title)
+        if (body.stores is None) == (body.from_ is None):
+            if body.stores is None:
+                raise ValueError("a chat needs stores, or from: a chat to copy")
+            raise ValueError("send stores or from, not both")
+        if body.from_ is not None:
+            return state.chats.create_like(body.from_, body.title)
+        return state.chats.create(body.stores or [], body.title)
 
     @app.get("/chats/{chat_id}")
     def get_chat(chat_id: str) -> dict:
@@ -1302,7 +1453,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.patch("/chats/{chat_id}")
     def patch_chat(chat_id: str, body: ChatPatch) -> dict:
-        return state.chats.update(chat_id, **body.model_dump(exclude_unset=True))
+        return state.chats.update(chat_id, body.model_dump(exclude_unset=True))
 
     @app.delete("/chats/{chat_id}", status_code=204)
     def delete_chat(chat_id: str) -> Response:
@@ -1310,14 +1461,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(status_code=204)
 
     @app.post("/chats/{chat_id}/messages")
-    def chat_message(chat_id: str, body: NewMessage) -> dict:
-        return state.chats.ask(chat_id, body.content, body.model)
+    def chat_message(chat_id: str, body: NewMessage, brief: bool = False) -> dict:
+        message = state.chats.ask(chat_id, body.content, body.model, body.answer)
+        return brief_reply(message) if brief else message
 
     @app.post("/chats/{chat_id}/messages/{n}/attempts")
     def chat_attempt(chat_id: str, n: int, body: NewAttempt) -> dict:
-        overrides = {s: o.model_dump(exclude_unset=True) for s, o in body.overrides.items()}
-        drop = {s: list(fields) for s, fields in body.drop.items()}
-        return state.chats.rerun(chat_id, n, overrides, drop)
+        settings = body.settings.model_dump(exclude_unset=True)
+        stores = {s: v.model_dump(exclude_unset=True) for s, v in body.stores.items()}
+        return state.chats.rerun(chat_id, n, settings, stores)
 
     @app.post("/chats/{chat_id}/messages/{n}/attempts/{attempt}/answer")
     def chat_answer(chat_id: str, n: int, attempt: int, body: AnswerRequest | None = None) -> dict:
@@ -1327,22 +1479,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def chat_default(chat_id: str, store: str) -> dict:
         return state.chats.set_default(chat_id, store)
 
-    @app.post("/routing/eval")
-    def routing_eval(body: RoutingEval) -> dict:
-        """The gate and the profile router scored on the stores' own eval set questions, in
-        the request: embeddings only, so it spends nothing."""
-        return state.router.evaluate(body.stores, body.split)
-
     @app.post("/query")
     def query(body: QueryRequest) -> dict:
-        check_methods(body.methods)
+        """Each method's hits for a question; with no methods or rrf_k, Settings' own."""
+        defaults: dict[str, Any] = search_defaults.in_force(state.conn)
+        methods = body.methods if body.methods is not None else [str(defaults["method"])]
+        rrf_k = body.rrf_k if body.rrf_k is not None else int(defaults["rrf_k"])
+        check_methods(methods)
         spec = state.retriever.spec(body.collection)
+        # A store mid-switch is emptied, so every method is refused at once (409); a model
+        # it can't load fails only the methods that embed, each with its error.
+        if db.switching_model(state.conn, spec.name):
+            state.indexer.check_model(spec)
         search = search_settings(spec.search or SearchSettings(), body.search)
-        if "keyword_rag" in body.methods and search.query_tags == "oracle":
+        if "keyword_rag" in methods and search.query_tags == "oracle":
             raise ValueError("oracle tags need a question's gold")  # eval only
         skip = tuple(db.disabled_sources(state.conn, body.collection))
         results = {}
-        for method in body.methods:
+        for method in methods:
 
             def answer(hits: list[Hit]) -> dict:
                 program = search.program and not body.choices
@@ -1370,7 +1524,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body.question,
                 method,
                 body.k,
-                body.rrf_k,
+                rrf_k,
                 search,
                 skip,
                 answer if body.answer else None,
@@ -1379,65 +1533,64 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/chat")
     def chat(body: ChatRequest) -> dict:
-        """An answer from a store's passages, citing them as [n]. Spends like the Lab: no
+        """An answer from a store's passages, citing them as [n]. Searched as a chat searches
+        one store: its method and candidates, then the pool reranked against the question,
+        with Settings' rerank, RRF k, reranker and pool cap. Spends like the Lab: no
         estimate, the cost is in the reply, the budget cap holds."""
         *earlier, last = body.messages
         if last.role != "user":
             raise ValueError("the last message must be the user's")
         spec = state.retriever.spec(body.collection)
-        reasons = available_methods(spec, db.get_keyword_lists(state.conn, spec.name) is not None)
-        method = body.method or ("keyword_rag" if reasons["keyword_rag"] is None else "hybrid")
-        check_methods([method])
-        if reasons[method]:
-            raise HTTPException(409, f"{method} {reasons[method]} on '{body.collection}'")
-        search = spec.search or SearchSettings()
-        if search.query_tags == "oracle":  # it needs a question's gold; chat has none
-            search = replace(search, query_tags="classifier")
-        skip = tuple(db.disabled_sources(state.conn, body.collection))
-        history = [t.model_dump() for t in earlier][-CHAT_TURNS:]
-        cited: list[dict] = []
-
-        def answer(hits: list[Hit]) -> dict:
-            system, user = chat_prompt(last.content, history, hits)
-            done = state.ai.complete(
-                user,
-                role="answer",
-                system=system,
-                model=body.model,
-                max_tokens=CHAT_TOKENS,
-                purpose="chat",
-            )
-            ordered = edge_order(hits)
-            for n in cited_numbers(done.text, len(ordered)):
-                hit = ordered[n - 1]
-                cited.append(
-                    {
-                        "n": n,
-                        "id": hit.id,
-                        "text": hit.text[:CHAT_PASSAGE_CHARS],
-                        "source": hit.meta.get("source"),
-                        "part": hit.meta.get("part"),
-                        "parts": hit.meta.get("parts"),
-                    }
-                )
-            return {"answer": done.text}
-
-        out = run_method(spec, last.content, method, body.k, 60, search, skip, answer)
+        chain = state.chats.store_in_force(spec.name)
+        method = body.method or str(chain["method"]["value"])
+        if body.method is not None:
+            check_methods([method])
+            if method not in search_defaults.CHAT_METHODS:
+                raise HTTPException(422, f"{method} is not a chat method")
+            why = state.chats.why_not(spec, method)
+            if why:
+                raise HTTPException(409, f"{method} {why} on '{body.collection}'")
+        defaults: dict[str, Any] = search_defaults.in_force(state.conn)
+        reranker = defaults["rerank_model"] or state.models.rerank_model
+        found = state.chats.search(
+            {spec.name: {"method": method, "candidates": chain["candidates"]["value"]}},
+            last.content,
+            last.content,
+            body.k or int(defaults["evidence_size"]),
+            bool(defaults["rerank"]),
+            int(defaults["rrf_k"]),
+            str(reranker),
+            int(defaults["rerank_pool"]),
+        )
+        decision, evidence = found["decisions"][0], found["evidence"]
+        out: dict = {"answer": None, "citations": [], "error": decision["error"]}
+        if decision["error"] is None:  # a store that failed is not answered from
+            history = [t.model_dump() for t in earlier][-CHAT_TURNS:]
+            answered = state.chats.answer_from(last.content, history, evidence, body.model)
+            out.update(answer=answered["answer"], error=answered["error"])
+            out["citations"] = [  # one store: its name is not repeated
+                {k: v for k, v in c.items() if k != "store"} for c in answered["citations"]
+            ]
+            found["usd"] += answered["usd"]
+        notes = [decision["note"]] if decision["note"] else []
         return {
-            "answer": out["answer"],
-            "citations": cited,
-            "hit_ids": [h["id"] for h in out["hits"]],
-            "method": method,
-            "query_tags": out.get("query_tags"),
-            "usd": out["usd"],
-            "error": out["error"],
+            **out,
+            "hit_ids": [e["id"] for e in evidence],
+            "method": decision["method"],
+            "query_tags": decision["tags"],
+            "usd": found["usd"],
+            "notes": notes + found["notes"],
         }
 
     @app.post("/eval", status_code=202)
     def evaluate(body: EvalRequest):
         check_methods(body.methods)
         spec = state.retriever.spec(body.collection)
+        if spec.qa_type == "documents" and body.answer:
+            raise HTTPException(422, ANSWERS_LATER)
         search_settings(spec.search or SearchSettings(), body.search)  # 422 before an estimate
+        if body.rerank_model is not None:
+            search_defaults.check("rerank_model", body.rerank_model)
         estimate = state.evaluator.estimate(
             body.collection,
             body.split,
@@ -1463,6 +1616,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body.rrf_k,
                 body.search,
                 body.eval_set,
+                body.rerank_pool,
+                body.rerank_model,
             )
         return {"job_id": job_id, "estimate": estimate}
 
@@ -1548,6 +1703,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = db.get_job(state.conn, job_id)
         if row is not None and row["kind"] == "copy":
             return resume_copy(row, body is not None and body.confirm)
+        if row is not None and row["kind"] == "reembed":
+            return resume_reembed(row)
+        if row is not None and row["kind"] == "tag_build":
+            return resume_tag_build(row, body is not None and body.confirm)
         try:
             refusal = state.evaluator.resume_refusal(job_id)
         except KeyError:
@@ -1570,12 +1729,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source = row["setup"]["source"]
         target = state.retriever.spec(row["collection"])
         state.retriever.spec(source)  # 404 when the source is gone
-        busy = db.list_jobs(state.conn, collection=source, status="running", limit=1)
-        busy = busy or db.list_jobs(state.conn, collection=source, status="queued", limit=1)
-        if busy:
-            raise HTTPException(
-                409, f"a {busy[0]['kind']} job is {busy[0]['status']} on '{source}'; wait"
-            )
+        refuse_busy(source)
         estimate = state.loader.estimate_copy(source, target)
         if target.summarize and estimate["est_usd"] != 0:
             need_ai("summary")
@@ -1584,6 +1738,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not confirm:
             return JSONResponse({"estimate": estimate}, 200)
         with not_adding(source):
+            if not db.requeue(state.conn, row["id"]):  # moved since the check
+                raise HTTPException(409, "the job is no longer resumable")
+        return {"job_id": row["id"]}
+
+    def resume_tag_build(row: dict, confirm: bool):
+        """A stopped Add keyword tags runs again in place: the build finishes what it left
+        unbuilt (the vocabulary when none is in force, the passages without tags), so only
+        that is priced."""
+        if row["status"] not in db.JOBS_RESUMABLE:
+            raise HTTPException(409, f"a {row['status']} tag build cannot be resumed")
+        name = row["collection"]
+        spec = state.retriever.spec(name)  # 404 when the store is gone
+        with not_adding(name):  # no job is queued between these checks and the requeue
+            # The keyword tags state reads the newest tag build only, so an older one must
+            # not run again in its place.
+            newest = db.list_jobs(state.conn, kind="tag_build", collection=name, limit=1)
+            if newest[0]["id"] != row["id"]:
+                raise HTTPException(409, f"a newer tag build of '{name}' exists; resume that one")
+            refuse_busy(name)
+            estimate, calls = state.builder.plan_tag_build(spec)
+            if estimate is None:
+                raise HTTPException(409, NO_KEYWORDS_MODEL)
+            if not confirm:
+                return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
+            if estimate != 0:
+                need_ai("keywords")
+            if not db.requeue(state.conn, row["id"]):  # moved since the check
+                raise HTTPException(409, "the job is no longer resumable")
+        return {"job_id": row["id"]}
+
+    def resume_reembed(row: dict) -> dict:
+        """A stopped rebuild runs again: before its switch it embeds every item afresh, and
+        during it (setup["switching"]) it finishes the switch. It is free: no estimate."""
+        if row["status"] not in db.JOBS_RESUMABLE:
+            raise HTTPException(409, f"a {row['status']} rebuild cannot be resumed")
+        name = row["collection"]
+        state.retriever.spec(name)  # 404 when the store is gone
+        with not_adding(name):  # no job is queued between these checks and the requeue
+            # switching_model reads the newest rebuild only, so an older one must not run
+            # again; the newest is this one, so a stopped switch is its own to finish.
+            newest = db.list_jobs(state.conn, kind="reembed", collection=name, limit=1)
+            if newest[0]["id"] != row["id"]:
+                raise HTTPException(
+                    409, f"a newer rebuild of '{name}' replaced this one; start the rebuild again"
+                )
+            refuse_busy(name, stopped_switch_ok=True)
             if not db.requeue(state.conn, row["id"]):  # moved since the check
                 raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": row["id"]}
@@ -1714,6 +1914,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.ai.set_cap(body.cap_usd)
         return {"cap_usd": state.ai.cap_usd}
 
+    # -- search defaults (Settings -> Search defaults) ----------------------------
+
+    def search_defaults_reply() -> dict:
+        models = state.models
+
+        def named(values: dict) -> dict:  # None is the service's model: say which
+            return {
+                **values,
+                "rerank_model": values["rerank_model"] or models.rerank_model,
+                "dense_model": values["dense_model"] or models.dense_model,
+            }
+
+        saved = search_defaults.saved(state.conn)
+        in_force = named(search_defaults.in_force(state.conn))
+        reranker = str(in_force["rerank_model"])
+        status = models.rerank_status(reranker)
+        # The short list, then the service's model and the saved one if not on it.
+        offered = [*search_defaults.EMBEDDERS, models.dense_model, saved["dense_model"]]
+        embedders = [str(name) for name in dict.fromkeys(offered) if name is not None]
+        return {
+            "saved": saved,
+            "recommended": named(search_defaults.RECOMMENDED),
+            "in_force": in_force,
+            # The in-force reranker's warm-up: idle, loading, ready or failed, and why it failed.
+            "rerank_status": status,
+            "rerank_error": models.rerank_errors.get(reranker) if status == "failed" else None,
+            "limits": {field: list(bounds) for field, bounds in search_defaults.LIMITS.items()},
+            "methods": list(search_defaults.CHAT_METHODS),
+            "rerankers": [
+                {"name": name, "size_gb": size}
+                for name, size in search_defaults.supported_rerankers().items()
+            ],
+            "embedders": [
+                {
+                    "name": name,
+                    "dim": models.dense_dim(name),
+                    "size_gb": search_defaults.supported_embedders().get(name, {}).get("size_gb"),
+                    "note": search_defaults.EMBEDDER_NOTES.get(name),
+                    "seconds_per_1000": search_defaults.EMBED_SECONDS.get(name),
+                }
+                for name in embedders
+            ],
+            "embed_machine": search_defaults.EMBED_MACHINE,
+            "notes": {"rerank": search_defaults.RERANK_OFF_WHY},
+        }
+
+    @app.get("/search-defaults")
+    def get_search_defaults() -> dict:
+        return search_defaults_reply()
+
+    @app.put("/search-defaults")
+    def put_search_defaults(body: SearchDefaultsIn) -> dict:
+        changes = body.model_dump(exclude_unset=True)
+        models = state.models
+        before = str(search_defaults.in_force(state.conn)["rerank_model"] or models.rerank_model)
+        search_defaults.save(state.conn, changes)  # a bad value is a ValueError: 422
+        picked = changes.get("rerank_model")
+        # Loaded before the next message needs it. Saving the one in force again retries only
+        # a failed load (say, the Hub was down), so a Save of other fields starts nothing.
+        if "rerank_model" in changes and (
+            (picked or models.rerank_model) != before or models.rerank_status(picked) == "failed"
+        ):
+            models.retry_rerank(picked)
+        return search_defaults_reply()
+
     # -- pages: plain HTML plus the shared ui.js, served from /static (behind the same auth) --
 
     pages = {
@@ -1767,9 +2032,45 @@ def collection_state(jobs: list[dict], count: int, has_lists: bool) -> tuple[str
     queued = [j for j in jobs if j["status"] == "queued"]
     if queued:
         return "queued", queued[-1]  # the one the worker takes first
+    stopped = rebuild_state(jobs)
+    if stopped and stopped["switching"]:  # emptied or part-filled: search is refused
+        return "rebuilding", next(j for j in jobs if j["id"] == stopped["job_id"])
     if count == 0:
         return "empty", None
     return ("ready" if has_lists else "no_lists"), None
+
+
+def keyword_tags_state(spec: CollectionSpec, jobs: list[dict], terms: list[str] | None):
+    """A Documents store's keyword tags, the first that applies: building while its newest
+    tag_build is queued or running, stopped while that is otherwise not done, built while a
+    vocabulary (`terms`) is in force, else none. None for any other store. `jobs` are its
+    jobs, newest first."""
+    if spec.qa_type != "documents":
+        return None
+    job = next((j for j in jobs if j["kind"] == "tag_build"), None)
+    if job and job["status"] in ("queued", "running"):
+        return {"state": "building", "job_id": job["id"], "progress": job["progress"]}
+    if job and job["status"] != "done":
+        return {"state": "stopped", "job_id": job["id"]}
+    if terms:
+        return {"state": "built", "terms": len(terms)}
+    return {"state": "none"}
+
+
+def rebuild_state(jobs: list[dict]) -> dict | None:
+    """The store's newest rebuild while it is unfinished; `jobs` are its jobs, newest first."""
+    job = next((j for j in jobs if j["kind"] == "reembed"), None)
+    if job is None or job["status"] == "done":
+        return None
+    setup = job["setup"]
+    return {
+        "job_id": job["id"],
+        "status": job["status"],
+        "model": setup.get("model"),
+        "from": setup.get("from"),
+        "progress": job["progress"],
+        "switching": setup.get("switching", False),
+    }
 
 
 def eval_set_fields(setup: dict) -> dict:

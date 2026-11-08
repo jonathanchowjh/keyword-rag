@@ -7,9 +7,8 @@ from ragqa_core.connection import Connection
 from ragqa_core.evaluator import Evaluator, ended
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
-
-# The jobs that add or replace a collection's items: the bars kept for it no longer hold.
-ITEM_ADDING = ("load", "import", "copy")
+from ragqa_core.recipes import build_for
+from ragqa_core.types import CollectionSpec
 
 
 class Worker:
@@ -84,18 +83,7 @@ class Worker:
                 except Exception as e2:
                     self._failed(e2)
                     reason = f"worker could not record a final status: {e2!r}"
-            if job is not None and job["kind"] in ITEM_ADDING:
-                self._drop_bars(job["collection"])
             self._ensure_final(job_id, reason, log)
-
-    def _drop_bars(self, collection: str) -> None:
-        """The API's router keys a bar on the item count, which an edited re-add can leave
-        as it was; the rows are shared, so dropping them here reaches it. Even after a
-        failure, since a failed load still added items. A failure here is kept, not raised."""
-        try:
-            db.delete_store_bars(self.conn, collection)
-        except Exception as e:
-            self._failed(e)
 
     def _record_failure(self, job_id: str, e: Exception) -> None:
         db.update_job(self.conn, job_id, **ended(e))
@@ -140,10 +128,44 @@ class Worker:
         elif kind == "backfill":
             result = self.indexer.backfill(job["collection"], progress)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
+        elif kind == "reembed":
+            name, setup = job["collection"], job["setup"]
+
+            def on_switch() -> None:
+                # Recorded before the switch empties the store: a stop from here on leaves
+                # it refused for search (check_model) until a resume finishes the switch.
+                db.set_job_setup(self.conn, job_id, {**setup, "switching": True})
+
+            switching = setup.get("switching", False)
+            result = self.indexer.reembed(name, setup["model"], progress, switching, on_switch)
+            self.evaluator.forget(name)
+            self.evaluator.retriever.forget(name)
+            db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
+        elif kind == "tag_build":
+            result = self._tag_build(job["collection"], progress)
+            db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "eval":
             self.evaluator.run(job_id, check)
         else:
             db.update_job(self.conn, job_id, status="failed", error=f"unknown job kind {kind!r}")
+
+    def _tag_build(self, name: str, progress) -> dict:
+        """Add keyword tags: the Documents store switches to documents_tagged in place
+        (once: a resume finds it switched) and builds every passage. An induction with no
+        usable term switches it back, so it can be tried again."""
+        if self._spec(name).recipe != "documents_tagged":
+            db.set_recipe(self.conn, name, "documents_tagged", build_for("documents_tagged"))
+        result = self.builder.build(self._spec(name), [], progress)
+        if self._spec(name).vocabulary_version is None:
+            db.set_recipe(self.conn, name, "documents", build_for("documents"))
+            return {**result, "note": "no usable terms: nothing was tagged"}
+        return result
+
+    def _spec(self, name: str) -> CollectionSpec:
+        spec = db.get_collection(self.conn, name)
+        if spec is None:
+            raise ValueError(f"unknown collection {name!r}")
+        return spec
 
     def _failed(self, e: Exception) -> None:
         self.error = repr(e)

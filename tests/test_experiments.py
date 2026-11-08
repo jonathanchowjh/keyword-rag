@@ -219,3 +219,36 @@ def test_report_prints_paired_differences(monkeypatch, capsys):
     assert experiments.main(["report", "job1"]) == 0
     out = capsys.readouterr().out
     assert "keyword_rag - hybrid" in out and "0.050" in out and "0.010" in out and "(paired)" in out
+
+
+def test_x5_is_one_run_of_hybrid_rerank_and_hybrid_at_twenty():
+    assert arms("x5", "c") == [
+        {
+            "collection": "c",
+            "split": "dev",
+            "methods": ["hybrid_rerank", "hybrid"],
+            "answer": False,
+            "k": 10,
+            "rerank_pool": 20,
+        }
+    ]
+
+
+def test_report_names_the_rerank_pool(monkeypatch, capsys):
+    def handler(request: httpx.Request) -> httpx.Response:
+        cell = {"lo": 0.1, "hi": 0.9, "n": 4}
+        setup = {
+            "methods": ["hybrid_rerank"],
+            "rrf_k": 60,
+            "search": {},
+            "rerank_pool": 20,
+            "rerank_model": "jinaai/jina-reranker-v1-tiny-en",
+        }
+        methods = {"hybrid_rerank": {"usd": 0.0, "n": 4, "ndcg@10": {"mean": 0.5, **cell}}}
+        return httpx.Response(200, json={"setup": setup, "methods": methods})
+
+    client = httpx.Client(base_url="http://api", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(experiments, "make_client", lambda api: client)
+    assert experiments.main(["report", "job1"]) == 0
+    assert "hybrid_rerank pool=20 jina-reranker-v1-tiny-en" in capsys.readouterr().out
+    assert "pool=20" in experiments.body_label(arms("x5", "c")[0])

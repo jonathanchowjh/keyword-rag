@@ -12,11 +12,11 @@ runs each statement under one lock and returns its rows as a list.
 
 The lock covers one statement. log_job, request_cancel, delete_job,
 delete_collection_rows and the migrations in connect are several statements and
-are not atomic (move_ai_tables, replace_questions and each collection's step of the eval set
-migration are one transaction each). The eval set writes (save_questions, replace_questions,
-delete_eval_set) hold the lock for the whole write; log_job also reads then writes, so it
-assumes a single writer (the worker). So do the chat writes, which number a chat's messages
-and a message's attempts inside the lock.
+are not atomic (move_ai_tables, _drop_routing, replace_questions and each collection's
+step of the eval set migration are one transaction each). The eval set writes
+(save_questions, replace_questions, delete_eval_set) hold the lock for the whole write;
+log_job also reads then writes, so it assumes a single writer (the worker). So do the chat
+writes, which number a chat's messages and a message's attempts inside the lock.
 """
 
 import hashlib
@@ -81,11 +81,6 @@ create table if not exists run_items (
   row_json text not null, complete integer not null default 0
 );
 create index if not exists run_items_job on run_items (job_id, method);
-create table if not exists store_bars (
-  collection text not null, kind text not null default 'gate', key text not null,
-  value real, n integer not null, computed_at text not null,
-  primary key (collection, kind)
-);
 create table if not exists chats (
   id text primary key, title text not null, stores_json text not null,
   settings_json text not null, created_at text not null, updated_at text not null
@@ -98,8 +93,10 @@ create table if not exists chat_attempts (
   chat_id text not null, n integer not null, attempt integer not null,
   search_text text not null, decisions_json text not null, evidence_json text not null,
   answer text, citations_json text not null, usd real not null, error text, model text,
-  created_at text not null, primary key (chat_id, n, attempt)
+  created_at text not null, search_error text, pipeline_json text,
+  primary key (chat_id, n, attempt)
 );
+create table if not exists app_settings (key text primary key, value_json text not null);
 """
 
 
@@ -126,6 +123,12 @@ def connect(path: Path) -> Connection:
     for column in NEW_COLLECTION_COLUMNS:
         if column not in columns:
             conn.execute(f"alter table collections add column {column} text")
+    columns = {row["name"] for row in conn.execute("pragma table_info(chat_attempts)")}
+    if "search_error" not in columns:  # before an answer kept a failed rewrite's note
+        conn.execute("alter table chat_attempts add column search_error text")
+    if "pipeline_json" not in columns:  # before the pool and rerank were recorded
+        conn.execute("alter table chat_attempts add column pipeline_json text")
+    _drop_routing(conn)  # after the columns: it clears chat_k
     _migrate_collections(conn)
     _migrate_run_items(conn)
     _migrate_eval_sets(conn)
@@ -141,10 +144,54 @@ NEW_COLLECTION_COLUMNS = (
     "profile_json",
     "eval_set",
     "chat_method",
-    "chat_bar",
     "chat_k",
-    "route_profile",
-)
+)  # old databases keep the two columns, unused
+
+
+ROUTING_DROPPED = "schema.routing_dropped"  # app_settings key: this database is current
+
+
+def _drop_routing(conn: Connection) -> None:
+    """A database from before chat searched every store: its bars go, and with them the
+    chat setting that picked stores by profile ("routing"); a chat keeps every other key.
+    An evidence size of 8 and rewrite off were the built-in values, so they become null,
+    what is in force. Each store's chat_k is cleared, since it now means candidates per
+    store. One transaction, which also writes the ROUTING_DROPPED marker; a fresh or
+    migrated database with no store_bars gets the marker too. With the marker, store_bars
+    made again (an older build run on this database) only drops it and any "routing" key:
+    a chat's and a store's values keep their meaning."""
+    has_bars = "select 1 from sqlite_master where type = 'table' and name = 'store_bars'"
+    marked = "select 1 from app_settings where key = ?"
+    if not conn.execute(has_bars):
+        if not conn.execute(marked, (ROUTING_DROPPED,)):
+            set_app_setting(conn, ROUTING_DROPPED, True)
+        return
+    with conn.lock:
+        conn.execute("begin immediate")
+        try:
+            if not conn.execute(has_bars):  # another process migrated it first
+                conn.execute("commit")
+                return
+            done = bool(conn.execute(marked, (ROUTING_DROPPED,)))
+            for row in conn.execute("select id, settings_json from chats"):
+                settings = json.loads(row["settings_json"])
+                settings.pop("routing", None)
+                if not done:
+                    size, rewrite = settings.get("evidence_size"), settings.get("rewrite")
+                    settings["evidence_size"] = None if size == 8 else size
+                    settings["rewrite"] = None if rewrite is False else rewrite
+                conn.execute(
+                    "update chats set settings_json = ? where id = ?",
+                    (json.dumps(settings), row["id"]),
+                )
+            if not done:
+                conn.execute("update collections set chat_k = null")
+                set_app_setting(conn, ROUTING_DROPPED, True)
+            conn.execute("drop table store_bars")
+            conn.execute("commit")
+        except BaseException:
+            conn.execute("rollback")
+            raise
 
 
 def _migrate_collections(conn: Connection) -> None:
@@ -330,6 +377,16 @@ def save_collection(conn: Connection, spec: CollectionSpec) -> None:
     )
 
 
+def set_recipe(conn: Connection, name: str, recipe: str, build: BuildSettings) -> None:
+    """Switches the store's recipe and build in place. Its search stays: the Documents
+    recipes share one default, and resetting it would lose a saved override."""
+    with conn.lock:
+        conn.execute(
+            "update collections set recipe = ?, build_json = ? where name = ?",
+            (recipe, json.dumps(asdict(build)), name),
+        )
+
+
 def set_search(conn: Connection, name: str, search: SearchSettings) -> None:
     conn.execute(
         "update collections set search_json = ? where name = ?", (json.dumps(asdict(search)), name)
@@ -382,6 +439,28 @@ def save_keyword_lists(conn: Connection, name: str, lists: KeywordLists, version
 
 def set_keyword_version(conn: Connection, name: str, version: str) -> None:
     conn.execute("update collections set keyword_version = ? where name = ?", (version, name))
+
+
+def set_dense_model(conn: Connection, name: str, model: str, dim: int) -> None:
+    conn.execute(
+        "update collections set dense_model = ?, dense_dim = ? where name = ?", (model, dim, name)
+    )
+
+
+def switching_model(conn: Connection, name: str) -> str | None:
+    """The model the collection's newest rebuild is switching to while that switch is
+    unfinished, else None."""
+    row = first(
+        conn.execute(
+            "select status, setup_json from jobs where kind = 'reembed' and collection = ?"
+            " order by rowid desc limit 1",
+            (name,),
+        )
+    )
+    if row is None or row["status"] == "done":
+        return None
+    setup = json.loads(row["setup_json"])
+    return setup.get("model") if setup.get("switching") else None
 
 
 def get_keyword_lists(
@@ -635,31 +714,6 @@ def get_questions(conn: Connection, name: str, version: str | None = None) -> li
     return [Question(**q) for q in json.loads(row["questions_json"])]
 
 
-def get_store_bar(conn: Connection, name: str, kind: str) -> dict | None:
-    row = first(
-        conn.execute(
-            "select key, value, n, computed_at from store_bars where collection = ? and kind = ?",
-            (name, kind),
-        )
-    )
-    return dict(row) if row else None
-
-
-def save_store_bar(conn: Connection, name: str, kind: str, row: dict) -> None:
-    """row: key, value (or None) and n; computed_at is stamped here."""
-    with conn.lock:
-        conn.execute(
-            "insert or replace into store_bars (collection, kind, key, value, n, computed_at)"
-            " values (?, ?, ?, ?, ?, ?)",
-            (name, kind, row["key"], row["value"], row["n"], now()),
-        )
-
-
-def delete_store_bars(conn: Connection, name: str) -> None:
-    with conn.lock:
-        conn.execute("delete from store_bars where collection = ?", (name,))
-
-
 def _chat_column(conn: Connection, name: str, column: str) -> str | None:
     row = first(conn.execute(f"select {column} from collections where name = ?", (name,)))
     return row[column] if row else None
@@ -681,15 +735,6 @@ def set_chat_method(conn: Connection, name: str, method: str | None) -> None:
     _set_chat_column(conn, name, "chat_method", method)
 
 
-def get_chat_bar(conn: Connection, name: str) -> float | None:
-    value = _chat_column(conn, name, "chat_bar")
-    return None if value is None else float(value)
-
-
-def set_chat_bar(conn: Connection, name: str, value: float | None) -> None:
-    _set_chat_column(conn, name, "chat_bar", value)
-
-
 def get_chat_k(conn: Connection, name: str) -> int | None:
     value = _chat_column(conn, name, "chat_k")
     return None if value is None else int(value)
@@ -699,28 +744,25 @@ def set_chat_k(conn: Connection, name: str, k: int | None) -> None:
     _set_chat_column(conn, name, "chat_k", k)
 
 
-def get_route_profile(conn: Connection, name: str) -> str | None:
-    """The routing profile written by hand; None means the router drafts one."""
-    return _chat_column(conn, name, "route_profile")
-
-
-def set_route_profile(conn: Connection, name: str, text: str | None) -> None:
-    _set_chat_column(conn, name, "route_profile", text)
-
-
-def last_item_job(conn: Connection, name: str) -> str | None:
-    """The load, import or copy job that last finished on the collection, as its id and
-    when it finished: a job resumed and finished again is a new mark. Whatever its status,
-    since a failed load still added items. None when there has been none."""
-    row = first(
-        conn.execute(
-            "select id, updated_at from jobs where collection = ?"
-            " and kind in ('load', 'import', 'copy') and status not in ('queued', 'running')"
-            " order by updated_at desc, rowid desc limit 1",
-            (name,),
-        )
+def get_app_settings(conn: Connection, prefix: str) -> dict[str, object]:
+    """The app-wide settings whose key starts with `prefix`, keyed without it."""
+    rows = conn.execute(
+        "select key, value_json from app_settings where substr(key, 1, ?) = ?",
+        (len(prefix), prefix),
     )
-    return f"{row['id']}@{row['updated_at']}" if row else None
+    return {row["key"][len(prefix) :]: json.loads(row["value_json"]) for row in rows}
+
+
+def set_app_setting(conn: Connection, key: str, value: object | None) -> None:
+    """None deletes the setting."""
+    with conn.lock:
+        if value is None:
+            conn.execute("delete from app_settings where key = ?", (key,))
+        else:
+            conn.execute(
+                "insert or replace into app_settings (key, value_json) values (?, ?)",
+                (key, json.dumps(value)),
+            )
 
 
 def default_eval_set(conn: Connection, collection: str) -> str | None:
@@ -947,9 +989,22 @@ def retag_partly_done(conn: Connection, collection: str) -> bool:
     return row is not None
 
 
-# The jobs that add, tag or read a collection's items: its vocabulary or build must not
-# change under one.
-ITEM_JOBS = ("load", "import", "retag", "copy", "eval")
+def tag_build_unfinished(conn: Connection, collection: str) -> bool:
+    """The store's newest Add keyword tags job is not done: queued, running or stopped. Its
+    vocabulary is switched to before tagging, so until then the tags may be partial."""
+    row = first(
+        conn.execute(
+            "select status from jobs where kind = 'tag_build' and collection = ?"
+            " order by rowid desc limit 1",
+            (collection,),
+        )
+    )
+    return row is not None and row["status"] != "done"
+
+
+# The jobs that add, tag, re-embed or read a collection's items: its vocabulary or build
+# must not change under one.
+ITEM_JOBS = ("load", "import", "retag", "copy", "eval", "reembed", "tag_build")
 
 
 def busy_job(conn: Connection, collection: str) -> str | None:
@@ -993,7 +1048,6 @@ def set_source_enabled(conn: Connection, name: str, source: str, enabled: bool) 
 
 
 def delete_collection_rows(conn: Connection, name: str) -> None:
-    conn.execute("delete from store_bars where collection = ?", (name,))
     for row in conn.execute("select id from jobs where collection = ?", (name,)):
         delete_job(conn, row["id"])
     conn.execute("delete from disabled_sources where collection = ?", (name,))
@@ -1163,12 +1217,15 @@ def _attempt(row: sqlite3.Row) -> dict:
         "error": row["error"],
         "model": row["model"],
         "created_at": row["created_at"],
+        "pipeline": json.loads(row["pipeline_json"]) if row["pipeline_json"] else None,
     }
 
 
 def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> int:
     """Saves message n's next attempt (search_text, decisions, evidence, answer, citations,
-    usd, error, model) and returns its number, counted from 1."""
+    usd, search_error, error, model, and pipeline when it has one) and returns its number,
+    counted from 1. search_error is the part of error made before any answer, kept when it is
+    answered later."""
     with conn.lock:
         number = conn.execute(
             "select coalesce(max(attempt), 0) + 1 as a from chat_attempts"
@@ -1176,7 +1233,9 @@ def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> i
             (chat_id, n),
         )[0]["a"]
         conn.execute(
-            "insert into chat_attempts values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "insert into chat_attempts (chat_id, n, attempt, search_text, decisions_json,"
+            " evidence_json, answer, citations_json, usd, error, model, created_at,"
+            " search_error, pipeline_json) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 n,
@@ -1190,6 +1249,8 @@ def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> i
                 attempt["error"],
                 attempt["model"],
                 now(),
+                attempt["search_error"],
+                json.dumps(pipeline) if (pipeline := attempt.get("pipeline")) is not None else None,
             ),
         )
         return number
@@ -1197,22 +1258,32 @@ def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> i
 
 def answer_chat_attempt(
     conn: Connection, chat_id: str, n: int, attempt: int, answered: dict
-) -> None:
-    """Writes an attempt's answer, citations, usd, error and model."""
-    conn.execute(
-        "update chat_attempts set answer = ?, citations_json = ?, usd = ?, error = ?, model = ?"
-        " where chat_id = ? and n = ? and attempt = ?",
-        (
-            answered["answer"],
-            json.dumps(answered["citations"]),
-            answered["usd"],
-            answered["error"],
-            answered["model"],
-            chat_id,
-            n,
-            attempt,
-        ),
-    )
+) -> bool:
+    """Writes an unanswered attempt's answer, citations, usd and model, and as its error its
+    search_error then the answer's own error. False, writing nothing, when it has an answer."""
+    where = " where chat_id = ? and n = ? and attempt = ? and answer is null"
+    with conn.lock:  # no other statement between the read, the update and changes()
+        row = first(
+            conn.execute(f"select search_error from chat_attempts{where}", (chat_id, n, attempt))
+        )
+        if row is None:
+            return False
+        error = "; ".join(e for e in (row["search_error"], answered["error"]) if e) or None
+        conn.execute(
+            "update chat_attempts set answer = ?, citations_json = ?, usd = ?, error = ?,"
+            f" model = ?{where}",
+            (
+                answered["answer"],
+                json.dumps(answered["citations"]),
+                answered["usd"],
+                error,
+                answered["model"],
+                chat_id,
+                n,
+                attempt,
+            ),
+        )
+        return conn.changes() > 0
 
 
 def chat_attempts(conn: Connection, chat_id: str, n: int | None = None) -> list[dict]:

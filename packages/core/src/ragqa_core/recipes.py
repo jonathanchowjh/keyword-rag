@@ -41,12 +41,29 @@ RECIPES: dict[str, BuildSettings] = {
         profile=True,
     ),
 }
+# A Documents store's passages are the uploaded chunks, kept whole. No profile: nothing reads
+# it, so it would only spend. documents_tagged is a copy: only the name differs, and builds()
+# runs the build steps for it alone.
+RECIPES["documents"] = BuildSettings(
+    units="whole",
+    added_text="none",
+    vocabulary="induced",
+    describes="text",
+    tagging="similarity",
+    abstracted=False,
+    classifier=False,
+    profile=False,
+)
+RECIPES["documents_tagged"] = replace(RECIPES["documents"])
 
 RECIPE_LABELS: dict[str, str] = {
     "worked_examples": "worked examples",
     "reference": "reference",
     "paper_2024": "paper 2024",
+    "documents": "documents",
+    "documents_tagged": "documents with keyword tags",
 }
+DOCUMENTS_RECIPES = ("documents", "documents_tagged")
 
 CHANNELS = ("meaning", "words", "keywords")
 QUERY_TAGS = ("classifier", "similarity", "oracle", "model")
@@ -60,6 +77,14 @@ BUILD_CHOICES: dict[str, tuple[str, ...]] = {
     "tagging": ("similarity", "similarity_cutoff", "ai"),
 }
 BUILD_FLAGS = ("abstracted", "classifier", "profile")
+
+
+def recipes_for(qa_type: QaType) -> tuple[str, ...]:
+    """The recipes a store of the type may take: a Documents store its own two, and every
+    other type the rest."""
+    if qa_type == "documents":
+        return DOCUMENTS_RECIPES
+    return tuple(r for r in RECIPES if r not in DOCUMENTS_RECIPES)
 
 
 def corpus_type_for(qa_type: QaType) -> CorpusType:

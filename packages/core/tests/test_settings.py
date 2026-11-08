@@ -9,9 +9,17 @@ def test_defaults():
     s = load_settings({})
     assert s.port == 8080 and s.qdrant_url is None
     assert s.home == Path("~/.ragqa").expanduser()
-    assert s.dense_model == "Qwen/Qwen3-Embedding-0.6B-Q"
     assert s.judge_model == "BAAI/bge-small-en-v1.5"
-    assert s.rerank_model == "BAAI/bge-reranker-v2-m3-int8"
+
+
+def test_the_default_embedding_model_is_bge_small():
+    assert load_settings({}).dense_model == "BAAI/bge-small-en-v1.5"
+    assert load_settings({"RAGQA_DENSE_MODEL": "a/x"}).dense_model == "a/x"
+
+
+def test_the_default_reranker_is_jina_tiny():
+    assert load_settings({}).rerank_model == "jinaai/jina-reranker-v1-tiny-en"
+    assert load_settings({"RAGQA_RERANK_MODEL": "a/x"}).rerank_model == "a/x"
 
 
 def test_reads_every_variable():

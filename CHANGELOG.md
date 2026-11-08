@@ -2,52 +2,161 @@
 
 ## Unreleased
 
-- Store routing: a store has a routing profile (`route_profile`, set with
-  `PATCH /collections/{name}`; `POST /collections/{name}/route-profile/draft`
-  drafts one: a Store line, the store's top 20 terms, a Sources line and 5 sample
-  passages; `GET` returns
-  `route_profile` and `route_profile_drafted`). A chat's new Routing setting
-  (`all` or `profiles`, `PATCH /chats/{id}`) gives each store a route score, the
-  higher of the cosine to its profile and to its average item (centroid of up to
-  2,000 items), over the message and its search text as the gate's best match is,
-  against a route bar calibrated like the gate's bar and recomputed when the
-  profile changes. Reasons: "no profile" (no saved profile, an empty draft and no
-  items) and "no route bar" (always routed: the gate still decides, so such a
-  store can be "below its bar"), "not routed" (not searched), then the gate;
-  sticky and "search anyway" still apply. Decisions gain `route` and `route_bar`.
-  On the store page, Use the drafted profile fills the box with the draft; Save
-  keeps it.
-- Routing eval: `POST /routing/eval` and a Check routing panel score the gate and
-  the profile router on the stores' own eval set questions (held out by default,
-  dev and full selectable; up to 200 per set): recall, precision, none rate, mean
-  searched and per-store recall. The panel checks the chat's stores (at least two)
-  and says why a store adds no questions (no eval set, or a set of 200 or fewer,
-  all dev slice); the API takes any list and names each store's `eval_set`. It
-  uses embeddings only and runs in the request.
-- Chat API: `PATCH /chats/{id}` refuses an explicit null for title, stores,
-  evidence_size, rewrite or routing (422). The attempts body takes an optional
-  `drop: {store: [field, ...]}` that removes held edits before the new ones merge;
-  a store not on the chat is a 404.
-- Roadmap: profiles and routing are built; a learned router is next.
-- Chat across stores: chats are saved on the server (`/chats`) and search several
-  stores. Each store has a bar, the 5th percentile of the best matches of its own
-  default eval set's questions (dev slice, up to 200; BRIGHT exclusions and leaked
-  questions left out), shown by `GET /collections/{name}/bar`; with fewer than 20
-  usable questions or no eval set the store is always kept, and a bar you set wins.
-  The gate scores the message alone and the follow-up search text and takes the
-  higher. A follow-up is searched with the message plus the previous 2 user
-  messages, or, with Rewrite follow-ups with AI on, a standalone question from the
-  new `rewrite` job (one AI call per follow-up, never repeated by a re-run). A store
-  the previous message kept on its own merit is kept again (one message back). Kept
-  stores are merged by RRF (k = 60) by store and id, cut to the evidence size
-  (default 8, 1 to 20).
-- Chat: a retrieval step under each answer shows every store's decision and
-  evidence. Edit a store's method, k, search settings or bar, or search it anyway,
-  then re-run (adds an attempt without answering) and Answer from this attempt.
-  Edits last until the service restarts; Set as default saves method, k, search
-  settings and bar for the store ("search anyway" is not saved). No estimate before
-  a message; each reply and attempt shows its cost and the budget cap holds. The old
-  `POST /chat` still works; conversations kept only in a browser tab are not migrated.
+- The New store form defaults to a Documents store (`qa_type` `documents`, recipe
+  `documents`; `POST /collections` still needs a `qa_type`): it keeps your passages
+  as uploaded and searches them by meaning and by words, with no AI. `POST /collections` with no `recipe` takes the type's default
+  (`documents` for Documents, paper 2024 for the others). The New store form leads
+  with Documents and offers each type's own recipes; a Documents store takes only
+  `documents` or `documents_tagged`.
+- Content ids: a `.md` or `.txt` passage, in every store, is named
+  `<file>#<12 hex>` from its text, and `meta` holds `{file, part, parts}` (a short
+  file is part 1 of 1). An edit keeps the ids of the other sections, and an edited
+  passage is a new id. Re-adding a file embeds only new or changed passages and
+  deletes the old ones, including the old `<file>` and `<file>#<digits>` ids. A store
+  loaded before keeps its old ids until each file is added again; an eval set's gold
+  ids that name an old or edited passage go unmeasured.
+- `.md` and `.txt` files must be UTF-8: any other is refused (422, `<file> is not
+  UTF-8 text; save it as UTF-8 and upload it again`) instead of read with characters
+  replaced. JSON, CSV and TSV are read as before. A Documents store refuses anything
+  but `.md` and `.txt` (422, `A Documents store takes .md and .txt files`).
+- Add keyword tags: `POST /collections/{name}/keyword-tags` (and a button on the
+  store page) is priced first; `confirm: true` queues a `tag_build` job (state
+  `tagging`, shown as Adding keyword tags), which switches the Documents store to
+  `documents_tagged` in place, induces a vocabulary and tags each passage by
+  similarity. Resume finishes a stopped one (only the newest), and is free with no
+  model once the vocabulary is saved. An import is refused (409) while a `tag_build`
+  is queued or running on the store. Once the vocabulary is in force, adding
+  passages to a tagged store is free and needs no model.
+  `GET /collections/{name}` returns `keyword_tags`. Until every passage is tagged,
+  `keyword_rag` is unavailable. `PUT /vocabulary` on an untagged Documents store is
+  409.
+- Documents runs score Recall@10, MRR@10 and nDCG@10 at depth 10, headed by nDCG@10.
+  A Documents run that asks for answers is refused (422) until answers are judged.
+- The leak check is off for a Documents store: a question whose words sit in your
+  passages is expected.
+- Plan 1 cleanups that change behaviour: stored Search defaults are re-checked each
+  time they are read, so a reranker fastembed dropped or a method that is not a chat
+  method reads as unset; **Set as default** is refused (409) when the store cannot
+  run the chat's method; Save starts loading a reranker only when it is a new pick or
+  the one in force failed; `/eval` checks a `rerank_model` it is sent.
+- Chat from your own app: `POST /chats` takes `{from}` to start a conversation set up
+  like a chat (its stores and saved settings, no messages); `POST /chats/{id}/messages`
+  takes `?brief=true` for a short reply (`n`, `answer`, `citations`, `passages`,
+  `passages_only`, `error`, `usd`) and `"answer": false` for the reranked passages
+  with no answer written and nothing paid for one (`pipeline.answer_skipped`). The
+  chat page has **Use from your app** with the curl lines.
+- New stores are embedded with `BAAI/bge-small-en-v1.5` by default instead of
+  `Qwen/Qwen3-Embedding-0.6B-Q`, which ran hot and slow on a laptop CPU. Existing
+  stores keep theirs. To go back: Settings → Search defaults → Embedding model for
+  new stores, or `RAGQA_DENSE_MODEL=Qwen/Qwen3-Embedding-0.6B-Q`. X1–X4 were
+  measured with Qwen3 0.6B.
+- Each store embeds questions with its own model, so a service whose
+  `RAGQA_DENSE_MODEL` differs no longer refuses older stores. `ModelMismatch` (409)
+  now means the model can't be loaded, or the store is switching. Chat no longer
+  leaves out a store built with another model.
+- Rebuild with another model: `POST /collections/{name}/reembed` queues a free
+  `reembed` job that embeds the store aside (`<name>__rebuild`) and then switches.
+  The store's state is `rebuilding`, `GET /collections/{name}` returns `rebuild`, and
+  `POST /jobs/{id}/resume` resumes a stopped one. A stopped switch refuses search,
+  deleting a source and copying (409).
+- New store names (a create or a copy's target) may not end in `__rebuild` or
+  `__chunks`: those are a store's search data, and a store named so would lose them
+  when `<name>` is rebuilt or deleted (422). Stores already so named are unchanged.
+  Publishing is refused while a switch is stopped, and the store reads `rebuilding`.
+- `POST /collections` takes `dense_model`; `GET`/`PUT /search-defaults` carry
+  `dense_model` and `embedders`. A copy keeps its source's model.
+- `scripts/time_embed.py` times the offered embedding models (results pending).
+- Removed from chat: the store bar, sticky stores, routing profiles, Check
+  routing and Search anyway, with their endpoints and fields
+  (`GET /collections/{name}/bar`, `POST /collections/{name}/route-profile/draft`,
+  `POST /routing/eval`, `route_profile`, the `routing` chat setting, and the
+  decision fields `bar`, `route`, `kept` and `reason`). `ChatPatch` and
+  `CollectionPatch` now refuse the removed fields (422). The `store_bars` table is
+  dropped; the `chat_bar` and `route_profile` columns stay in old databases,
+  unused. None of these were released; a database that has them is migrated
+  once (see the chat settings entry below).
+- Chat pipeline: a chat searches every store on it. Each store returns its top
+  candidates by its own method, the lists are pooled round-robin by rank
+  (deduplicated by text, capped at Rerank up to, never below the evidence size),
+  reranked against the standalone question or the message alone, and cut to the
+  evidence size. With rerank off, or the reranker loading or failed, the pool is
+  merged by RRF with the notes `reranker still loading: merged by rank` or
+  `reranker unavailable: merged by rank`. A method a store cannot run, or a paid
+  one with no AI, is replaced by hybrid with `<method> <why>, so hybrid was used`.
+  The retrieval step shows the search text, what it was reranked against and by
+  which model, how many passages were pooled (`Pooled 20 of 60 (Rerank up to
+  20)`), and each passage's relevance.
+- The reranker warms in the background at start and when Settings picks another,
+  and scores in ONNX batches of 16 (the embedder in batches of 8).
+- The reranker is a Setting (Reranker model, Rerank up to), and the default model
+  is now `jinaai/jina-reranker-v1-tiny-en` instead of
+  `BAAI/bge-reranker-v2-m3-int8`, which was too slow on CPU (11 to 18 s for 20
+  passages against about 1.5 s on an M4 Pro). `RAGQA_RERANK_MODEL` still replaces
+  the default and is then the recommended model. To go back to bge, pick it in
+  Settings → Search defaults → Reranker model, or set
+  `RAGQA_RERANK_MODEL=BAAI/bge-reranker-v2-m3-int8`. Settings says while the
+  reranker downloads and, if it failed, why (`GET /search-defaults` returns
+  `rerank_status` and `rerank_error`); saving it again retries at once.
+- "Hybrid + reranker" runs record the model they used in `setup.rerank_model`
+  and use it (Settings' at queue time, unless the body names one). Earlier runs
+  used `bge-reranker-v2-m3-int8` at a pool of 50, and a resumed one keeps it. A
+  run page names a `hybrid_rerank` run's reranker and pool, and Re-run repeats
+  both.
+- Chat settings are saved with the chat (evidence size, rerank, rewrite, and per
+  store the method and candidates) and inherit: chat, then store, then Settings,
+  then the recommended value. The migration turns a saved evidence size of 8 and
+  rewrite off into inherit, drops `routing`, and resets each store's saved
+  `chat_k`, which now means candidates per store. It writes the marker
+  `schema.routing_dropped`; a later start only drops leftovers and never resets
+  settings again.
+- Per-store search overrides are dropped from chat: a re-run edits the chat's
+  settings, each store's method and candidates, and Set as default saves the
+  store's own.
+- Follow-ups are now rewritten by default whenever any AI is connected: one paid
+  call per follow-up, in chats from before too. Settings → Search defaults →
+  Rewrite follow-ups → Off turns it off, or switch it off in a chat's panel.
+  Re-running an old message (from before this change) reuses its search text,
+  with no paid rewrite.
+- `iterative` and `hybrid_rerank` are no longer chat methods: `POST /chat` and the
+  chat settings refuse them (422). A paid method with no AI falls back to hybrid
+  with a note in a chat; an explicit one on `POST /chat` is 409 `needs AI`, and an
+  unknown or unpriced `model` is the reply's `error`.
+- The default chat method is now hybrid, also for stores with a vocabulary
+  (it was `keyword_rag`).
+- Chat works without AI: Send returns the passages, marked `Passages only: no
+  answer model`, with `Connect AI in Settings to get written answers`.
+- Settings → Search defaults: the default method, candidates per store, evidence
+  size, rerank, rewrite, previous messages joined, RRF k, reranker model and
+  Rerank up to, each with its recommended value and Reset to recommended
+  (`GET`/`PUT /search-defaults`). The store page shows its chat settings with
+  Reset to Settings.
+- `POST /chat` and `POST /query` take their defaults from Settings: `/chat`
+  with no `method` or `k`, `/query` with no `methods` or `rrf_k`. `POST /chat`
+  runs the chat pipeline for one store and returns `notes`.
+- `POST /eval` takes `rerank_pool` (1 to 50) and `rerank_model` for
+  `hybrid_rerank`; `scripts/experiments.py` gains X5, hybrid against hybrid
+  reranked at 20.
+- Experiments: `scripts/experiments.md` has the X1 to X4 results (hybrid beat the
+  label channel with classifier tags; Haiku query tags separated from hybrid,
+  Opus ones did not; nothing in X3 beat the defaults; examples did not beat
+  zero-shot on SciBench), the reranker timing for the smaller models, and X5,
+  pending.
+- Chats are saved on the server (`GET`/`POST /chats`, `GET`/`PATCH`/`DELETE
+  /chats/{id}`) and search several stores; the chat page lists them on the left.
+  `PATCH /chats/{id}` refuses a null title or stores (422); a null evidence size,
+  rerank or rewrite inherits from Settings. A follow-up is searched with the
+  message plus the previous messages joined (2 by default), or, with Rewrite
+  follow-ups on and AI connected, a standalone question from the new `rewrite`
+  role.
+- Chat: a retrieval step under each answer shows the search and every store's
+  candidates and evidence. Re-run adds an attempt without answering, and Answer
+  from this attempt answers it. An attempt answered by two requests at once is
+  answered and paid once (the other gets 409), and answering keeps a failed
+  rewrite's note in the attempt's error. A store taken off a chat, then deleted,
+  still shows as deleted on the chat's old rows. No estimate before a message;
+  each reply and attempt shows its cost and the budget cap holds. The old
+  `POST /chat` still works; conversations kept only in a browser tab are not
+  migrated.
 - Imports: a `.txt` or `.md` upload (also inside a zip) longer than one passage is
   split into passages of up to 1,500 characters (`imports.chunk_text`): Markdown
   headings first, then paragraphs and sentences; code blocks, tables and lists are
@@ -67,11 +176,10 @@
 - Chat: a page at `/chat` (side nav, under Stores) and `POST /chat` answer from one
   store's passages and cite them as `[n]` (or `[n, m]`, `[n-m]`), with sources under
   each reply, the method, the query tags and the cost. It retrieves on the latest
-  question with `keyword_rag` when the store has a vocabulary (keyword lists are not
-  needed), else `hybrid`, or the chosen method (422 for an unknown name, 409 when the
-  store cannot run it); oracle tags become classifier tags. The last 6 turns are sent.
-  It spends like the Lab: no estimate, the cost on each reply, the budget cap enforced.
-  The conversation stays in the browser tab. Add document adds `.txt` and `.md` files to
+  question with the store's chat method (hybrid by default) or the chosen method (422
+  for an unknown name, 409 when the store cannot run it); oracle tags become classifier
+  tags. The last 6 turns are sent. It spends like the Lab: no estimate, the cost on each
+  reply, the budget cap enforced. Add document adds `.txt` and `.md` files to
   the store (uploads take `accept=text`); a source name is cleaned the same way in the
   store and eval set uploads.
 - Stores and eval sets: a store (the API still says collection) is what is retrieved

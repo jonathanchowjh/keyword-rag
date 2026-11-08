@@ -1,9 +1,9 @@
-import { $, api, esc, head, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
 
 shell("settings");
 $("head").innerHTML = head({
   title: "Settings",
-  sub: "Where the AI comes from, what each model costs, and which model does which job.",
+  sub: "AI writes chat answers, rewrites follow-ups, and builds keyword tags. Search and eval runs on retrieval work without it.",
 });
 
 const ENV = "set by environment";
@@ -227,7 +227,14 @@ $("models").addEventListener("click", (event) => {
 
 // -- jobs -------------------------------------------------------------------------
 
-const JOB_NOTE = { default: "Used by any job without its own choice" };
+const JOB_NOTE = {
+  default: "Used by any job without its own choice",
+  answer: "Writes chat answers, and answers in runs and the Lab",
+  summary: "Summarises items, and questions for keyword methods, in stores built with summaries",
+  keywords: "Proposes keyword lists and vocabularies, and tags items when a store is built",
+  query: "Picks a question's keywords when a store searches with model tags",
+  rewrite: "Rewrites a chat follow-up as one standalone question",
+};
 
 // A job's model that can no longer be used still shows, marked and selected, so the
 // choice is visible and picking anything else (even "same as default") changes it.
@@ -276,6 +283,125 @@ $("budget").addEventListener("submit", (event) => {
   });
 });
 
+// -- search defaults ----------------------------------------------------------------------
+
+const JINA_TINY = "jinaai/jina-reranker-v1-tiny-en";
+const FIELDS = ["dense_model", "method", "candidates", "evidence_size", "rerank", "rerank_model", "rerank_pool", "rewrite", "follow_up_turns", "rrf_k"];
+
+let cat = null;
+let defaults = null; // the last GET /search-defaults
+
+const onOff = (v) => (v ? "on" : "off");
+
+function methodOption(m, chosen) {
+  const paid = cat?.methods?.[m]?.paid;
+  const label = methodLabel(m, cat) + (paid && paid !== "never" ? " (may cost AI)" : "");
+  return `<option value="${esc(m)}"${m === chosen ? " selected" : ""}>${esc(label)}</option>`;
+}
+
+function rerankerOption(name, size, chosen, recommended) {
+  const notes = [size == null ? "" : `${size} GB`, name === recommended ? "(recommended)" : "",
+    name === JINA_TINY ? "about 1.5 s for 20 passages on an M4 Pro" : "",
+    name.startsWith("BAAI/bge-reranker-") ? "slower; for a faster machine" : ""].filter(Boolean);
+  return `<option value="${esc(name)}"${name === chosen ? " selected" : ""}>${esc([name, ...notes].join(" · "))}</option>`;
+}
+
+function searchHtml() {
+  const d = defaults;
+  const f = d.in_force;
+  const rec = d.recommended;
+  const range = (field) => `min="${esc(d.limits[field][0])}" max="${esc(d.limits[field][1])}" step="1"`;
+  const recommended = (text) => `<span class="muted" data-recommended>Recommended: ${esc(text)}</span>`;
+  const number = (field, label, extra = "") =>
+    `<label>${esc(label)} <input type="number" name="${field}" ${range(field)} value="${esc(f[field])}">
+      ${extra}${recommended(rec[field])}</label>`;
+  const check = (field, label, extra = "") =>
+    `<label class="check"><input type="checkbox" name="${field}"${f[field] ? " checked" : ""}> ${esc(label)} ${extra}
+      ${recommended(onOff(rec[field]))}</label>`;
+  const names = Object.fromEntries(d.rerankers.map((r) => [r.name, r.size_gb]));
+  // the service's own reranker may not be fastembed's to list; the select still shows it
+  for (const name of [rec.rerank_model, f.rerank_model]) if (name && !(name in names)) names[name] = null;
+  const models = Object.entries(names).map(([n, size]) => rerankerOption(n, size, f.rerank_model, rec.rerank_model)).join("");
+  const embedders = d.embedders
+    .map((e) => `<option value="${esc(e.name)}"${e.name === f.dense_model ? " selected" : ""}>${esc(embedderLabel(e, d.embed_machine, rec.dense_model))}</option>`)
+    .join("");
+  const why = d.notes.rerank ? `<span class="muted" data-rerank-note>${esc(d.notes.rerank)}</span>` : "";
+  // The in-force reranker's warm-up, as the service reports it; ready or idle says nothing.
+  const loading = d.rerank_status === "loading"
+    ? '<span class="muted" data-downloading>Downloading in the background; chat merges by rank until it is ready.</span>'
+    : d.rerank_status === "failed"
+      ? `<span class="err" data-rerank-error>Could not load it: ${esc(d.rerank_error ?? "unknown error")}. Chat merges by rank; Save tries again.</span>`
+      : "";
+  return `<label>Embedding model for new stores <select name="dense_model">${embedders}</select>
+      ${recommended(rec.dense_model)}
+      <span class="muted" data-embedder-note>Existing stores keep theirs; rebuild one from its page.</span></label>
+    <label>Default search method <select name="method">${d.methods.map((m) => methodOption(m, f.method)).join("")}</select>
+      ${recommended(methodLabel(rec.method, cat))}</label>
+    ${number("candidates", "Candidates per store")}
+    ${number("evidence_size", "Evidence size")}
+    ${check("rerank", "Rerank", why)}
+    <label>Reranker model <select name="rerank_model">${models}</select>${loading}
+      ${recommended(rec.rerank_model ?? "the service's reranker")}</label>
+    <label>Rerank up to <input type="number" name="rerank_pool" ${range("rerank_pool")} value="${esc(f.rerank_pool)}">
+      <span class="muted">passages per message</span>${recommended(rec.rerank_pool)}</label>
+    ${check("rewrite", "Rewrite follow-ups", '<span class="muted">(needs a rewrite model)</span>')}
+    ${number("follow_up_turns", "Previous messages joined, without rewrite")}
+    ${number("rrf_k", "RRF k", '<span class="muted">(rerank off, and inside hybrid)</span>')}
+    <div class="row"><button type="submit" id="search-go">Save</button>
+      <button type="button" id="search-reset" class="secondary">Reset to recommended</button></div>`;
+}
+
+function drawSearch() {
+  $("search").innerHTML = searchHtml();
+}
+
+// The fields whose value differs from what is in force; an emptied number goes back to recommended.
+function searchChanges() {
+  const form = $("search");
+  const changes = {};
+  for (const field of FIELDS) {
+    const box = form.elements[field];
+    const value = box.type === "checkbox" ? box.checked : box.type === "number" ? (box.value === "" ? null : Number(box.value)) : box.value;
+    if (value !== defaults.in_force[field] && !(value === null && defaults.saved[field] === null)) {
+      // The recommended reranker is saved as null, so it keeps following the recommendation.
+      changes[field] = field === "rerank_model" && value === defaults.recommended.rerank_model ? null : value;
+    }
+    // A reranker that failed to load is sent again as it is, so Save retries it now.
+    else if (field === "rerank_model" && defaults.rerank_status === "failed") changes[field] = defaults.saved[field];
+  }
+  return changes;
+}
+
+async function putSearch(body, done) {
+  $("search-msg").className = "";
+  $("search-msg").textContent = "";
+  try {
+    defaults = await api("/search-defaults", { method: "PUT", body });
+    drawSearch();
+    $("search-msg").className = "ok";
+    $("search-msg").textContent = done;
+  } catch (e) {
+    $("search-msg").className = "err";
+    $("search-msg").textContent = e.message;
+  }
+}
+
+$("search").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const changes = searchChanges();
+  if (Object.keys(changes).length) putSearch(changes, "Saved");
+});
+
+$("search").addEventListener("click", (event) => {
+  if (!event.target.closest("#search-reset")) return;
+  putSearch(Object.fromEntries(FIELDS.map((f) => [f, null])), "Back to recommended");
+});
+
+async function loadSearch() {
+  [cat, defaults] = await Promise.all([catalog(), api("/search-defaults")]);
+  drawSearch();
+}
+
 // -- page -------------------------------------------------------------------------
 
 async function load() {
@@ -289,3 +415,4 @@ async function load() {
 }
 
 load().catch((e) => say(e.message));
+loadSearch().catch((e) => ($("search-msg").textContent = e.message));

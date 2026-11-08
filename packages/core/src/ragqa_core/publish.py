@@ -157,6 +157,11 @@ def publish(
     busy = db.busy_job(conn, collection)
     if busy:
         raise Refused(f"a {busy} job is queued or running on {collection!r}; wait")
+    switching = db.switching_model(conn, collection)
+    if switching:
+        raise Refused(
+            f"{collection!r} is switching to {switching}; resume it on the store page first"
+        )
     loads = db.list_jobs(conn, kind="load", collection=collection, status="done", limit=1)
     if not loads:
         raise Refused(f"collection {collection!r} has no finished load to name its dataset")

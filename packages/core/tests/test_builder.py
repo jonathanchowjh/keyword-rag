@@ -123,9 +123,21 @@ def test_similarity_tags_top_k(env):
     one = with_build(builder, spec, tagging="similarity", tag_k=1)
     assert builder.tags_for(one, TERMS, text, lambda p: None) == [["enzyme kinetics"]]
     assert prompts == []  # similarity never asks the AI
-    assert builder.term_vectors(TERMS) is builder.term_vectors(TERMS)  # cached by version
+    dense = "fake/dense"
+    assert builder.term_vectors(dense, TERMS) is builder.term_vectors(dense, TERMS)  # cached
     # The same version in another order: rows still follow the terms given.
-    assert (builder.term_vectors(TERMS[::-1]) == builder.term_vectors(TERMS)[::-1]).all()
+    reverse = builder.term_vectors(dense, TERMS[::-1])
+    assert (reverse == builder.term_vectors(dense, TERMS)[::-1]).all()
+
+
+def test_term_vector_caches_are_per_model(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    store, models = Store(None, None), fake_models(dims={"fake/small": 64})
+    ai = fake_ai(conn, lambda p: "{}")
+    builder = Builder(conn, store, models, ai, Indexer(conn, store, models, ai))
+    assert len(builder.similar("fake/dense", TERMS, ["x"], 1)[0]) == 1
+    assert len(builder.similar("fake/small", TERMS, ["x"], 1)[0]) == 1  # not 256 columns
+    assert builder.term_vectors("fake/small", TERMS).shape[1] == 64
 
 
 def test_cutoff_tags_at_least_one(env):
@@ -252,12 +264,20 @@ def test_retag_failure_keeps_old_version(env):
         builder.retag("w", new, lambda p: None)
     assert db.get_collection(builder.conn, "w").vocabulary_version == old
     del builder.store.set_tags
-    # Built with another model: refused before any term is embedded.
+    # Built with a model this service can't load: refused before any term is embedded.
     db.save_collection(
         builder.conn, replace(db.get_collection(builder.conn, "w"), dense_model="x/y")
     )
+    real = builder.models.dense_dim
+
+    def dense_dim(model=None):
+        if model == "x/y":
+            raise ValueError("x/y is not in fastembed's supported models")
+        return real(model)
+
+    builder.models.dense_dim = dense_dim  # type: ignore[method-assign]
     embedded: list[list[str]] = []
-    builder.models.embed = lambda texts: embedded.append(texts)
+    builder.models.embed = lambda texts, model=None: embedded.append(texts)
     with pytest.raises(ModelMismatch):
         builder.retag("w", new, lambda p: None)
     assert embedded == [] and db.get_collection(builder.conn, "w").vocabulary_version == old
@@ -526,3 +546,20 @@ def test_apply_outputs_command_reads_the_vocabulary_and_outputs_files(env, tmp_p
     monkeypatch.setattr(apply_outputs, "make_builder", lambda: builder)
     assert apply_outputs.main(["w", str(vocabulary), str(outputs)]) == 0
     assert db.get_collection(builder.conn, "w").vocabulary_version is not None
+
+
+def test_plan_tag_build_prices_the_tagged_build_of_the_stored_passages(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    store, models = Store(None, None), fake_models()
+    ai = fake_ai(conn, lambda p: '{"terms": []}')
+    ix = Indexer(conn, store, models, ai)
+    spec = ix.create("d", "documents", False, recipe="documents")
+    ix.add(spec, [Item(f"p{k}", f"passage {k} about tides") for k in range(3)], "x")
+    builder = Builder(conn, store, models, ai, ix)
+    assert builder.plan_build(spec, []) == (0.0, 0)  # documents builds nothing
+    usd, calls = builder.plan_tag_build(spec)
+    assert usd is not None and usd > 0
+    assert calls == 1  # one induction batch; tagging by similarity sends nothing
+    assert purposes(conn) == [] and db.get_collection(conn, "d").recipe == "documents"
+    ai.set_role("default", None)
+    assert builder.plan_tag_build(spec)[0] is None  # no model for keywords: unpriced

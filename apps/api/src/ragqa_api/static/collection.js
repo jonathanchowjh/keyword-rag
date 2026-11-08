@@ -1,10 +1,10 @@
-import { $, BUSY, api, askDelete, axisHtml, catalog, clock, confirmSpend, count, costMark, esc, gapBar, gapSpan,
+import { $, BUSY, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
   importBox, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
-const BUSY_STATES = new Set(["loading", "rekeying", "retagging", "copying", "evaluating", "queued", "importing", "labelling"]); // the collection's own
+const BUSY_STATES = new Set(["loading", "rekeying", "retagging", "tagging", "copying", "evaluating", "queued", "importing", "labelling", "rebuilding"]); // the collection's own
 const DATASETS = { science: "scibench", mcq: "scienceqa", multihop: "musique", table: "tatqa" };
 const GROUPS = [
   ["baseline", "Baseline"],
@@ -14,6 +14,9 @@ const GROUPS = [
   ["keywords", "Keywords"],
 ];
 const CONTROLS = ["random_example", "fixed_example"];
+const NOT_BUILT = "Not built. Keyword tags let keyword_rag search this store: an AI proposes a vocabulary " +
+  "from your passages, then tags each passage by similarity.";
+const TAGS_STOPPED = "Adding keyword tags stopped part-way; keyword_rag waits until every passage is tagged.";
 
 const name = decodeURIComponent(location.pathname.split("/")[2] ?? "");
 const enc = encodeURIComponent(name);
@@ -22,15 +25,17 @@ let cat = null;
 let col = null; // the latest GET /collections/{name}
 let sets = []; // the eval sets of this store's type
 let runs = [];
+let defaults = null; // the latest GET /search-defaults
 let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
-let routeText = undefined; // the routing profile the textarea was filled from
-let routeDirty = false;
-let routeDraft = undefined; // the draft "Use the drafted profile" filled in, not yet saved
+let imports = null; // the items import box, built once the store's type is known
 
 shell(`c/${name}`);
+
+// A Documents store keeps passages as uploaded: no keyword lists, no answer runs (yet).
+const documents = () => col?.qa_type === "documents";
 
 // -- head and answer -------------------------------------------------------------
 
@@ -44,8 +49,9 @@ function staleNotes() {
 function headHtml() {
   const type = cat.qa_types[col.qa_type];
   const noun = type?.item_noun ?? "item";
-  const lists = col.keyword_lists ? `keyword lists ${short(col.keyword_version)}` : "no keyword lists yet";
+  const lists = documents() ? null : col.keyword_lists ? `keyword lists ${short(col.keyword_version)}` : "no keyword lists yet";
   const status = [plural(col.count, noun), plural(col.questions, "question"), lists, col.dense_model]
+    .filter((s) => s != null)
     .map(esc)
     .join(" · ");
   const progress = col.progress != null ? ` ${pct(col.progress)}` : "";
@@ -125,22 +131,29 @@ function setOptions(sets) {
   return blank + options;
 }
 
+// A Documents store runs no keyword-list methods and asks for no answers: its runs score
+// retrieval only, and the API refuses an answer run.
 function runFormHtml(ai, sets) {
-  const groups = GROUPS.map(([id, title]) => {
+  const groups = GROUPS.filter(([id]) => !(documents() && id === "keywords")).map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
       .map(([mid, m]) => {
         const on = cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
         const ok = col.methods_available.includes(mid);
+        const why = col.methods_unavailable?.[mid];
+        const off = why ? ` <span class="muted">${esc(`(${why})`)}</span>` : "";
         return `<label class="check"><input type="checkbox" name="method" value="${esc(mid)}"
-          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${costMark(mid, col, cat)}</label>`;
+          ${on && ok ? "checked" : ""} ${ok ? "" : "disabled"}> ${esc(m.label)}<code>${esc(mid)}</code>${costMark(mid, col, cat)}${off}</label>`;
       })
       .join("");
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";
   }).join("");
   const models = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
+  const answer = documents()
+    ? ""
+    : `<label class="check"><input type="checkbox" id="rf-answer" checked> Have the AI answer the questions <span class="cost muted">costs money</span></label>`;
   return `<div class="card form">${groups}
-    <label class="check"><input type="checkbox" id="rf-answer" checked> Have the AI answer the questions <span class="cost muted">costs money</span></label>
+    ${answer}
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
       <label>Eval set<select id="rf-set">${setOptions(sets)}</select></label>
       <label>Questions<select id="rf-split">
@@ -156,7 +169,7 @@ function bindRunForm() {
   const body = () => ({
     collection: name,
     methods: [...form.querySelectorAll("input[name=method]:checked")].map((i) => i.value),
-    answer: $("rf-answer").checked,
+    answer: $("rf-answer")?.checked ?? false,
     model: $("rf-model").value || null,
     split: $("rf-split").value,
     eval_set: $("rf-set").value || null,
@@ -249,8 +262,8 @@ function itemsHtml() {
 }
 
 function benchmarkHtml() {
-  if (!needsLoad()) return "";
   const dataset = DATASETS[col.qa_type];
+  if (!dataset || !needsLoad()) return ""; // a Documents store has no built-in benchmark
   const unfinished = col.count > 0 || loadJob != null;
   const label = unfinished ? "Finish loading" : `Load ${dataset}`;
   return `<div class="card form">
@@ -511,63 +524,159 @@ function syncLists() {
   }
 }
 
-// -- routing profile ----------------------------------------------------------------------
+// -- keyword tags -----------------------------------------------------------------------
 
-function buildRoute() {
-  $("route").innerHTML = `<p class="muted">Routing compares each message with this text and with the store's average item.</p>
-    <textarea id="rp-text" class="route-text" rows="8" spellcheck="false" aria-label="Routing profile text"></textarea>
-    <p id="rp-state" class="muted"></p>
-    <div class="actions"><button type="button" id="rp-save">Save</button>
-      <button type="button" id="rp-draft" class="secondary">Use the drafted profile</button></div>
-    <p id="rp-msg" role="status"></p>`;
-  $("rp-text").addEventListener("input", () => (routeDirty = true));
-  // null: the store's draft, which follows the store as it changes. The draft filled in and
-  // left as it is, or a blank, saves that.
-  $("rp-save").addEventListener("click", () => {
-    const text = $("rp-text").value;
-    if (text === routeDraft) saveRoute(null, "Using the drafted profile.");
-    else if (!text.trim()) saveRoute(null, "Blank: using the drafted profile.");
-    else saveRoute(text, "Saved.");
+// A Documents store's keyword tags, by state; "" for any other store.
+function tagsHtml() {
+  const t = col.keyword_tags;
+  if (!t) return "";
+  let body;
+  if (t.state === "building") body = `<p>${esc(`Adding keyword tags: ${pct(t.progress)}`)}</p>`;
+  else if (t.state === "stopped") {
+    body = `<p class="warn">${esc(TAGS_STOPPED)}
+      <button type="button" class="secondary" data-tags-resume="${esc(t.job_id)}">Resume</button></p>`;
+  } else if (t.state === "built") body = `<p>${esc(`Built: ${count(t.terms)} terms.`)}</p>`;
+  else {
+    body = `<p>${esc(NOT_BUILT)}</p>
+      <div class="actions"><button type="button" id="tags-add">Add keyword tags</button></div>`;
+  }
+  return `<h2>Keyword tags</h2>${body}`;
+}
+
+// Money rule: the click asks only for the estimate (or the refusal); spending needs Start.
+async function askTags() {
+  const path = `/collections/${enc}/keyword-tags`;
+  const box = $("tags-confirm");
+  box.innerHTML = "";
+  try {
+    const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
+    confirmSpend(box, estimate, async () => {
+      try {
+        await api(path, { method: "POST", body: { confirm: true } });
+        box.innerHTML = "";
+        refreshSpend();
+        await refresh();
+      } catch (e) {
+        $("tags-msg").textContent = e.message;
+      }
+    });
+  } catch (e) {
+    $("tags-msg").textContent = e.message;
+  }
+}
+
+$("tags").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  $("tags-msg").textContent = "";
+  if (button.id === "tags-add") askTags();
+  else if (button.dataset.tagsResume) askResume($("tags-confirm"), button.dataset.tagsResume, refresh);
+});
+
+// -- embedding model --------------------------------------------------------------------
+
+// The stopped line for a rebuild that is not running: before the switch, or part-way through it.
+function stoppedLine(r) {
+  return r.switching
+    ? `The switch to ${r.model} stopped part-way; search is refused until it finishes.`
+    : `The rebuild with ${r.model} stopped; the store still uses ${r.from ?? col.dense_model}.`;
+}
+
+function embeddingHtml() {
+  const r = col.rebuild;
+  const line = `<p>Built with ${esc(col.dense_model)} · ${esc(col.dense_dim)} dimensions</p>`;
+  const live = r && (r.status === "queued" || r.status === "running");
+  const job = r ? `data-job="${esc(r.job_id)}"` : "";
+  let status = "";
+  if (live) {
+    status = r.switching
+      ? `<p data-rebuild>Switching to ${esc(r.model)}…</p>`
+      : `<p data-rebuild>Rebuilding with ${esc(r.model)}: ${esc(pct(r.progress))}
+          <button type="button" class="secondary" data-rebuild-cancel ${job}>Cancel</button></p>`;
+  } else if (r) {
+    status = `<p class="warn" data-rebuild>${esc(stoppedLine(r))}
+      <button type="button" class="secondary" data-rebuild-resume ${job}>Resume</button></p>`;
+  }
+  const busy = BUSY_STATES.has(col.state);
+  const options = (defaults?.embedders ?? [])
+    .filter((e) => e.name !== col.dense_model)
+    .map((e) => `<option value="${esc(e.name)}">${esc(embedderLabel(e, defaults.embed_machine, defaults.recommended.dense_model))}</option>`)
+    .join("");
+  const wait = busy && live ? `<span class="muted">Wait for the ${esc(col.state)} job to finish.</span>` : "";
+  return `${line}${status}<div class="row"><label>Rebuild with <select id="rb-model"${busy ? " disabled" : ""}>${options}</select></label>
+    <button type="button" id="rb-ask"${busy ? " disabled" : ""}>Rebuild</button> ${wait}</div>`;
+}
+
+// "about 12 s", or "about 3 min" from 90 s; "" when the model has no timing figure.
+function aboutTime(seconds) {
+  return seconds < 90 ? `about ${Math.round(seconds)} s` : `about ${Math.round(seconds / 60)} min`;
+}
+
+function askRebuild(model) {
+  const e = defaults.embedders.find((x) => x.name === model);
+  const timed = e?.seconds_per_1000 != null && defaults.embed_machine
+    ? `, ${aboutTime((col.count * e.seconds_per_1000) / 1000)} for ${col.count} items on ${defaults.embed_machine}` : "";
+  $("embedding-confirm").innerHTML = `<p>${esc(`Rebuild ${name} with ${model}? Every item is embedded again on this machine: free${timed}. Search keeps using ${col.dense_model} until the rebuild finishes.`)}</p>
+    <div class="actions"><button type="button" data-yes>Yes, rebuild</button>
+    <button type="button" class="secondary" data-keep>Cancel</button></div>`;
+  $("embedding-confirm").querySelector("[data-keep]").addEventListener("click", () => ($("embedding-confirm").innerHTML = ""));
+  $("embedding-confirm").querySelector("[data-yes]").addEventListener("click", async () => {
+    $("embedding-confirm").innerHTML = "";
+    await post(`/collections/${enc}/reembed`, { model });
   });
-  $("rp-draft").addEventListener("click", fillDraft);
 }
 
-// Fills the box with the draft and saves nothing: a profile written by hand stays until Save.
-async function fillDraft() {
-  $("rp-msg").textContent = "";
+async function post(path, body) {
+  $("embedding-msg").textContent = "";
   try {
-    const draft = await api(`/collections/${enc}/route-profile/draft`, { method: "POST" });
-    $("rp-text").value = draft.route_profile;
-    routeDirty = true;
-    routeDraft = draft.route_profile;
-    $("rp-msg").innerHTML = '<span class="muted">The drafted profile, not saved: Save to use it.</span>';
+    await api(path, { method: "POST", body });
   } catch (e) {
-    $("rp-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    $("embedding-msg").textContent = e.message;
   }
+  await refresh();
 }
 
-async function saveRoute(text, done) {
-  $("rp-msg").textContent = "";
+$("embedding").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.id === "rb-ask") {
+    const model = $("rb-model").value;
+    if (model) askRebuild(model);
+  } else if (button.dataset.rebuildCancel !== undefined) post(`/jobs/${encodeURIComponent(button.dataset.job)}/cancel`, undefined);
+  else if (button.dataset.rebuildResume !== undefined) post(`/jobs/${encodeURIComponent(button.dataset.job)}/resume`, {});
+});
+
+// -- chat settings ----------------------------------------------------------------------
+
+const FROM = { chat: "saved on a chat", store: "saved on this store", settings: "from Settings", recommended: "recommended" };
+
+// The store's method and candidates for chat, each with the level it comes from. A value saved
+// on this store has a button that puts it back to Settings.
+function chatSettingsHtml() {
+  const s = col.chat_settings;
+  const row = (field, label, shown, patch) => {
+    const f = s[field];
+    const reset = f.from === "store"
+      ? ` <button type="button" class="secondary" data-reset="${esc(patch)}">Reset to Settings</button>` : "";
+    return `<tr data-chat-field="${esc(field)}"><td>${esc(label)}</td><td data-value>${esc(shown(f.value))}</td>
+      <td class="muted" data-from>${esc(FROM[f.from] ?? f.from)}</td><td>${reset}</td></tr>`;
+  };
+  return `<p class="muted">What chat uses for this store, unless a chat says otherwise.</p>
+    <table><tbody>${row("method", "Search method", (m) => methodLabel(m, cat), "chat_method")}
+    ${row("candidates", "Candidates", String, "chat_k")}</tbody></table>
+    <p id="chat-settings-msg" class="err" role="status"></p>`;
+}
+
+$("chat-settings").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-reset]");
+  if (!button) return;
   try {
-    col = await api(`/collections/${enc}`, { method: "PATCH", body: { route_profile: text } });
-    routeDirty = false;
-    routeDraft = undefined;
-    routeText = undefined;
-    syncRoute();
-    $("rp-msg").innerHTML = `<span class="ok">${esc(done)}</span>`;
+    await api("/collections/" + enc, { method: "PATCH", body: { [button.dataset.reset]: null } });
+    await refresh();
   } catch (e) {
-    $("rp-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    $("chat-settings-msg").textContent = e.message;
   }
-}
-
-// An edit in progress is kept across refreshes; otherwise the textarea follows the store.
-function syncRoute() {
-  $("rp-state").textContent = col.route_profile_drafted ? "Drafted from the store." : "Edited by hand.";
-  if (!routeDirty && col.route_profile !== routeText) {
-    $("rp-text").value = col.route_profile;
-    routeText = col.route_profile;
-  }
-}
+});
 
 // -- delete ---------------------------------------------------------------------------
 
@@ -592,12 +701,13 @@ async function refresh() {
   try {
     cat = await catalog();
     let loads, everySet;
-    [col, runs, loads, versions, everySet] = await Promise.all([
+    [col, runs, loads, versions, everySet, defaults] = await Promise.all([
       api("/collections/" + enc),
       api("/eval?collection=" + enc),
       api("/jobs?collection=" + enc + "&kind=load&limit=1"),
       api("/collections/" + enc + "/keyword-lists"),
       api("/eval-sets"),
+      api("/search-defaults"),
     ]);
     loadJob = loads[0] ?? null;
     sets = everySet.filter((e) => e.qa_type === col.qa_type);
@@ -607,9 +717,23 @@ async function refresh() {
     paint("asked", askedHtml());
     paint("items", itemsHtml());
     paint("sources", sourcesHtml());
+    paint("embedding", embeddingHtml());
+    paint("chat-settings", chatSettingsHtml());
     if (paint("benchmark", benchmarkHtml())) bindLoad();
+    if (paint("tags", tagsHtml())) {
+      $("tags-confirm").innerHTML = ""; // an estimate or a message for a state now gone
+      $("tags-msg").textContent = "";
+    }
+    $("lists-section").hidden = documents();
+    $("imp-title").textContent = documents() ? "Add your own passages" : "Add your own items";
+    imports ??= importBox($("imp-items"), {
+      uploadPath: `/collections/${enc}/uploads`,
+      importPath: `/collections/${enc}/imports`,
+      kind: "items",
+      qaType: col.qa_type,
+      done: () => refresh(),
+    });
     syncLists();
-    syncRoute();
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
@@ -619,15 +743,7 @@ async function refresh() {
 
 $("new-run").addEventListener("click", toggleRunForm);
 buildLists();
-buildRoute();
 buildDelete();
 bindSources();
 bindAsked();
-importBox($("imp-items"), {
-  uploadPath: `/collections/${enc}/uploads`,
-  importPath: `/collections/${enc}/imports`,
-  kind: "items",
-  qaType: null,
-  done: () => refresh(),
-});
 refresh();

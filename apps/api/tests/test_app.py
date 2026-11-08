@@ -10,12 +10,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ragqa_api.app import create_app
-from ragqa_core import db
+from ragqa_api.app import collection_state, create_app
+from ragqa_core import db, imports, search_defaults
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
 from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
-from ragqa_core.router import PROFILE_SAMPLES
 from ragqa_core.settings import load_settings
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
@@ -53,6 +52,8 @@ QUESTION = Question(
 )
 EVAL = {"collection": "c", "methods": ["hybrid"], "answer": False}
 PAIR = ["kw_individual", "hybrid"]
+TURBO = "jinaai/jina-reranker-v1-turbo-en"
+SEARCH_FIELDS = list(search_defaults.RECOMMENDED)
 
 
 def settings(tmp_path: Path, **overrides):
@@ -80,6 +81,7 @@ def make_client(
     fake_embeddings(app.state.models)
     fake_ai(app.state.conn, reply, api_key, cap_usd)  # stored in the app's file
     fake_replies(app.state.ai, reply)
+    search_defaults.save(app.state.conn, {"rewrite": False})  # follow-ups search the joined text
     app.state.worker.idle_seconds = 0.01
     return TestClient(app)
 
@@ -825,7 +827,7 @@ PUBLIC = {
     "/ai",
     "/chat",
     "/chats",
-    "/routing",
+    "/search-defaults",
 }
 PAGES = ("/", "/c/x", "/c/x/runs/abc", "/e/x", "/worker", "/lab", "/chat")
 
@@ -958,22 +960,43 @@ def test_ui_formatting(tmp_path):
     assert len(raw) == 1 and "no chance level" in raw[0] and match == []
 
 
+def unloadable(client, name: str = "c") -> None:
+    """Records the store as built with gone/model, which this service can't load."""
+    models = client.app.state.models
+    real = models.dense_dim
+
+    def dense_dim(model=None):
+        if model == "gone/model":
+            raise ValueError("gone/model is not in fastembed's supported models")
+        return real(model)
+
+    models.dense_dim = dense_dim
+    conn = client.app.state.conn
+    conn.execute("update collections set dense_model = 'gone/model' where name = ?", (name,))
+
+
 def test_model_mismatch_on_query_and_eval(client):
     add_collection(client)
-    client.app.state.models.dense_model = "other/model"
+    unloadable(client)
     r = client.post("/query", json={"collection": "c", "question": "x", "methods": ["hybrid"]})
-    assert "built with fake/dense" in r.json()["results"]["hybrid"]["error"]
+    assert "built with gone/model" in r.json()["results"]["hybrid"]["error"]
     r = client.post("/eval", json={"collection": "c", "methods": ["hybrid"]})
-    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
-    r = client.get("/collections/c/bar")
-    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
+    assert r.status_code == 409 and "this service can't load" in r.json()["detail"]
 
 
-def test_saving_lists_is_refused_when_the_dense_model_changed(client):
-    add_collection(client, lists=False)
+def test_a_store_keeps_its_model_when_the_services_default_changes(client):
+    add_collection(client)
     client.app.state.models.dense_model = "other/model"
+    body = {"collection": "c", "question": "enzyme", "methods": ["hybrid"]}
+    result = client.post("/query", json=body).json()["results"]["hybrid"]
+    assert result["error"] is None and result["hits"]
+
+
+def test_saving_lists_is_refused_when_the_stores_model_cannot_load(client):
+    add_collection(client, lists=False)
+    unloadable(client)
     r = client.put("/collections/c/keyword-lists", json=asdict(LISTS))
-    assert r.status_code == 409 and "service is running other/model" in r.json()["detail"]
+    assert r.status_code == 409 and "this service can't load" in r.json()["detail"]
     assert client.get("/collections/c/keyword-lists").json() == []
 
 
@@ -1110,6 +1133,7 @@ def test_restart_keeps_queued_jobs_and_interrupts_running(tmp_path):  # Review f
     r2 = db.create_job(conn, "load", "c", {})
     set_running(conn, r2)
     app.state.worker.start = lambda: None
+    app.state.models.warm_rerank_in_background = lambda model=None: None  # builds no model
     with TestClient(app):
         assert db.get_job(conn, r2)["status"] == "interrupted"
         assert db.get_job(conn, q)["status"] == "queued"
@@ -1784,21 +1808,28 @@ def source_ids(client, source, name="c"):
     return client.app.state.store.source_ids(name, source)
 
 
+def ids_of(filename: str, body: bytes) -> list[str]:
+    """The content ids a text file's chunks take, in file order (test_imports pins them)."""
+    return [r["file"] for r in imports.text_rows(filename, body.decode())]
+
+
 def test_a_long_text_upload_adds_one_item_per_chunk_and_chat_cites_the_part(tmp_path):
     reply = lambda p: " ".join(f"[{i}]" for i in range(1, 21))  # noqa: E731
     with make_client(tmp_path, reply=reply) as client:
         add_collection(client, questions=False, lists=False)
         body = long_text(["alpha", "brine", "cocoa"])
         assert len(body) > 2900
+        ids = ids_of("x.md", body)
         job = add_text(client, "x.md", body)
         assert job["result"]["new"] == 3 and job["result"]["removed"] == 0
-        assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+        assert source_ids(client, "upload:docs") == sorted(ids)
         again = add_text(client, "x.md", body)  # the same file: the same ids, nothing new
         assert again["result"]["unchanged"] == 3 and again["result"]["new"] == 0
-        assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+        assert again["result"]["removed"] == 0
+        assert source_ids(client, "upload:docs") == sorted(ids)
         chat = {**chat_body("brine"), "method": "vector", "k": 20}
         got = client.post("/chat", json=chat).json()
-        part = next(c for c in got["citations"] if c["id"] == "x.md#2")
+        part = next(c for c in got["citations"] if c["id"] == ids[1])
         assert (part["part"], part["parts"], part["source"]) == (2, 3, "upload:docs")
         assert part["text"].startswith("x.md\n\nbrine brine")
         whole = next(c for c in got["citations"] if c["id"] == "enzyme-item")
@@ -1811,25 +1842,32 @@ def test_re_adding_a_shorter_text_file_leaves_only_its_new_chunks(client):
     add_text(client, "y.md", long_text(["delta", "egret", "finch"]))  # same source
     add_text(client, "x.md", long_text(["gamma"]), source_name="other")  # another source
     job = add_text(client, "x.md", long_text(["alpha", "brine"]))
-    assert job["result"]["removed"] == 1
-    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2"] + [
-        f"y.md#{i}" for i in (1, 2, 3)
-    ]
-    assert source_ids(client, "upload:other") == ["x.md"]
-    held = client.app.state.store.get("c", ["x.md#2", "y.md#3"])
+    assert job["result"]["removed"] == 1 and job["result"]["unchanged"] == 2
+    x, y = (
+        ids_of("x.md", long_text(["alpha", "brine"])),
+        ids_of("y.md", long_text(["delta", "egret", "finch"])),
+    )
+    assert source_ids(client, "upload:docs") == sorted(x + y)
+    assert source_ids(client, "upload:other") == ids_of("x.md", long_text(["gamma"]))
+    held = client.app.state.store.get("c", [x[1], y[2]])
     assert [h.meta["parts"] for h in held] == [2, 3]
 
 
-def test_a_text_file_shrunk_to_one_chunk_is_one_item_named_by_the_file(client):
+def test_a_text_file_shrunk_to_one_chunk_is_one_item_part_1_of_1(client):
     add_collection(client, questions=False, lists=False)
     add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
     job = add_text(client, "x.md", b"just a line now")
     assert job["result"]["removed"] == 3 and job["result"]["new"] == 1
-    assert source_ids(client, "upload:docs") == ["x.md"]
-    assert client.app.state.store.get("c", ["x.md"])[0].text == "just a line now"
+    [one] = ids_of("x.md", b"just a line now")
+    assert source_ids(client, "upload:docs") == [one]
+    [held] = client.app.state.store.get("c", [one])
+    assert held.text == "just a line now"
+    assert (held.meta["file"], held.meta["part"], held.meta["parts"]) == ("x.md", 1, 1)
     grown = add_text(client, "x.md", long_text(["alpha", "brine"]))
     assert grown["result"]["removed"] == 1
-    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2"]
+    assert source_ids(client, "upload:docs") == sorted(
+        ids_of("x.md", long_text(["alpha", "brine"]))
+    )
 
 
 def store_import(client, filename, body, source_name="docs"):
@@ -1852,19 +1890,27 @@ def test_a_file_named_like_a_chunk_of_another_is_not_its_chunk(client, tmp_path)
         z.writestr("a.md#7.txt", b"also its own")
     store_import(client, "x.zip", zipped.read_bytes())
     before = source_ids(client, "upload:docs")
-    assert {"a.md#b.md", "a.md#old/x.md#1", "a.md#old/x.md#2", "a.md#7.txt"} <= set(before)
+    others = [
+        *ids_of("a.md#b.md", b"one chunk of its own"),
+        *ids_of("a.md#old/x.md", long_text(["delta", "egret"])),
+        *ids_of("a.md#7.txt", b"also its own"),
+    ]
+    assert len(others) == 4 and set(others) <= set(before)
     job = store_import(client, "a.md", long_text(["alpha", "brine"]))
     assert job["result"]["removed"] == 1
-    assert source_ids(client, "upload:docs") == sorted(set(before) - {"a.md#3"})
+    cocoa = ids_of("a.md", long_text(["alpha", "brine", "cocoa"]))[2]
+    assert source_ids(client, "upload:docs") == sorted(set(before) - {cocoa})
 
 
 def test_appending_to_a_split_file_re_indexes_only_the_changed_chunks(client):
     add_collection(client, questions=False, lists=False)
     add_text(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
     job = add_text(client, "x.md", long_text(["alpha", "brine", "cocoa", "delta"]))
-    assert job["result"]["updated"] <= 2 and job["result"]["new"] == 1
-    assert job["result"]["unchanged"] >= 2
-    held = client.app.state.store.get("c", [f"x.md#{i}" for i in (1, 2, 3, 4)])
+    assert job["result"]["new"] == 1 and job["result"]["unchanged"] == 3
+    assert job["result"]["updated"] == 0 and job["result"]["removed"] == 0
+    held = client.app.state.store.get(
+        "c", ids_of("x.md", long_text(["alpha", "brine", "cocoa", "delta"]))
+    )
     assert [(h.meta["part"], h.meta["parts"]) for h in held] == [(i, 4) for i in (1, 2, 3, 4)]
     assert all(h.meta["source"] == "upload:docs" and h.meta["file"] == "x.md" for h in held)
     again = add_text(client, "x.md", long_text(["alpha", "brine", "cocoa", "delta"]))
@@ -1887,7 +1933,116 @@ def test_a_failed_text_import_removes_nothing(client):
     ).json()
     r = do_import(client, up, "docs", confirm=True)
     assert wait(client, r.json()["job_id"])["status"] == "failed"
-    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "x.md#3"]
+    assert source_ids(client, "upload:docs") == sorted(
+        ids_of("x.md", long_text(["alpha", "brine", "cocoa"]))
+    )
+
+
+def handbook(first: str) -> bytes:
+    """Four sections of about 1,000 characters each, each its own chunk; `first` opens
+    section 1."""
+    sections = [
+        f"# {w.title()}\n\n{long_text([w]).decode()}" for w in ("alpha", "brine", "cocoa", "delta")
+    ]
+    sections[0] = sections[0].replace("\n\n", f"\n\n{first}\n\n", 1) if first else sections[0]
+    return "\n\n".join(sections).encode()
+
+
+def test_an_edit_above_a_passage_keeps_its_id_and_skips_its_embedding(client):
+    add_collection(client, questions=False, lists=False)
+    old = handbook("")
+    assert len(old) > 4000
+    add_text(client, "handbook.md", old)
+    before = source_ids(client, "upload:docs")
+    assert len(before) == 4
+    models = client.app.state.models
+    embedded: list[str] = []
+    embed = models.embed
+
+    def counting(texts, model=None):
+        embedded.extend(texts)
+        return embed(texts, model)
+
+    models.embed = counting
+    edited = handbook(long_text(["eagle"]).decode())  # a new paragraph opens section 1
+    job = add_text(client, "handbook.md", edited)
+    after = ids_of("handbook.md", edited)
+    assert len(after) == 5  # section 1 is now two chunks
+    held = {h.id: h for h in client.app.state.store.get("c", after)}
+    unchanged = [
+        i
+        for i in after
+        if "brine" in held[i].text or "cocoa" in held[i].text or "delta" in held[i].text
+    ]
+    assert len(unchanged) == 3 and set(unchanged) <= set(before)  # sections 2-4 keep their ids
+    counts = {k: job["result"][k] for k in ("new", "unchanged", "updated", "removed")}
+    assert counts == {"new": 2, "unchanged": 3, "updated": 0, "removed": 1}
+    assert source_ids(client, "upload:docs") == sorted(after)
+    # Item vectors for the two new chunks only, and no piece of sections 2-4 embedded again.
+    fresh = [held[i].text for i in after if i not in before]
+    stored = {h.text for h in held.values()}
+    assert sorted(t for t in embedded if t in stored) == sorted(fresh)
+    assert not any("brine" in t or "cocoa" in t or "delta" in t for t in embedded)
+    # their new place is written as a payload: parts 3-5 of 5
+    assert [(held[i].meta["part"], held[i].meta["parts"]) for i in unchanged] == [
+        (3, 5),
+        (4, 5),
+        (5, 5),
+    ]
+    assert all(held[i].meta["source"] == "upload:docs" for i in after)
+
+
+def test_adding_a_file_again_drops_its_positional_ids(client):
+    add_collection(client, questions=False, lists=False)
+    state = client.app.state
+    source = {"source": "upload:docs"}
+    old = [  # as a load before content ids wrote them
+        Item("x.md#1", "x.md\n\nalpha", meta={**source, "file": "x.md", "part": 1, "parts": 2}),
+        Item("x.md#2", "x.md\n\nbrine", meta={**source, "file": "x.md", "part": 2, "parts": 2}),
+        Item("y.md", "a short file", meta=source),
+    ]
+    texts = [i.text for i in old]
+    state.store.upsert_items(
+        "c", old, state.models.embed(texts), state.models.sparse(texts), [None] * 3
+    )
+    ids = [i.id for i in old]
+    state.store.upsert_chunks("c", ids, texts, state.models.embed(texts), ["upload:docs"] * 3)
+    assert source_ids(client, "upload:docs") == ["x.md#1", "x.md#2", "y.md"]
+    x_body, y_body = long_text(["alpha", "brine"]), b"a short file"
+    assert add_text(client, "x.md", x_body)["result"]["removed"] == 2
+    assert add_text(client, "y.md", y_body)["result"]["removed"] == 1
+    assert source_ids(client, "upload:docs") == sorted(
+        ids_of("x.md", x_body) + ids_of("y.md", y_body)
+    )
+    assert not state.store.chunk_points("c", ids)  # their chunks went with them
+
+
+def test_a_text_file_that_is_not_utf8_is_refused_by_name(client, tmp_path):
+    add_collection(client, questions=False, lists=False)
+    message = "notes.txt is not UTF-8 text; save it as UTF-8 and upload it again"
+    windows = "café au lait".encode("cp1252")
+    r = upload(client, windows, filename="notes.txt")
+    assert r.status_code == 422 and r.json()["detail"] == message
+    zipped = tmp_path / "x.zip"
+    with zipfile.ZipFile(zipped, "w") as z:
+        z.writestr("ok.md", "fine")
+        z.writestr("notes.txt", windows)
+    r = upload(client, zipped.read_bytes(), filename="x.zip")
+    assert r.status_code == 422 and r.json()["detail"] == message
+    chat_way = client.post(
+        "/collections/c/uploads",
+        params={"filename": "notes.txt", "kind": "items", "accept": "text"},
+        content=windows,
+    )
+    assert chat_way.status_code == 422 and chat_way.json()["detail"] == message
+    assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
+    assert source_ids(client, "upload:notes") == []
+    # JSON keeps replacing a bad byte, as the benchmark loaders need
+    loose = upload(client, b'[{"id": "j1", "text": "caf\xe9 au lait"}]', filename="notes.json")
+    assert loose.status_code == 200 and loose.json()["preview"]["ready"]
+    r = do_import(client, loose.json(), "loose", confirm=True)
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    assert client.app.state.store.get("c", ["j1"])[0].text == "caf\ufffd au lait"
 
 
 def test_a_text_import_drops_the_store_leak_scans(client):
@@ -3016,8 +3171,7 @@ def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
     scroll = store.scroll
 
     def counted(name, batch=256, skip=()):
-        if batch > PROFILE_SAMPLES:  # the routing profile's draft peeks at a few items
-            scans.append(1)
+        scans.append(1)
         return scroll(name, batch, skip)
 
     store.scroll = counted
@@ -3111,40 +3265,6 @@ def test_patch_is_refused_while_a_load_or_question_import_is_queued(client):
     db.create_job(conn, "load", "c", {"dataset": "scienceqa"})
     assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 409
     assert db.default_eval_set(conn, "c") == "c"
-
-
-def test_route_profile_routes(client):
-    add_collection(client)
-    conn = client.app.state.conn
-    client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
-    assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 200
-    body = client.get("/collections/c").json()
-    assert isinstance(body["profile"], dict)
-    assert body["route_profile_drafted"] is True
-    assert body["route_profile"].startswith("Store c (mcq, ")
-    draft = client.post("/collections/c/route-profile/draft")
-    assert draft.status_code == 200 and draft.json() == {"route_profile": body["route_profile"]}
-    assert db.get_route_profile(conn, "c") is None  # the draft route saves nothing
-
-    client.app.state.worker.stop()
-    db.create_job(conn, "load", "c", {"dataset": "scienceqa"})  # a load blocks only eval_set
-    r = client.patch("/collections/c", json={"route_profile": "Enzyme kinetics, by hand."})
-    assert r.status_code == 200, r.text
-    got = r.json()
-    assert got["route_profile"] == "Enzyme kinetics, by hand."
-    assert got["route_profile_drafted"] is False
-    assert got["eval_set"] == "e" and isinstance(got["profile"], dict)
-    assert db.get_route_profile(conn, "c") == "Enzyme kinetics, by hand."
-    assert client.patch("/collections/c", json={"eval_set": None}).status_code == 409
-    assert db.get_route_profile(conn, "c") == "Enzyme kinetics, by hand."
-
-    back = client.patch("/collections/c", json={"route_profile": None}).json()
-    assert back["route_profile_drafted"] is True
-    assert back["route_profile"] == body["route_profile"]
-    assert back["eval_set"] == "e"
-    blank = client.patch("/collections/c", json={"route_profile": "  \n"}).json()
-    assert blank["route_profile_drafted"] is True  # a blank text goes back to the draft too
-    assert client.post("/collections/nope/route-profile/draft").status_code == 404
 
 
 def test_a_store_and_an_eval_set_of_one_name_have_one_type(client):
@@ -3303,14 +3423,76 @@ def test_chat_method_defaults_and_refusals(client):
     r = client.post("/chat", json={**chat_body(method="kw_individual"), "collection": "bare"})
     assert r.status_code == 409 and "needs keyword lists" in r.json()["detail"]
     assert client.post("/chat", json=chat_body(method="nope")).status_code == 422
+    assert client.post("/chat", json=chat_body(method="hybrid_rerank")).status_code == 422
     reference_with_vocabulary(client)
     body = {**chat_body(), "collection": "r"}
+    got = client.post("/chat", json=body).json()
+    assert got["method"] == "hybrid" and got["query_tags"] is None  # the store's chain
+    body = {**body, "method": "keyword_rag"}
     got = client.post("/chat", json=body).json()
     assert got["method"] == "keyword_rag" and got["query_tags"][0] == "enzyme"
     put = client.put("/collections/r/search", json={"query_tags": "oracle"})
     assert put.status_code == 200
     r = client.post("/chat", json=body)
     assert r.status_code == 200 and r.json()["error"] is None and r.json()["query_tags"]
+
+
+def test_post_chat_refuses_a_paid_method_with_no_ai_and_reports_an_unpriced_model(client):
+    add_collection(client, summarize=True)  # kw_individual summarises the query: paid
+    ai = client.app.state.ai
+    ai.add_model("anthropic", "unpriced-model", price_in=None, price_out=None)
+    got = client.post("/chat", json=chat_body(model="anthropic/unpriced-model"))
+    assert got.status_code == 200, got.text
+    assert got.json()["answer"] is None and "unpriced-model" in got.json()["error"]
+    ai.set_role("default", None)
+    r = client.post("/chat", json=chat_body(method="kw_individual"))
+    assert r.status_code == 409 and "needs AI" in r.json()["detail"]
+
+
+def chat_spend(client) -> float:
+    rows = client.app.state.ai.sql("select sum(usd) as usd from ai_ledger where purpose = 'chat'")
+    return rows[0]["usd"] or 0.0
+
+
+def test_post_chat_uses_the_settings_and_the_pipeline(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    search_defaults.save(conn, {"method": "vector"})
+    before = chat_spend(client)
+    got = client.post("/chat", json=chat_body()).json()
+    assert got["method"] == "vector" and got["error"] is None
+    assert isinstance(got["notes"], list) and got["notes"] == []
+    assert got["usd"] > 0 and got["usd"] == pytest.approx(chat_spend(client) - before)
+    assert got["hit_ids"][0] == "enzyme-item"  # reranked against the question
+    search_defaults.save(conn, {"evidence_size": 2})
+    got = client.post("/chat", json=chat_body()).json()
+    assert 0 < len(got["hit_ids"]) <= 2
+    assert len(client.post("/chat", json=chat_body(k=3)).json()["hit_ids"]) == 3
+    r = client.post("/chat", json=chat_body(method="hybrid_rerank"))
+    assert r.status_code == 422 and "is not a chat method" in r.json()["detail"]
+    assert client.post("/chat", json=chat_body(method="question_only")).status_code == 422
+    client.app.state.models.rerank_status = lambda model=None: "loading"  # type: ignore[attr-defined]
+    got = client.post("/chat", json=chat_body()).json()
+    assert got["notes"] == ["reranker still loading: merged by rank"] and got["answer"]
+
+
+def test_query_without_methods_uses_the_settings_method(client):
+    add_collection(client)
+    search_defaults.save(client.app.state.conn, {"method": "keyword", "rrf_k": 5})
+    retriever, seen = client.app.state.retriever, []
+    real = retriever.retrieve
+
+    def retrieve(collection, question, method, k, rrf_k, *args, **kw):
+        seen.append((method, rrf_k))
+        return real(collection, question, method, k, rrf_k, *args, **kw)
+
+    retriever.retrieve = retrieve
+    r = client.post("/query", json={"collection": "c", "question": "enzyme rate"})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"].keys() == {"keyword"} and seen == [("keyword", 5)]
+    body = {"collection": "c", "question": "enzyme rate", "methods": ["vector"], "rrf_k": 9}
+    assert client.post("/query", json=body).json()["results"].keys() == {"vector"}
+    assert seen[-1] == ("vector", 9)
 
 
 def test_chat_over_budget_is_that_replys_error(tmp_path):
@@ -3367,7 +3549,8 @@ def test_chats_crud_and_errors(client):
     assert chat["title"] == "Mine" and chat["stores"] == ["c"]
     assert client.get("/chats").json()[0]["id"] == chat["id"]
     got = client.get(f"/chats/{chat['id']}").json()
-    assert got["messages"] == [] and got["settings"]["evidence_size"] == 8
+    assert got["messages"] == []
+    assert got["settings"] == {"evidence_size": None, "rewrite": None, "rerank": None, "stores": {}}
     r = client.patch(
         f"/chats/{chat['id']}", json={"title": "New", "evidence_size": 3, "rewrite": True}
     )
@@ -3376,12 +3559,21 @@ def test_chats_crud_and_errors(client):
     for body in ({"evidence_size": 0}, {"evidence_size": 21}, {"stores": []}, {"title": " "}):
         assert client.patch(f"/chats/{chat['id']}", json=body).status_code == 422
     assert client.patch(f"/chats/{chat['id']}", json={"stores": ["nope"]}).status_code == 404
+    # A null title or stores is refused, not ignored: leave a field out to keep it.
+    for field in ("title", "stores"):
+        r = client.patch(f"/chats/{chat['id']}", json={field: None})
+        assert r.status_code == 422, field
+        assert field in r.json()["detail"][0]["msg"]  # r.text echoes the input: no test
     assert client.post("/chats", json={"stores": []}).status_code == 422
     assert client.post("/chats", json={"stores": ["nope"]}).status_code == 404
     assert client.get("/chats/nope").status_code == 404
     assert client.patch("/chats/nope", json={"title": "x"}).status_code == 404
     assert client.delete("/chats/nope").status_code == 404
     assert client.post(f"/chats/{chat['id']}/messages", json={"content": ""}).status_code == 422
+    for typo in ({"answers": False}, {"Answer": False}):  # refused, not answered and paid for
+        r = client.post(f"/chats/{chat['id']}/messages", json={"content": "hi", **typo})
+        assert r.status_code == 422, typo
+    assert client.get(f"/chats/{chat['id']}").json()["messages"] == []
     assert client.post("/chats/nope/messages", json={"content": "hi"}).status_code == 404
     assert client.post(f"/chats/{chat['id']}/messages/9/attempts", json={}).status_code == 404
     assert (
@@ -3390,51 +3582,6 @@ def test_chats_crud_and_errors(client):
     assert client.post(f"/chats/{chat['id']}/stores/nope/default").status_code == 404
     assert client.delete(f"/chats/{chat['id']}").status_code == 204
     assert client.get(f"/chats/{chat['id']}").status_code == 404
-
-
-def test_routing_setting_patch(client):
-    add_collection(client)
-    chat = new_chat(client)
-    assert chat["settings"]["routing"] == "all"
-    url = f"/chats/{chat['id']}"
-    r = client.patch(url, json={"routing": "profiles"})
-    assert r.status_code == 200, r.text
-    assert r.json()["settings"]["routing"] == "profiles"
-    assert client.get(url).json()["settings"]["routing"] == "profiles"
-    assert client.patch(url, json={"routing": "nope"}).status_code == 422
-    # An explicit null is refused, not ignored: leave a field out to keep it.
-    for field in ("title", "stores", "evidence_size", "rewrite", "routing"):
-        r = client.patch(url, json={field: None})
-        assert r.status_code == 422, field
-        assert field in r.json()["detail"][0]["msg"]  # r.text echoes the input: no test
-    got = client.get(url).json()
-    assert got["title"] == "New chat" and got["stores"] == ["c"]
-    assert got["settings"] == {"evidence_size": 8, "rewrite": False, "routing": "profiles"}
-    message = client.post(f"{url}/messages", json={"content": "enzyme rate"}).json()
-    (d,) = message["attempts"][0]["decisions"]
-    assert "route" in d and "route_bar" in d
-    assert client.patch(url, json={"routing": "all"}).json()["settings"]["routing"] == "all"
-
-
-def test_chat_attempt_drop_removes_a_held_field_before_the_merge(client):
-    add_collection(client)
-    chat = new_chat(client)
-    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
-    url = f"/chats/{chat['id']}/messages/1/attempts"
-    r = client.post(url, json={"overrides": {"c": {"bar": 0.25, "k": 2}}})
-    assert r.json()["decisions"][0]["bar_source"] == "override"
-    r = client.post(url, json={"overrides": {}, "drop": {"c": ["bar"]}})
-    assert r.status_code == 200, r.text
-    assert r.json()["decisions"][0]["bar_source"] != "override"
-    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}
-    assert client.post(url, json={"drop": {"other": ["bar"]}}).status_code == 404
-    for drop in ({"c": ["colour"]}, {"c": "bar"}):
-        r = client.post(url, json={"drop": drop})
-        assert r.status_code == 422, drop
-    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"k": 2}}
-    r = client.post(url, json={"overrides": {"c": {"bar": 0.3}}, "drop": {"c": ["bar", "k"]}})
-    assert r.json()["decisions"][0]["bar"] == 0.3
-    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {"c": {"bar": 0.3}}
 
 
 def test_chat_message_returns_decisions_evidence_and_cost(client):
@@ -3446,10 +3593,14 @@ def test_chat_message_returns_decisions_evidence_and_cost(client):
     assert message["n"] == 1 and message["content"] == "enzyme rate"
     (attempt,) = message["attempts"]
     assert attempt["attempt"] == 1 and attempt["answer"] and attempt["usd"] > 0
-    assert attempt["decisions"][0]["store"] == "c" and attempt["decisions"][0]["kept"]
+    assert attempt["decisions"][0]["store"] == "c" and attempt["decisions"][0]["error"] is None
     assert attempt["evidence"] and attempt["evidence"][0]["store"] == "c"
     assert client.get(f"/chats/{chat['id']}").json()["messages"][0]["attempts"] == [attempt]
-    r = client.post(f"/chats/{chat['id']}/messages/1/attempts", json={"overrides": {}})
+    assert client.get(f"/chats/{chat['id']}").json()["in_force"]["stores"]["c"]["candidates"] == {
+        "value": 20,
+        "from": "recommended",
+    }
+    r = client.post(f"/chats/{chat['id']}/messages/1/attempts", json={})
     assert r.status_code == 200 and r.json()["attempt"] == 2 and r.json()["answer"] is None
     url = f"/chats/{chat['id']}/messages/1/attempts"
     assert client.post(f"{url}/2/answer", json={}).json()["answer"]
@@ -3466,87 +3617,182 @@ def test_chat_attempt_override_rejects_a_method_the_store_cannot_run(client):
     chat = new_chat(client, stores=["bare"])
     client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme"})
     url = f"/chats/{chat['id']}/messages/1/attempts"
-    r = client.post(url, json={"overrides": {"bare": {"method": "kw_individual"}}})
+    r = client.post(url, json={"stores": {"bare": {"method": "kw_individual"}}})
     assert r.status_code == 409 and "needs keyword lists" in r.json()["detail"]
-    for bad in ({"k": 0}, {"k": 21}, {"bar": 2}, {"method": "nope"}):
-        r = client.post(url, json={"overrides": {"bare": bad}})
+    for bad in (
+        {"candidates": 0},
+        {"candidates": 61},
+        {"method": "nope"},
+        {"method": "hybrid_rerank"},
+        {"k": 2},
+        {"search": {"example": "off"}},
+    ):
+        r = client.post(url, json={"stores": {"bare": bad}})
         assert r.status_code == 422, bad
-    r = client.post(url, json={"overrides": {"other": {"k": 2}}})
+    for body in (
+        {"overrides": {}},
+        {"settings": {"colour": 1}},
+        {"settings": {"evidence_size": 21}},
+    ):
+        assert client.post(url, json=body).status_code == 422, body
+    r = client.post(url, json={"stores": {"other": {"candidates": 2}}})
     assert r.status_code == 404
-    r = client.post(url, json={"overrides": {"bare": {"k": 2, "method": None}}})
-    assert r.status_code == 200 and r.json()["decisions"][0]["k"] == 2
+    r = client.post(url, json={"stores": {"bare": {"candidates": 2, "method": None}}})
+    assert r.status_code == 200 and r.json()["decisions"][0]["candidates"] == 2
 
 
-def test_set_as_default_from_a_chat_changes_the_store_search_and_bar(client):
+def test_set_as_default_from_a_chat_changes_the_store_method_and_candidates(client):
     add_collection(client)
-    conn = client.app.state.conn
     chat = new_chat(client)
     client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
+    search = client.get("/collections/c").json()["search"]
     url = f"/chats/{chat['id']}/messages/1/attempts"
-    only_bar = client.post(url, json={"overrides": {"c": {"bar": 0.25}}})
-    assert only_bar.status_code == 200
-    assert only_bar.json()["decisions"][0]["bar_source"] == "override"
-    assert db.get_chat_bar(conn, "c") is None  # an override is in memory only
-    client.post(url, json={"overrides": {"c": {"k": 2, "search": {"example": "off"}}}})
-    held = client.get(f"/chats/{chat['id']}").json()["overrides"]
-    assert held == {"c": {"bar": 0.25, "k": 2, "search": {"example": "off"}}}
+    r = client.post(url, json={"stores": {"c": {"method": "vector", "candidates": 12}}})
+    assert r.status_code == 200, r.text
     assert client.get("/collections/c").json()["chat_k"] is None  # not saved yet
     r = client.post(f"/chats/{chat['id']}/stores/c/default")
     assert r.status_code == 200, r.text
-    got = r.json()
-    assert got["chat_bar"] == 0.25 and got["chat_k"] == 2 and got["chat_method"] is None
-    assert db.get_chat_bar(conn, "c") == 0.25 and got["search"]["example"] == "off"
-    assert client.get("/collections/c").json()["search"]["example"] == "off"
-    assert set(got) == {"search", "chat_method", "chat_k", "chat_bar"}
-    assert client.get("/collections/c/bar").json()["source"] == "manual"
-    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == {}
+    from_store = {
+        "method": {"value": "vector", "from": "store"},
+        "candidates": {"value": 12, "from": "store"},
+    }
+    assert r.json() == {"chat_method": "vector", "chat_k": 12, "in_force": from_store}
     detail = client.get("/collections/c").json()
-    assert (detail["chat_k"], detail["chat_method"], detail["chat_bar"]) == (2, None, 0.25)
-    # a null clears the saved value
-    client.post(url, json={"overrides": {"c": {"bar": None}}})
-    got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
-    assert got["chat_bar"] is None and got["chat_k"] == 2
+    assert (detail["chat_method"], detail["chat_k"]) == ("vector", 12)
+    assert detail["chat_settings"] == from_store
+    assert detail["search"] == search  # a chat never edits a store's search
+    got = client.get(f"/chats/{chat['id']}").json()
+    assert got["in_force"]["stores"]["c"] == from_store
+    assert got["settings"]["stores"]["c"] == {"method": None, "candidates": None}
 
 
-def test_a_null_override_runs_the_built_in_default_and_set_as_default_clears(client):
+def test_set_as_default_refuses_a_method_the_store_cannot_run(client):
     add_collection(client)
-    conn = client.app.state.conn
-    db.set_chat_bar(conn, "c", 0.25)
-    db.set_chat_k(conn, "c", 2)
-    db.set_chat_method(conn, "c", "vector")
     chat = new_chat(client)
-    first = client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"}).json()
-    ran = first["attempts"][0]["decisions"][0]
-    assert (ran["method"], ran["k"], ran["bar_source"]) == ("vector", 2, "manual")
+    conn = client.app.state.conn
+    settings = {"stores": {"c": {"method": "keyword_rag", "candidates": None}}}
+    db.update_chat(conn, chat["id"], settings=settings)
+    r = client.post(f"/chats/{chat['id']}/stores/c/default")
+    assert r.status_code == 409, r.text
+    assert "keyword_rag needs a vocabulary on 'c'" in r.json()["detail"]
+    assert client.get("/collections/c").json()["chat_method"] is None
+    assert db.get_chat(conn, chat["id"])["settings"] == settings  # nothing cleared
+
+
+def test_chat_patch_takes_null_as_inherit_and_refuses_a_null_title(client):
+    add_collection(client)
+    chat = new_chat(client)
+    url = f"/chats/{chat['id']}"
+    r = client.patch(url, json={"evidence_size": 5, "rewrite": True, "rerank": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"] == {
+        "evidence_size": 5,
+        "rewrite": True,
+        "rerank": False,
+        "stores": {},
+    }
+    force = client.get(url).json()["in_force"]
+    assert force["evidence_size"] == {"value": 5, "from": "chat"}
+    assert force["rerank"] == {"value": False, "from": "chat"}
+    r = client.patch(url, json={"evidence_size": None, "rewrite": None, "rerank": None})
+    assert r.status_code == 200, r.text
+    force = client.get(url).json()["in_force"]
+    assert force["evidence_size"] == {"value": 8, "from": "recommended"}
+    assert force["rewrite"] == {"value": False, "from": "settings"}  # make_client turns it off
+    assert force["rerank"] == {"value": True, "from": "recommended"}
+    for field in ("title", "stores"):
+        r = client.patch(url, json={field: None})
+        assert r.status_code == 422, field
+        assert field in r.json()["detail"][0]["msg"]
+    assert client.get(url).json()["title"] == "New chat"
+
+
+def test_chat_attempt_saves_its_settings_with_the_chat(client):
+    add_collection(client)
+    chat = new_chat(client)
+    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
     url = f"/chats/{chat['id']}/messages/1/attempts"
-    nulls = {"c": {"bar": None, "k": None, "method": None}}
-    r = client.post(url, json={"overrides": nulls})
+    body = {
+        "settings": {"evidence_size": 1},
+        "stores": {"c": {"method": "vector", "candidates": 5}},
+    }
+    r = client.post(url, json=body)
     assert r.status_code == 200, r.text
     ran = r.json()["decisions"][0]
-    assert (ran["method"], ran["k"], ran["bar_source"]) == ("hybrid", 8, "few")  # its set's
-    assert client.get(f"/chats/{chat['id']}").json()["overrides"] == nulls
-    got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
-    assert (got["chat_method"], got["chat_k"], got["chat_bar"]) == (None, None, None)
+    assert (ran["method"], ran["candidates"]) == ("vector", 5) and len(r.json()["evidence"]) == 1
+    got = client.get(f"/chats/{chat['id']}").json()
+    assert got["settings"] == {
+        "evidence_size": 1,
+        "rewrite": None,
+        "rerank": None,
+        "stores": {"c": {"method": "vector", "candidates": 5}},
+    }
+    assert got["in_force"]["stores"]["c"]["candidates"] == {"value": 5, "from": "chat"}
+    # null inherits; an absent field keeps the chat's value
+    r = client.post(url, json={"stores": {"c": {"candidates": None}}})
+    assert r.status_code == 200, r.text
+    ran = r.json()["decisions"][0]
+    assert (ran["method"], ran["candidates"]) == ("vector", 20)
+
+
+def test_store_chat_settings_show_their_source_and_reset_to_settings(client):
+    add_collection(client)  # keyword lists, no vocabulary
+    recommended = {
+        "method": {"value": "hybrid", "from": "recommended"},
+        "candidates": {"value": 20, "from": "recommended"},
+    }
+    assert client.get("/collections/c").json()["chat_settings"] == recommended
+    r = client.patch("/collections/c", json={"chat_method": "vector", "chat_k": 30})
+    assert r.status_code == 200, r.text
+    assert r.json()["chat_settings"] == {
+        "method": {"value": "vector", "from": "store"},
+        "candidates": {"value": 30, "from": "store"},
+    }
+    assert (r.json()["chat_method"], r.json()["chat_k"]) == ("vector", 30)
+    r = client.patch("/collections/c", json={"chat_method": None, "chat_k": None})
+    assert r.json()["chat_settings"] == recommended
+    assert client.put("/search-defaults", json={"method": "keyword"}).status_code == 200
+    method = client.get("/collections/c").json()["chat_settings"]["method"]
+    assert method == {"value": "keyword", "from": "settings"}
+
+    assert client.patch("/collections/c", json={"chat_method": "hybrid_rerank"}).status_code == 422
+    for k in (0, 61):
+        assert client.patch("/collections/c", json={"chat_k": k}).status_code == 422
+    r = client.patch("/collections/c", json={"chat_method": "keyword_rag", "chat_k": 9})
+    assert r.status_code == 409 and "needs a vocabulary" in r.json()["detail"]
+    assert client.get("/collections/c").json()["chat_k"] is None  # nothing was saved
+
+    # A method saved before it left the chat list reads as null, here and from Set as default.
+    db.set_chat_method(client.app.state.conn, "c", "hybrid_rerank")
     detail = client.get("/collections/c").json()
-    assert (detail["chat_method"], detail["chat_k"], detail["chat_bar"]) == (None, None, None)
-    assert client.get("/collections/c/bar").json()["source"] == "few"
+    assert detail["chat_method"] is None
+    assert detail["chat_settings"]["method"] == {"value": "keyword", "from": "settings"}
+    chat = new_chat(client)
+    client.post(f"/chats/{chat['id']}/messages", json={"content": "enzyme rate"})
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    assert client.post(url, json={"stores": {"c": {"candidates": 7}}}).status_code == 200
+    got = client.post(f"/chats/{chat['id']}/stores/c/default").json()
+    assert (got["chat_method"], got["chat_k"]) == (None, 7)
 
 
-def test_a_source_replaced_by_as_many_items_recomputes_the_bar(client):
+def test_store_lists_why_each_method_cannot_run(client):
+    add_collection(client, name="bare", lists=False)
+    why = client.get("/collections/bare").json()["methods_unavailable"]
+    assert why["keyword_rag"] == "needs a vocabulary"
+    assert why["kw_individual"] == "needs keyword lists"
+    assert "hybrid" not in why
+
+
+def test_removed_routes_are_gone(client):
     add_collection(client)
-    conn = client.app.state.conn
-    import_items(client)
-    db.create_eval_set(conn, "e", "mcq")
-    qs = [Question(f"q{i:02d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(20)]
-    db.replace_questions(conn, "e", qs, None)
-    db.set_default_eval_set(conn, "c", "e")
-    first = client.get("/collections/c/bar").json()
-    assert first["source"] == "set"
-    conn.execute("update store_bars set value = 0.999 where collection = 'c'")
-    assert client.get("/collections/c/bar").json()["value"] == 0.999  # cached
-    assert client.delete("/collections/c/sources/upload:notes").status_code == 204
-    import_items(client)  # as many items as before, under the same source
-    assert client.get("/collections/c/bar").json() == first
+    chat = new_chat(client)
+    assert client.get("/collections/c/bar").status_code == 404
+    assert client.post("/collections/c/route-profile/draft").status_code == 404
+    assert client.post("/routing/eval", json={"stores": ["c", "c"]}).status_code == 404
+    assert client.patch("/collections/c", json={"route_profile": "x"}).status_code == 422
+    assert client.patch(f"/chats/{chat['id']}", json={"routing": "all"}).status_code == 422
+    detail = client.get("/collections/c").json()
+    assert not {"chat_bar", "route_profile", "route_profile_drafted"} & set(detail)
 
 
 def test_rewrite_is_a_known_role(client):
@@ -3559,58 +3805,875 @@ def test_old_post_chat_still_answers(client):
     assert r.status_code == 200 and r.json()["answer"]
 
 
-def test_deleting_a_store_drops_its_bar(client):
-    conn = client.app.state.conn
-
-    def build_store():
-        add_collection(client)
-        if db.get_eval_set(conn, "e") is None:
-            db.create_eval_set(conn, "e", "mcq")
-            qs = [Question(f"q{i:02d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(20)]
-            db.replace_questions(conn, "e", qs, None)
-        db.set_default_eval_set(conn, "c", "e")
-
-    build_store()
-    first = client.get("/collections/c/bar").json()
-    assert first["source"] == "set" and first["eval_set"] == "e" and first["n"] == 20
-    conn.execute("update store_bars set value = 0.999 where collection = 'c'")
-    assert client.get("/collections/c/bar").json()["value"] == 0.999  # cached
-    assert client.delete("/collections/c").status_code == 204
-    assert client.get("/collections/c/bar").status_code == 404
-    build_store()
-    assert client.get("/collections/c/bar").json() == first
+def test_the_service_warms_the_settings_reranker_at_start(tmp_path):
+    client = make_client(tmp_path)
+    search_defaults.save(client.app.state.conn, {"rerank_model": TURBO})
+    called = []
+    client.app.state.models.warm_rerank_in_background = called.append  # type: ignore[attr-defined]
+    with client:
+        pass
+    assert called == [TURBO]
 
 
-def ledger(client) -> int:
-    return client.app.state.ai.sql("select count(*) as n from ai_ledger")[0]["n"]
-
-
-def test_routing_eval_route(client):
-    conn = client.app.state.conn
-    add_collection(client, name="c", questions=False)
-    add_collection(client, name="d", questions=False)
-    db.create_eval_set(conn, "e", "mcq")
-    qs = [Question(f"q{i:03d}", f"enzyme rate {i}", None, ["A"], [], {}) for i in range(210)]
-    db.replace_questions(conn, "e", qs, None)
-    db.set_default_eval_set(conn, "c", "e")
-    spent = ledger(client)
-
-    r = client.post("/routing/eval", json={"stores": ["c", "d"]})
+def test_search_defaults_round_trip_and_reset(client):
+    service = client.app.state.models.rerank_model
+    r = client.put("/search-defaults", json=dict.fromkeys(SEARCH_FIELDS))
     assert r.status_code == 200, r.text
-    got = r.json()
-    assert got["split"] == "held_out" and got["questions"] == 10
-    assert set(got["modes"]) == {"gate", "profiles"}
-    assert set(got["modes"]["gate"]) == {"recall", "precision", "none_rate", "mean_searched"}
-    assert got["per_store"]["c"]["questions"] == 10 and got["per_store"]["d"]["questions"] == 0
-    assert all(row["homes"] == ["c"] for row in got["rows"])
-    r = client.post("/routing/eval", json={"stores": ["c", "d"], "split": "dev"})
-    assert r.json()["split"] == "dev" and r.json()["questions"] == 200
-    assert ledger(client) == spent
+    got = client.get("/search-defaults").json()
+    assert got["in_force"] == {
+        **search_defaults.RECOMMENDED,
+        "rerank_model": service,
+        "dense_model": client.app.state.models.dense_model,
+    }
+    assert got["recommended"]["rerank_model"] == service
+    assert got["limits"] == {
+        "evidence_size": [1, 20],
+        "candidates": [1, 60],
+        "follow_up_turns": [0, 10],
+        "rrf_k": [0, 1000],
+        "rerank_pool": [1, 60],
+    }
+    assert got["methods"] == list(search_defaults.CHAT_METHODS)
+    tiny = [r for r in got["rerankers"] if r["name"] == "jinaai/jina-reranker-v1-tiny-en"]
+    assert len(tiny) == 1 and tiny[0]["size_gb"] > 0
+    assert got["notes"] == {"rerank": None}
 
-    assert client.post("/routing/eval", json={"stores": ["c", "nope"]}).status_code == 404
-    assert client.post("/routing/eval", json={"stores": ["c"]}).status_code == 422  # min 2
-    r = client.post("/routing/eval", json={"stores": ["c", "d"], "split": "train"})
+    r = client.put("/search-defaults", json={"candidates": 30})
+    assert r.status_code == 200 and r.json()["in_force"]["candidates"] == 30
+    assert r.json()["saved"] == {**dict.fromkeys(SEARCH_FIELDS), "candidates": 30}
+    r = client.put("/search-defaults", json={"candidates": None})
+    assert r.json()["in_force"]["candidates"] == 20
+    assert client.put("/search-defaults", json={"nope": 1}).status_code == 422
+    assert client.put("/search-defaults", json={"method": "hybrid_rerank"}).status_code == 422
+    assert client.get("/search-defaults").json()["in_force"]["rerank_model"] == service
+
+
+def test_a_store_is_created_with_the_settings_model_or_the_one_named(client):
+    service = client.app.state.models.dense_model
+    r = client.post("/collections", json={"name": "a", "qa_type": "mcq"})
+    assert r.status_code == 201 and r.json()["dense_model"] == service
+    r = client.put("/search-defaults", json={"dense_model": "BAAI/bge-base-en-v1.5"})
+    assert r.status_code == 200, r.text
+    r = client.post("/collections", json={"name": "b", "qa_type": "mcq"})
+    assert r.status_code == 201 and r.json()["dense_model"] == "BAAI/bge-base-en-v1.5"
+    body = {"name": "c", "qa_type": "mcq", "dense_model": "BAAI/bge-small-en-v1.5"}
+    r = client.post("/collections", json=body)
+    assert r.status_code == 201 and r.json()["dense_model"] == "BAAI/bge-small-en-v1.5"
+    body = {"name": "d", "qa_type": "mcq", "dense_model": service}  # the service's own
+    assert client.post("/collections", json=body).json()["dense_model"] == service
+    r = client.post("/collections", json={"name": "e", "qa_type": "mcq", "dense_model": "nope/y"})
+    assert r.status_code == 422 and "unknown embedding model nope/y" in r.text
+    assert client.get("/collections/e").status_code == 404
+
+
+def test_search_defaults_lists_embedders_and_names_the_service_model(client):
+    service = client.app.state.models.dense_model
+    got = client.get("/search-defaults").json()
+    assert got["recommended"]["dense_model"] == service
+    assert got["in_force"]["dense_model"] == service and got["saved"]["dense_model"] is None
+    names = [e["name"] for e in got["embedders"]]
+    assert names[: len(search_defaults.EMBEDDERS)] == list(search_defaults.EMBEDDERS)
+    assert service in names and len(names) == len(set(names))
+    small = next(e for e in got["embedders"] if e["name"] == "BAAI/bge-small-en-v1.5")
+    assert small == {
+        "name": "BAAI/bge-small-en-v1.5",
+        "dim": 256,  # the fake's
+        "size_gb": 0.067,
+        "note": "fast",
+        "seconds_per_1000": search_defaults.EMBED_SECONDS.get("BAAI/bge-small-en-v1.5"),
+    }
+    own = next(e for e in got["embedders"] if e["name"] == service)
+    assert (own["size_gb"], own["note"]) == (None, None)  # not in fastembed's list
+    r = client.put("/search-defaults", json={"dense_model": "BAAI/bge-base-en-v1.5"})
+    assert r.json()["in_force"]["dense_model"] == "BAAI/bge-base-en-v1.5"
+    r = client.put("/search-defaults", json={"dense_model": None})
+    assert r.json()["in_force"]["dense_model"] == service
+    assert client.put("/search-defaults", json={"dense_model": "nope/y"}).status_code == 422
+
+
+def test_changing_the_reranker_warms_it_in_the_background(client):
+    called = []
+    client.app.state.models.warm_rerank_in_background = called.append  # type: ignore[attr-defined]
+    r = client.put("/search-defaults", json={"rerank_model": TURBO})
+    assert r.status_code == 200 and r.json()["in_force"]["rerank_model"] == TURBO
+    assert called == [TURBO]
+    client.put("/search-defaults", json={"candidates": 30})
+    assert called == [TURBO]
+
+
+def test_put_search_defaults_warms_only_a_changed_or_failed_reranker(client):
+    models = client.app.state.models
+    search_defaults.save(client.app.state.conn, {"rerank_model": TURBO})  # in force already
+    warmed = []
+    models.retry_rerank = warmed.append  # type: ignore[method-assign]
+    assert models.rerank_status(TURBO) != "failed"
+    assert client.put("/search-defaults", json={"rerank_model": TURBO}).status_code == 200
+    assert warmed == []
+    other = "jinaai/jina-reranker-v1-tiny-en"
+    client.put("/search-defaults", json={"rerank_model": other})
+    assert warmed == [other]
+    models.rerank_status = lambda model=None: "failed"  # type: ignore[method-assign]
+    client.put("/search-defaults", json={"rerank_model": other})
+    assert warmed == [other, other]
+
+
+def test_search_defaults_say_how_the_in_force_reranker_is_loading(client):
+    models = client.app.state.models
+    got = client.get("/search-defaults").json()
+    assert (got["rerank_status"], got["rerank_error"]) == ("ready", None)  # the fake's
+    asked = []
+    status = {TURBO: "failed"}
+
+    def rerank_status(model=None):
+        asked.append(model)
+        return status.get(model or "", "loading")
+
+    models.rerank_status = rerank_status  # type: ignore[attr-defined]
+    models.warm_rerank_in_background = lambda model=None: None  # type: ignore[attr-defined]
+    got = client.get("/search-defaults").json()
+    assert (got["rerank_status"], got["rerank_error"]) == ("loading", None)
+    assert asked[-1] == models.rerank_model  # the service's, when Settings names none
+    models.rerank_errors[TURBO] = "hub down"
+    got = client.put("/search-defaults", json={"rerank_model": TURBO}).json()
+    assert (got["rerank_status"], got["rerank_error"]) == ("failed", "hub down")
+    status[TURBO] = "ready"
+    got = client.get("/search-defaults").json()
+    assert (got["rerank_status"], got["rerank_error"]) == ("ready", None)
+
+
+def test_picking_a_reranker_that_just_failed_retries_it_at_once(client):
+    models = client.app.state.models
+    called = []
+    models.warm_rerank_in_background = called.append  # type: ignore[attr-defined]
+    models.rerank_failed_at[TURBO] = time.monotonic()  # failed a moment ago
+    models.rerank_failed_at["other"] = time.monotonic()
+    assert client.put("/search-defaults", json={"rerank_model": TURBO}).status_code == 200
+    assert called == [TURBO] and TURBO not in models.rerank_failed_at
+    assert "other" in models.rerank_failed_at  # only the model picked
+
+
+def test_an_unknown_reranker_is_422(client):
+    called = []
+    client.app.state.models.warm_rerank_in_background = called.append  # type: ignore[attr-defined]
+    r = client.put("/search-defaults", json={"rerank_model": "nope/y"})
+    assert r.status_code == 422 and "unknown reranker" in r.text
+    assert called == []
+
+
+def spy_retrieve(client) -> list[dict]:
+    """Every retrieve call's pool and rerank_model, with the real search still running."""
+    retriever, seen = client.app.state.retriever, []
+    real = retriever.retrieve
+
+    def retrieve(*args, **kw):
+        seen.append({"pool": kw.get("pool"), "rerank_model": kw.get("rerank_model")})
+        return real(*args, **kw)
+
+    retriever.retrieve = retrieve
+    return seen
+
+
+def test_a_run_records_and_uses_its_rerank_pool(client):
+    add_collection(client)
+    seen = spy_retrieve(client)
+    body = {**EVAL, "methods": ["hybrid_rerank"], "rerank_pool": 20}
+    r = client.post("/eval", json={**body, "confirm": True})
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done" and job["setup"]["rerank_pool"] == 20
+    assert seen and {s["pool"] for s in seen} == {20}
+    for bad in (0, 51):
+        assert client.post("/eval", json={**body, "rerank_pool": bad}).status_code == 422
+
+
+def test_a_run_recorded_before_the_reranker_and_pool_keeps_bge_at_50(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    body = {**EVAL, "methods": ["hybrid_rerank"], "confirm": True}
+    done = wait(client, client.post("/eval", json=body).json()["job_id"])
+    old = {k: v for k, v in done["setup"].items() if k not in ("rerank_model", "rerank_pool")}
+    seen = spy_retrieve(client)
+    job = wait(client, db.create_job(conn, "eval", "c", old))
+    assert job["status"] == "done", job
+    assert seen and {(s["rerank_model"], s["pool"]) for s in seen} == {
+        ("BAAI/bge-reranker-v2-m3-int8", 50)
+    }
+
+
+def test_a_run_records_and_uses_its_rerank_model(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    seen = spy_retrieve(client)
+    body = {**EVAL, "methods": ["hybrid_rerank"], "confirm": True}
+    search_defaults.save(conn, {"rerank_model": TURBO})
+    job = wait(client, client.post("/eval", json=body).json()["job_id"])
+    assert job["setup"]["rerank_model"] == TURBO
+    assert {s["rerank_model"] for s in seen} == {TURBO}
+    search_defaults.save(conn, {"rerank_model": None})
+    assert db.get_job(conn, job["id"])["setup"]["rerank_model"] == TURBO  # what it recorded
+    tiny = "jinaai/jina-reranker-v1-tiny-en"
+    job = wait(client, client.post("/eval", json={**body, "rerank_model": tiny}).json()["job_id"])
+    assert job["setup"]["rerank_model"] == tiny
+    assert client.post("/eval", json={**body, "rerank_model": "nope/y"}).status_code == 422
+    job = wait(client, client.post("/eval", json={**body, "methods": ["hybrid"]}).json()["job_id"])
+    assert "rerank_model" not in job["setup"]
+
+
+# -- rebuild with another embedding model ------------------------------------------
+
+
+def small_model(client, monkeypatch) -> None:
+    """fake/small embeds at 64 dimensions and is offered alongside fastembed's own list."""
+    fake_embeddings(client.app.state.models, dims={"fake/small": 64})
+    offered = {"fake/small": {"dim": 64, "size_gb": 0.1}}
+    monkeypatch.setattr(search_defaults, "supported_embedders", lambda: offered)
+
+
+def reembed(client, name="c", model="fake/small"):
+    return client.post(f"/collections/{name}/reembed", json={"model": model})
+
+
+def test_rebuild_with_another_model_re_embeds_and_switches(client, monkeypatch):
+    small_model(client, monkeypatch)
+    add_collection(client)
+    run_pair(client)
+    r = reembed(client)
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    body = client.get("/collections/c").json()
+    assert (body["dense_model"], body["dense_dim"]) == ("fake/small", 64)
+    assert body["count"] == len(ITEMS) and body["rebuild"] is None
+    ask = {"collection": "c", "question": "enzyme rate", "methods": ["hybrid"]}
+    hits = client.post("/query", json=ask).json()["results"]["hybrid"]["hits"]
+    assert hits[0]["id"] == "enzyme-item"
+    assert "dense model" in body["answer"]["since"]["changes"]
+
+
+def test_rebuild_is_refused_for_an_unknown_or_the_same_model_or_a_busy_store(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: no worker, so a queued job stays queued
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    r = reembed(client, model="nope/y")
+    assert r.status_code == 422 and r.json()["detail"] == "unknown embedding model nope/y"
+    r = reembed(client, model="fake/dense")
+    assert r.status_code == 409 and r.json()["detail"] == "'c' is already built with fake/dense"
+    assert reembed(client, "nope").status_code == 404
+    db.create_job(client.app.state.conn, "load", "c", {})
+    r = reembed(client)
+    assert r.status_code == 409 and "a load job is queued" in r.json()["detail"]
+    r = client.post("/collections/c/reembed", json={"model": "fake/small", "confirm": True})
+    assert r.status_code == 422  # nothing to confirm: a rebuild is free
+
+
+def test_writes_are_refused_while_a_rebuild_is_queued(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: the rebuild stays queued
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    app = client.app.state
+    app.indexer.add(app.indexer.spec("c"), [Item("x-1", "optics light lens", "D")], "x")
+    r = reembed(client)
+    assert r.status_code == 202, r.text
+    job = db.get_job(app.conn, r.json()["job_id"])
+    assert job["kind"] == "reembed" and job["status"] == "queued"
+    assert job["setup"] == {"model": "fake/small", "from": "fake/dense"}
+    assert client.get("/collections/c").json()["state"] == "queued"
+    r = client.post("/collections/c/documents", json={"items": ITEMS[:1], "confirm": True})
+    assert r.status_code == 409 and "reembed" in r.json()["detail"]
+    assert client.delete("/collections/c/sources/x").status_code == 409
+    body = {"name": "cc", "recipe": "paper_2024", "confirm": True}
+    assert client.post("/collections/c/copy", json=body).status_code == 409
+    assert reembed(client).status_code == 409  # one rebuild at a time
+    assert client.post("/collections", json=WORKED).status_code == 201
+    assert reembed(client, "w").status_code == 202
+    r = client.put("/collections/w/vocabulary", json={"terms": ["ohm's law"], "confirm": True})
+    assert r.status_code == 409 and "reembed" in r.json()["detail"]
+
+
+def test_a_stopped_rebuild_resumes_through_the_jobs_route(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    job_id = db.create_job(conn, "reembed", "c", {"model": "fake/small", "from": "fake/dense"})
+    db.update_job(conn, job_id, status="cancelled")
+    rebuild = client.get("/collections/c").json()["rebuild"]
+    assert rebuild == {
+        "job_id": job_id,
+        "status": "cancelled",
+        "model": "fake/small",
+        "from": "fake/dense",
+        "progress": 0.0,
+        "switching": False,
+    }
+    r = client.post(f"/jobs/{job_id}/resume")
+    assert r.status_code == 202 and r.json() == {"job_id": job_id}
+    with client:
+        assert wait(client, job_id)["status"] == "done"
+        body = client.get("/collections/c").json()
+        assert (body["dense_model"], body["rebuild"]) == ("fake/small", None)
+        r = client.post(f"/jobs/{job_id}/resume")
+        assert r.status_code == 409 and r.json()["detail"] == "a done rebuild cannot be resumed"
+
+
+def test_a_rebuild_resumes_only_when_its_store_is_idle_and_it_is_the_newest(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: queued jobs stay queued
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    older = db.create_job(conn, "reembed", "c", {"model": "fake/small", "from": "fake/dense"})
+    db.update_job(conn, older, status="cancelled")
+    load = db.create_job(conn, "load", "c", {})
+    r = client.post(f"/jobs/{older}/resume")
+    assert r.status_code == 409 and "a load job is queued" in r.json()["detail"]
+    db.update_job(conn, load, status="done")
+    newer = db.create_job(conn, "reembed", "c", {"model": "fake/small", "from": "fake/dense"})
+    db.update_job(conn, newer, status="failed")
+    r = client.post(f"/jobs/{older}/resume")
+    assert r.status_code == 409 and "a newer rebuild" in r.json()["detail"]
+    assert client.post(f"/jobs/{newer}/resume").status_code == 202
+
+
+def test_the_store_reports_a_stopped_switch_and_refuses_search(client, monkeypatch):
+    small_model(client, monkeypatch)
+    add_collection(client)
+    app = client.app.state
+    store, copy = app.store, app.store.copy
+
+    def dies(source, target):
+        raise RuntimeError("the process stopped")
+
+    store.copy = dies  # the switch empties the store, then stops before refilling it
+    job_id = reembed(client).json()["job_id"]
+    assert wait(client, job_id)["status"] == "failed"
+    db.update_job(app.conn, job_id, status="interrupted")  # as a restart leaves it
+    body = client.get("/collections/c").json()
+    assert body["rebuild"]["switching"] is True and body["rebuild"]["status"] == "interrupted"
+    ask = {"collection": "c", "question": "enzyme rate", "methods": ["hybrid"]}
+    r = client.post("/query", json=ask)
+    assert r.status_code == 409 and "switching to fake/small" in r.json()["detail"]
+    r = reembed(client)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "the switch to fake/small stopped part-way; resume it first"
+    store.copy = copy
+    r = client.post(f"/jobs/{job_id}/resume")
+    assert r.status_code == 202 and r.json() == {"job_id": job_id}
+    assert wait(client, job_id)["status"] == "done"
+    body = client.get("/collections/c").json()
+    assert (body["dense_model"], body["dense_dim"], body["rebuild"]) == ("fake/small", 64, None)
+    assert body["count"] == len(ITEMS) and db.switching_model(app.conn, "c") is None
+    hits = client.post("/query", json=ask).json()["results"]["hybrid"]["hits"]
+    assert hits[0]["id"] == "enzyme-item"
+
+
+def test_a_stopped_switch_refuses_deleting_a_source_and_copying(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: the stopped switch stays stopped
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    app = client.app.state
+    app.indexer.add(app.indexer.spec("c"), [Item("x-1", "optics light lens", "D")], "x")
+    setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
+    db.update_job(app.conn, db.create_job(app.conn, "reembed", "c", setup), status="interrupted")
+    stopped = "the switch to fake/small stopped part-way; resume it first"
+    r = client.delete("/collections/c/sources/x")
+    assert r.status_code == 409 and r.json()["detail"] == stopped
+    r = client.post("/collections/c/copy", json={"name": "cc", "recipe": "paper_2024"})
+    assert r.status_code == 409 and r.json()["detail"] == stopped
+    assert app.store.count("c") == len(ITEMS) + 1 and db.get_collection(app.conn, "cc") is None
+
+
+def test_a_running_rebuild_reports_its_state(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    job_id = reembed(client).json()["job_id"]
+    db.update_job(conn, job_id, status="running", progress=0.5)
+    body = client.get("/collections/c").json()
+    assert (body["state"], body["progress"]) == ("rebuilding", 0.5)
+    assert body["rebuild"]["progress"] == 0.5 and body["rebuild"]["switching"] is False
+
+
+def test_new_store_names_may_not_end_in_a_search_data_suffix(client):
+    client.app.state.worker.stop()
+    assert client.post("/collections", json={"name": "x", "qa_type": "mcq"}).status_code == 201
+    message = "store names may not end in __rebuild or __chunks"
+    r = client.post("/collections", json={"name": "x__rebuild", "qa_type": "mcq"})
+    assert r.status_code == 422 and message in r.json()["detail"]
+    r = client.post("/collections/x/copy", json={"name": "x__chunks", "recipe": "paper_2024"})
+    assert r.status_code == 422 and message in r.json()["detail"]
+    assert db.get_collection(client.app.state.conn, "x__chunks") is None
+
+
+def test_a_stopped_switch_reads_as_rebuilding():
+    def job(status, switching):
+        setup = {"model": "m", "from": "o", "switching": switching}
+        return {"id": "j", "kind": "reembed", "status": status, "progress": 0, "setup": setup}
+
+    for count, lists in ((0, False), (3, True), (3, False)):
+        state, behind = collection_state([job("interrupted", True)], count, lists)
+        assert state == "rebuilding" and behind["id"] == "j"
+    assert collection_state([job("interrupted", False)], 3, True)[0] == "ready"
+    assert collection_state([job("done", True)], 3, True)[0] == "ready"
+
+
+# -- Documents stores -------------------------------------------------------------------
+
+DOCUMENTS_ONLY = "A Documents store takes .md and .txt files"
+
+
+def add_documents(client, name="c"):
+    r = client.post("/collections", json={"name": name, "qa_type": "documents"})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_a_documents_store_defaults_to_the_documents_recipe_and_refuses_others(client):
+    client.app.state.worker.stop()
+    assert add_documents(client, "d")["recipe"] == "documents"
+    tagged = {"name": "t", "qa_type": "documents", "recipe": "documents_tagged"}
+    assert client.post("/collections", json=tagged).json()["recipe"] == "documents_tagged"
+    for name, qa_type, recipe in (("e", "documents", "reference"), ("m", "mcq", "documents")):
+        body = {"name": name, "qa_type": qa_type, "recipe": recipe}
+        r = client.post("/collections", json=body)
+        assert r.status_code == 422, r.text
+        assert db.get_collection(client.app.state.conn, name) is None
+    r = client.post("/collections", json={"name": "m", "qa_type": "mcq"})
+    assert r.json()["recipe"] == "paper_2024"  # the other types keep their default
+    r = client.post("/collections/d/copy", json={"name": "d2", "recipe": "paper_2024"})
+    assert r.status_code == 422, r.text
+    r = client.post("/collections/m/copy", json={"name": "m2", "recipe": "documents_tagged"})
+    assert r.status_code == 422, r.text
+    assert db.get_collection(client.app.state.conn, "d2") is None
+
+
+def test_documents_upload_takes_md_and_txt_only(client, tmp_path):
+    add_documents(client)
+    zipped = tmp_path / "x.zip"
+    with zipfile.ZipFile(zipped, "w") as z:
+        z.writestr("a.md", "some text")
+    refused = (("notes.csv", b"text\nsome text\n"), ("notes.jsonl", NOTES), ("x.zip", zipped))
+    for filename, body in refused:
+        content = body.read_bytes() if isinstance(body, Path) else body
+        r = upload(client, content, filename=filename)
+        assert r.status_code == 422 and r.json()["detail"] == DOCUMENTS_ONLY
+    assert not list((client.app.state.settings.home / "uploads").glob("*/file"))
+    for filename in ("a.md", "b.txt", "C.MD"):
+        r = upload(client, b"some text", filename=filename)
+        assert r.status_code == 200, r.text
+        assert r.json()["preview"]["ready"] and r.json()["preview"]["usable"] == 1
+    questions = jsonl({"text": "where is some text", "gold_ids": "x"})
+    r = upload(client, questions, filename="set.jsonl", kind="questions")  # items only
+    assert r.status_code == 200, r.text
+    add_collection(client, name="m", lists=False, questions=False)
+    assert upload(client, filename="notes.jsonl", name="m").status_code == 200  # other types
+
+
+def test_documents_upload_keeps_passages_whole(client):
+    add_documents(client)
+    body = long_text(["alpha", "brine", "cocoa"])
+    rows = imports.text_rows("x.md", body.decode())
+    assert len(rows) == 3
+    job = store_import(client, "x.md", body)
+    assert job["result"]["new"] == 3
+    held = client.app.state.store.get("c", [r["file"] for r in rows])
+    assert {h.id: h.text for h in held} == {r["file"]: r["text"] for r in rows}
+    assert client.app.state.store.count("c") == 3
+
+
+def test_a_documents_run_with_answers_is_refused(client):
+    add_documents(client)
+    store_import(client, "x.md", b"some text about passwords")
+    message = (
+        "Documents runs score retrieval only for now; answer judging comes with Documents eval sets"
+    )
+    for confirm in (False, True):
+        body = {"collection": "c", "methods": ["hybrid"], "answer": True, "confirm": confirm}
+        r = client.post("/eval", json=body)
+        assert r.status_code == 422 and r.json()["detail"] == message
+    assert db.list_jobs(client.app.state.conn, kind="eval") == []
+
+
+def test_an_empty_documents_store_reads_and_a_blank_file_is_refused(client):
+    add_documents(client)
+    r = client.get("/collections/c")
+    assert r.status_code == 200, r.text
+    assert set(r.json()["measurable"]) == {"ndcg@10", "recall@10", "mrr@10"}
+    assert r.json()["methods_unavailable"]["keyword_rag"] == (
+        "needs keyword tags: Add keyword tags on the store page"
+    )
+    up = upload(client, b"  \n\n\t \n", filename="blank.md")
+    assert up.status_code == 200, up.text
+    shown = up.json()["preview"]
+    assert shown["usable"] == 0 and shown["ready"] is False and up.json()["estimate"] is None
+    r = do_import(client, up.json(), "blank", confirm=True)
+    assert r.status_code == 422 and r.json()["detail"] == "no usable rows"
+    assert client.app.state.store.count("c") == 0
+    query = {"collection": "c", "question": "anything", "methods": ["hybrid"]}
+    r = client.post("/query", json=query)
+    assert r.status_code == 200, r.text
+    assert r.json()["results"]["hybrid"]["hits"] == []
+    r = client.post("/query", json={"collection": "c", "question": "x", "methods": ["keyword_rag"]})
+    assert r.json()["results"]["keyword_rag"]["error"] == (
+        "needs keyword tags: Add keyword tags on the store page"
+    )
+
+
+# -- Add keyword tags ---------------------------------------------------------------------
+
+NEEDS_TAGS = "needs keyword tags: Add keyword tags on the store page"
+NOT_UNTAGGED = "only a Documents store without keyword tags can add them"
+NO_KEYWORDS_MODEL = "connect a model for keywords first"
+
+
+def terms_reply(prompt: str) -> str:
+    return '{"terms": ["alpha", "brine", "cocoa"]}'
+
+
+def documents_with_passages(client) -> None:
+    """Store c: a Documents store of three passages, without keyword tags."""
+    add_documents(client)
+    store_import(client, "x.md", long_text(["alpha", "brine", "cocoa"]))
+    assert client.app.state.store.count("c") == 3
+
+
+def add_tags(client, confirm: bool):
+    return client.post("/collections/c/keyword-tags", json={"confirm": confirm})
+
+
+def passages(client, name="c") -> list:
+    return [h for batch in client.app.state.store.scroll(name) for h in batch]
+
+
+def keyword_tags(client, name="c"):
+    return client.get(f"/collections/{name}").json()["keyword_tags"]
+
+
+def test_add_keyword_tags_estimates_then_builds(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        conn = client.app.state.conn
+        client.put("/collections/c/search", json={"weights": {"keywords": 2}})
+        saved = db.get_collection(conn, "c").search
+        r = add_tags(client, False)
+        assert r.status_code == 200, r.text
+        estimate = r.json()["estimate"]
+        assert set(estimate) == {"est_usd", "calls"}
+        assert estimate["est_usd"] > 0 and estimate["calls"] >= 1
+        assert ledger_purposes(client) == [] and db.get_collection(conn, "c").recipe == "documents"
+        r = add_tags(client, True)
+        assert r.status_code == 202, r.text
+        job = wait(client, r.json()["job_id"])
+        assert job["status"] == "done", job
+        spec = db.get_collection(conn, "c")
+        assert spec.recipe == "documents_tagged" and spec.vocabulary_version is not None
+        assert spec.search == saved  # the switch keeps a saved search override
+        assert len(passages(client)) == 3 and all(h.tags for h in passages(client))
+        body = client.get("/collections/c").json()
+        assert "keyword_rag" in body["methods_available"]
+        terms = db.get_vocabulary(conn, "c")
+        assert terms and body["keyword_tags"] == {"state": "built", "terms": len(terms)}
+        query = {"collection": "c", "question": "alpha", "methods": ["keyword_rag"]}
+        result = client.post("/query", json=query).json()["results"]["keyword_rag"]
+        assert result["error"] is None and result["hits"]
+
+
+def test_add_keyword_tags_without_ai_is_refused_and_changes_nothing(client):
+    documents_with_passages(client)
+    client.app.state.ai.set_role("default", None)  # no model for keywords at all
+    for confirm in (False, True):
+        r = add_tags(client, confirm)
+        assert r.status_code == 409 and r.json()["detail"] == NO_KEYWORDS_MODEL, r.text
+    spec = db.get_collection(client.app.state.conn, "c")
+    assert spec.recipe == "documents" and spec.vocabulary_version is None
+    assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
+    assert ledger_purposes(client) == [] and keyword_tags(client) == {"state": "none"}
+
+
+def test_add_keyword_tags_is_refused_on_other_stores(client):
+    add_collection(client, name="m", lists=False, questions=False)
+    tagged = {"name": "t", "qa_type": "documents", "recipe": "documents_tagged"}
+    assert client.post("/collections", json=tagged).status_code == 201
+    for name in ("m", "t"):
+        for confirm in (False, True):
+            r = client.post(f"/collections/{name}/keyword-tags", json={"confirm": confirm})
+            assert r.status_code == 409 and r.json()["detail"] == NOT_UNTAGGED, (name, r.text)
+    add_documents(client, "e")
+    r = client.post("/collections/e/keyword-tags", json={"confirm": True})
+    assert r.status_code == 409 and r.json()["detail"] == "add passages first"
+    assert client.post("/collections/nope/keyword-tags", json={}).status_code == 404
+    r = client.post("/collections/e/keyword-tags", json={"confirm": True, "x": 1})
+    assert r.status_code == 422  # extra fields are refused
+    assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
+
+
+def test_a_stopped_tag_build_resumes_and_finishes(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        conn, builder = client.app.state.conn, client.app.state.builder
+        real = builder._write_tags
+
+        def first_only(spec, ids, tags, progress=lambda p: None):
+            real(spec, ids[:1], tags[:1])
+            raise RuntimeError("stopped part-way")
+
+        builder._write_tags = first_only  # writes 1 of 3, then the job stops
+        job_id = add_tags(client, True).json()["job_id"]
+        assert wait(client, job_id)["status"] == "failed"
+        del builder._write_tags
+        db.update_job(conn, job_id, status="interrupted")  # as a restart leaves it
+        spec = db.get_collection(conn, "c")
+        assert spec.recipe == "documents_tagged" and spec.vocabulary_version is not None
+        assert sum(1 for h in passages(client) if h.tags) == 1
+        body = client.get("/collections/c").json()
+        assert body["keyword_tags"] == {"state": "stopped", "job_id": job_id}
+        assert body["methods_unavailable"]["keyword_rag"] == NEEDS_TAGS
+        query = {"collection": "c", "question": "alpha", "methods": ["keyword_rag"]}
+        result = client.post("/query", json=query).json()["results"]["keyword_rag"]
+        assert result["error"] == NEEDS_TAGS and result["hits"] == []
+        assert client.app.state.chats.why_not(spec, "keyword_rag") == NEEDS_TAGS
+        r = client.patch("/collections/c", json={"chat_method": "keyword_rag"})
+        assert r.status_code == 409 and NEEDS_TAGS in r.json()["detail"]
+        assert add_tags(client, False).status_code == 409  # switched already: resume it
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
+        assert r.status_code == 200, r.text
+        assert set(r.json()["estimate"]) == {"est_usd", "calls"}
+        assert db.get_job(conn, job_id)["status"] == "interrupted"  # only estimated
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+        assert r.status_code == 202 and r.json() == {"job_id": job_id}
+        assert wait(client, job_id)["status"] == "done"
+        assert all(h.tags for h in passages(client))
+        body = client.get("/collections/c").json()
+        assert "keyword_rag" in body["methods_available"]
+        assert body["keyword_tags"]["state"] == "built"
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+        assert r.status_code == 409  # done: nothing to resume
+
+
+def test_a_tag_build_stopped_after_its_vocabulary_resumes_with_no_keywords_model(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        conn, builder = client.app.state.conn, client.app.state.builder
+
+        def stop(spec, ids, tags, progress=lambda p: None):
+            raise RuntimeError("stopped after the vocabulary")
+
+        builder._write_tags = stop
+        job_id = add_tags(client, True).json()["job_id"]
+        assert wait(client, job_id)["status"] == "failed"
+        del builder._write_tags
+        assert db.get_vocabulary(conn, "c") and not any(h.tags for h in passages(client))
+        client.app.state.ai.set_role("default", None)  # what is left is free: no model needed
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
+        assert r.status_code == 200 and r.json()["estimate"] == {"est_usd": 0, "calls": 0}, r.text
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+        assert r.status_code == 202, r.text
+        assert wait(client, job_id)["status"] == "done"
+        assert all(h.tags for h in passages(client)) and keyword_tags(client)["state"] == "built"
+
+
+def test_only_the_newest_tag_build_resumes(client):
+    documents_with_passages(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    older = db.create_job(conn, "tag_build", "c", {})
+    db.update_job(conn, older, status="interrupted")
+    newer = db.create_job(conn, "tag_build", "c", {})
+    db.update_job(conn, newer, status="cancelled")
+    for confirm in (False, True):
+        r = client.post(f"/jobs/{older}/resume", json={"confirm": confirm})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"] == "a newer tag build of 'c' exists; resume that one"
+    assert db.get_job(conn, older)["status"] == "interrupted"
+    assert client.post(f"/jobs/{newer}/resume", json={"confirm": False}).status_code == 200
+
+
+def test_a_tag_build_with_no_usable_terms_goes_back_to_none(tmp_path):
+    with make_client(tmp_path, reply=lambda p: '{"terms": []}') as client:
+        documents_with_passages(client)
+        job = wait(client, add_tags(client, True).json()["job_id"])
+        assert job["status"] == "done", job
+        assert job["result"]["note"] == "no usable terms: nothing was tagged"
+        spec = db.get_collection(client.app.state.conn, "c")
+        assert spec.recipe == "documents" and spec.vocabulary_version is None
+        assert keyword_tags(client) == {"state": "none"}
+        assert add_tags(client, False).status_code == 200  # Add keyword tags can be tried again
+        assert add_tags(client, True).status_code == 202
+
+
+def test_add_documents_waits_for_a_tag_build(client):
+    documents_with_passages(client)
+    client.app.state.worker.stop()
+    assert add_tags(client, True).status_code == 202
+    body = {"items": [{"id": "n", "text": "a new passage"}], "confirm": True}
+    r = client.post("/collections/c/documents", json=body)
+    assert r.status_code == 409 and "a tag_build job" in r.json()["detail"], r.text
+    assert client.app.state.store.count("c") == 3
+
+
+def test_an_import_waits_for_a_tag_build(client):
+    documents_with_passages(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    imports_before = len(db.list_jobs(conn, kind="import"))
+    up = upload(client, b"a fourth passage on dunes", filename="y.md").json()
+    assert up["estimate"]["est_usd"] == 0  # priced while the store is still untagged
+    assert add_tags(client, True).status_code == 202
+    r = do_import(client, up, "docs", confirm=True)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "a tag_build job is queued or running on 'c'; wait"
+    assert len(db.list_jobs(conn, kind="import")) == imports_before
+
+
+def test_put_vocabulary_is_refused_on_an_untagged_documents_store(client):
+    documents_with_passages(client)
+    message = "'c' has no keyword tags yet; use Add keyword tags on the store page"
+    for confirm in (False, True):
+        r = client.put("/collections/c/vocabulary", json={"terms": ["alpha"], "confirm": confirm})
+        assert r.status_code == 409 and r.json()["detail"] == message, r.text
+    assert db.list_vocabularies(client.app.state.conn, "c") == []
+    assert db.list_jobs(client.app.state.conn, kind="retag") == []
+
+
+def test_adding_passages_to_a_tagged_documents_store_estimates_the_build(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        add_documents(client, "u")  # stays without keyword tags
+        assert wait(client, add_tags(client, True).json()["job_id"])["status"] == "done"
+        up = upload(client, b"a fourth passage on dunes", filename="y.md").json()
+        # The build is priced: with the vocabulary in force, tagging by similarity is free.
+        assert up["estimate"]["est_usd"] == 0 and up["estimate"]["calls"] == 0
+        r = do_import(client, up, "docs", confirm=True)
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        assert len(passages(client)) == 4 and all(h.tags for h in passages(client))
+        assert "keyword_rag" in client.get("/collections/c").json()["methods_available"]
+        client.app.state.ai.set_role("default", None)  # no model for keywords now
+        # With its vocabulary in force, the tagged store's build is free: no model is needed.
+        tagged = upload(client, b"a fifth passage", filename="z.md").json()
+        untagged = upload(client, b"a fifth passage", filename="z.md", name="u").json()
+        assert tagged["estimate"]["est_usd"] == 0 and tagged["estimate"]["calls"] == 0
+        assert untagged["estimate"]["est_usd"] == 0  # the untagged one builds nothing
+        r = do_import(client, tagged, "more", confirm=True)
+        assert r.status_code == 202, r.text
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        body = {"items": [{"id": "n", "text": "a sixth passage on dunes"}], "confirm": True}
+        r = client.post("/collections/c/documents", json=body)
+        assert r.status_code == 200 and r.json() == {"added": 1}, r.text
+        assert len(passages(client)) == 6 and all(h.tags for h in passages(client))
+        assert ledger_purposes(client).count("induce") == 1  # induced once, by Add keyword tags
+
+
+def test_keyword_tags_state_is_reported(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        add_collection(client, name="m", lists=False, questions=False)
+        assert keyword_tags(client, "m") is None  # not a Documents store
+        documents_with_passages(client)
+        conn, worker = client.app.state.conn, client.app.state.worker
+        assert keyword_tags(client) == {"state": "none"}
+        worker.stop()
+        job_id = add_tags(client, True).json()["job_id"]
+        assert keyword_tags(client) == {"state": "building", "job_id": job_id, "progress": 0}
+        r = add_tags(client, False)
+        assert r.status_code == 409 and "a tag_build job is queued" in r.json()["detail"]
+        db.update_job(conn, job_id, status="running", progress=0.25)
+        assert keyword_tags(client) == {"state": "building", "job_id": job_id, "progress": 0.25}
+        assert client.get("/collections/c").json()["state"] == "tagging"
+        db.update_job(conn, job_id, status="cancelled")
+        assert keyword_tags(client) == {"state": "stopped", "job_id": job_id}
+        worker.start()
+        assert client.post(f"/jobs/{job_id}/resume", json={"confirm": True}).status_code == 202
+        assert wait(client, job_id)["status"] == "done"
+        terms = db.get_vocabulary(conn, "c")
+        assert terms and keyword_tags(client) == {"state": "built", "terms": len(terms)}
+        worker.stop()
+        later = db.create_job(conn, "tag_build", "c", {})  # building outranks built
+        assert keyword_tags(client)["state"] == "building"
+        db.update_job(conn, later, status="interrupted")  # and so does stopped
+        assert keyword_tags(client) == {"state": "stopped", "job_id": later}
+        db.update_job(conn, later, status="done")
+        assert keyword_tags(client)["state"] == "built"
+
+
+# -- chat from your own app --------------------------------------------------------------
+
+BRIEF_KEYS = {"n", "answer", "citations", "passages", "passages_only", "error", "usd"}
+PASSAGE_KEYS = {"n", "store", "id", "text", "source", "part", "parts", "relevance"}
+
+
+def brief(client, chat_id, content="enzyme rate", **body):
+    r = client.post(f"/chats/{chat_id}/messages?brief=true", json={"content": content, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_new_chat_takes_stores_or_from(client):
+    add_collection(client)
+    first = new_chat(client)
+    r = client.post("/chats", json={"from": first["id"]})
+    assert r.status_code == 201 and r.json()["stores"] == ["c"]
+    r = client.post("/chats", json={"from": first["id"], "title": "Bot"})
+    assert r.status_code == 201 and r.json()["title"] == "Bot"
+    r = client.post("/chats", json={})
     assert r.status_code == 422
-    db.set_default_eval_set(conn, "c", None)
-    r = client.post("/routing/eval", json={"stores": ["c", "d"]})
-    assert r.status_code == 422 and "eval set" in r.json()["detail"]
+    assert r.json()["detail"] == "a chat needs stores, or from: a chat to copy"
+    r = client.post("/chats", json={"stores": ["c"], "from": first["id"]})
+    assert r.status_code == 422 and r.json()["detail"] == "send stores or from, not both"
+    assert client.post("/chats", json={"from": "nope"}).status_code == 404
+    assert client.post("/chats", json={"stores": ["c"], "routing": "all"}).status_code == 422
+
+
+def test_brief_reply_is_the_answer_citations_and_passages(client):
+    add_collection(client)
+    chat = new_chat(client)
+    one = brief(client, chat["id"])
+    assert set(one) == BRIEF_KEYS and one["n"] == 1
+    assert one["answer"] and one["passages_only"] is False and one["error"] is None
+    assert one["passages"] and all(set(p) == PASSAGE_KEYS for p in one["passages"])
+    saved = client.get(f"/chats/{chat['id']}").json()["messages"][-1]["attempts"][0]
+    assert one["citations"] == saved["citations"] and one["usd"] == saved["usd"]
+    for p, e in zip(one["passages"], saved["evidence"], strict=True):
+        assert (p["id"], p["relevance"]) == (e["id"], e["relevance"])
+
+
+def test_brief_reply_without_an_answer_model_is_passages_only(client):
+    add_collection(client)
+    chat = new_chat(client)
+    client.app.state.ai.set_role("default", None)
+    one = brief(client, chat["id"])
+    assert one["answer"] is None and one["passages_only"] is True and one["error"] is None
+    assert one["citations"] == [] and one["passages"] and one["usd"] == 0
+
+
+def test_brief_reply_on_a_chat_with_a_deleted_store_answers_from_the_rest(client):
+    add_collection(client)
+    add_collection(client, name="d")
+    first = new_chat(client, stores=("c", "d"))
+    copy = client.post("/chats", json={"from": first["id"]}).json()
+    assert client.delete("/collections/d").status_code == 204
+    one = brief(client, copy["id"])
+    assert one["passages"] and {p["store"] for p in one["passages"]} == {"c"}
+    attempt = client.get(f"/chats/{copy['id']}").json()["messages"][0]["attempts"][0]
+    assert next(d for d in attempt["decisions"] if d["store"] == "d")["note"] == "deleted"
+
+
+def test_brief_reply_on_an_empty_documents_store_has_no_passages(client):
+    add_documents(client)
+    chat = new_chat(client)
+    one = brief(client, chat["id"])
+    assert one["passages"] == [] and one["error"] is None
+
+
+def test_brief_reply_with_answer_false_is_passages_only(client):
+    add_collection(client)
+    chat = new_chat(client)
+    one = brief(client, chat["id"], answer=False)
+    assert one["answer"] is None and one["passages_only"] is True and one["error"] is None
+    assert one["passages"] and one["usd"] == 0
+
+
+def test_messages_without_brief_keep_the_full_reply(client):
+    add_collection(client)
+    chat = new_chat(client)
+    for query in ("", "?brief=false"):
+        r = client.post(f"/chats/{chat['id']}/messages{query}", json={"content": "enzyme rate"})
+        (attempt,) = r.json()["attempts"]
+        assert {"decisions", "evidence", "pipeline"} <= set(attempt)

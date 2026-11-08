@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -53,7 +55,8 @@ def test_text_file_is_one_row(tmp_path):
     p = write(tmp_path / "n.md", "# Title\nbody")
     fmt, rows, _ = imports.read_rows(p, "n.md")
     assert fmt == "text"
-    assert rows == [{"file": "n.md", "text": "# Title\nbody"}]
+    text, one = "# Title\nbody", {"file": "n.md", "part": 1, "parts": 1}
+    assert rows == [{"file": f"n.md#{sha(text)}", "text": text, "meta": one}]
 
 
 def test_zip_reads_text_members_only(tmp_path):
@@ -66,7 +69,11 @@ def test_zip_reads_text_members_only(tmp_path):
         z.writestr("pic.png", b"\x89PNG")
     fmt, rows, problems = imports.read_rows(p, "a.zip")
     assert fmt == "zip"
-    assert {r["file"]: r["text"] for r in rows} == {"top.txt": "alpha", "docs/inner.md": "beta"}
+    assert {r["meta"]["file"]: r["text"] for r in rows} == {
+        "top.txt": "alpha",
+        "docs/inner.md": "beta",
+    }
+    assert [r["file"] for r in rows] == [f"top.txt#{sha('alpha')}", f"docs/inner.md#{sha('beta')}"]
     assert len(problems) == 1 and "1" in problems[0]
 
 
@@ -524,14 +531,16 @@ def test_a_long_text_file_reads_as_one_row_per_chunk(tmp_path):
     fmt, rows, _ = imports.read_rows(p, "x.md")
     assert fmt == "text" and len(rows) > 2
     n = len(rows)
-    assert [r["file"] for r in rows] == [f"x.md#{i}" for i in range(1, n + 1)]
+    ids = [f"x.md#{sha(r['text'])}" for r in rows]
+    assert [r["file"] for r in rows] == ids and len(set(ids)) == n
     assert [r["meta"] for r in rows] == [
         {"file": "x.md", "part": i, "parts": n} for i in range(1, n + 1)
     ]
     mapping = imports.guess_mapping(imports.columns(rows), "items")
     assert mapping["id"] == "file" and mapping["meta"] == "meta"
     items, _ = imports.build_items(rows, mapping)
-    assert [i.id for i in items] == [f"x.md#{i}" for i in range(1, n + 1)]
+    assert [i.id for i in items] == ids
+    assert [i.text for i in items] == [r["text"] for r in rows]  # what is hashed is stored
     assert items[1].meta == {"file": "x.md", "part": 2, "parts": n}
     assert imports.text_files(rows) == {"x.md"}
 
@@ -542,12 +551,15 @@ def test_a_long_text_file_inside_a_zip_is_chunked_too(tmp_path):
         z.writestr("docs/long.txt", "x" * 4000)
         z.writestr("short.md", "beta")
     _, rows, _ = imports.read_rows(p, "x.zip")
+    # 4,000 x's cut hard: the first two pieces are the same text, so the second is numbered
+    first, _, last, short = (sha(r["text"]) for r in rows)
     assert [r["file"] for r in rows] == [
-        "docs/long.txt#1",
-        "docs/long.txt#2",
-        "docs/long.txt#3",
-        "short.md",
+        f"docs/long.txt#{first}",
+        f"docs/long.txt#{first}-2",
+        f"docs/long.txt#{last}",
+        f"short.md#{short}",
     ]
+    assert [r["meta"]["part"] for r in rows] == [1, 2, 3, 1]
     assert imports.text_files(rows) == {"docs/long.txt", "short.md"}
 
 
@@ -602,7 +614,101 @@ def test_chunk_text_one_chunk_needs_no_room_for_a_breadcrumb():
 def test_a_one_chunk_text_file_is_never_longer_than_a_chunk(tmp_path):
     text = ("para. " * 40 + "\n\n\n\n") * 6 + "\n" * 200  # over 1,500 only by its padding
     assert len(text) > 1500 and len(text.strip()) <= 1500
+    one = {"file": "w.txt", "part": 1, "parts": 1}
     rows = imports.text_rows("w.txt", text)
-    assert rows == [{"file": "w.txt", "text": text.strip()}]
-    assert imports.text_rows("w.txt", "short\n") == [{"file": "w.txt", "text": "short\n"}]
-    assert imports.text_rows("w.txt", "  ") == [{"file": "w.txt", "text": "  "}]
+    assert rows == [{"file": f"w.txt#{sha(text.strip())}", "text": text.strip(), "meta": one}]
+    assert imports.text_rows("w.txt", "short\n") == [
+        {"file": f"w.txt#{sha('short')}", "text": "short", "meta": one}
+    ]
+    # a blank file is still one row, with no text: build_items counts it as no_text
+    blank = imports.text_rows("w.txt", "  ")
+    assert blank == [{"file": f"w.txt#{sha('')}", "text": "", "meta": one}]
+    assert (
+        imports.build_items(blank, imports.guess_mapping(["file", "text", "meta"], "items"))[1][
+            "no_text"
+        ]
+        == 1
+    )
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def test_text_rows_ids_are_the_file_and_a_hash_of_the_text():
+    text = f"# A\n\n{sentences(25, 'a')}\n\n# B\n\n{sentences(25, 'b')}"
+    rows = imports.text_rows("a.md", text)
+    assert len(rows) == 2
+    for row in rows:
+        assert re.fullmatch(r"a\.md#[0-9a-f]{12}", row["file"])
+        assert row["file"] == "a.md#" + hashlib.sha256(row["text"].encode()).hexdigest()[:12]
+        assert row["text"] == row["text"].strip() and row["text"].startswith("a.md › ")
+    [one] = imports.text_rows("a.md", "\n  a short note\n")
+    assert one["text"] == "a short note" and one["file"] == f"a.md#{sha('a short note')}"
+    assert one["meta"] == {"file": "a.md", "part": 1, "parts": 1}
+
+
+def test_a_repeated_passage_in_one_file_gets_a_numbered_id():
+    section = f"# Note\n\n{sentences(25, 'n')}"
+    rows = imports.text_rows("a.md", f"{section}\n\n{section}\n\n# End\n\n{sentences(25, 'e')}")
+    assert len(rows) == 3 and rows[0]["text"] == rows[1]["text"]
+    h = sha(rows[0]["text"])
+    assert [r["file"] for r in rows] == [f"a.md#{h}", f"a.md#{h}-2", f"a.md#{sha(rows[2]['text'])}"]
+    seen: dict[str, int] = {}
+    assert [imports.chunk_id("b.md", t, seen) for t in ("x", "y", "x", "x")] == [
+        f"b.md#{sha('x')}",
+        f"b.md#{sha('y')}",
+        f"b.md#{sha('x')}-2",
+        f"b.md#{sha('x')}-3",
+    ]
+
+
+def test_a_text_file_that_is_not_utf8_is_refused_by_name(tmp_path):
+    message = "notes.txt is not UTF-8 text; save it as UTF-8 and upload it again"
+    p = write(tmp_path / "notes.txt", "café".encode("cp1252"))
+    with pytest.raises(ValueError) as e:
+        imports.read_rows(p, "notes.txt")
+    assert str(e.value) == message
+    zipped = tmp_path / "x.zip"
+    with zipfile.ZipFile(zipped, "w") as z:
+        z.writestr("ok.md", "fine")
+        z.writestr("docs/notes.txt", "café".encode("cp1252"))
+    with pytest.raises(ValueError) as e:
+        imports.read_rows(zipped, "x.zip")
+    assert str(e.value) == f"docs/{message}"
+    # JSON keeps replacing a bad byte, as the benchmark files need
+    bad = write(tmp_path / "a.json", b'[{"text": "caf\xe9"}]')
+    assert imports.read_rows(bad, "a.json")[1] == [{"text": "caf\ufffd"}]
+
+
+def test_a_utf8_bom_is_not_part_of_the_first_chunk(tmp_path):
+    p = write(tmp_path / "a.md", "\ufeff# Title\n\nbody".encode())
+    [row] = imports.read_rows(p, "a.md")[1]
+    assert row["text"] == "# Title\n\nbody" and row["file"] == f"a.md#{sha(row['text'])}"
+    assert imports.decode_text("\ufeffhi".encode(), "a.md") == "hi"
+
+
+def test_a_documents_eval_set_imports_gold_ids_without_answers(tmp_path):
+    assert imports.required("questions", "documents") == ("text",)
+    rows = [
+        {"text": "how do I reset my password", "gold_ids": "a.md#0123456789ab|a.md#ba9876543210"},
+        {"text": "who approves leave", "gold_ids": ["b.md#00000000000a"]},
+    ]
+    path = tmp_path / "set.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+    shown = imports.preview(path, "set.jsonl", "questions", "documents")
+    assert shown["missing"] == [] and shown["usable"] == 2 and shown["ready"]
+    built, report = imports.build_questions(rows, shown["mapping"], "documents")
+    assert [q.gold_ids for q in built] == [
+        ["a.md#0123456789ab", "a.md#ba9876543210"],
+        ["b.md#00000000000a"],
+    ]
+    assert all(q.gold_answers == [] for q in built) and report["no_answer"] == 0
+    for other in ("multihop", "table"):  # the reference types still need an answer
+        assert imports.preview(path, "set.jsonl", "questions", other)["missing"] == ["answer"]
+        kept, report = imports.build_questions(rows, shown["mapping"], other)
+        assert kept == [] and report["no_answer"] == 2
+    answered = [{**rows[0], "answer": "Settings, then Reset"}]
+    mapping = {**shown["mapping"], "answer": "answer"}
+    [q], _ = imports.build_questions(answered, mapping, "documents")
+    assert q.gold_answers == ["Settings, then Reset"]

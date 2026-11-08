@@ -176,6 +176,14 @@ def test_refuses_while_a_job_works_on_the_collection(tmp_path):
         run(tmp_path, hub, builder)
 
 
+def test_refuses_while_a_switch_stopped_part_way(tmp_path):
+    conn, builder, hub = built(tmp_path)
+    job = create_job(conn, "reembed", "aops", {"model": "fake/small", "switching": True})
+    update_job(conn, job, status="interrupted")
+    with pytest.raises(Refused, match="switching to fake/small"):
+        run(tmp_path, hub, builder)
+
+
 def published_text(files: dict) -> str:
     """Every published file as text, parquet decoded (its pages are compressed)."""
     return "\n".join(

@@ -298,6 +298,100 @@ def conn(tmp_path):
     return connect(tmp_path / "q.db")
 
 
+OLD_STORE_BARS = """
+create table if not exists store_bars (
+  collection text not null, kind text not null default 'gate', key text not null,
+  value real, n integer not null, computed_at text not null,
+  primary key (collection, kind)
+);
+"""
+
+OLD_COLLECTION_COLUMNS = (
+    "corpus_type",
+    "recipe",
+    "build_json",
+    "search_json",
+    "vocabulary_version",
+    "profile_json",
+    "eval_set",
+    "chat_method",
+    "chat_bar",
+    "chat_k",
+    "route_profile",
+)
+
+
+def test_an_old_database_drops_store_bars_and_migrates_chat_settings(tmp_path):
+    path = tmp_path / "r.db"
+    old = sqlite3.connect(path)
+    old.executescript(db.SCHEMA + OLD_STORE_BARS)
+    for column in OLD_COLLECTION_COLUMNS:
+        old.execute(f"alter table collections add column {column} text")
+    old.execute(
+        "insert into collections (name, qa_type, summarize, dense_model, dense_dim,"
+        " created_at, recipe, chat_k) values ('c', 'multihop', 0, 'm', 8, 'now', 'paper_2024', '5')"
+    )
+    old.execute("insert into store_bars values ('c', 'gate', 'k', 0.5, 20, 'now')")
+    for chat_id, settings in (
+        ("A", {"evidence_size": 8, "rewrite": False, "routing": "profiles"}),
+        ("B", {"evidence_size": 5, "rewrite": True, "routing": "all"}),
+    ):
+        old.execute(
+            "insert into chats values (?, 'chat', '[\"c\"]', ?, 'now', 'now')",
+            (chat_id, json.dumps(settings)),
+        )
+    old.commit()
+    old.close()
+
+    conn = connect(path)
+    assert not conn.execute("select 1 from sqlite_master where name = 'store_bars'")
+    chat_a, chat_b = db.get_chat(conn, "A"), db.get_chat(conn, "B")
+    assert chat_a is not None and chat_b is not None
+    assert chat_a["settings"] == {"evidence_size": None, "rewrite": None}
+    assert chat_b["settings"] == {"evidence_size": 5, "rewrite": True}
+    assert db.get_chat_k(conn, "c") is None  # it now means candidates per store
+
+    db.set_chat_k(conn, "c", 5)
+    connect(path)  # a second connect leaves it alone: it runs once
+    assert db.get_chat(conn, "B") == chat_b
+    assert db.get_chat_k(conn, "c") == 5
+
+
+def test_a_rerun_of_the_routing_migration_keeps_newer_chat_settings(tmp_path):
+    settings = {
+        "evidence_size": 8,
+        "rewrite": False,
+        "rerank": True,
+        "stores": {"c": {"method": "vector", "candidates": None}},
+    }
+    # A fresh database, and one migrated from before chat searched every store.
+    fresh, old = tmp_path / "fresh.db", tmp_path / "old.db"
+    connect(fresh)
+    legacy = sqlite3.connect(old)
+    legacy.executescript(db.SCHEMA + OLD_STORE_BARS)
+    legacy.commit()
+    legacy.close()
+    connect(old)
+    for path in (fresh, old):
+        conn = connect(path)
+        assert db.get_app_settings(conn, "schema.") == {"routing_dropped": True}
+        conn.execute(
+            "insert into collections (name, qa_type, summarize, dense_model, dense_dim,"
+            " created_at) values ('c', 'multihop', 0, 'm', 8, 'now')"
+        )
+        db.set_chat_k(conn, "c", 12)
+        conn.execute(
+            "insert into chats values ('A', 'chat', '[\"c\"]', ?, 'now', 'now')",
+            (json.dumps({**settings, "routing": "all"}),),
+        )
+        conn.execute(OLD_STORE_BARS)  # as an older build makes it again on this database
+        connect(path)
+        chat = db.get_chat(conn, "A")
+        assert chat is not None and chat["settings"] == settings, path.name
+        assert db.get_chat_k(conn, "c") == 12, path.name
+        assert not conn.execute("select 1 from sqlite_master where name = 'store_bars'")
+
+
 def test_claim_takes_the_oldest_queued_job_by_insertion(conn):
     a = create_job(conn, "load", "c", {})
     b = create_job(conn, "eval", "c", {})
@@ -944,3 +1038,84 @@ def test_migration_pins_runs_a_step_left_unpinned(tmp_path):
         "eval_set_version": first_version,
     }
     assert get_job(conn, pinned)["setup"] == {"eval_set": "c", "eval_set_version": "v"}
+
+
+def test_chat_attempts_from_before_search_error_migrate_and_answer(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table chat_attempts (
+          chat_id text not null, n integer not null, attempt integer not null,
+          search_text text not null, decisions_json text not null, evidence_json text not null,
+          answer text, citations_json text not null, usd real not null, error text,
+          model text, created_at text not null, primary key (chat_id, n, attempt)
+        );
+        insert into chat_attempts
+          values ('c', 1, 1, 's', '[]', '[]', null, '[]', 0, 'x', null, 't');
+        """
+    )
+    old.commit()
+    old.close()
+    conn = connect(path)
+    row = {"search_text": "s", "decisions": [], "evidence": [], "answer": None, "citations": []}
+    row.update(usd=0.0, search_error="the note", error="the note; failed", model=None)
+    assert db.add_chat_attempt(conn, "c", 1, row) == 2
+    answered = {"answer": "yes", "citations": [], "usd": 0.5, "error": None, "model": "m"}
+    assert db.answer_chat_attempt(conn, "c", 1, 1, answered)  # an old row has no note
+    assert db.answer_chat_attempt(conn, "c", 1, 2, answered)
+    assert not db.answer_chat_attempt(conn, "c", 1, 2, answered)  # answered: nothing written
+    got = db.chat_attempts(conn, "c", 1)
+    assert [(a["answer"], a["error"]) for a in got] == [("yes", None), ("yes", "the note")]
+
+
+def test_chat_attempts_from_before_the_pipeline_read_with_no_pipeline(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        create table chat_attempts (
+          chat_id text not null, n integer not null, attempt integer not null,
+          search_text text not null, decisions_json text not null, evidence_json text not null,
+          answer text, citations_json text not null, usd real not null, error text,
+          model text, created_at text not null, search_error text,
+          primary key (chat_id, n, attempt)
+        );
+        insert into chat_attempts
+          values ('c', 1, 1, 's', '[]', '[]', 'old', '[]', 0, null, 'm', 't', null);
+        """
+    )
+    old.commit()
+    old.close()
+    conn = connect(path)
+    row = {"search_text": "s", "decisions": [], "evidence": [], "answer": None, "citations": []}
+    row.update(usd=0.0, search_error=None, error=None, model=None)
+    assert db.add_chat_attempt(conn, "c", 1, row) == 2  # an old-shape row: no pipeline
+    pipeline = {"merged_by": "rerank", "pool": 3, "notes": []}
+    assert db.add_chat_attempt(conn, "c", 1, {**row, "pipeline": pipeline}) == 3
+    got = db.chat_attempts(conn, "c", 1)
+    assert [a["pipeline"] for a in got] == [None, None, pipeline]
+
+
+def test_switching_model_reads_the_newest_unfinished_switch(conn):
+    assert db.switching_model(conn, "c") is None
+    job = create_job(conn, "reembed", "c", {"model": "m", "switching": True})
+    update_job(conn, job, status="interrupted")
+    assert db.switching_model(conn, "c") == "m"
+    assert db.switching_model(conn, "other") is None
+    update_job(conn, job, status="done")
+    assert db.switching_model(conn, "c") is None
+    update_job(conn, create_job(conn, "reembed", "c", {"model": "n"}), status="interrupted")
+    assert db.switching_model(conn, "c") is None
+
+
+def test_set_dense_model_changes_only_the_model_and_dimension(conn):
+    save_collection(conn, SPEC)
+    db.set_dense_model(conn, SPEC.name, "fake/small", 64)
+    spec = get_collection(conn, SPEC.name)
+    assert spec is not None and (spec.dense_model, spec.dense_dim) == ("fake/small", 64)
+    assert spec.keyword_version == SPEC.keyword_version and spec.qa_type == SPEC.qa_type
+
+
+def test_a_rebuild_is_an_item_job():
+    assert "reembed" in db.ITEM_JOBS

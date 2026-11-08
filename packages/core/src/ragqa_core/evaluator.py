@@ -15,7 +15,7 @@ from aiconnect.ai import (
     Cancelled,
     NoConnection,
 )
-from ragqa_core import db, imports, verdict
+from ragqa_core import db, imports, search_defaults, verdict
 from ragqa_core.builder import TAG_TOKENS, build_of
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
@@ -23,6 +23,7 @@ from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
 from ragqa_core.metrics import (
     bootstrap_ci,
     cosine,
+    mrr_at,
     ndcg_at,
     recall_at,
     science_correct,
@@ -33,6 +34,7 @@ from ragqa_core.metrics import (
 from ragqa_core.models import Models
 from ragqa_core.program import program_answer
 from ragqa_core.prompts import (
+    CHAT_TOKENS,
     QUERY_TASK,
     SUMMARY_TOKENS,
     answer_line,
@@ -43,20 +45,26 @@ from ragqa_core.prompts import (
     summary_prompt,
 )
 from ragqa_core.recipes import search_settings
-from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, Retriever
+from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, POOL, Retriever
 from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question, SearchSettings
 
 # What worked collections whose questions name relevant items (BRIGHT) gain, measured
 # GOLD_DEPTH deep: how high the relevant examples rank, and how many of them come first.
 GOLD_ID_METRICS = ("ndcg@10", "recall@1")
 GOLD_DEPTH = 10
+# A Documents store's runs, all measured GOLD_DEPTH deep (spec I9).
+DOCUMENTS_METRICS = ("ndcg@10", "recall@10", "mrr@10")
+# The reranker every run used before runs recorded one: a resumed old run keeps it.
+LEGACY_RERANK_MODEL = "BAAI/bge-reranker-v2-m3-int8"
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
+    "documents": DOCUMENTS_METRICS,
     "mcq": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
     "science": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
     "multihop": ("recall@2", "recall@5"),
     "table": ("recall@1", "recall@3"),
 }
 ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
+    "documents": (),  # retrieval only until its answers are judged
     "mcq": ("accuracy",),
     "science": ("accuracy",),
     "multihop": ("em", "f1"),
@@ -65,11 +73,13 @@ ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
 # What counts as a retrieval miss when a run has no answers: a binary metric,
 # because the continuous solution similarity is practically never exactly 0.
 MISS_METRIC: dict[QaType, str] = {
+    "documents": "recall@10",
     "mcq": "same_skill@1",
     "science": "same_skill@1",
     "multihop": "recall@2",
     "table": "recall@1",
 }
+# None for documents: its runs are refused answers, and this is read only for a run with them.
 PAIR_ANSWER_METRIC: dict[QaType, str] = {
     "mcq": "accuracy",
     "science": "accuracy",
@@ -77,7 +87,13 @@ PAIR_ANSWER_METRIC: dict[QaType, str] = {
     "table": "f1",
 }
 # Multi-step science working runs long; a reply cut off before its Answer line scores wrong.
-ANSWER_TOKENS: dict[QaType, int] = {"mcq": 400, "science": 1500, "multihop": 100, "table": 100}
+ANSWER_TOKENS: dict[QaType, int] = {
+    "documents": CHAT_TOKENS,
+    "mcq": 400,
+    "science": 1500,
+    "multihop": 100,
+    "table": 100,
+}
 # A plan and a program do not fit in a short answer's budget.
 PROGRAM_TOKENS = 600
 ESTIMATE_SAMPLE = 5
@@ -111,10 +127,15 @@ def example_form(qa_type: QaType, shown: list[Hit], example: str) -> str | None:
 
 def retrieval_depth(qa_type: QaType, q: Question, k: int) -> int:
     """How many hits a question keeps: k, or GOLD_DEPTH when its gold ids score a worked
-    collection's ranking. Passage types keep k, since every hit kept is shown to the answerer."""
-    return max(k, GOLD_DEPTH) if qa_type in EXAMPLE_TYPES and q.gold_ids else k
+    collection's or a Documents store's ranking. The other passage types keep k, since every
+    hit kept is shown to the answerer; a Documents run has no answerer."""
+    deep = qa_type in EXAMPLE_TYPES or qa_type == "documents"
+    return max(k, GOLD_DEPTH) if deep and q.gold_ids else k
 
 
+ANSWERS_LATER = (
+    "Documents runs score retrieval only for now; answer judging comes with Documents eval sets"
+)
 NOTHING_TO_MEASURE = (
     "nothing to measure: this store holds none of the eval set's evidence;"
     " have the AI answer, or choose another store"
@@ -238,7 +259,11 @@ class Evaluator:
         """The set's imported or hand-written questions whose text sits inside one of the
         store's items; the built-in datasets' questions are never checked, so a set of only
         those needs no scan of the store. The scan is kept until the store's item count or the
-        set's version changes: the store page asks for it on every poll."""
+        set's version changes: the store page asks for it on every poll. A Documents store's
+        questions are never leaked: they are asked of the team's own passages, so a question
+        whose words sit in one is expected (spec I11)."""
+        if spec.qa_type == "documents":
+            return set()
         found = db.get_eval_set(self.conn, eval_set)
         version = found["version"] if found else None
         count = self.retriever.store.count(spec.name)
@@ -486,6 +511,8 @@ class Evaluator:
         rrf_k: int = 60,
         search: dict | None = None,
         eval_set: str | None = None,
+        rerank_pool: int = POOL,
+        rerank_model: str | None = None,
     ) -> str:
         """Queue a run of the eval set (the store's default when None) with the request only;
         the rest of its setup is recorded when it runs. `search` overrides the collection's
@@ -493,7 +520,11 @@ class Evaluator:
         spec = self.retriever.spec(collection)
         if not methods:
             raise ValueError("choose at least one method")
+        if spec.qa_type == "documents" and answer:
+            raise ValueError(ANSWERS_LATER)  # its answers have no metric yet
         search_settings(spec.search or SearchSettings(), search)
+        if rerank_model not in (None, self.models.rerank_model):
+            search_defaults.check("rerank_model", rerank_model)
         name = self._chosen_set(spec, eval_set)
         questions = self._questions(spec, {"split": split, "eval_set": name})
         if not questions:
@@ -511,7 +542,16 @@ class Evaluator:
             "rrf_k": rrf_k,
             "search": search or {},
             "eval_set": name,
+            "rerank_pool": rerank_pool,
         }
+        if "hybrid_rerank" in methods:
+            # The one Setting a run reads, resolved now so a repeat or resume uses the same one.
+            saved = search_defaults.in_force(self.conn)["rerank_model"]
+            setup["rerank_model"] = (
+                rerank_model
+                or (saved if isinstance(saved, str) else None)
+                or self.models.rerank_model
+            )
         return db.create_job(self.conn, "eval", collection, setup)
 
     def _record_setup(self, job_id: str, spec: CollectionSpec, setup: dict) -> dict:
@@ -534,7 +574,9 @@ class Evaluator:
         include = db.get_include_leaked(self.conn, name) if name else False
         setup = {
             "dense_model": spec.dense_model,
-            "query_instruction": self.models.query_instruction(QUERY_TASK[spec.qa_type]),
+            "query_instruction": self.models.query_instruction(
+                QUERY_TASK[spec.qa_type], spec.dense_model
+            ),
             "judge_model": self.models.judge_model,
             "keyword_version": spec.keyword_version,
             "vocabulary_version": spec.vocabulary_version,
@@ -687,6 +729,8 @@ class Evaluator:
                     search,
                     tags,
                     excluded,
+                    pool=setup.get("rerank_pool", POOL),
+                    rerank_model=setup.get("rerank_model", LEGACY_RERANK_MODEL),
                 )
             )
             if n % 10 == 0 and n < len(questions):
@@ -794,6 +838,12 @@ class Evaluator:
                     metrics["recall@1"] = recall_at(ids, q.gold_ids, 1)
             elif not q.gold_ids or set(q.gold_ids) <= off:
                 metrics = {}  # nothing to find: absent, never 0
+            elif spec.qa_type == "documents":
+                metrics = {
+                    "ndcg@10": ndcg_at(ids, q.gold_ids, GOLD_DEPTH),
+                    "recall@10": recall_at(ids, q.gold_ids, GOLD_DEPTH),
+                    "mrr@10": mrr_at(ids, q.gold_ids, GOLD_DEPTH),
+                }
             else:
                 cuts = (2, 5) if spec.qa_type == "multihop" else (1, 3)
                 metrics = {f"recall@{c}": recall_at(ids, q.gold_ids, c) for c in cuts}

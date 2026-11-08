@@ -30,6 +30,7 @@ METHOD_HINT = {
     " dimensional analysis)",
     "table": "operations (ratio, difference, % change, average, sum, comparison)",
     "multihop": "relation or question types (e.g. birthplace, founding date, membership)",
+    "documents": "tasks or procedures the passages explain (e.g. setup, approval, troubleshooting)",
 }
 # What a dense query is looking for, for embedding models trained with a task
 # instruction on the query side (Models.query_instruction).
@@ -38,6 +39,7 @@ QUERY_TASK: dict[QaType, str] = {
     "science": "Given a science problem, retrieve a solved problem that needs the same reasoning",
     "multihop": "Given a multi-hop question, retrieve passages with the facts needed to answer it",
     "table": "Given a financial question, retrieve the table and text needed to compute the answer",
+    "documents": "Given a question, retrieve passages that answer it",
 }
 
 

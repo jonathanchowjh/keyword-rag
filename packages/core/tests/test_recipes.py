@@ -6,9 +6,10 @@ from ragqa_core.recipes import (
     build_settings,
     corpus_type_for,
     default_search,
+    recipes_for,
     search_settings,
 )
-from ragqa_core.types import SearchSettings
+from ragqa_core.types import CollectionSpec, SearchSettings
 
 
 def test_recipes_match_spec_table():
@@ -39,6 +40,40 @@ def test_recipes_match_spec_table():
         "similarity",
     )
     assert (p.abstracted, p.classifier, p.profile) == (False, False, True)
+
+
+def test_documents_recipe_builds_nothing_and_tagged_builds():
+    from ragqa_core.builder import builds
+
+    d, t = RECIPES["documents"], RECIPES["documents_tagged"]
+    assert d == t  # only the name differs, and builds() reads it
+    assert (d.units, d.added_text, d.vocabulary, d.describes, d.tagging) == (
+        "whole",
+        "none",
+        "induced",
+        "text",
+        "similarity",
+    )
+    assert (d.abstracted, d.classifier, d.profile) == (False, False, False)
+
+    def spec(recipe: str) -> CollectionSpec:
+        return CollectionSpec("d", "documents", False, "fake/dense", 4, recipe=recipe)
+
+    assert builds(spec("documents")) is False and builds(spec("documents_tagged")) is True
+    assert builds(spec("paper_2024")) is False and builds(spec("reference")) is True
+
+
+def test_each_type_takes_its_own_recipes():
+    assert recipes_for("documents") == ("documents", "documents_tagged")
+    for t in ("science", "mcq", "multihop", "table"):
+        assert recipes_for(t) == ("worked_examples", "reference", "paper_2024")
+
+
+def test_a_documents_store_is_reference_searched_with_full_text_and_no_program():
+    assert corpus_type_for("documents") == "reference"
+    for recipe in ("documents", "documents_tagged"):
+        s = default_search("documents", RECIPES[recipe])
+        assert (s.program, s.query_tags, s.example) == (False, "similarity", "full")
 
 
 def test_corpus_type_by_qa_type():

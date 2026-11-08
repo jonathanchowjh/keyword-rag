@@ -3,6 +3,10 @@ import { $, BUSY, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, bet
   pill, plural, pts, refreshSpend, shell, short, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
+// What a hybrid_rerank run recorded before runs recorded its reranker and pool: it used these
+// (evaluator.LEGACY_RERANK_MODEL and retriever.POOL), and a resume or repeat keeps them.
+const LEGACY_RERANK_MODEL = "BAAI/bge-reranker-v2-m3-int8";
+const LEGACY_RERANK_POOL = 50;
 const STATE_TEXT = { ahead: "ahead", cant_tell: "can't tell", behind: "behind" };
 
 const parts = location.pathname.split("/");
@@ -22,6 +26,10 @@ const metric = (m) => metricLabel(m, qaType, cat);
 const says = (m) => metricSays(m, qaType, cat);
 const method = (m) => methodLabel(m, cat);
 const isControl = (m) => cat.methods[m]?.group === "control";
+// The reranker and pool a hybrid_rerank run used; null for a run without hybrid_rerank.
+const reranked = (s) => s.methods.includes("hybrid_rerank")
+  ? { model: s.rerank_model ?? LEGACY_RERANK_MODEL, pool: s.rerank_pool ?? LEGACY_RERANK_POOL }
+  : null;
 // Lists joined; settings (a run's search) as "name value" pairs, a nested one in brackets.
 const show = (v) =>
   Array.isArray(v) ? v.join(" · ")
@@ -36,6 +44,8 @@ const rawScale = () => run.scale?.unit === "raw";
 function headHtml() {
   const s = run.setup;
   const model = s.answer ? s.model : "retrieval only";
+  const r = reranked(s);
+  const reranker = r ? [`reranker ${r.model.split("/").pop()}, pool ${r.pool}`] : [];
   const progress = run.status === "running" ? ` ${pct(run.progress)}` : "";
   const since = run.since.untracked
     ? ' · <span class="muted">recorded before settings were tracked</span>'
@@ -49,7 +59,7 @@ function headHtml() {
   return head({
     title: `Run ${short(id)}`,
     crumb: [{ label: "Stores", href: "/" }, { label: name, href: `/c/${enc}` }, "Runs"],
-    aside: [clock(run.created_at), model, asked, usd(run.usd_total)].map(esc).join(" · ") +
+    aside: [clock(run.created_at), model, ...reranker, asked, usd(run.usd_total)].map(esc).join(" · ") +
       `${evalSet} · ${pill(run.status)}${esc(progress)}${since}`,
   }) + failed;
 }
@@ -389,8 +399,10 @@ async function rerun() {
   say("");
   // The recorded search settings too, so the repeat is this run, not today's defaults.
   const { collection, split, methods, answer, model, k, rrf_k, search, eval_set } = run.setup;
+  const r = reranked(run.setup);
   const request = { collection, split, methods, answer, model, k, rrf_k, ...(search ? { search } : {}),
-    ...(eval_set ? { eval_set } : {}) };
+    ...(eval_set ? { eval_set } : {}),
+    ...(r ? { rerank_model: r.model, rerank_pool: r.pool } : {}) };
   try {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
     confirmSpend($("act-confirm"), estimate, async () => {

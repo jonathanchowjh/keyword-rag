@@ -30,11 +30,13 @@ local.
 - [The paper](#the-paper)
 - [Quick start](#quick-start)
 - [First run](#first-run)
+- [Your own documents](#your-own-documents)
 - [Your own corpus](#your-own-corpus)
 - [Recipes](#recipes)
 - [Retrieval methods](#retrieval-methods)
 - [Answering](#answering)
-- [Chat across stores](#chat-across-stores)
+- [Chat](#chat)
+- [Search defaults](#search-defaults)
 - [Datasets](#datasets)
 - [AI connections](#ai-connections)
 - [Configuration](#configuration)
@@ -199,6 +201,48 @@ Docker on macOS cannot use the Apple GPU, so embedding runs on the CPU. The
 first load of MuSiQue's 11,656 passages takes roughly 10–20 minutes. After
 that, everything is kept in the `ragqa` and `qdrant` volumes.
 
+## Your own documents
+
+The New store form defaults to a Documents store (`POST /collections` still needs
+a `qa_type`). It keeps your passages as you upload them and finds them with no AI.
+Create one on the Stores page, then add files on the store page.
+
+- **Files:** `.md` and `.txt` only, and they must be UTF-8. A `.zip`, a table or
+  JSON lines is refused with `A Documents store takes .md and .txt files`, and a
+  file that is not UTF-8 with `<file> is not UTF-8 text; save it as UTF-8 and upload
+  it again`. Nothing is imported and no character is replaced.
+- **Passages:** each file is split into passages of up to 1,500 characters, at
+  headings first, each starting with a breadcrumb such as `notes.md › Setup ›
+  Install` (the splitting rules are under [Your own corpus](#your-own-corpus)). A
+  file with no text is refused (`no usable rows`).
+- **Ids:** a passage is named `<file>#<12 hex>`, from its text. Add a file again
+  after editing it: a passage that did not change keeps its id and is not embedded
+  again, a changed or new passage is written, and a passage that left the file is
+  deleted. An edit keeps the ids of the other *sections*. Passages are packed
+  greedily within a section, so an edit changes the passages after it in its own
+  section, and a `.txt` is one section. A file that grows past 1,500 characters in
+  all gains breadcrumbs, and its passages take new ids. An eval set's old
+  positional gold ids (such as `x.md#2`), and the gold id of an edited passage, go
+  unmeasured once the file is added again.
+- **Search:** vector, keyword (BM25) and hybrid, with no AI call. `keyword_rag` is
+  off until you **Add keyword tags**.
+- **Add keyword tags** is on the store page. It is paid: an AI proposes a
+  vocabulary from your passages, then each passage is tagged by similarity. You see
+  the estimate first, and nothing is spent until you confirm. Its job switches the
+  store to the `documents_tagged` recipe in place when it starts. If the job stops,
+  **Resume** finishes it (free once the vocabulary is saved); until every passage
+  is tagged, `keyword_rag` stays unavailable with `needs keyword tags: Add keyword
+  tags on the store page`. With no model for `keywords`, the button is refused and
+  the store stays as it was. Once the vocabulary is in force, adding passages to a
+  store that has tags is $0 and needs no AI model: they are tagged by similarity.
+  An import is refused while the job is queued or running.
+- **Runs:** a run scores Recall@10, MRR@10 and nDCG@10 at depth 10, and the head
+  metric is nDCG@10. The leak check is off for a Documents store: a question
+  whose words sit in your passages is expected. A run that asks for answers is
+  refused (`Documents runs score retrieval only for now; answer judging comes with
+  Documents eval sets`). Answer runs come with Documents eval sets. A store with
+  passages and no keyword lists reads Ready.
+
 ## Your own corpus
 
 Any store takes your own items (what is retrieved). Your own questions (what is
@@ -217,16 +261,24 @@ confirm the estimate. A question import on the eval set page
   headings first, then paragraphs and sentences. Code blocks, tables and lists are
   kept whole where they fit; a table cut in two repeats its header row. Each
   passage starts with a breadcrumb such as `notes.md › Setup › Install`, and one
-  under 200 characters is merged into a neighbour. Passage ids are
-  `<file>#1`, `<file>#2`, …, and `meta` holds `{file, part, parts}`. A file that
-  fits in one passage stays one item, named by the file, as it is. Re-adding a
-  file updates its passages by id and deletes, from the same source, the old
-  passages it no longer yields (`<file>` and `<file>#<digits>` only; a file named
-  `a.md#b.md` is not a passage of `a.md`). A passage whose text did not change is
-  not re-indexed when the file gains or loses a passage; its `parts` is rewritten.
-  A section that is only a heading makes no passage: its children's breadcrumbs
-  name it. Splitting means more items: on a store that spends
-  per item (summaries), the add's estimate shows the extra cost.
+  under 200 characters is merged into a neighbour. A file that fits in one passage
+  has no breadcrumb. Text files must be UTF-8 (JSON, CSV and TSV are read leniently,
+  as before). A section that is only a heading makes no passage: its children's
+  breadcrumbs name it. Splitting means more items: on a store that spends per item
+  (summaries), the add's estimate shows the extra cost.
+- **Passage ids name the text:** in every store, a passage is
+  `<file>#<12 hex>`, the first 12 hex digits of the SHA-256 of the passage as stored
+  (breadcrumb included). A text that repeats in one file takes `-2`, `-3`, and so
+  on. `meta` holds `{file, part, parts}` for every text passage, and a file that
+  fits in one passage is `part 1 of 1`. Re-adding a file updates its passages by id,
+  embeds only the new or changed ones, and deletes, from the same source, the old
+  passages it no longer yields: the ids `<file>`, `<file>#<digits>` (the old
+  numbered ids) and `<file>#<12 hex>`, but not a file named `a.md#b.md`, which is
+  not a passage of `a.md`. A store loaded before this change keeps its old ids
+  (`<file>#1`, …, or `<file>` for a short file) until each file is added again, and
+  an eval set's gold ids naming them go unmeasured after that. A passage whose text
+  did not change keeps its id when the file gains or loses a passage; its `parts` is
+  rewritten.
 - **Mapping:** items need `text`; `id`, `answer`, `explanation`, `skill` and
   `topic` are optional. Questions need `text` and `answer` (and `choices` for
   multiple choice), and may carry `gold_ids` (the items that hold the
@@ -295,6 +347,18 @@ curl -X POST http://localhost:8080/eval-sets/notes/imports \
   -d '{"upload_id": "...", "mapping": {"text": "q", "answer": "a"}, "source_name": "qs"}'
 ```
 
+### Rebuild with another model
+
+The store page's **Embedding model** section shows what the store was built with and
+offers another. Rebuilding is a free background job (`reembed`): it embeds every item
+and chunk again on this machine, with progress and Cancel. Search keeps the old model
+until the switch, and the switch itself, a few seconds, refuses search, deleting a
+source and copying. If the job stops, **Resume** carries on: before the switch it embeds again from the start; a stop during the switch resumes the switch. If the copy made for the switch is gone, delete the store and load it again. Lists are re-keyed, but
+tags and the vocabulary are kept, so if the build tags by similarity, re-tag by PUTting
+the vocabulary. A run from before the change is marked `dense model changed` and can't
+be resumed. Until the switch the store holds two copies in Qdrant (`<name>__rebuild`),
+about twice its disk.
+
 ## Recipes
 
 A recipe is a set of build choices, picked when a collection is created
@@ -306,7 +370,12 @@ collection, and `PUT /collections/{name}/search` sets its default search setting
 |---|---|---|
 | `worked_examples` | Solved problems (science, multiple choice) | One unit per item; an induced vocabulary; items tagged by the AI from their solution; abstracted examples; the classifier |
 | `reference` | Passages (multi-hop, tables) | 100-word chunks with 10 words of overlap; the title put before the text; an induced vocabulary; tags by similarity; the classifier |
-| `paper_2024` | The paper's method (the default) | 100-word chunks with 25 words of overlap; the paper's three keyword lists (yours, or AI-proposed) and optional summaries |
+| `paper_2024` | The paper's method (the default for the types above) | 100-word chunks with 25 words of overlap; the paper's three keyword lists (yours, or AI-proposed) and optional summaries |
+| `documents` | Passages as uploaded (Documents stores; the default) | The uploaded passages kept whole; no AI; searched by meaning and by words |
+| `documents_tagged` | The same, with keyword tags (Documents stores) | An AI-made vocabulary; passages tagged by similarity; reached by Add keyword tags, not chosen |
+
+A Documents store takes only `documents` or `documents_tagged`, and the other types
+can take neither. The New store form offers each type's own.
 
 Build steps that call the AI (inducing a vocabulary, AI tagging, abstracted
 examples) are priced with the `keywords` job's model and shown as an estimate
@@ -334,12 +403,15 @@ unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
   applied only when it was built with the collection's build settings, and covers
   exactly the items the collection will hold, each one usable, and only while the
   collection has no vocabulary in force: an entry never replaces a vocabulary built,
-  authored or edited here. This is checked before anything is added. Otherwise, and whenever the Hub cannot be reached, the
-  load builds locally as usual, and its estimate and result say why
-  (`hub: {skipped: ...}`). A load that applies one reports `hub: {entry, items}`.
+  authored or edited here. This is checked before anything is added. Otherwise, and
+  whenever the Hub cannot be reached, the load builds locally as usual, and its
+  estimate and result say why (`hub: {skipped: ...}`). A load that applies one
+  reports `hub: {entry, items}`.
   There is one exception. A load the entry made free is queued without `confirm`, so
   if the entry is no longer usable when that load runs, it fails and adds nothing,
   rather than spend what nobody agreed to.
+- **Any model loads it.** A Hub build holds text only (no embeddings), so it loads into a
+  store of any embedding model.
 - **Only the owner publishes.** You run the publish script inside the api
   container. It is a dry run unless you pass `--publish`, and it refuses a token
   that does not belong to the repo's owner:
@@ -369,7 +441,7 @@ unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
 | `kw_all` | paper | Top 9 keywords from the pooled lists (+ summary), one vector | free* |
 | `kw_individual` | paper | Top 3 from each list (+ summary), one vector; the paper's best | free* |
 | `kw_rrf` | paper | One vector per list (+ summary), fused with RRF | free* |
-| `hybrid_rerank` | modern | `hybrid` top 50, reranked by a local cross-encoder | free, slower |
+| `hybrid_rerank` | modern | `hybrid` top 50, or `rerank_pool` (1 to 50), reranked by the run's `rerank_model` (runs: the Settings reranker at queue time, which the run records; the Lab and `/query`: the service's reranker) | free, slower |
 | `kw_hybrid` | new | `kw_individual` fused with `hybrid`: a dual index like Doc2Query++ | free* |
 | `keyword_rag` | new | Meaning (item vectors for worked examples, chunks for reference), BM25, and the question's predicted tags against each item's `kw_tags`, fused by weighted RRF with the collection's channel weights; needs a vocabulary | free* |
 | `iterative` | modern | Up to 3 retrieval hops; the AI decides the next query | paid per hop |
@@ -387,8 +459,8 @@ helped. For the exam QA type they also give the chance level of the free
 metrics: the solution similarity and same-skill rate of an unchosen example.
 
 Dense queries carry a task instruction per QA type when the dense model was
-trained with one (Qwen3-Embedding, the default): `Instruct: <task>\nQuery:`
-before the query, nothing before documents. Each eval run records the exact
+trained with one (Qwen3-Embedding only): `Instruct: <task>\nQuery:`
+before the query, nothing before documents. A bge store gets none. Each eval run records the exact
 prefix in its setup.
 
 The RRF constant is a request parameter `rrf_k`: the paper used 1, today's
@@ -433,121 +505,230 @@ from the AI model set up for the `answer` job, but that model reads the
 question and the passages, so text planted in a corpus can steer what it
 writes.
 
-## Chat across stores
+## Chat
 
-A chat searches several stores at once and answers from the best evidence, with
-the evidence shown under every answer. Chats are saved on the server. The old
-`POST /chat` for one store still works.
+A chat searches every store it lists at once, pools their best passages, reranks
+the pool against the question and answers from the top. The evidence is shown
+under every answer. Chats are saved on the server, with their own settings. The
+single-store `POST /chat` runs the same pipeline for one store.
 
 For each message the service does this:
 
 1. **Search text.** The first message is searched as typed. A follow-up is
-   searched with the message plus the previous 2 user messages. With **Rewrite
-   follow-ups with AI** on, the `rewrite` job (set it on Settings) turns the
-   follow-up into one standalone question instead: one AI call per follow-up,
-   never for the first message, and a re-run never rewrites again.
-2. **The bar.** Each store has a bar, the score a message's best match should
-   reach for the store to be worth searching. It is worked out from the
-   store's own default eval set: the 5th percentile of the best matches of its
-   questions (the dev slice, up to 200; BRIGHT exclusions and leaked questions
-   are left out). So 95% of questions that belong to the store would clear it.
-   With fewer than 20 usable questions, or no eval set, the store has no bar
-   and is always kept. A bar you set yourself wins. It is recomputed when the
-   eval set's version, the store's item count, its switched-off sources or its
-   embedding model change, and after one of its sources is deleted. A store
-   built with another embedding model than the service runs is refused (409).
-   `GET /collections/{name}/bar` shows it.
-3. **The gate.** A store is kept when its best match clears its bar. The gate
-   scores the message alone and the follow-up search text, and takes the
-   higher, so a short follow-up such as "and the second one?" is not dropped.
-4. **Sticky stores.** A store the previous message kept on its own merit (it
-   cleared its bar, had no bar, or you searched it anyway; judged from that
-   message's latest answered attempt) is kept again. This reaches one message
-   back only.
-5. **Merge.** Every kept store is searched with its own method and settings.
-   The results are merged by reciprocal rank fusion (k = 60) by store and id,
-   and cut to the evidence size (default 8, 1 to 20). The model answers from
-   that evidence. When no store is kept, or the kept stores find nothing, the
-   model answers without passages, and the page says the answer used none.
+   searched as the message plus the previous 2 user messages (Settings'
+   *Previous messages joined, without rewrite*), one per line, and reranked
+   against the message alone. With **Rewrite follow-ups** on and any AI
+   connected, the `rewrite` job turns the follow-up into one standalone
+   question, which is both searched and reranked against: one paid call per
+   follow-up, never for the first message. A failed rewrite falls back to the
+   joined text and says so.
+2. **Candidates per store.** Each store is searched with its own method and
+   returns its top *candidates* (default 20). A method the store cannot run (a
+   keyword method before it has a vocabulary, say) is replaced by hybrid with a
+   note: `keyword_rag needs a vocabulary, so hybrid was used`. A method that
+   would call AI when none is connected (a paid method, or `keyword_rag` with
+   model tags) is replaced the same way: `<method> needs AI, so hybrid was used`.
+3. **Pool.** The stores' lists are pooled round-robin by rank (every store's
+   rank 1, then rank 2, and so on, in the chat's store order), skipping a text
+   already taken, so the same passage in two stores counts once. The pool is
+   capped at **Rerank up to** (Settings `rerank_pool`, default 20), but never
+   below the evidence size.
+4. **Rerank.** The pool is scored against the question by the Settings
+   reranker model (a local cross-encoder, so free) and sorted by score. Each
+   passage shows its relevance, the logistic of the score.
+5. **Evidence.** The top *evidence size* passages (default 8, 1 to 20) go to the
+   answer model, which cites them as `[n]`. When no store finds anything, the
+   model answers without passages, and the page says so.
 
-**Routing.** A chat's **Routing** setting is `all` ("Search every store", the default:
-every store goes to the gate) or `profiles` ("By routing profile"). With `profiles`, each store is first given a
-route score, the higher of two cosines: the message's to the store's
-[routing profile](#routing-profiles), and its to the store's average item (the
-normalised centroid of up to 2,000 of its items). As the gate takes the higher of
-the message's and the search text's best match, the route score takes the higher
-of the message's and the search text's. Like the bar, a route bar is
-worked out from the store's own default eval set (the 5th percentile of its
-questions' route scores, dev slice, up to 200) and recomputed when the routing
-profile, the eval set or the store changes. A store's reason in the retrieval
-step, in the order they are checked:
+With **Rerank** off, the pool keeps its round-robin order and is scored
+`1 / (rrf_k + rank)`, which is reciprocal rank fusion over the stores' lists.
+The same happens when the reranker cannot be used, with a note:
+`reranker still loading: merged by rank` (it is never waited for) or
+`reranker unavailable: merged by rank` (the load failed, and a retry starts in
+the background).
 
-- **no profile**: nothing to compare the message with: no saved profile, a
-  draft with no topics and no sample passages, and no items to average. Always
-  routed: the gate still decides, so a store below its bar shows "below its bar".
-- **no route bar**: no eval set, or fewer than 20 usable questions. Always
-  routed, and the gate decides, as for no profile.
-- **not routed**: the route score is below the route bar. Not searched.
-- otherwise the gate decides, as above.
+**Warm-up.** The reranker loads in the background when the service starts, and
+again when Settings picks another one, so a chat does not wait for it on its
+first message. It scores in ONNX batches of 16 and the embedder in batches of 8.
+The first start downloads the model into the `ragqa` volume (about 0.13 GB for
+the default).
 
-Sticky stores and "search anyway" still apply. The retrieval step shows the
-route score and route bar in two more columns. Routing costs nothing: it uses
-embeddings only.
+**Passages only, without AI.** With no answer model, Send still works: the
+reply is the retrieval step and the evidence, marked `Passages only: no answer
+model`, and the page says `Connect AI in Settings to get written answers`. Nothing
+is paid, and Answer from this attempt answers it once a model is connected.
 
-### Routing profiles
+**The retrieval step.** Under each answer, open the step to see the search text
+and where it came from (message, joined or rewrite), what the pool was reranked
+against and by which model, how many passages were pooled of all the stores'
+candidates (`Pooled 20 of 60 (Rerank up to 20)`: Rerank up to caps the pool, so
+more candidates may change nothing), each store's candidates and how many were kept, its
+method (for `keyword_rag`, also the query tags it picked), the pipeline's notes
+and the evidence with each passage's store, rank and relevance.
 
-A store's page has a **Routing profile** section: a short text saying what the
-store is about, which routing compares a message against. Until you save one the
-router uses a draft it writes from the store (a Store line with its name and
-types, its top 20 terms, a Sources line naming its switched-on sources, and 5
-sample passages of up to 200 characters) and keeps it up to date as the store
-changes; the section says "Drafted from the store" or "Edited by hand". Edit and
-save to set your own. **Use the drafted profile** fills the box with the draft
-and saves nothing: your text is kept until you press Save, which then goes back
-to the draft (saving a blank box does too). Saving a profile recomputes the
-route bar.
+**The settings panel.** Under the latest message, *Settings for this chat*
+holds the chat's own *Evidence size*, *Rerank* and *Rewrite follow-ups*, and per
+store its *Search method* and *Candidates*. **Re-run** searches that message
+again with the edits and adds an attempt without answering; **Answer from this
+attempt** answers it (an answer cannot be repeated). A re-run saves the edits on
+the chat, so its later messages use them. A store's **Set as default** saves
+that store's method and candidates on the store (after which the chat inherits
+them); the store page's *Chat settings* shows them, and **Reset to Settings** clears a value the store saved. Set as default is refused (409) when
+the store cannot run the chat's method, and saves nothing. A panel edit that changes
+nothing is dropped.
 
-### Check routing
+**Which value wins.** A blank field (null) inherits, highest level first:
 
-The Chat page's **Check routing** button (with a **Questions to check on**
-choice) scores the gate and the profile router
-on the stores' own questions, and costs nothing. It checks the chat's stores (it
-needs at least two; `POST /routing/eval` takes any list of stores) on a split:
-**held out** (the default) uses the questions outside the dev slice
-the bars were set on, so the score is not marked by the same questions that set
-the bars; **dev** and **full** are also offered, and dev is in-sample. Up to 200
-questions are taken from each store's default eval set, and a question's homes
-are every listed store whose default set it came from. For each mode (gate,
-profiles) it shows:
+- a store's *method* and *candidates*: the chat, then the store, then Settings,
+  then the recommended value;
+- the chat's *evidence size*, *rerank* and *rewrite*: the chat, then Settings,
+  then the recommended value;
+- *previous messages joined*, *RRF k*, *Reranker model* and *Rerank up to*
+  are Settings-only.
 
-- **recall**: a home store was kept;
-- **precision**: homes kept over stores kept;
-- **none rate**: how often no store was kept;
-- **mean searched**: how many stores were searched per question;
+The panel shows what is inherited, and from where.
 
-and, per store, its recall: that store was kept on its home questions. A store
-whose eval set has no more than 200 questions has all of them in the dev slice,
-so it adds no held-out questions: the panel says so and suggests the dev split
-(a store with no eval set adds none either, and is still scored when kept for
-another store's question). It runs in the request (the call may be slow for many
-stores).
+**Old chats.** A chat or attempt from before this pipeline reads as recorded: its
+decisions and evidence are shown as they were. Re-running an old message keeps
+its search text, with no paid rewrite. The first start on an old database
+migrates it once (one way; back it up first): the chat bar, sticky stores,
+routing profiles, `store_bars` and the *routing* chat setting are dropped; a
+chat's saved evidence size of 8 and rewrite off become blank (inherit); each
+store's `chat_k` is cleared, because it now means candidates per store. The
+migration writes the marker `schema.routing_dropped`; a later start only drops
+leftovers and never resets settings again. The `chat_bar` and `route_profile`
+columns stay in old databases, unused.
 
-**The retrieval step.** Under each answer you can open the step to see every
-store's decision; for `keyword_rag`, the Method column also shows the query
-tags it picked. Edit a store's method, k, search settings or bar, or tick
-"search anyway", and **Re-run**. A re-run adds an attempt without answering;
-**Answer from this attempt** answers it (an answered attempt cannot be answered
-again). These edits last until the service restarts. The store's Edit form
-shows the settings the next search in this chat uses, and the store's saved
-defaults under them. The built-in method, a blank k (the chat's evidence size)
-and **Use the eval set's bar** clear a saved value: a re-run shows the result,
-and Set as default saves it. **Set as default** saves the fields you edited
-(method, k, search settings and bar) as the store's own settings; "search
-anyway" is not saved.
+**Spending.** There is no estimate before a message. Each reply and attempt
+shows its cost: the rewrite (one paid call for each follow-up when Rewrite
+follow-ups is on and any AI is connected, **including in chats made before**),
+any model-tag calls of `keyword_rag`, and the answer. Reranking is free. The
+monthly cap holds. To stop paying for rewrites, set Settings → Search defaults →
+*Rewrite follow-ups* → Off, or switch it off in one chat's panel. A re-run that
+would rewrite again says so before it runs.
 
-**Spending.** There is no estimate before a message. Each reply and each
-attempt shows its cost (the rewrite, every store's retrieval and the answer),
-and the monthly cap holds.
+### Chat from your own app
+
+Your own app can chat over the API with the same pipeline. Set up a chat in the
+UI first (its stores, evidence size, rerank and so on), then open **Use from your
+app** on the chat page and copy its lines. The example below is a chat over a
+Documents store. Two calls are enough:
+
+```sh
+# start a conversation set up like chat <id>
+curl -s -u user:password http://localhost:8080/chats \
+  -H 'content-type: application/json' -d '{"from": "<id>"}'
+
+# send each next message; the URL is quoted because zsh reads ? as a glob
+curl -s -u user:password 'http://localhost:8080/chats/<id>/messages?brief=true' \
+  -H 'content-type: application/json' -d '{"content":"How do I reset my password?"}'
+```
+
+`{"from": "<id>"}` copies the stores and the chat's saved settings, nulls
+included, so the copy keeps following each store and Settings; it copies no
+messages, and a store deleted since is left out (422 `a chat needs at least one
+store` if none is left). Use the new chat's `id` in the second call. The server
+keeps the history, so your app sends only the new message.
+
+The short reply (`?brief=true`) has these keys: `n`, `answer`, `citations`,
+`passages`, `passages_only`, `error` and `usd`. Each passage has `n`, `store`,
+`id`, `text`, `source`, `part`, `parts` and `relevance`. `relevance` is the
+reranker's score as a logistic, 0 to 1, or null when the pool was merged by rank.
+`citations` are the passages the answer cites, as saved on the attempt. The raw score is left out. Only this route has the short form; re-runs and
+answers keep the full shape.
+
+```json
+{
+  "n": 1,
+  "answer": "Open Settings, choose Security, then Reset password [1].",
+  "citations": [
+    {"n": 1, "id": "handbook.md#3f9a1c07b2de", "text": "handbook.md › Account › Password\n\nOpen Settings, choose Security, …",
+     "source": "upload:handbook", "part": 2, "parts": 5, "store": "handbook"}
+  ],
+  "passages": [
+    {"n": 1, "store": "handbook", "id": "handbook.md#3f9a1c07b2de",
+     "text": "handbook.md › Account › Password\n\nOpen Settings, choose Security, …",
+     "source": "upload:handbook", "part": 2, "parts": 5, "relevance": 0.93}
+  ],
+  "passages_only": false,
+  "error": null,
+  "usd": 0.0004
+}
+```
+
+- **Retrieval for your own model:** send `"answer": false` to get the reranked
+  passages with no answer written and nothing paid for one. This is the mode for an
+  agent harness with its own model, such as Hermes Agent, which curls the endpoint
+  from its shell tool. `answer` null with `passages_only` true means no
+  answer was written, either by request or because no answer model is connected.
+  The attempt stays unanswered, so **Answer from this attempt** on the chat page can
+  still answer it.
+- **Check `error`:** a failed answer is still HTTP 200, and the message is saved.
+  Retrying would save it twice.
+- **See why:** every API conversation is a saved chat. Open it on the chat page to
+  see the retrieval step behind each answer.
+- **Auth:** the service login (`curl -u user:password`). Put HTTPS in front before
+  exposing it beyond localhost. There are no API keys, CORS or streaming yet.
+- **Reference:** the OpenAPI docs are at `/docs`.
+
+## Search defaults
+
+Settings → *Search defaults* holds app-wide values; each shows its recommended
+value, and **Reset to recommended** puts them all back. A blank or reset field is
+null and follows the recommendation. A stored value is checked each time it is
+read: one that no longer passes (a reranker fastembed dropped, a method that is not
+a chat method) reads as null. Save starts loading a reranker only when you picked a
+new one, or the one in force had failed to load.
+
+| Option | Recommended | Basis |
+|---|---|---|
+| Default search method | `hybrid` | X1 on BRIGHT AoPS: hybrid .376 against the label channel .314; hybrid is the standard default |
+| Candidates per store | 20 | a common pool size before a reranker (20 to 100) |
+| Evidence size | 8 | the earlier default |
+| Rerank | on | the standard multi-source pipeline |
+| Rewrite follow-ups | on (needs a rewrite model) | the standard "condense question" step |
+| Previous messages joined, without rewrite | 2 | the earlier default |
+| RRF k (rerank off, and inside hybrid) | 60 | the standard constant; X3 found no arm that beat it (best, k 10, was within noise) |
+| Reranker model | `jinaai/jina-reranker-v1-tiny-en` | about 1.5 s for 20 passages on an M4 Pro; see [Reranker timing](scripts/experiments.md#reranker-timing) |
+| Rerank up to | 20 (1 to 60) | the most pooled passages reranked per message |
+| Embedding model for new stores | `BAAI/bge-small-en-v1.5` | fast; timing pending (`scripts/time_embed.py`, [Embedding timing](scripts/experiments.md#embedding-timing)); its retrieval quality on these benchmarks has not been measured |
+
+The basis for Rerank itself is X5 (hybrid against hybrid reranked at 20,
+[scripts/experiments.md](scripts/experiments.md)); its result is pending.
+
+**The embedding model.** Each store keeps the model it was built with, and new stores
+take this setting. `RAGQA_DENSE_MODEL` replaces the default and is then the recommended
+one. The page offers `BAAI/bge-small-en-v1.5` (384 dimensions, 0.067 GB),
+`BAAI/bge-base-en-v1.5` (768, 0.21 GB) and `Qwen/Qwen3-Embedding-0.6B-Q` (1024, 1.12 GB),
+plus the service's model and any saved value; the API accepts any model fastembed
+lists. Stores of different models can share a chat, because chat reranks or merges by
+rank, never by score. The bge models read at most 512 tokens, so a long document is cut
+short. **X1–X4 were measured on stores embedded with Qwen/Qwen3-Embedding-0.6B-Q**, so
+their numbers say nothing yet about bge-small. The tag cut-off (0.5) and the term merge
+(0.88) were tuned on Qwen's scores; bge's are likely higher (unmeasured), so a similarity build
+or an induced vocabulary on a bge store may keep more tags or merge more terms.
+
+**The reranker** is a Setting. The default is `jinaai/jina-reranker-v1-tiny-en`,
+about 1.5 s for 20 passages on an M4 Pro, where `BAAI/bge-reranker-v2-m3-int8`,
+the earlier default, took 11 to 18 s. Any cross-encoder fastembed supports can be
+chosen; picking one downloads it in the background (chat merges by rank until it
+is ready). The page says while it downloads, and if it failed, why; Save then tries
+again at once. **Rerank up to** caps how many pooled passages are scored, so a
+smaller number is faster; it is never below the evidence size.
+`RAGQA_RERANK_MODEL` replaces the default, and it is then the recommended one.
+
+**Going back to bge.** Pick `BAAI/bge-reranker-v2-m3-int8` under Settings →
+Search defaults → Reranker model, or set `RAGQA_RERANK_MODEL=BAAI/bge-reranker-v2-m3-int8`,
+which also makes it the recommended one. It is slower: about 11 to 18 s for 20
+passages on an M4 Pro.
+
+**Where they apply.** Chat, `POST /chat`, and `POST /query` when it sends no
+`methods` or `rrf_k`. Runs (`/eval`) and the Lab choose their own, with one
+exception: a `hybrid_rerank` run with no `rerank_model` takes the Settings
+reranker when it is queued and records it in `setup.rerank_model`, so a resumed
+or repeated run uses the same one. Runs from before recorded no model and used
+`BAAI/bge-reranker-v2-m3-int8` at 50. A run page names a `hybrid_rerank` run's
+reranker and pool in its head, and **Re-run** sends both, so the repeat is the same run.
 
 ## Datasets
 
@@ -677,18 +858,18 @@ All are optional.
 | `RAGQA_MODEL` | The `default` job's model: `<connection>/<model id>`, or a bare model id that one enabled model has, e.g. `claude-haiku-5-5`. A value that names no stored model is taken as an Anthropic model id and added, at $0, to the Anthropic connection when there is one; price it on the Settings page. Read-only on the Settings page while set. With only a key set, the default starts as `claude-haiku-5-5` and stays editable |
 | `RAGQA_MONTHLY_CAP_USD` | The monthly cap. Read-only on the Settings page while set; unset, the stored cap stands (default `20`) |
 | `RAGQA_USERNAME`, `RAGQA_PASSWORD` | HTTP basic auth over every route. Set both or neither; exactly one set is a 503 on every request |
-| `RAGQA_DENSE_MODEL` | Retrieval embedding model (fastembed). Default `Qwen/Qwen3-Embedding-0.6B-Q` |
+| `RAGQA_DENSE_MODEL` | Retrieval embedding model (fastembed). Default `BAAI/bge-small-en-v1.5`; it was `Qwen/Qwen3-Embedding-0.6B-Q`, which ran hot and slow on a laptop CPU. It is the recommendation for new stores, not a setting for old ones |
 | `RAGQA_JUDGE_MODEL` | A different model, used only to score solution similarity. Default `BAAI/bge-small-en-v1.5` |
-| `RAGQA_RERANK_MODEL` | Cross-encoder for `hybrid_rerank`. Default `BAAI/bge-reranker-v2-m3-int8` |
+| `RAGQA_RERANK_MODEL` | The default reranker (fastembed cross-encoder) for chat and `hybrid_rerank`, and the one Settings recommends. Default `jinaai/jina-reranker-v1-tiny-en`; it was `BAAI/bge-reranker-v2-m3-int8`, which is slower on CPU. Settings → Search defaults can pick another |
 | `RAGQA_QDRANT_URL` | Set by compose. Unset means in-process Qdrant (tests only) |
 | `HF_TOKEN` | Hugging Face token: read, to load GPQA (gated); write, only for the owner's `ragqa_core.publish --publish` |
 | `RAGQA_BUILD_HUB` | The Hub repo of [published builds](#published-builds) a load applies. Default `jonathanmiro97/keyword-rag-builds`; empty turns it off |
 | `RAGQA_HOME` | State directory. `/home/app/.ragqa` in the image |
 | `PORT` | Listen port. `8080` |
 
-A collection remembers the dense model it was built with. Changing
-`RAGQA_DENSE_MODEL` afterwards makes that collection refuse new items with a
-409 that names both models.
+A store keeps the embedding model it was built with and embeds its questions with
+it. Changing `RAGQA_DENSE_MODEL` changes only the recommendation for new stores.
+A store whose model can't be loaded refuses search and new items with a 409.
 
 ## Cost safety
 
@@ -727,15 +908,15 @@ The side nav reads Stores, Chat, Eval sets, Lab, Settings. The store pages live 
 
 | Route | What it shows |
 |---|---|
-| `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store (one that exists is opened instead), create a store or set up the benchmarks |
-| `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), delete |
+| `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store (one that exists is opened instead), create a store (the form leads with Documents, offers each type's own recipes and says `Embedded with <model> (Settings → Search defaults)`) or set up the benchmarks |
+| `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), its **Embedding model** (what it was built with; rebuild with another, with progress, cancel and resume), for a Documents store its **Keyword tags** (`Not built` with an **Add keyword tags** button that shows the estimate first, `Adding keyword tags: <pct>`, a stopped build with Resume, or `Built: <n> terms`; a Documents store has no keyword lists section and its imports take `.md` and `.txt` only), its **Chat settings** (the method and candidates a chat uses for it, each with where the value comes from, and Reset to Settings for one saved on the store), delete |
 | `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
-| `/chat` | Chat across stores. The left lists your saved chats (chats are saved on the server; conversations that lived only in a browser tab before are not migrated). A chat has a list of stores, an evidence size (default 8, 1 to 20) and the optional **Rewrite follow-ups with AI**. Each reply has `[n]` links to its sources (id, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). With no answer model Send is disabled and a note links to Settings. Under each answer a **retrieval step** shows, per store, whether it was kept or dropped and why, its best match against its bar, its method and the evidence found; see [Chat across stores](#chat-across-stores) |
+| `/chat` | Chat. The left lists your saved chats (chats are saved on the server; conversations that lived only in a browser tab before are not migrated). A chat has a list of stores. Each reply has `[n]` links to its sources (id, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). Send works without an answer model: the reply is the passages, with a note linking to Settings. Under each answer a **retrieval step** shows the search text, what it was reranked against, each store's candidates and the evidence, and under the latest message one **Settings for this chat** panel holds the chat's evidence size, rerank and rewrite, each store's method and candidates, Re-run and Set as default; **Use from your app** holds the curl lines to send the next message and to start a copy of the chat, see [Chat from your own app](#chat-from-your-own-app); see [Chat](#chat) |
 | `/eval-sets` | Every eval set; create one |
 | `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions, delete the set |
 | `/lab` | One question, methods side by side |
-| `/worker` | The worker, its queue and what needs a person |
-| `/settings` | AI connections, models and prices, the model each job uses, the monthly cap |
+| `/worker` | The worker, its queue and what needs a person; a `tag_build` job is named Adding keyword tags |
+| `/settings` | AI connections, models and prices, the model each job uses (each with a note on what uses it, under an intro saying AI writes chat answers, rewrites follow-ups and builds keyword tags, and that search and eval runs work without it), the monthly cap, and [Search defaults](#search-defaults), including Embedding model for new stores |
 | `/docs` | Every endpoint |
 
 ## Endpoints
@@ -745,7 +926,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
-| `POST /collections` | `{name, qa_type: science\|mcq\|multihop\|table, summarize, recipe?: worked_examples\|reference\|paper_2024}`; no `recipe` means paper 2024, as before. 409 when the name is taken, or an eval set of that name has another type |
+| `POST /collections` | `{name, qa_type: documents\|science\|mcq\|multihop\|table, summarize, recipe?: documents\|documents_tagged\|worked_examples\|reference\|paper_2024, dense_model?}`; no `recipe` takes the type's default: `documents` for a Documents store and paper 2024 for the others, as before. No `dense_model` takes the Settings one (422 for one fastembed does not list). 409 when the name is taken, or an eval set of that name has another type; 422 for a name ending in `__rebuild` or `__chunks`, which are kept for a store's search data |
 | `GET /eval-sets` | Every eval set (the page, for a browser that asks for `text/html`; JSON otherwise) |
 | `POST /eval-sets` | `{name, qa_type}`; 409 when the name is taken, or a store of that name has another type |
 | `GET /eval-sets/{name}` | The set, its questions and its versions |
@@ -754,12 +935,13 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `DELETE /eval-sets/{name}` | Without `?confirm=true`, `{runs}`: how many runs would go. With it, deletes the set and those runs. 409 while an eval or load uses the set |
 | `POST /eval-sets/{name}/uploads?filename=` | The raw file as the body; returns `{upload_id, preview}` |
 | `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
-| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, its saved chat defaults `chat_method`, `chat_k` and `chat_bar` (null when none is saved), `state` (a running job's `loading`, `rekeying`, `retagging`, `copying`, `evaluating`, `importing` or `labelling`; else `queued`, `empty`, `no_lists` or `ready`) with its job and progress, question counts, its answer and number of runs |
-| `PATCH /collections/{name}` | `{eval_set, route_profile}`, each optional: a field left out is kept. `eval_set` makes that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. `route_profile` is below. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or, for `eval_set` only, while a load or question import is queued or running on the store |
+| `POST /collections/{name}/reembed` | `{model}`: queue a `reembed` job that re-embeds the store with another model into `<name>__rebuild`, then switches; free, no `confirm`. 404 for an unknown store; 422 for a model fastembed does not list; 409 while any job is queued or running on the store, for the model it already has, and `resume it first` while a switch has stopped part-way |
+| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, its saved chat settings `chat_method` and `chat_k` (candidates per store; null when none is saved) and `chat_settings`, what chat uses for it with the level each value comes from (`store`, `settings` or `recommended`), `state` (a running job's `loading`, `rekeying`, `retagging`, `tagging` (Add keyword tags), `copying`, `evaluating`, `importing`, `labelling` or `rebuilding`; else `queued`, `empty`, `no_lists` or `ready`; a Documents store with passages and no keyword lists is `ready`) with its job and progress, `keyword_tags` (for a Documents store; null for any other: `{state: none}`, `{state: building, job_id, progress}`, `{state: stopped, job_id}` or `{state: built, terms}`), question counts, its answer and number of runs; `rebuild` (`{job_id, status, model, from, progress, switching}`) while the newest re-embed is unfinished |
+| `PATCH /collections/{name}` | `{eval_set, chat_method, chat_k}`, each optional: a field left out is kept. `eval_set` makes that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. `chat_method` is a chat method (not `hybrid_rerank` or `iterative`) and `chat_k` the candidates per store (1 to 60); `null` for either goes back to Settings. Any other field, such as the removed `route_profile`, is 422. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or, for `eval_set` only, while a load or question import is queued or running on the store, or when the store cannot run `chat_method` |
 | `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
-| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; 409 while a load, re-key or eval on the collection is queued or running. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
-| `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost. `accept=text` takes only `.txt` and `.md` files (422 otherwise); the chat uses it. A source name is cleaned to letters, digits, space, `_`, `.` and `-`, at most 64 characters |
-| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`; `kind=questions` goes to the store's default eval set. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable; 503 when it would spend and no AI model is set up. With `kind=questions`, 409 before anything else when the store's default eval set has another type |
+| `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; a Documents store takes plain `{text}` items here too (the hand-add path for an API client; the `.md` and `.txt` rule is for file uploads and imports); 409 while a load, re-key, `retag`, `copy`, `import`, `backfill`, `reembed`, `tag_build` or eval on the collection is queued or running, and while a rebuild's switch has stopped part-way. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
+| `POST /collections/{name}/uploads?filename=&kind=items\|questions` | The raw file as the body (up to 200 MB). Returns `{upload_id, preview, estimate}`: the first rows under a guessed field mapping, and what importing would cost. `accept=text` takes only `.txt` and `.md` files (422 otherwise); the chat uses it. On a Documents store, `kind=items` takes only `.txt` and `.md` files too: 422 `A Documents store takes .md and .txt files` for a zip, a table or JSON lines, and `<file> is not UTF-8 text; save it as UTF-8 and upload it again` for a text file that is not UTF-8 (nothing is saved). A source name is cleaned to letters, digits, space, `_`, `.` and `-`, at most 64 characters |
+| `POST /collections/{name}/imports` | `{upload_id, kind, mapping, source_name, confirm}`; `kind=questions` goes to the store's default eval set. Without `confirm`: the preview and estimate. With it: queues an import job and returns `{job_id}`; 422 when a required field is unmapped or no row is usable (`no usable rows`, as for a `.md` with no text); 503 when it would spend and no AI model is set up. 409 while a `tag_build` is queued or running on the store (it was priced on the recipe the build switches). With `kind=questions`, 409 before anything else when the store's default eval set has another type |
 | `GET /collections/{name}/sources` | Each source with its item count and whether retrieval uses it |
 | `PATCH /collections/{name}/sources/{source}` | `{enabled}`: switch a source on or off for retrieval. 409 while an eval runs, or to switch off the last item source |
 | `DELETE /collections/{name}/sources/{source}` | Remove a source's items and chunks; questions stay; 409 while a job is queued or running on the collection |
@@ -767,31 +949,29 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PATCH /collections/{name}/questions/leaked` | `{include}`: the same setting as `PATCH /eval-sets/{name}`, on the store's default set |
 | `PUT /collections/{name}/search` | Set the collection's default search settings, in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`), and return all of them; `/query` and `/eval` override them per request. 422 for an unknown key or value |
 | `POST /collections/{name}/load` | Load `scienceqa`, `gpqa`, `musique`, `tatqa` or `scibench` (`GET /catalog` lists them as `datasets`); its questions go to the store's default eval set, upserted by id. When it would spend (summaries; an AI keyword proposal because an AI model is set up and a recipe that uses keyword lists has none; or the build steps of the other recipes: inducing a vocabulary while there is none, AI tagging and abstracted examples), without `confirm` it returns the estimate `{est_usd, items, calls}`; with `{confirm: true}`, or when it is free, it queues a job and returns `{job_id}`. 503 when the build would spend and no model is set up for `keywords`. 409 before anything is estimated or queued when the store's default eval set has another type |
-| `POST /collections/{name}/copy` | `{name, recipe, build, confirm}`: a new store of this one's items under another recipe, with its switched-off sources. It points at the source's default eval set and copies no questions. `build` overrides the recipe's build settings in part; the recipe keeps its vocabulary, `chunk_overlap` stays below `chunk_words`, and `added_text: "summary"` needs keyword lists. Without `confirm`, returns `{estimate}` (embedding is free; summaries, and the build steps of the recipes other than paper 2024); with `confirm: true`, makes the collection and queues a `copy` job, which adds every item under its source, then builds (a paper 2024 copy takes the source's keyword lists in force instead of proposing any); returns `{name, job_id}`. 409 when the name is taken or a job is queued or running on the source; 404 for an unknown source; 422 for a bad name, recipe or build setting; 503 when it would spend and no model is set up for the job |
+| `POST /collections/{name}/copy` | `{name, recipe, build, confirm}`: a new store of this one's items under another recipe, with its switched-off sources. It points at the source's default eval set and copies no questions. `build` overrides the recipe's build settings in part; the recipe keeps its vocabulary, `chunk_overlap` stays below `chunk_words`, and `added_text: "summary"` needs keyword lists. Without `confirm`, returns `{estimate}` (embedding is free; summaries, and the build steps of the recipes other than paper 2024); with `confirm: true`, makes the collection and queues a `copy` job, which adds every item under its source, then builds (a paper 2024 copy takes the source's keyword lists in force instead of proposing any); returns `{name, job_id}`. 409 when the name is taken or a job is queued or running on the source; 404 for an unknown source; 422 for a bad name, recipe or build setting; 503 when it would spend and no model is set up for the job; a name ending in `__rebuild` or `__chunks` is 422 |
+| `POST /collections/{name}/keyword-tags` | Add keyword tags to a Documents store using the `documents` recipe: `{confirm?}`. Without `confirm`: 200 `{estimate: {est_usd, calls}}` and nothing is queued. With `confirm: true`: queues a `tag_build` job (the store's state is `tagging`), which switches the store to `documents_tagged` in place, then induces a vocabulary and tags every passage by similarity; returns 202 `{job_id}`. Until the worker starts the job, `GET /collections/{name}` still shows `recipe: documents`. 409 `only a Documents store without keyword tags can add them` for any other store, `add passages first` for an empty one, `connect a model for keywords first` when there is no keywords model (the recipe stays `documents`), and while any job is queued or running on the store; 503 when it would spend and no model is set up. Until every passage is tagged, `keyword_rag` is unavailable with `needs keyword tags: Add keyword tags on the store page`: a 409 on `PATCH /collections/{name}` `chat_method`, `/eval` and chat, and a per-method `error` (still 200) on `/query` |
 | `POST /collections/{name}/keyword-lists/propose` | The AI proposes the topic, method and common lists; nothing is saved. Without `confirm`: the estimate `{est_usd, calls}`; with `{confirm: true}`: the lists |
 | `GET /collections/{name}/keyword-lists`, `GET …/keyword-lists/{version}` | Every saved version of the lists, newest first; one version with its lists |
-| `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the service's dense model differs from the collection's |
+| `PUT /collections/{name}/keyword-lists` | Save `{topic, method, common}` as a version and queue a `rekey` job; returns `{version, job_id}`. The collection switches to the new lists once every item is re-keyed. 409 while an eval runs on it, or when the store's model can't be loaded or it is switching |
 | `GET /collections/{name}/vocabulary` | The induced vocabulary in force and every saved version: `{version, terms, versions: [{version, created_at, count, active}]}`; `version` and `terms` are null until one is in force. This body is the export. 404 for an unknown collection |
-| `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag or eval is queued or running on it; 422 for an empty list |
-| `GET /collections/{name}/bar` | The store's bar for chat routing: `{value, source, eval_set, n}` (`source` is `set`, `manual`, `none` or `few`), computed from its default eval set (see [Chat across stores](#chat-across-stores)); no bar means the store is always kept. 409 when the store was built with another embedding model |
-| `PATCH /collections/{name}` also takes `route_profile`; `POST /collections/{name}/route-profile/draft` | `route_profile` is the store's routing profile text (null or blank goes back to the draft); `GET /collections/{name}` returns `route_profile` and `route_profile_drafted` (true when the text is the router's draft, not a saved one). The draft endpoint returns `{route_profile}`, the router's draft, without saving it |
-| `POST /routing/eval` | `{stores (at least 2), split = held_out\|dev\|full}`: the gate and the profile router scored on the stores' own eval set questions (see [Check routing](#check-routing)). Returns `{split, questions, per_store, modes, rows}`: `per_store` has each store's `eval_set` (null for none), `questions` and its recall in each mode; `modes` has `gate` and `profiles`, each with recall, precision, none rate and mean searched. Embeddings only, so it spends nothing. 404 for an unknown store; 409 when a store was built with another embedding model; 422 for fewer than two stores, an unknown split, or none of the stores having an eval set |
-| `GET /chats`, `POST /chats` | Saved chats, newest first; create one `{stores, title?}`. 404 for an unknown store; 422 for no stores |
-| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, and the `overrides` it holds; change `{title, stores, evidence_size, rewrite, routing}` (`routing` is `all` or `profiles`); delete. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, or an explicit null for any of the fields |
-| `POST /chats/{id}/messages` | `{content, model?}`: search the chat's stores, keep those that clear their bar, merge the evidence and answer. Returns the message with its first attempt; each decision has the store's `method`, `k`, `search`, `best`, `bar`, `bar_source`, `route` and `route_bar` (null with routing `all`), `tags` (the query tags `keyword_rag` picked, else null), `kept`, `reason`, `usd` and `error`. 404 for an unknown chat; 422 for empty text, or an answer model that is unknown or has no price, before anything is saved |
-| `POST /chats/{id}/messages/{n}/attempts` | `{overrides: {store: {method?, k?, search?, bar?, keep?}}, drop?: {store: [field, ...]}}`: re-run the retrieval of message `n` with edits, held by the chat for its later messages. A field left out is what is in force (the store's saved value, else the built-in default); `null` for `method`, `k` or `bar` is the built-in default whatever is saved (`keyword_rag` where it can run, else `hybrid`; the chat's evidence size; the eval set's bar), so the re-run shows what Set as default would then save. `drop` removes the named fields (`method`, `k`, `search`, `bar`, `keep`) from the edits the chat already holds for a store before the new overrides merge; the page uses it for Use the store's bar. Adds an attempt without answering; a re-run never rewrites the follow-up again. 404 for an unknown chat, message or store, or a store in `overrides` or `drop` that is not on the chat; 409 for a method the store cannot run; 422 for a bad override, and then none of the overrides is kept |
-| `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered. An answer model that is unknown or has no price becomes the attempt's `error` |
-| `POST /chats/{id}/stores/{store}/default` | Set as default: save, as the store's own, only the fields the chat's override for it names (method, k, search settings, bar), where `null` clears the saved value, then drop the override; "search anyway" is not saved. Returns `{search, chat_method, chat_k, chat_bar}`. 404 for an unknown chat, or a store not on it |
-| `POST /chat` | The single-store chat, unchanged. `{collection, messages: [{role, content}], method?, k = 5 (1 to 20), model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means `keyword_rag` when the store has a vocabulary (it needs no keyword lists), else `hybrid`; an unknown method name is 422, and a method the store cannot run is 409 with the reason. A store whose saved search uses oracle tags is chatted with classifier tags. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
-| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it |
-| `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary. `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
+| `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag, `reembed` or eval is queued or running on it, and `has no keyword tags yet; use Add keyword tags on the store page` for a Documents store using the `documents` recipe; 422 for an empty list |
+| `GET /chats`, `POST /chats` | Saved chats, newest first; create one with `{stores, title?}` or `{from, title?}`: `from` is the id of a chat to copy (its stores and saved settings, no messages; a store since deleted is left out). 404 for an unknown store, or an unknown `from` chat; 422 for no stores, `a chat needs stores, or from: a chat to copy` with neither, `send stores or from, not both` with both, and `a chat needs at least one store` when none of the copied chat's stores is left |
+| `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, its own `settings`, and `in_force`, what the next search uses with the level each value comes from; change `{title, stores, evidence_size, rewrite, rerank}`; delete. A null `evidence_size`, `rewrite` or `rerank` inherits from Settings. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, a null title or stores, or an unknown field (such as `routing`) |
+| `POST /chats/{id}/messages` | `{content, model?, answer?}`: search every store on the chat, pool and rerank their passages, and answer (or, with no answer model, return the passages alone). `answer` defaults to true; with `"answer": false` the attempt is searched, pooled and reranked as usual (a follow-up rewrite still runs when it is on) but no answer call is made and nothing is paid for one. With `?brief=true` it returns the short reply instead (`n`, `answer`, `citations`, `passages`, `passages_only`, `error`, `usd`; see [Chat from your own app](#chat-from-your-own-app)), whose `passages_only` is true when no answer model was available or `answer` was false. Without it, returns the message with its first attempt: `search_text`, `decisions` (per store: `method`, `candidates`, `search`, `tags`, `found`, `used`, `note`, `usd`, `error`), `evidence` (each passage with its `store`, `rank`, `score`, `relevance` and `channels`), `answer`, `citations`, `usd`, `error` and `pipeline` (where the search text came from, what it was reranked against and by which model, the pool, the notes, `passages_only`: no answer model was available when this attempt was made, and `answer_skipped`: this attempt was made without an answer call. It is true for a message sent with `"answer": false` and for every re-run, and stays true after **Answer from this attempt** fills the answer). A failed answer is still 200 with `error` set, and the message is saved. 404 for an unknown chat; 422 for empty text, a field other than `content`, `model` and `answer` (so a misspelt `answer` is refused, not answered and paid for), or an answer model that is unknown or has no price, before anything is saved |
+| `POST /chats/{id}/messages/{n}/attempts` | `{settings: {evidence_size?, rerank?, rewrite?}, stores: {store: {method?, candidates?}}}`: save those values on the chat (`null` inherits, a field left out is kept) and re-run message `n`, adding an attempt without answering. The attempt reuses the latest attempt's search text unless the rewrite or follow-up turns now in force differ from how it was made; a message from before this pipeline always keeps its text, with no paid rewrite. 404 for an unknown chat, message or store not on the chat; 409 for a method the store cannot run, or that needs AI when none is connected; 422 for a bad value, and then none is saved |
+| `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered or another request is answering it (nothing is paid twice). An answer model that is unknown or has no price becomes the attempt's `error`, after any note the attempt already had (a failed rewrite) |
+| `POST /chats/{id}/stores/{store}/default` | Set as default: save the method and candidates the chat holds for the store as the store's own, then clear them from the chat so it inherits them. Returns `{chat_method, chat_k, in_force}`. 404 for an unknown chat, or a store not on it; 409 when the store cannot run the method the chat holds (nothing is saved, since every chat that inherits it would fail) |
+| `POST /chat` | The single-store chat, through the same pipeline as a chat of one store. `{collection, messages: [{role, content}], method?, k?, model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means the store's chat method as a chat inherits it (store, then Settings); `k` is the evidence size (1 to 20), Settings' when left out. Candidates come from the store (then Settings); rerank, RRF k, the reranker and Rerank up to are Settings'. An unknown method is 422, and so are `iterative`, `hybrid_rerank` and the other methods that are not chat methods; a method the store cannot run is 409 with the reason, and an explicit paid method (or `keyword_rag` with model tags) when no AI is connected is 409 `needs AI`. An unknown or unpriced `model` is the reply's `error`. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error, notes}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
+| `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). With no `methods` it runs Settings' default method, and with no `rrf_k` Settings' RRF k (the Lab sends both). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it. A method that cannot run reports its own `error` with status 200: `keyword_rag` on a Documents store reads `needs keyword tags: Add keyword tags on the store page`, also while Add keyword tags is unfinished |
+| `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary (on a Documents store, while Add keyword tags is unfinished); 422 `Documents runs score retrieval only for now; answer judging comes with Documents eval sets` for a Documents run that asks for answers. `rerank_pool` (1 to 50, default 50) and `rerank_model` are read by `hybrid_rerank` alone: how many of hybrid's top it reranks, and with which model (none takes the Settings reranker when the run is queued; the run records it in `setup.rerank_model`). `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome`; `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
-| `POST /jobs/{job_id}/resume` | Resume a stopped run or copy. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run, copy, `reembed` or `tag_build`. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again. A `reembed` is free: it queues at once, with no estimate and no `confirm`. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt. A `tag_build` runs again in place too and finishes only what is left (the vocabulary if none is in force, the passages without tags); without `confirm` it returns `{estimate: {est_usd, calls}}`, with it the job is queued again. Only a store's newest `tag_build` resumes: an older one is 409 `a newer tag build of '<name>' exists; resume that one` |
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
 | `GET /catalog` | Plain names and descriptions of methods, metrics and QA types, and the built-in `datasets` |
 | `GET /budget` | This service's spend this month against its cap |
@@ -800,6 +980,7 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `POST /ai/connections/{id}/test`, `…/models/fetch`, `…/models` | Test a connection (an unreachable server is reported, not raised), fetch its model list, add a model by hand |
 | `PUT /ai/models/{connection}/{model}` | Price, label or enable a model |
 | `PUT /ai/roles/{job}`, `PUT /ai/budget` | Choose the model a job uses; set the monthly cap |
+| `GET /search-defaults`, `PUT /search-defaults` | The app-wide [Search defaults](#search-defaults): `{saved, recommended, in_force, limits, methods, rerankers, embedders, embed_machine, notes, rerank_status, rerank_error}`, where a null `saved` value follows the recommendation and `rerank_model` is shown as a name; `rerank_status` is the in-force reranker's load (`idle`, `loading`, `ready` or `failed`) and `rerank_error` why it failed. `PUT` takes any of `method`, `candidates`, `evidence_size`, `rerank`, `rewrite`, `follow_up_turns`, `rrf_k`, `rerank_model`, `rerank_pool`, `dense_model`, in part; `null` puts one back to recommended. A `PUT` with `rerank_model` starts loading it in the background, at once even if it failed minutes ago. 422 for an unknown field or a value out of range, a method that is not a chat method, a reranker or an embedding model fastembed does not list. `embedders` is `{name, dim, size_gb, note, seconds_per_1000}` for each offered model |
 
 Errors: a bad value is 422; a state conflict is 409; a provider's error is
 502, carrying its message with any key masked; no model for a job is 503.
@@ -856,11 +1037,12 @@ service:
 ## Experiments
 
 `scripts/experiments.py` queues the method-v2 experiments (X1 retrieval, X2 query
-tags, X3 fusion, X4 answer accuracy) through the API: `estimate` prices every arm,
+tags, X3 fusion, X4 answer accuracy, and X5, rerank against hybrid at chat's pool
+size) through the API: `estimate` prices every arm,
 `run --confirm` queues them (`--paid` for the arms that cost money: X2's `model`
 arm, one call per question, and every X4 arm, one answer call per question), and
 `report` prints one table with confidence intervals. Setup,
-commands and what each result proves or kills are in
+commands, the X1 to X4 results and what each result proves or kills are in
 [scripts/experiments.md](scripts/experiments.md).
 
 ## Using the AI layer in another project
@@ -892,24 +1074,29 @@ package's own: `BudgetExceeded`, `NoConnection`, `UnknownModel`,
 
 ## Roadmap
 
-The bench is now a chat across your stores that shows its evidence and lets
-you edit and re-run the retrieval, with the keyword method brought up to date;
-store profiles and routing by profile are built; a learned router is next.
-Where each part stands:
+The bench is a chat across your stores that pools every store's best passages,
+reranks them against the question and shows its evidence, with the keyword
+method brought up to date. The learned router is dropped: chat searches every
+store. Where each part stands:
 
-- **Keyword-RAG v2** (built; its [experiments](#experiments) have not been run,
-  so it is not yet known to beat the paper's method): build recipes per
-  collection, a keyword vocabulary induced from the corpus and reviewed through
-  the API instead of curated lists, keywords that describe the skill a solution
-  uses rather than the question's topic, a classifier that predicts a question's
-  keywords, and
-  abstracted worked examples. New benchmarks: BRIGHT AoPS and TheoremQA-Q,
-  scored by nDCG@10.
-- **Chat across stores** (built): saved chats that search several stores,
-  keep those that clear their bar and show an editable retrieval step under
-  every answer. Phase B is built too: store routing profiles, a chat setting
-  that routes each message to its stores by profile, and a routing eval. Next, a
-  learned router that uses the routing eval as its data.
+- **Keyword-RAG v2** (built, and its [experiments](#experiments) X1 to X4 have
+  been run): build recipes per collection, a keyword vocabulary induced from the
+  corpus and reviewed through the API instead of curated lists, keywords that
+  describe the skill a solution uses rather than the question's topic, a
+  classifier that predicts a question's keywords, and abstracted worked
+  examples. New benchmarks: BRIGHT AoPS and TheoremQA-Q, scored by nDCG@10.
+  The results, in [scripts/experiments.md](scripts/experiments.md):
+  - hybrid beat the label channel with classifier tags (X1), so the channel adds
+    nothing on that path;
+  - query tags from a model separated from hybrid with Haiku (+.054, CI above
+    zero) but not with Opus (+.030), and the oracle ceiling is far higher (.545
+    against .430), so tag prediction is the bottleneck (X2);
+  - nothing in the fusion experiment beat the defaults (X3);
+  - abstracted or full retrieved examples did not beat zero-shot on SciBench (X4).
+- **Chat** (built): saved chats that search several stores, pool their
+  candidates and rerank them with a reranker chosen in Settings, work without AI
+  as passages, and keep their own settings. Rerank's default is the open
+  question of X5.
 - **Library**: collections renamed to corpora, with PDF, Word and HTML
   imports.
 
@@ -974,8 +1161,10 @@ Where each part stands:
 - Chen et al. (2025). [SA-ICL](https://arxiv.org/abs/2510.13905) and Wang et
   al. (2025). [I2S](https://arxiv.org/abs/2509.23196): show an example's
   method, not the full worked example.
-- [Qwen3-Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B): the
+- [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5): the
   default embedding model.
+- [Qwen3-Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B): an
+  option, and the model of stores built before this change.
 
 ### Benchmarks
 

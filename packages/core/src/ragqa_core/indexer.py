@@ -6,14 +6,14 @@ from dataclasses import replace
 import numpy as np
 
 from aiconnect.ai import AI, NoConnection
-from ragqa_core import db
+from ragqa_core import db, search_defaults
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import source_for
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
-from ragqa_core.recipes import build_for, corpus_type_for, default_search
-from ragqa_core.store import Store, item_hash
+from ragqa_core.recipes import build_for, corpus_type_for, default_search, recipes_for
+from ragqa_core.store import CHUNK, SPARSE, Store, chunks_of, item_hash, rebuild_of
 from ragqa_core.types import FACETS, BuildSettings, CollectionSpec, Item, KeywordLists, QaType
 
 NAME = db.NAME
@@ -62,9 +62,12 @@ class Indexer:
         self.store = store
         self.models = models
         self.ai = ai
-        # Keyword-list embeddings by list version: they change only when the
-        # lists do, and re-embedding ~565 keywords per query dominated eval time.
-        self._list_vectors: dict[str, tuple[dict[str, np.ndarray], list[str], np.ndarray]] = {}
+        # Keyword-list embeddings by (model, list version): they change only when the
+        # lists do, and re-embedding ~565 keywords per query dominated eval time. A copy
+        # shares its source's lists version, so the model is in the key too.
+        self._list_vectors: dict[
+            tuple[str, str], tuple[dict[str, np.ndarray], list[str], np.ndarray]
+        ] = {}
 
     def new_spec(
         self,
@@ -73,22 +76,39 @@ class Indexer:
         summarize: bool,
         recipe: str = "paper_2024",
         build: BuildSettings | None = None,
+        dense_model: str | None = None,
     ) -> CollectionSpec:
-        """A new collection's spec, not yet saved: the recipe's build, or the one given."""
+        """A new collection's spec, not yet saved: the recipe's build, or the one given, and
+        the dense model given, or the one new stores take."""
         if not NAME.match(name):
             raise ValueError(f"collection name {name!r} must match {NAME.pattern}")
+        if name.endswith(("__rebuild", "__chunks")):  # the names of a store's search data
+            raise ValueError(
+                "store names may not end in __rebuild or __chunks;"
+                " those are kept for its search data"
+            )
         build = build or build_for(recipe, summarize)
+        allowed = recipes_for(qa_type)
+        if recipe not in allowed:
+            raise ValueError(
+                f"a {qa_type} store takes the recipes {', '.join(allowed)}, not {recipe}"
+            )
+        model = dense_model or self.new_store_model()
         return CollectionSpec(
             name,
             qa_type,
             build.added_text == "summary",  # the build decides; the flag only moves paper 2024
-            self.models.dense_model,
-            self.models.dense_dim(),
+            model,
+            self.models.dense_dim(model),
             corpus_type=corpus_type_for(qa_type),
             recipe=recipe,
             build=build,
             search=default_search(qa_type, build),
         )
+
+    def new_store_model(self) -> str:
+        """The embedding model a new store takes: Settings', else the service's."""
+        return str(search_defaults.in_force(self.conn)["dense_model"] or self.models.dense_model)
 
     def create(
         self,
@@ -97,8 +117,9 @@ class Indexer:
         summarize: bool,
         recipe: str = "paper_2024",
         build: BuildSettings | None = None,
+        dense_model: str | None = None,
     ) -> CollectionSpec:
-        spec = self.new_spec(name, qa_type, summarize, recipe, build)
+        spec = self.new_spec(name, qa_type, summarize, recipe, build, dense_model)
         db.save_collection(self.conn, spec)
         self.store.create(name, spec.dense_dim)
         return spec
@@ -166,7 +187,7 @@ class Indexer:
             sums = summaries[start : start + BATCH]
             texts = [i.text for i in part]
             whole = [embed_text(spec, i) for i in part]
-            vectors = self.models.embed(whole)
+            vectors = self.models.embed(whole, spec.dense_model)
             self.store.upsert_items(spec.name, part, vectors, self.models.sparse(texts), sums)
             # An updated item may now have fewer chunks: drop the old ones first.
             self.store.delete_chunks(spec.name, [i.id for i in part])
@@ -182,7 +203,7 @@ class Indexer:
             # VECTOR: embedding it again doubled the load's slowest step.
             # Only the rest are embedded, and never an empty list (the real model can't).
             rest = [p for p, o in zip(pieces, own, strict=True) if o is None]
-            fresh = iter(self.models.embed(rest) if rest else [])
+            fresh = iter(self.models.embed(rest, spec.dense_model) if rest else [])
             chunk_vectors = np.stack([vectors[o] if o is not None else next(fresh) for o in own])
             self.store.upsert_chunks(spec.name, parents, pieces, chunk_vectors, sources)
             # THE INDUCED RECIPES KEEP THEIR TERMS AS TAGS, NOT AS THE THREE LISTS' VECTORS.
@@ -243,12 +264,12 @@ class Indexer:
 
     def save_lists(self, spec: CollectionSpec, lists: KeywordLists) -> str:
         """Validate, embed and store a version of the lists, without switching to it."""
-        self.check_model(spec)  # the re-key would key items with another model's vectors
+        self.check_model(spec)  # a model this service can't load can't embed the lists
         for facet in FACETS:
             if not getattr(lists, facet):
                 raise ValueError(f"keyword list '{facet}' is empty")
         # Embedded before saving: a collection must never point at lists it cannot use.
-        self._lists_embedded(lists)
+        self._lists_embedded(spec.dense_model, lists)
         version = list_version(lists)
         db.save_keyword_lists(self.conn, spec.name, lists, version)
         return version
@@ -292,8 +313,8 @@ class Indexer:
         summaries: list[str | None],
     ) -> tuple[list[dict], dict[str, np.ndarray]]:
         """Keywords and keyword vectors for items or queries — both sides alike."""
-        item_vecs = self.models.embed(texts)
-        facet_vecs, pooled, pooled_vecs = self._lists_embedded(lists)
+        item_vecs = self.models.embed(texts, spec.dense_model)
+        facet_vecs, pooled, pooled_vecs = self._lists_embedded(spec.dense_model, lists)
         per_facet = assign(item_vecs, facet_vecs, lists)
         pooled_picks = pick_all(item_vecs, pooled_vecs, pooled)
         keywords = [{**kw, "all": picks} for kw, picks in zip(per_facet, pooled_picks, strict=True)]
@@ -312,7 +333,9 @@ class Indexer:
         }
         if spec.summarize:
             groups["kw_summary"] = [s or "" for s in summaries]
-        flat = self.models.embed([text for strings in groups.values() for text in strings])
+        flat = self.models.embed(
+            [text for strings in groups.values() for text in strings], spec.dense_model
+        )
         vectors: dict[str, np.ndarray] = {}
         offset = 0
         for name, strings in groups.items():
@@ -321,21 +344,157 @@ class Indexer:
         return keywords, vectors
 
     def _lists_embedded(
-        self, lists: KeywordLists
+        self, model: str, lists: KeywordLists
     ) -> tuple[dict[str, np.ndarray], list[str], np.ndarray]:
-        version = list_version(lists)
-        if version not in self._list_vectors:
+        key = (model, list_version(lists))
+        if key not in self._list_vectors:
             pooled = list(dict.fromkeys(lists.topic + lists.method + lists.common))
-            self._list_vectors[version] = (
-                {f: self.models.embed(getattr(lists, f)) for f in FACETS},
+            self._list_vectors[key] = (
+                {f: self.models.embed(getattr(lists, f), model) for f in FACETS},
                 pooled,
-                self.models.embed(pooled),
+                self.models.embed(pooled, model),
             )
-        return self._list_vectors[version]
+        return self._list_vectors[key]
+
+    def reembed(
+        self,
+        name: str,
+        model: str,
+        progress: Callable[[float], None] = lambda p: None,
+        switching: bool = False,
+        on_switch: Callable[[], None] = lambda: None,
+    ) -> dict:
+        """Rebuilds the store with another embedding model, then switches to it.
+
+        Phase 1 embeds every item and chunk again into rebuild_of(name), keeping each point's
+        id, payload, tags and sparse vector; keyword-list picks are recomputed with the new
+        model. A stop there (Cancelled from progress included) drops the copy and leaves the
+        store as it was. Phase 2, the switch, refills the store from the copy and records
+        the model; it reports no progress, so it can't be cancelled, and `switching=True`
+        resumes it after a stop."""
+        spec = self.spec(name)
+        if spec is None:
+            raise ValueError(f"no collection '{name}'")
+        if not switching:
+            self._rebuild(spec, model, progress)
+            on_switch()
+        elif not self.store.exists(rebuild_of(name)):
+            if spec.dense_model == model:  # the switch finished; only the copy's drop was left
+                self.store.drop_rebuild(name)  # its chunks may outlive a drop that died
+                return {
+                    "model": spec.dense_model,
+                    "dim": spec.dense_dim,
+                    "items": self.store.count(name),
+                    "chunks": self.store.count(chunks_of(name)),
+                }
+            raise ValueError(
+                f"the copy made for the switch to {model} is gone;"
+                " delete the store and load it again"
+            )
+        dim = self.models.dense_dim(model)
+        self.store.recreate(name, dim)
+        items = self.store.copy(rebuild_of(name), name)
+        chunks = self.store.copy(chunks_of(rebuild_of(name)), chunks_of(name))
+        db.set_dense_model(self.conn, name, model, dim)
+        self.store.drop_rebuild(name)
+        return {"model": model, "dim": dim, "items": items, "chunks": chunks}
+
+    def _rebuild(self, spec: CollectionSpec, model: str, progress: Callable[[float], None]) -> None:
+        """Phase 1 of reembed. It never checks the old model: it reads only payloads and
+        the sparse vector, so a store whose model can't load can be rebuilt with one that can."""
+        target = replace(spec, dense_model=model, dense_dim=self.models.dense_dim(model))
+        side = rebuild_of(spec.name)
+        # WHATEVER THE VOCABULARY, AS REKEY: lists set by hand give any store kw_* vectors
+        # that search reads, so they are recomputed with the new model whenever in force.
+        lists = db.get_keyword_lists(self.conn, spec.name)
+        total, done = self.store.count(spec.name), 0
+        self.store.drop_rebuild(spec.name)
+        try:
+            self.store.create(side, target.dense_dim)
+            for points in self.store.points(spec.name, BATCH):
+                self._rebuild_batch(spec, target, lists, points)
+                done += len(points)
+                progress(0.95 * done / total)
+        except BaseException:
+            self.store.drop_rebuild(spec.name)
+            raise
+
+    def _rebuild_batch(
+        self,
+        spec: CollectionSpec,
+        target: CollectionSpec,
+        lists: KeywordLists | None,
+        points: list[tuple[str, dict, dict]],
+    ) -> None:
+        """One batch of items, and their chunks, embedded with target's model into the copy."""
+        model, side = target.dense_model, rebuild_of(spec.name)
+        payloads = [dict(payload) for _, _, payload in points]
+        items = [
+            Item(
+                p["item_id"], p["text"], p.get("answer"), p.get("explanation"), p.get("meta") or {}
+            )
+            for p in payloads
+        ]
+        whole = [embed_text(spec, i) for i in items]
+        dense = self.models.embed(whole, model)
+        vectors: list[dict] = [
+            {"text_dense": dense[row], SPARSE: old[SPARSE]}
+            for row, (_, old, _) in enumerate(points)
+        ]
+        if lists is not None:
+            keywords, kw_vectors = self.keywords_for(
+                target, lists, [i.text for i in items], [p.get("summary") for p in payloads]
+            )
+            for row, kw in enumerate(keywords):
+                payloads[row]["keywords"] = kw
+                vectors[row].update({v: vecs[row] for v, vecs in kw_vectors.items()})
+        tagged = [row for row, p in enumerate(payloads) if p.get("tags")]
+        if tagged:
+            tags = [keyword_string(payloads[row]["tags"], None) for row in tagged]
+            for row, vec in zip(tagged, self.models.embed(tags, model), strict=True):
+                vectors[row]["kw_tags"] = vec
+        self.store.write(
+            side,
+            [
+                (pid, vecs, p)
+                for (pid, _, _), vecs, p in zip(points, vectors, payloads, strict=True)
+            ],
+        )
+        # A CHUNK THAT IS ITS ITEM'S WHOLE TEXT REUSES THE ITEM'S NEW VECTOR, AS IN add.
+        row_of = {i.id: row for row, i in enumerate(items)}
+        chunks = self.store.chunk_points(spec.name, [i.id for i in items])
+        rows = [row_of[p["parent_id"]] for _, p in chunks]
+        own = [r if p["text"] == whole[r] else None for (_, p), r in zip(chunks, rows, strict=True)]
+        rest = [p["text"] for (_, p), o in zip(chunks, own, strict=True) if o is None]
+        fresh = iter(self.models.embed(rest, model) if rest else [])
+        self.store.write(
+            chunks_of(side),
+            [
+                (pid, {CHUNK: dense[o] if o is not None else next(fresh)}, p)
+                for (pid, p), o in zip(chunks, own, strict=True)
+            ],
+        )
 
     def check_model(self, spec: CollectionSpec) -> None:
-        if spec.dense_model != self.models.dense_model:
+        """Refuses a store this service can't search: a switch to another model is
+        unfinished, its model is not one fastembed lists, or the dimension it was built at
+        is not its model's. A store whose model is not the service's default is fine: it is
+        embedded and searched with its own."""
+        switching = db.switching_model(self.conn, spec.name)
+        if switching:
             raise ModelMismatch(
-                f"collection '{spec.name}' was built with {spec.dense_model};"
-                f" service is running {self.models.dense_model}"
+                f"store '{spec.name}' is switching to {switching}; try again when its"
+                " rebuild finishes, or resume it on the store page"
+            )
+        try:
+            dim = self.models.dense_dim(spec.dense_model)
+        except ValueError:
+            raise ModelMismatch(
+                f"collection '{spec.name}' was built with {spec.dense_model},"
+                " which this service can't load"
+            ) from None
+        if dim != spec.dense_dim:
+            raise ModelMismatch(
+                f"collection '{spec.name}' was built with {spec.dense_model}"
+                f" at {spec.dense_dim} dimensions; {spec.dense_model} gives {dim}"
             )

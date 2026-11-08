@@ -4,6 +4,8 @@ import ast
 import re
 from pathlib import Path
 
+from ragqa_core import db
+
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SRC = ROOT / "packages/core/src"
 API_SRC = ROOT / "apps/api/src"
@@ -145,3 +147,66 @@ def test_python_strings_name_no_provider():
                 ):
                     found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert found == []
+
+
+GONE = [
+    r"store_bars",
+    r"chat_bar",
+    r"route_profile|route-profile|routeProfile",
+    r"\brouting\b|\bRouting\b",
+    r"\bRouter\b|ragqa_core\.router",
+    r"[Ss]earch anyway",
+    r"kept from the last message|_sticky|ON_MERIT",
+    r"_drop_bars",
+    r"\{name\}/bar|/routing/eval",
+    r"check-routing|routing-check|routing-split|Check routing",
+    r"bar_source|route_bar|\bownBar\b|\bsetBar\b|barFrom|route-text|routeText|routeDraft",
+]
+GONE_PY_ONLY = r"\bBar\b"
+MIGRATION_TERMS = ("store_bars", "chat_bar", "route_profile", "routing")
+
+
+def migration_lines(path: Path) -> set[int]:
+    """Lines of the one migration function, `_drop_routing`, in db.py."""
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.FunctionDef) and node.name == "_drop_routing":
+            return set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return set()
+
+
+def leftovers() -> list[str]:
+    hits = []
+    for src in (CORE_SRC, API_SRC, WORKER_SRC):
+        for path in sorted(
+            p for p in src.rglob("*") if p.suffix in {".py", ".js", ".html", ".css"}
+        ):
+            allowed = migration_lines(path) if path.name == "db.py" else set()
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                found = any(re.search(rx, line) for rx in GONE)
+                found = found or (path.suffix == ".py" and re.search(GONE_PY_ONLY, line))
+                if found and not (number in allowed and any(t in line for t in MIGRATION_TERMS)):
+                    hits.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    return hits
+
+
+def files_importing_the_router() -> list[str]:
+    hits = []
+    dirs = [ROOT / "tests", *ROOT.glob("packages/*/tests"), *ROOT.glob("apps/*/tests")]
+    for folder in dirs:
+        for path in sorted(folder.rglob("*.py")):
+            if path == Path(__file__).resolve():
+                continue
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if re.search(r"ragqa_core\.router", line):
+                    hits.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    return hits
+
+
+def test_routing_bars_and_profiles_are_gone():
+    problems = leftovers() + files_importing_the_router()
+    if (CORE_SRC / "ragqa_core/router.py").exists():
+        problems.append("packages/core/src/ragqa_core/router.py still exists")
+    for name in ("get_chat_bar", "last_item_job"):
+        if hasattr(db, name):
+            problems.append(f"db.{name} still exists")
+    assert not problems, "\n".join(problems)
