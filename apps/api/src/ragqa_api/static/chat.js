@@ -1,4 +1,4 @@
-import { $, UNPRICED, api, catalog, esc, head, methodLabel, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
+import { $, UNPRICED, api, catalog, esc, followJob, head, methodLabel, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
 
 const PASSAGE = 300; // characters of a source shown before it is expanded
 const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
@@ -27,7 +27,7 @@ let adding = false; // files are being added
 const details = {}; // store -> its GET /collections/{name}: its chip, its methods, its own settings
 const pending = {}; // chat id -> the message still on its way there
 const arrived = {}; // chat id -> the replies (a message, a re-run, an answer) that came while its chat was loading, merged once it has
-const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes
+const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes; read and pushed through notesOf
 const turns = {}; // "chat id:message n" (and "chat id:panel") -> what the reader has open or edited there, kept across redraws
 
 // The chat's stores that still exist.
@@ -35,6 +35,50 @@ const live = () => (chat ? chat.stores.filter((s) => !chat.deleted_stores.includ
 const lastN = (c) => c.messages.at(-1)?.n ?? 0;
 // The newest message with an attempt: the settings panel sits under it.
 const latestN = () => chat?.messages.filter((m) => m.attempts.length).at(-1)?.n ?? null;
+
+// -- the page's own lines, kept in this browser ---------------------------------------------------
+
+const NOTES = "chat-notes:"; // localStorage key prefix, then the chat id: its lines as a JSON array
+
+// The chat's own lines, read from this browser's storage on first touch. A storage that throws
+// (a private window, blocked site data) keeps them in memory only, until a reload.
+function notesOf(id) {
+  if (!local[id]) {
+    let kept = null;
+    try {
+      kept = JSON.parse(localStorage.getItem(NOTES + id));
+    } catch {}
+    local[id] = Array.isArray(kept) ? kept.filter((l) => l && typeof l === "object") : [];
+  }
+  return local[id];
+}
+
+// Adds lines to the chat's own, and writes them back.
+function addNotes(id, ...lines) {
+  notesOf(id).push(...lines);
+  try {
+    localStorage.setItem(NOTES + id, JSON.stringify(local[id]));
+  } catch {}
+}
+
+function dropNotes(id) {
+  delete local[id];
+  try {
+    localStorage.removeItem(NOTES + id);
+  } catch {}
+}
+
+// Removes the kept lines of chats no longer listed, deleted from another tab or page. The open
+// chat's are kept: a list read before this tab made it may land after its first note.
+function pruneNotes(listed) {
+  const ids = new Set([...listed.map((c) => c.id), chat?.id, openId]);
+  try {
+    const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+    for (const key of keys) {
+      if (key?.startsWith(NOTES) && !ids.has(key.slice(NOTES.length))) localStorage.removeItem(key);
+    }
+  } catch {}
+}
 
 // Message n's state on the page: the attempt tab chosen (null: the latest), whether its
 // Retrieval step is open, the passages expanded, and Answer from this attempt's progress.
@@ -225,8 +269,9 @@ function attemptHtml(a, at, ui) {
   // Said whenever the answer had no passages.
   const none = a.evidence.length ? "" : '<div class="meta warn no-passages">The stores found no passages, so this answer used none.</div>';
   const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
+  const cached = a.pipeline?.answer_cached ? " · answer cached" : ""; // the answer only: a paid rewrite is not
   return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, cited, at)}</div>${sources}
-    ${none}${note}<div class="meta muted">Cost ${usd(a.usd)}</div></div>`;
+    ${none}${note}<div class="meta muted">Cost ${usd(a.usd)}${cached}</div></div>`;
 }
 
 // -- the retrieval step ------------------------------------------------------------------------
@@ -584,7 +629,7 @@ function drawHead() {
   drawChips();
   const others = stores.filter((s) => !chat.stores.includes(s.name));
   $("add-store").innerHTML = ['<option value="">Add a store…</option>']
-    .concat(others.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} · ${esc(s.qa_type)}</option>`))
+    .concat(others.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} · ${esc(cat?.qa_types?.[s.qa_type]?.label ?? s.qa_type)}</option>`))
     .join("");
   $("add-store").disabled = !others.length;
   const keep = $("doc-store").value;
@@ -596,7 +641,7 @@ function drawHead() {
 function drawLog() {
   let html = "";
   if (chat) {
-    const lines = local[chat.id] ?? [];
+    const lines = notesOf(chat.id);
     const after = (n) => lines.filter((l) => l.after === n).map(lineHtml).join("");
     const waiting = pending[chat.id];
     // While a reply is on its way, the message it answers is drawn once, as the waiting line.
@@ -634,6 +679,7 @@ function setBusy() {
 
 async function loadList() {
   chats = await api("/chats");
+  pruneNotes(chats);
   drawList();
   const listed = chats.find((c) => c.id === chat?.id);
   if (listed) {
@@ -703,7 +749,7 @@ function pickStores() {
     return;
   }
   const boxes = stores
-    .map((s) => `<label class="check"><input type="checkbox" value="${esc(s.name)}"> ${esc(s.name)} <span class="muted">${esc(s.qa_type)}</span></label>`)
+    .map((s) => `<label class="check"><input type="checkbox" value="${esc(s.name)}"> ${esc(s.name)} <span class="muted">${esc(cat?.qa_types?.[s.qa_type]?.label ?? s.qa_type)}</span></label>`)
     .join("");
   $("picking").innerHTML = `<fieldset><legend>Stores to search</legend><div class="checks">${boxes}</div></fieldset>
     <div class="actions"><button type="button" data-start>Start chat</button>
@@ -730,7 +776,7 @@ function pickStores() {
 function askDelete(id) {
   const title = chats.find((c) => c.id === id)?.title ?? "";
   const box = $("deleting");
-  box.innerHTML = `<p>${esc(`Delete chat ${title}?`)}</p><div class="actions">
+  box.innerHTML = `<p>${esc(`Delete chat ${title.replace(/[?\s]+$/, "")}?`)}</p><div class="actions">
     <button type="button" class="danger" data-yes>Yes, delete</button>
     <button type="button" class="secondary" data-keep>Keep it</button></div>`;
   box.querySelector("[data-keep]").addEventListener("click", () => (box.innerHTML = ""));
@@ -738,7 +784,7 @@ function askDelete(id) {
     try {
       await api(`/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
       box.innerHTML = "";
-      delete local[id];
+      dropNotes(id);
       if (id === openId) {
         history.replaceState(null, "", location.pathname); // no hash: no chat open
         await openChat("");
@@ -795,7 +841,7 @@ async function ask() {
     });
   } catch (e) {
     error = e.message; // refused: the server kept nothing, so the page keeps it until a reload
-    (local[id] ??= []).push({ after, role: "user", content }, { after, role: "error", content: error });
+    addNotes(id, { after, role: "user", content }, { after, role: "error", content: error });
   }
   delete pending[id];
   refreshSpend();
@@ -960,8 +1006,6 @@ async function answerAttempt(n, number) {
 
 // -- adding documents --------------------------------------------------------------------------
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 // Asks, in #adding, whether to spend `estimate`; resolves true on Add and false on Cancel.
 function askToAdd(file, estimate) {
   const cost = estimate.est_usd == null ? UNPRICED : `≈ ${usd(estimate.est_usd)}`;
@@ -974,16 +1018,13 @@ function askToAdd(file, estimate) {
 }
 
 // Follows an import job, with the line "Adding <file>… 40%"; returns the finished job.
-async function follow(file, jobId) {
-  for (;;) {
-    const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
-    if (job.status !== "queued" && job.status !== "running") return job;
+function follow(file, jobId) {
+  return followJob(jobId, (job) => {
     $("adding").textContent =
       job.status === "queued"
         ? `Adding ${file}: waiting for the store's other job…`
         : `Adding ${file}… ${Math.round((job.progress ?? 0) * 100)}%`;
-    await wait(500);
-  }
+  });
 }
 
 // One file into the store for good, as its own source: upload, estimate, confirm if it spends.
@@ -1008,7 +1049,7 @@ async function addFiles(files) {
   const start = lastN(chat);
   // A line in the chat the files went to, drawn when the page is still on it.
   const say = (role, content) => {
-    (local[id] ??= []).push({ after: chat?.id === id ? lastN(chat) : start, role, content });
+    addNotes(id, { after: chat?.id === id ? lastN(chat) : start, role, content });
     if (chat?.id === id) drawLog();
   };
   adding = true;
@@ -1169,9 +1210,11 @@ window.addEventListener("hashchange", () => {
   openChat(id).catch(said);
 });
 
-loadModels()
+const ready = loadModels()
   .then(async () => (stores = await api("/collections")))
-  .then(async () => (cat = await catalog().catch((e) => (said(e), null)))) // labels: not needed to chat
+  .then(async () => (cat = await catalog().catch((e) => (said(e), null)))); // labels: not needed to chat
+ready.catch(() => {}).then(() => ($("new").disabled = false)); // New chat lists the stores read
+ready
   .then(async () => (defaults = await api("/search-defaults").catch((e) => (said(e), null)))) // not needed to chat
   .then(loadList)
   .then(() => openChat(hashId()))

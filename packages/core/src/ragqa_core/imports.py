@@ -44,16 +44,35 @@ FORMATS = {
 }
 FIELDS = {
     "items": ("id", "text", "answer", "explanation", "skill", "topic", "meta"),
-    "questions": ("id", "text", "choices", "answer", "gold_ids", "solution", "skill", "scale"),
+    "questions": (
+        "id",
+        "text",
+        "choices",
+        "answer",
+        "gold_ids",
+        "solution",
+        "skill",
+        "scale",
+        "judged_ids",
+    ),
 }
 SYNONYMS = {
     "id": ("id", "uid", "qid", "problemid", "file", "key"),
     "text": ("text", "question", "problem", "problem_text", "content", "passage", "body"),
-    "answer": ("answer", "answers", "gold", "gold_answer", "answer_number", "label"),
+    "answer": (
+        "answer",
+        "answers",
+        "gold",
+        "gold_answer",
+        "answer_number",
+        "label",
+        "gold_answers",
+    ),
     "explanation": ("explanation", "solution", "rationale", "worked_solution"),
     "solution": ("solution", "explanation", "rationale", "worked_solution"),
     "choices": ("choices", "options"),
     "gold_ids": ("gold_ids", "supporting_ids", "evidence_ids", "evidence"),
+    "judged_ids": ("judged_ids", "judged"),
     "skill": ("skill", "chapter", "category"),
     "topic": ("topic", "subject"),
     "scale": ("scale",),
@@ -651,7 +670,9 @@ def build_questions(
             continue
         meta = {k: v for k in ("solution", "skill", "scale") if (v := cell_text(row, mapping, k))}
         gold_ids = split_list(cell(row, mapping, "gold_ids"))
-        question = Question(id_, text, choices, gold, gold_ids, meta)
+        judged = cell(row, mapping, "judged_ids")
+        judged_ids = None if judged is None or judged == "" else split_list(judged)
+        question = Question(id_, text, choices, gold, gold_ids, meta, judged_ids)
         if question_problem(question, qa_type):
             report["unreadable_answers"] += 1
             continue

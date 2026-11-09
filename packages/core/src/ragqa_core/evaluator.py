@@ -5,7 +5,7 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from typing import Literal
+from typing import Any, Literal
 
 from aiconnect.ai import (
     AI,
@@ -34,14 +34,22 @@ from ragqa_core.metrics import (
 from ragqa_core.models import Models
 from ragqa_core.program import program_answer
 from ragqa_core.prompts import (
+    CHAT_NO_PASSAGES,
+    CHAT_SYSTEM,
     CHAT_TOKENS,
+    JUDGE_SYSTEM,
+    JUDGE_TOKENS,
     QUERY_TASK,
     SUMMARY_TOKENS,
     answer_line,
     answer_prompt,
+    chat_prompt,
     hop_prompt,
+    judge_prompt,
     parse_answer,
+    parse_verdict,
     query_tag_prompt,
+    strip_citations,
     summary_prompt,
 )
 from ragqa_core.recipes import search_settings
@@ -64,7 +72,7 @@ RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
     "table": ("recall@1", "recall@3"),
 }
 ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
-    "documents": (),  # retrieval only until its answers are judged
+    "documents": ("accuracy",),  # judged answers only
     "mcq": ("accuracy",),
     "science": ("accuracy",),
     "multihop": ("em", "f1"),
@@ -79,8 +87,8 @@ MISS_METRIC: dict[QaType, str] = {
     "multihop": "recall@2",
     "table": "recall@1",
 }
-# None for documents: its runs are refused answers, and this is read only for a run with them.
 PAIR_ANSWER_METRIC: dict[QaType, str] = {
+    "documents": "accuracy",  # judged answers only
     "mcq": "accuracy",
     "science": "accuracy",
     "multihop": "f1",
@@ -94,6 +102,8 @@ ANSWER_TOKENS: dict[QaType, int] = {
     "multihop": 100,
     "table": 100,
 }
+# A judged row's verdict, by what parse_verdict read.
+VERDICTS = {True: "correct", False: "incorrect"}
 # A plan and a program do not fit in a short answer's budget.
 PROGRAM_TOKENS = 600
 ESTIMATE_SAMPLE = 5
@@ -107,11 +117,15 @@ def answer_tokens(qa_type: QaType, program: bool) -> int:
     return max(ANSWER_TOKENS[qa_type], PROGRAM_TOKENS) if program else ANSWER_TOKENS[qa_type]
 
 
-def answer_hits(qa_type: QaType, hits: list[Hit], example: str) -> list[Hit]:
+def answer_hits(
+    qa_type: QaType, hits: list[Hit], example: str, evidence_size: int | None = None
+) -> list[Hit]:
     # The paper's one-shot: the single best example for worked types, none when the
-    # example is off; passages otherwise.
+    # example is off; passages otherwise, a Documents answer's cut to the evidence size.
     if qa_type in EXAMPLE_TYPES:
         return [] if example == "off" else hits[:1]
+    if qa_type == "documents" and evidence_size is not None:
+        return hits[:evidence_size]
     return hits
 
 
@@ -125,21 +139,72 @@ def example_form(qa_type: QaType, shown: list[Hit], example: str) -> str | None:
     return "abstracted" if example == "abstracted" and shown[0].abstracted else "full"
 
 
-def retrieval_depth(qa_type: QaType, q: Question, k: int) -> int:
+def retrieval_depth(qa_type: QaType, q: Question, k: int, answer_depth: int = 0) -> int:
     """How many hits a question keeps: k, or GOLD_DEPTH when its gold ids score a worked
-    collection's or a Documents store's ranking. The other passage types keep k, since every
-    hit kept is shown to the answerer; a Documents run has no answerer."""
+    collection's or a Documents store's ranking, and at least `answer_depth`, the hits an
+    answer is shown. The other passage types keep k, since every hit kept is shown to the
+    answerer."""
     deep = qa_type in EXAMPLE_TYPES or qa_type == "documents"
-    return max(k, GOLD_DEPTH) if deep and q.gold_ids else k
+    depth = max(k, GOLD_DEPTH) if deep and q.gold_ids else k
+    return max(depth, answer_depth)
 
 
-ANSWERS_LATER = (
-    "Documents runs score retrieval only for now; answer judging comes with Documents eval sets"
-)
+def run_prompt(
+    qa_type: QaType, q: Question, hits: list[Hit], search: SearchSettings, retrieves: bool = True
+) -> tuple[str, str]:
+    """A run's answer prompt. A Documents answer is a chat reply with no history; a method
+    that retrieves keeps CHAT_SYSTEM even when a question gets no hits, so one method's
+    prompts share one system."""
+    if qa_type == "documents":
+        system = CHAT_SYSTEM if retrieves else CHAT_SYSTEM + CHAT_NO_PASSAGES
+        return system, chat_prompt(q.text, [], hits)[1]
+    return answer_prompt(qa_type, q.text, q.choices, hits, search.example, search.program)
+
+
+# A method whose top GOLD_DEPTH holds more never-judged passages than this, on average, has
+# a score that may only say its passages were never labelled.
+UNJUDGED_OVER = 3
+
+
+def unjudged_count(hit_ids: list[str], judged: list[str]) -> int:
+    """How many of the top GOLD_DEPTH hits were never judged, right or wrong."""
+    seen = set(judged)
+    return sum(1 for i in hit_ids[:GOLD_DEPTH] if i not in seen)
+
+
 NOTHING_TO_MEASURE = (
     "nothing to measure: this store holds none of the eval set's evidence;"
     " have the AI answer, or choose another store"
 )
+# A Documents run's answers are shown unscored, so having the AI answer gives it nothing to
+# measure, and this refusal doesn't offer it.
+NOTHING_TO_MEASURE_DOCUMENTS = (
+    "nothing to measure: this store holds none of the eval set's evidence; choose another store"
+)
+# Judged answers are something to measure, so a set with reference answers is offered them.
+NOTHING_TO_MEASURE_JUDGE = (
+    "nothing to measure: this store holds none of the eval set's right passages; tick Judge"
+    " answers to score the answers, or choose another store"
+)
+JUDGE_NOT_DOCUMENTS = "Judge answers is for Documents stores"
+JUDGE_NEEDS_ANSWERS = "Judge answers needs the AI's answers: tick Have the AI answer the questions"
+JUDGE_NO_REFERENCE = (
+    "none of the questions in this run has a reference answer to judge against; add reference"
+    " answers on the eval set page, or choose All"
+)
+
+
+def check_judge(spec: CollectionSpec, answer: bool, judge: bool, questions: list[Question]) -> None:
+    """Refuses Judge answers where there is nothing to judge, in this order: not a Documents
+    store, no answers asked for, no reference answer among the questions asked."""
+    if not judge:
+        return
+    if spec.qa_type != "documents":
+        raise ValueError(JUDGE_NOT_DOCUMENTS)
+    if not answer:
+        raise ValueError(JUDGE_NEEDS_ANSWERS)
+    if not any(q.gold_answers for q in questions):
+        raise ValueError(JUDGE_NO_REFERENCE)
 
 
 class EvalSetMismatch(Exception):
@@ -157,7 +222,9 @@ def measurable(qa_type: QaType, fields: dict) -> dict[str, dict]:
     cannot or only in part. `fields` counts questions (total, solution, skill, gold_ids)
     and items (total, explanation, skill)."""
     q, i = fields["questions"], fields["items"]
-    out: dict[str, dict] = {m: {"measurable": True, "note": None} for m in ANSWER_METRICS[qa_type]}
+    # A store lists what every run of it measures: only a judged Documents run has accuracy.
+    answers = () if qa_type == "documents" else ANSWER_METRICS[qa_type]
+    out: dict[str, dict] = {m: {"measurable": True, "note": None} for m in answers}
     if qa_type in EXAMPLE_TYPES:
         needs = {
             "solution_sim@1": (
@@ -381,17 +448,24 @@ class Evaluator:
         model: str | None,
         search: dict | None = None,
         eval_set: str | None = None,
+        judge: bool = False,
     ) -> dict:
         """What the run would spend, with the counts the run form shows for this (store,
         eval set): its questions, its dev slice, and of the questions asked, those naming
-        evidence and those whose evidence the store holds."""
+        evidence and those whose evidence the store holds; for Documents, those with a
+        reference answer, which Judge answers grades."""
         spec = self.retriever.spec(collection)
         self.retriever.indexer.check_model(spec)
         every = self._questions(
             spec, {"split": "full", "eval_set": self._chosen_set(spec, eval_set)}
         )
         questions = dev_slice(every) if split == "dev" else every
+        check_judge(spec, answer, judge, questions)
         named, held = self._evidence(spec, questions)
+        documents = spec.qa_type == "documents"
+        # A Documents answer is shown Settings' evidence size; queue records the one priced.
+        size = self._evidence_size({}) if documents and answer else None
+        references = [q for q in questions if q.gold_answers]
         parts = self._estimate_parts(
             spec,
             {m: len(questions) for m in methods},
@@ -399,6 +473,9 @@ class Evaluator:
             model,
             questions[:ESTIMATE_SAMPLE],
             search_settings(spec.search or SearchSettings(), search),
+            evidence_size=size,
+            judged={m: len(references) for m in methods} if judge else None,
+            judge_sample=references[:ESTIMATE_SAMPLE],
         )
         return {
             "questions": len(every),
@@ -406,7 +483,16 @@ class Evaluator:
             "evidence_named": named,
             "evidence_held": held,
             **parts,
+            **({} if size is None else {"evidence_size": size}),
+            **({"references": len(references)} if documents else {}),
         }
+
+    def _evidence_size(self, setup: dict) -> int:
+        """The passages a Documents answer is shown: the run's recorded size, else Settings'."""
+        if "evidence_size" in setup:
+            return int(setup["evidence_size"])
+        defaults: dict[str, Any] = search_defaults.in_force(self.conn)
+        return int(defaults["evidence_size"])
 
     def estimate_resume(self, job_id: str) -> dict:
         """What resuming would cost: only the incomplete (method, question) pairs."""
@@ -420,6 +506,8 @@ class Evaluator:
         todo = {m: self._todo(job_id, m, questions) for m in setup["methods"]}
         pending = {q.id for qs in todo.values() for q in qs}
         remaining = [q for q in questions if q.id in pending]
+        documents = spec.qa_type == "documents" and setup["answer"]
+        judged, exact_judges = self._resume_judges(job_id, setup, todo)
         parts = self._estimate_parts(
             spec,
             {m: len(qs) for m, qs in todo.items()},
@@ -427,8 +515,79 @@ class Evaluator:
             setup["model"],
             remaining[:ESTIMATE_SAMPLE],
             self._search(spec, setup),
+            evidence_size=self._evidence_size(setup) if documents else None,
+            exact_answers=self._resume_answers(job_id, spec, setup, todo) if documents else None,
+            judged=judged,
+            judge_sample=[q for q in remaining if q.gold_answers][:ESTIMATE_SAMPLE],
+            exact_judges=exact_judges,
         )
         return {"questions": len(remaining), **parts}
+
+    def _resume_judges(
+        self, job_id: str, setup: dict, todo: dict[str, list[Question]]
+    ) -> tuple[dict[str, int], dict[str, list[str]]]:
+        """A judged run's verdicts still to ask, by method: their judge prompts when every
+        question left with a reference answer has its answer stored (a stop while judging),
+        else their count."""
+        judged: dict[str, int] = {}
+        exact: dict[str, list[str]] = {}
+        if not setup.get("judge"):
+            return judged, exact
+        for method, questions in todo.items():
+            references = [q for q in questions if q.gold_answers]
+            if not references:
+                continue
+            rows = {r["question_id"]: r for r in db.run_items(self.conn, job_id, method)}
+            if all("pred" in rows.get(q.id, {}) for q in references):
+                exact[method] = [
+                    judge_prompt(q.text, q.gold_answers, rows[q.id]["pred"])[1] for q in references
+                ]
+            else:
+                judged[method] = len(references)
+        return judged, exact
+
+    def _resume_answers(
+        self, job_id: str, spec: CollectionSpec, setup: dict, todo: dict[str, list[Question]]
+    ) -> dict[str, tuple[str, list[str]]]:
+        """A Documents run's answer prompts still to send, by method, as (system, prompts):
+        rebuilt from the stored rows, so a resume can price them against the AI cache. A
+        method is covered when every question left has a row with its hits, as it has once
+        its retrieval finished; the others are priced from a sample. A row that holds its
+        answer (a judged run stopped before judging) is not answered again."""
+        size, search = self._evidence_size(setup), self._search(spec, setup)
+        out = {}
+        for method, questions in todo.items():
+            rows = self._retrieved_rows(job_id, method)
+            if not questions or not all(q.id in rows for q in questions):
+                continue
+            retrieves = method != "question_only"
+            system = run_prompt("documents", questions[0], [], search, retrieves)[0]
+            out[method] = (
+                system,
+                [
+                    run_prompt(
+                        "documents", q, self._stored_hits(spec, rows[q.id], size), search, retrieves
+                    )[1]
+                    for q in questions
+                    if "pred" not in rows[q.id]
+                ],
+            )
+        return out
+
+    def _retrieved_rows(self, job_id: str, method: str) -> dict[str, dict]:
+        """The method's stored rows that hold their hits, by question id, as rows to write."""
+        return {
+            r["question_id"]: {
+                k: v for k, v in r.items() if k not in ("method", "question_id", "complete")
+            }
+            for r in db.run_items(self.conn, job_id, method)
+            if "hit_ids" in r
+        }
+
+    def _stored_hits(self, spec: CollectionSpec, row: dict, size: int | None) -> list[Hit]:
+        """A stored row's top `size` hits, read back from the store (none read for none)."""
+        ids = row["hit_ids"][:size]
+        return self.retriever.store.get(spec.name, ids) if ids else []
 
     def _estimate_parts(
         self,
@@ -438,11 +597,22 @@ class Evaluator:
         model: str | None,
         sample: list[Question],
         search: SearchSettings,
+        evidence_size: int | None = None,
+        exact_answers: dict[str, tuple[str, list[str]]] | None = None,
+        judged: dict[str, int] | None = None,
+        judge_sample: list[Question] | None = None,
+        exact_judges: dict[str, list[str]] | None = None,
     ) -> dict:
         # (calls, avg prompt chars, output tokens, batched?, role, model) — each part
         # priced the way it is sent: one complete_many per part, batched only
         # above 50 calls; iterative hops are single real-time calls. Summaries, hops and
         # the AI's query tags run on the query job's model; only answers use the requested one.
+        # A method in `exact_answers` has its answer prompts known (a resume's, rebuilt from
+        # its rows): they are priced as complete_many would send them, cached ones free.
+        # `judged` counts each method's verdicts, priced at the longest answer; a method in
+        # `exact_judges` has its judge prompts known (a resume's, from its stored answers).
+        exact = exact_answers or {}
+        known_judges = exact_judges or {}
         parts: list[tuple[int, float, int, bool, str, str | None]] = []
         summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
         if spec.summarize and summaries:
@@ -463,40 +633,84 @@ class Evaluator:
             if m == "iterative"
         )
         if answer and any(n_by_method.values()):
-            chars = self._answer_chars(spec, sample, search)
             program = search.program and any(not q.choices for q in sample)
             tokens = answer_tokens(spec.qa_type, program)
-            parts.extend(
-                (n, chars, tokens, n > BATCH_THRESHOLD, "answer", model)
-                for n in n_by_method.values()
+            # A Documents method that retrieves and question_only send different prompts;
+            # the other types' are sized once for every method.
+            sizes: dict[bool, float] = {}
+            for m, n in n_by_method.items():
+                if m in exact or not n:
+                    continue
+                retrieves = m != "question_only" or spec.qa_type != "documents"
+                if retrieves not in sizes:
+                    sizes[retrieves] = self._answer_chars(
+                        spec, sample, search, evidence_size, retrieves
+                    )
+                parts.append((n, sizes[retrieves], tokens, n > BATCH_THRESHOLD, "answer", model))
+        verdicts = {m: n for m, n in (judged or {}).items() if n and m not in known_judges}
+        if verdicts:
+            longest = "x" * CHAT_TOKENS * 4  # an answer as long as its tokens allow
+            judge_chars = avg(
+                sum(map(len, judge_prompt(q.text, q.gold_answers, longest)))
+                for q in judge_sample or []
             )
-        # Every call the run would make, cached or not: answer prompts depend on what is
-        # retrieved, so they cannot be checked against the cache, and the other parts are
-        # priced from a sample of the questions. The price counts the same calls.
-        calls = sum(part[0] for part in parts)
+            parts.extend(
+                (n, judge_chars, JUDGE_TOKENS, n > BATCH_THRESHOLD, "answer", model)
+                for n in verdicts.values()
+            )
+        # The known prompts' cache misses, and their price; None when no model answers.
+        known = [(system, prompts, CHAT_TOKENS) for system, prompts in exact.values()]
+        known += [(JUDGE_SYSTEM, prompts, JUDGE_TOKENS) for prompts in known_judges.values()]
+        exact_calls, exact_usd = 0, 0.0
+        no_model = False
+        for system, prompts, out in known:
+            if not prompts:  # nothing left to send for it
+                continue
+            try:
+                planned, misses = self.ai.plan_many(
+                    prompts, out, role="answer", model=model, system=system
+                )
+            except NoConnection:
+                planned, misses, no_model = 0.0, len(prompts), True  # unknown: every one counts
+            exact_calls += misses
+            exact_usd += planned
+        # Every call the run would make, cached or not, except where the prompts are known:
+        # answer prompts depend on what is retrieved, so a new run's cannot be checked against
+        # the cache, and the other parts are priced from a sample of the questions. The price
+        # counts the same calls.
+        calls = sum(part[0] for part in parts) + exact_calls
         if calls == 0:
             return {"calls": 0, "est_usd": 0.0, "roles": []}
         # Every job the run spends on, so a confirm can be refused before any is unusable.
-        roles = list(dict.fromkeys(part[4] for part in parts if part[0]))
+        spending = [part[4] for part in parts if part[0]] + (["answer"] if exact_calls else [])
+        roles = list(dict.fromkeys(spending))
         try:
-            usd = sum(
+            usd = exact_usd + sum(
                 c * self.ai.estimate_usd(int(chars), out, role=role, model=m, batch=batch)
                 for c, chars, out, batch, role, m in parts
             )
         except NoConnection:
-            return {"calls": calls, "est_usd": None, "roles": roles}  # a job has no model
-        return {"calls": calls, "est_usd": usd, "roles": roles}
+            usd, no_model = None, True
+        # None when a job has no model.
+        return {"calls": calls, "est_usd": None if no_model else usd, "roles": roles}
 
     def _answer_chars(
-        self, spec: CollectionSpec, sample: list[Question], search: SearchSettings
+        self,
+        spec: CollectionSpec,
+        sample: list[Question],
+        search: SearchSettings,
+        evidence_size: int | None = None,
+        retrieves: bool = True,
     ) -> float:
+        """The mean answer prompt over the sample, from hybrid's hits: a Documents answer's
+        from its top evidence_size, or from none when the method does not retrieve."""
+        # The other types' answers are sized from hybrid's top 5, as they always were.
+        k = evidence_size if spec.qa_type == "documents" and evidence_size else 5
         sizes = []
         for q in sample:
-            hits = self.retriever.retrieve(spec.name, q.text, "hybrid")
-            hits = answer_hits(spec.qa_type, hits, search.example)
-            system, user = answer_prompt(
-                spec.qa_type, q.text, q.choices, hits, search.example, search.program
-            )
+            hits = self.retriever.retrieve(spec.name, q.text, "hybrid", k) if retrieves else []
+            hits = answer_hits(spec.qa_type, hits, search.example, evidence_size)
+            system, user = run_prompt(spec.qa_type, q, hits, search, retrieves)
             sizes.append(len(system) + len(user))
         return avg(sizes)
 
@@ -513,15 +727,17 @@ class Evaluator:
         eval_set: str | None = None,
         rerank_pool: int = POOL,
         rerank_model: str | None = None,
+        evidence_size: int | None = None,
+        judge: bool = False,
     ) -> str:
         """Queue a run of the eval set (the store's default when None) with the request only;
         the rest of its setup is recorded when it runs. `search` overrides the collection's
-        search settings in part; a bad one raises ValueError."""
+        search settings in part; a bad one raises ValueError. A Documents run that answers
+        records `evidence_size`, the size its estimate priced (Settings' when None)."""
         spec = self.retriever.spec(collection)
+        documents = spec.qa_type == "documents"
         if not methods:
             raise ValueError("choose at least one method")
-        if spec.qa_type == "documents" and answer:
-            raise ValueError(ANSWERS_LATER)  # its answers have no metric yet
         search_settings(spec.search or SearchSettings(), search)
         if rerank_model not in (None, self.models.rerank_model):
             search_defaults.check("rerank_model", rerank_model)
@@ -529,8 +745,15 @@ class Evaluator:
         questions = self._questions(spec, {"split": split, "eval_set": name})
         if not questions:
             raise ValueError(f"eval set '{name}' has no questions")
-        if not answer and self._measures_nothing(spec, questions):
-            raise ValueError(NOTHING_TO_MEASURE)
+        check_judge(spec, answer, judge, questions)
+        # A Documents run's unjudged answers are unscored, so only judging measures more.
+        if ((documents and not judge) or not answer) and self._measures_nothing(spec, questions):
+            if not documents:
+                raise ValueError(NOTHING_TO_MEASURE)
+            references = any(q.gold_answers for q in questions)
+            raise ValueError(
+                NOTHING_TO_MEASURE_JUDGE if references else NOTHING_TO_MEASURE_DOCUMENTS
+            )
         setup = {
             "collection": collection,
             "split": split,
@@ -544,6 +767,13 @@ class Evaluator:
             "eval_set": name,
             "rerank_pool": rerank_pool,
         }
+        if documents and answer:  # fixed now, so the run sends what its estimate priced
+            setup["evidence_size"] = evidence_size or self._evidence_size({})
+            setup["judge"] = judge
+            if judge:  # the answer model judges (spec I10): refused before a run is made
+                if setup["model"] is None:
+                    raise NoConnection("answer")
+                setup["answer_judge_model"] = setup["model"]
         if "hybrid_rerank" in methods:
             # The one Setting a run reads, resolved now so a repeat or resume uses the same one.
             saved = search_defaults.in_force(self.conn)["rerank_model"]
@@ -607,9 +837,9 @@ class Evaluator:
         self, spec: CollectionSpec, questions: list[Question], disabled: list[str]
     ) -> set[str]:
         """The gold item ids that sit in a disabled source."""
-        if not disabled:
-            return set()
         gold = sorted({g for q in questions for g in q.gold_ids})
+        if not disabled or not gold:
+            return set()
         hits = self.retriever.store.get(spec.name, gold)
         return {h.id for h in hits if h.meta.get("source") in disabled}
 
@@ -704,10 +934,18 @@ class Evaluator:
         if not questions:
             return
         span = 0.5 if setup["answer"] else 0.99  # the share the retrieval step is worth
+        judging = bool(setup.get("judge"))
         search = self._search(spec, setup)
+        # A Documents answer is chat's reply over the method's top evidence-size hits.
+        documents = spec.qa_type == "documents" and setup["answer"]
+        size = self._evidence_size(setup) if documents else None
+        # A Documents question retrieved before a stop keeps its row and is answered from its
+        # stored hits, the prompt a resume's estimate priced, even if the store changed since.
+        kept = self._retrieved_rows(job_id, method) if documents else {}
+        fresh = [q for q in questions if q.id not in kept]
         skip = tuple(setup.get("disabled_sources", []))
         all_hits, all_tags = [], []
-        for n, q in enumerate(questions, start=1):
+        for n, q in enumerate(fresh, start=1):
             # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE LEFT OUT
             # BY EVERY SEARCH, the classifier's vote included, so they are never scored or
             # shown and each channel's pool and the depth count only the others.
@@ -724,7 +962,7 @@ class Evaluator:
                     spec.name,
                     q.text,
                     method,
-                    retrieval_depth(spec.qa_type, q, setup["k"]),
+                    retrieval_depth(spec.qa_type, q, setup["k"], size or 0),
                     setup["rrf_k"],
                     search,
                     tags,
@@ -733,61 +971,117 @@ class Evaluator:
                     rerank_model=setup.get("rerank_model", LEGACY_RERANK_MODEL),
                 )
             )
-            if n % 10 == 0 and n < len(questions):
-                report(span * n / len(questions))
+            if n % 10 == 0 and n < len(fresh):
+                report(span * n / len(fresh))
                 check()
         if method == "question_only":  # no retrieval, so nothing to score it on
-            rows = [
-                {"hit_ids": [], "hit_skills": [], "retrieval": {}, "usd": 0.0} for _ in questions
-            ]
+            rows = [{"hit_ids": [], "hit_skills": [], "retrieval": {}, "usd": 0.0} for _ in fresh]
         else:
-            off = self._gold_off(spec, questions, setup.get("disabled_sources", []))
-            rows = self._retrieval_rows(spec, questions, all_hits, off)
+            off = self._gold_off(spec, fresh, setup.get("disabled_sources", []))
+            rows = self._retrieval_rows(spec, fresh, all_hits, off)
         if method == "keyword_rag":
             for row, tags in zip(rows, all_tags, strict=True):
                 row["query_tags"] = tags
-        for q, row in zip(questions, rows, strict=True):
+        for q, row in zip(fresh, rows, strict=True):
             db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not setup["answer"])
         if not setup["answer"]:
             return
         report(span)
         check()
-        shown = [answer_hits(spec.qa_type, hits, search.example) for hits in all_hits]
+        if kept:  # back in the questions' order, the kept ones with their stored hits
+            found = {q.id: (row, hits) for q, row, hits in zip(fresh, rows, all_hits, strict=True)}
+            for q in questions:
+                if q.id in kept:
+                    found[q.id] = (kept[q.id], self._stored_hits(spec, kept[q.id], size))
+            rows = [found[q.id][0] for q in questions]
+            all_hits = [found[q.id][1] for q in questions]
+        shown = [answer_hits(spec.qa_type, hits, search.example, size) for hits in all_hits]
+        retrieves = method != "question_only"
+        # A judged run stopped before judging keeps the answers it stored, and what they cost:
+        # only the rows without one are answered.
+        pending = [i for i, row in enumerate(rows) if "pred" not in row]
         prompts = [
-            answer_prompt(spec.qa_type, q.text, q.choices, hits, search.example, search.program)
-            for q, hits in zip(questions, shown, strict=True)
+            run_prompt(spec.qa_type, questions[i], shown[i], search, retrieves) for i in pending
         ]
-        programs = [search.program and not q.choices for q in questions]
-        done = self.ai.complete_many(
-            [user for _, user in prompts],
-            role="answer",
-            system=prompts[0][0] if prompts else "",
-            model=setup["model"],
-            max_tokens=answer_tokens(spec.qa_type, any(programs)),
-            purpose="answer",
+        programs = [not documents and search.program and not q.choices for q in questions]
+        done = (
+            self.ai.complete_many(  # one call per method: its prompts share one system
+                [user for _, user in prompts],
+                role="answer",
+                system=prompts[0][0],
+                model=setup["model"],
+                max_tokens=CHAT_TOKENS if documents else answer_tokens(spec.qa_type, any(programs)),
+                purpose="answer",
+            )
+            if prompts
+            else []
         )
-        for n, (q, row, hits, program, completion) in enumerate(
-            zip(questions, rows, shown, programs, done, strict=True), start=1
-        ):
+        for n, (i, completion) in enumerate(zip(pending, done, strict=True), start=1):
+            q, row, hits, program = questions[i], rows[i], shown[i], programs[i]
             # PROGRAMS RUN HERE, UP TO PROGRAM_TIMEOUT EACH, so a cancel must not wait for all
             # of them. It costs nothing: the answers are cached, and a resume finds them.
             if n % 10 == 0:
-                report(span + (0.99 - span) * n / len(questions))
+                report(span + (0.99 - span) * n / len(pending))
                 check()
-            pred, record = read_answer(spec.qa_type, completion.text, bool(q.choices), program)
+            if documents:  # unscored ({}), shown without its [n] markers
+                pred, raw, record = strip_citations(completion.text), completion.text, None
+            else:
+                pred, record = read_answer(spec.qa_type, completion.text, bool(q.choices), program)
+                raw = answer_line(completion.text)
             row.update(
                 {
                     "pred": pred,
-                    "raw": answer_line(completion.text),
+                    "raw": raw,
                     "usd": completion.usd,
                     "answer": score(spec, q, pred),
                     "program": record,
                     "example_form": example_form(spec.qa_type, hits, search.example),
                 }
             )
-            db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)
+            # A judged row is complete once judged: a stop before then judges it on resume.
+            db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=not judging)
+        if judging:
+            check()
+            self._judge(job_id, method, questions, rows, setup)
         report(0.99)
         check()
+
+    def _judge(
+        self, job_id: str, method: str, questions: list[Question], rows: list[dict], setup: dict
+    ) -> None:
+        """Judge answers: one call over the method's answers to questions with a reference
+        answer, each graded as shown (its `pred`); every row is then complete. A question
+        without a reference is not judged, and an unreadable verdict is not scored; every
+        verdict's reply is kept as `judge_raw`."""
+        asked = [(q, row) for q, row in zip(questions, rows, strict=True) if q.gold_answers]
+        done = (
+            self.ai.complete_many(
+                [judge_prompt(q.text, q.gold_answers, row["pred"])[1] for q, row in asked],
+                role="answer",
+                system=JUDGE_SYSTEM,
+                model=setup["answer_judge_model"],
+                max_tokens=JUDGE_TOKENS,
+                purpose="judge",
+            )
+            if asked
+            else []
+        )
+        verdicts = {q.id: c for (q, _), c in zip(asked, done, strict=True)}
+        for q, row in zip(questions, rows, strict=True):
+            completion = verdicts.get(q.id)
+            if completion is None:
+                row.update({"judge": "no_reference", "answer": {}})
+            else:
+                right = parse_verdict(completion.text)
+                row.update(
+                    {
+                        "judge": "unreadable" if right is None else VERDICTS[right],
+                        "answer": {} if right is None else {"accuracy": float(right)},
+                        "judge_raw": completion.text,
+                        "usd": row["usd"] + completion.usd,
+                    }
+                )
+            db.upsert_run_item(self.conn, job_id, method, q.id, row, complete=True)
 
     def oracle_tags(self, spec: CollectionSpec, q: Question) -> list[str]:
         """The tags a perfect classifier would predict (eval only, X2): those stored on the
@@ -889,6 +1183,81 @@ class Evaluator:
         random = list(per_method.get("random_example", {}).values())
         return headline, verdict.scale(headline, avg(random) if random else None), per_method
 
+    def _labels(
+        self,
+        job_id: str,
+        spec: CollectionSpec,
+        setup: dict,
+        by_method: dict[str, dict[str, dict]],
+    ) -> dict | None:
+        """A Documents run's label figures, from its pinned questions so an old run gets
+        them too. For each method: the mean count of never-judged passages in its top
+        GOLD_DEPTH, over the questions it scored whose judged ids are known (the controls and
+        question_only left out; a method with none scored yet has no entry). Then the
+        questions it could not measure because the store held none of their right passages,
+        as the run recorded when it started (read from the store until then), and those with
+        no right passage. None for other types."""
+        if spec.qa_type != "documents":
+            return None
+        asked = self._asked(job_id, spec, setup)
+        if "evidence_named" in setup:  # what the metrics were scored with, not the store now
+            unmeasured = setup["evidence_named"] - setup["evidence_held"]
+        else:
+            held = self._held_ids(spec, asked)
+            unmeasured = sum(1 for q in asked if q.gold_ids and not set(q.gold_ids) & held)
+        judged = {q.id: q.judged_ids for q in asked if q.judged_ids is not None}
+        unjudged = {}
+        for method, per_q in by_method.items():
+            if method in CONTROLS or method == "question_only":
+                continue
+            counts = [
+                unjudged_count(r.get("hit_ids", []), judged[qid])
+                for qid, r in per_q.items()
+                if qid in judged and "ndcg@10" in r.get("retrieval", {})  # the scored rows
+            ]
+            if counts:
+                mean = avg(counts)
+                unjudged[method] = {
+                    "shown": math.ceil(mean),
+                    "questions": len(counts),
+                    "flag": mean > UNJUDGED_OVER,
+                }
+        return {
+            "tracked": bool(judged),
+            "unjudged": unjudged,
+            "unmeasured": unmeasured,
+            "no_right_passage": sum(1 for q in asked if not q.gold_ids),
+        }
+
+    def _answers(
+        self,
+        job_id: str,
+        spec: CollectionSpec,
+        setup: dict,
+        by_method: dict[str, dict[str, dict]],
+    ) -> dict | None:
+        """A Documents answer run's answer counts: whether it is judged, the questions asked
+        with no reference answer (not judged), and for each method the rows answered, judged,
+        judged right and with an unreadable verdict. None for other runs."""
+        if spec.qa_type != "documents" or not setup.get("answer"):
+            return None
+        judged = bool(setup.get("judge"))
+        asked = self._asked(job_id, spec, setup) if judged else []
+        methods = {}
+        for method, per_q in by_method.items():
+            rows = list(per_q.values())
+            methods[method] = {
+                "answered": sum(1 for r in rows if "pred" in r),
+                "judged": sum(1 for r in rows if "accuracy" in r.get("answer", {})),
+                "correct": sum(1 for r in rows if r.get("answer", {}).get("accuracy") == 1),
+                "unreadable": sum(1 for r in rows if r.get("judge") == "unreadable"),
+            }
+        return {
+            "judged": judged,
+            "no_reference": sum(1 for q in asked if not q.gold_answers),
+            "methods": methods,
+        }
+
     def _question_count(self, setup: dict, by_method: dict[str, dict[str, dict]]) -> int:
         if "question_ids" in setup:
             return len(setup["question_ids"])
@@ -988,6 +1357,8 @@ class Evaluator:
             "gaps": verdict.gaps(per_method, reference, scaling["factor"]),
             "answer": verdict.answer(per_method, headline, scaling["factor"]),
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
+            "labels": self._labels(job_id, spec, setup, by_method),
+            "answers": self._answers(job_id, spec, setup, by_method),
             "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
             "since": changes_since(
@@ -1009,19 +1380,25 @@ class Evaluator:
 
     def collection_answer(self, name: str) -> dict | None:
         """The collection's answer: the newest answered run that has the pair, else the
-        newest run that has it (spec §7.3: a run lacking the pair gives no answer)."""
+        newest run that has it (spec §7.3: a run lacking the pair gives no answer). A
+        Documents store's is the newest paired run with a verdict, judged or not, and is
+        retrieval only: a Documents headline is always nDCG@10."""
         spec = self.retriever.spec(name)
         done = self._done_evals(name)
         paired = [j for j in done if set(ANSWER_PAIR) <= set(j["setup"]["methods"])]
-        answered_runs = [j for j in paired if j["setup"].get("answer")]
-        job = (answered_runs or paired or [None])[0]
-        if job is None:
-            return None
-        answered = bool(job["setup"].get("answer"))
-        # Only an unanswered run's headline depends on the collection's proxy check.
-        trusted = None if answered else self.collection_proxy_trusted(name, done)
-        summary = self.summary(job["id"], trusted)
-        if summary is None or summary["answer"] is None:
+        if spec.qa_type == "documents":
+            candidates = paired
+        else:
+            answered_runs = [j for j in paired if j["setup"].get("answer")]
+            candidates = (answered_runs or paired)[:1]
+        for job in candidates:
+            answered = spec.qa_type != "documents" and bool(job["setup"].get("answer"))
+            # Only an unanswered run's headline depends on the collection's proxy check.
+            trusted = None if answered else self.collection_proxy_trusted(name, done)
+            summary = self.summary(job["id"], trusted)
+            if summary is not None and summary["answer"] is not None:
+                break
+        else:
             return None
         return {
             "run_id": job["id"],
@@ -1067,7 +1444,8 @@ class Evaluator:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
-        primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
+        primary = MISS_METRIC[spec.qa_type]
+        answering = answering_outcome(spec.qa_type, job["setup"])
         rows = [
             (row, questions.get(row["question_id"]))
             for row in db.run_items(self.conn, job_id, method)
@@ -1090,13 +1468,15 @@ class Evaluator:
         """Each question of a run with every method's row and its right/wrong outcome. With
         `disagree`, only the questions where the methods' outcomes differ; the controls are
         left out of that, and a method with no outcome has nothing to differ from. An
-        answering run is judged on answers only, so a method not answered yet has none."""
+        answering run is judged on answers only, so a method not answered yet has none; an
+        unjudged Documents run's answers are unscored, so it keeps the retrieval outcome."""
         job = db.get_job(self.conn, job_id)
         if job is None:
             raise KeyError(job_id)
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
-        primary, answering = MISS_METRIC[spec.qa_type], bool(job["setup"].get("answer"))
+        primary = MISS_METRIC[spec.qa_type]
+        answering = answering_outcome(spec.qa_type, job["setup"])
         by_question: dict[str, dict[str, dict]] = {}
         for r in db.run_items(self.conn, job_id):
             by_question.setdefault(r["question_id"], {})[r["method"]] = r
@@ -1116,17 +1496,18 @@ class Evaluator:
             if disagree and len(judged) < 2:
                 continue
             q = questions.get(qid)
-            out.append(
-                {
-                    "question_id": qid,
-                    "question": q.text if q else None,
-                    "choices": q.choices if q else None,
-                    "gold_answers": q.gold_answers if q else [],
-                    "gold_ids": q.gold_ids if q else [],
-                    "gold_held": [g for g in q.gold_ids if g in held] if q else [],
-                    "methods": methods,
-                }
-            )
+            row = {
+                "question_id": qid,
+                "question": q.text if q else None,
+                "choices": q.choices if q else None,
+                "gold_answers": q.gold_answers if q else [],
+                "gold_ids": q.gold_ids if q else [],
+                "gold_held": [g for g in q.gold_ids if g in held] if q else [],
+                "methods": methods,
+            }
+            if spec.qa_type == "documents":  # the pinned version's marks, None when unknown
+                row["judged_ids"] = q.judged_ids if q else None
+            out.append(row)
         return out
 
 
@@ -1175,6 +1556,8 @@ def avg(values) -> float:
 def score(spec: CollectionSpec, q: Question, pred: str) -> dict:
     """The answer metrics of one prediction; none for a question with no gold answer
     (BRIGHT's), which is then unmeasured rather than wrong."""
+    if spec.qa_type == "documents":  # judged by Judge answers, never by token overlap (I10)
+        return {}
     if not q.gold_answers:
         return {}
     if spec.qa_type == "mcq":
@@ -1199,6 +1582,13 @@ def metric_values(rows, metric: str) -> list[float]:
 
 def metric_by_question(per_q: dict[str, dict], metric: str) -> dict[str, float]:
     return {q: values[0] for q, row in per_q.items() if (values := metric_values([row], metric))}
+
+
+def answering_outcome(qa_type: QaType, setup: dict) -> bool:
+    """Whether a run's rows are marked by their answers: an answering run's are, except a
+    Documents run's that are not judged, whose answers are unscored, so they keep the
+    retrieval mark."""
+    return bool(setup.get("answer")) and (qa_type != "documents" or bool(setup.get("judge")))
 
 
 def outcome(row: dict, primary: str, answering: bool = False) -> str | None:

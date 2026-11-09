@@ -11,25 +11,71 @@
 <aside id="side"></aside>
 <main id="main">
   <div id="head"></div>
-  <h2>Questions</h2>
-  <p id="fields" class="muted"></p>
-  <div id="questions" class="scroll"></div>
-  <div id="pager" class="row"></div>
-  <div class="actions">
-    <button type="button" id="add">Add question</button>
-    <button type="button" id="save">Save changes</button>
-    <span id="dirty" class="warn"></span>
-  </div>
-  <p id="save-msg" role="status"></p>
+  <p id="run-store"></p>
+  <section id="bench">
+    <h2>Questions</h2>
+    <p id="fields" class="muted"></p>
+    <div id="questions" class="scroll"></div>
+    <div id="pager" class="row"></div>
+    <div class="actions">
+      <button type="button" id="add">Add question</button>
+      <button type="button" id="save">Save changes</button>
+      <span id="dirty" class="warn"></span>
+    </div>
+    <p id="save-msg" role="status"></p>
+  </section>
+  <section id="labelling" hidden>
+    <div id="lab-store"></div>
+    <p id="lab-link-msg" class="err" role="status"></p>
+    <div id="lab-warn"></div>
+    <h2>Questions</h2>
+    <div id="lab-questions" class="scroll"></div>
+    <div id="lab-del"></div>
+    <div id="lab-panel" hidden>
+      <h2>Label a question</h2>
+      <div id="lab-discard" role="status"></div>
+      <div class="form">
+        <label>Question <textarea id="lab-text" rows="3"></textarea></label>
+      </div>
+      <div class="actions"><button type="button" id="lab-find" disabled>Find passages</button></div>
+      <p id="lab-find-msg" class="err" role="status"></p>
+      <ul id="lab-notes" class="notes muted"></ul>
+      <ul id="lab-passages" class="evidence"></ul>
+      <div id="lab-found"></div>
+      <p id="lab-count" role="status"></p>
+      <div class="row">
+        <label>None of these? Search the store <input id="lab-search"></label>
+        <button type="button" id="lab-search-go" class="secondary">Search</button>
+      </div>
+      <p id="lab-search-msg" class="err" role="status"></p>
+      <div class="form">
+        <label>Reference answer (optional; short is better) <input id="lab-answer"></label>
+      </div>
+      <div class="actions"><button type="button" id="lab-ai" class="secondary" hidden>Get the AI's answer</button><span id="lab-ai-confirm"></span></div>
+      <p id="lab-ai-hint" class="muted" hidden>The AI answers from the passages marked y.</p>
+      <p id="lab-ai-msg" role="status"></p>
+      <div id="lab-ai-answer"></div>
+      <div class="actions">
+        <button type="button" id="lab-save" disabled>Save question</button>
+        <button type="button" id="lab-next" class="secondary" disabled>Save and write the next</button>
+      </div>
+      <p id="lab-msg" role="status"></p>
+    </div>
+  </section>
   <h2>Import questions</h2>
   <p id="imp-note" class="warn" role="status"></p>
   <fieldset id="imp-wrap" class="bare"><div id="imp-questions"></div></fieldset>
-  <h2>Leaked questions</h2>
-  <p class="muted">A question is leaked when its text is inside a store's items. Runs leave leaked questions out unless this is on.</p>
-  <label class="check"><input type="checkbox" id="leaked-include"> Include leaked questions</label>
-  <p id="leaked-msg" class="err" role="status"></p>
+  <section id="leaked">
+    <h2>Leaked questions</h2>
+    <p class="muted">A question is leaked when its text is inside a store's items. Runs leave leaked questions out unless this is on.</p>
+    <label class="check"><input type="checkbox" id="leaked-include"> Include leaked questions</label>
+    <p id="leaked-msg" class="err" role="status"></p>
+  </section>
   <h2>Versions</h2>
   <ul id="versions" class="history"></ul>
+  <div id="ver-more"></div>
+  <div id="ver-view"></div>
+  <p id="ver-msg" role="status"></p>
   <h2>Delete this eval set</h2>
   <div class="actions"><button type="button" id="del-ask" class="secondary">Delete eval set…</button></div>
   <div id="del-confirm"></div>

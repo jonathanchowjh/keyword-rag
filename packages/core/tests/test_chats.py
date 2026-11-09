@@ -8,15 +8,15 @@ import pytest
 from aiconnect.ai import UnknownModel, UnknownPrice
 from ragqa_core import db, search_defaults
 from ragqa_core.builder import Builder
-from ragqa_core.chats import AlreadyAnswered, Chats, UnknownChat
+from ragqa_core.chats import AlreadyAnswered, Chats, UnknownChat, round_robin
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.prompts import CHAT_TURNS
+from ragqa_core.prompts import CHAT_TURNS, chat_prompt
 from ragqa_core.retriever import MethodUnavailable, Retriever, UnknownCollection
 from ragqa_core.search_defaults import RECOMMENDED
 from ragqa_core.store import Store
-from ragqa_core.types import Item, KeywordLists
+from ragqa_core.types import Hit, Item, KeywordLists
 
 WORDS = {
     "a": "enzyme kinetics catalyst assay substrate",
@@ -338,6 +338,22 @@ def test_the_pool_is_capped_round_robin_by_rank(tmp_path):
     assert len(texts[-1]) == 45 == two["pipeline"]["pool"]
     assert texts[-1][:3] == [firsts["a"], firsts["b"], firsts["c"]]
     assert two["pipeline"]["rerank_pool"] == 45
+
+
+def test_round_robin_by_id_keeps_the_first_rank_of_each_id():
+    def hit(i: str, text: str | None = None) -> Hit:
+        return Hit(i, text or f"text {i}", 0.0, {}, [], None, None, {})
+
+    a, b, c, d = (hit(i) for i in "abcd")
+    lists = {"vector": [a, b], "keyword": [b, c], "hybrid": [a, d]}
+    pool = round_robin(lists, None, key=lambda h: h.id)
+    assert [h.id for _, h, _ in pool] == ["a", "b", "c", "d"]
+    assert [rank for _, _, rank in pool] == [1, 1, 2, 2]
+    assert [m for m, _, _ in pool] == ["vector", "keyword", "keyword", "hybrid"]
+    same = {"vector": [hit("e", "one text"), hit("f", "one text")]}
+    assert [h.id for _, h, _ in round_robin(same, None, key=lambda h: h.id)] == ["e", "f"]
+    assert [h.id for _, h, _ in round_robin(same, None)] == ["e"]  # chat's key: by text
+    assert len(round_robin(lists, 3)) == 3
 
 
 def test_a_reranker_chosen_in_settings_is_used_and_noted_while_it_loads(tmp_path):
@@ -1205,3 +1221,70 @@ def test_a_message_sent_without_an_answer_pays_for_none(tmp_path):
     assert answered["answer"] and "answer" in asked
     two = attempt(chats.ask(chat["id"], ENZYME))
     assert two["pipeline"]["answer_skipped"] is False and two["answer"]
+
+
+def test_reference_prompt_is_chats_prompt_over_the_y_passages(tmp_path):
+    chats, _ = build(tmp_path)
+    p1, p2 = "a-1", "a-2"
+    got = chats.reference_prompt("a", "what?", [p2, "gone", p1, p2])
+    hits = chats.retriever.store.get("a", [p2, p1])
+    assert [h.id for h in hits] == [p2, p1]
+    assert got == chat_prompt("what?", [], hits)
+    with pytest.raises(ValueError, match="mark at least one passage y that is in a first"):
+        chats.reference_prompt("a", "what?", ["gone"])
+    with pytest.raises(UnknownCollection):
+        chats.reference_prompt("nope", "what?", [p1])
+
+
+def test_a_repeated_question_marks_its_answer_cached(tmp_path):
+    chats, prompts = build(tmp_path)
+    one = attempt(chats.ask(chats.create(["a", "b"])["id"], ENZYME))
+    before = len(prompts)
+    two = attempt(chats.ask(chats.create(["a", "b"])["id"], ENZYME))  # the same evidence
+    assert two["evidence"] == one["evidence"] and prompts[before:] == []
+    assert one["pipeline"]["answer_cached"] is False and one["usd"] > 0
+    assert two["pipeline"]["answer_cached"] is True and two["usd"] == 0
+    assert two["answer"] == one["answer"]
+
+
+def test_answer_from_this_attempt_marks_a_cached_answer(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = chats.create(["a", "b"])
+    chats.ask(chat["id"], ENZYME)
+    rerun = chats.rerun(chat["id"], 1)
+    assert rerun["pipeline"]["answer_cached"] is False and rerun["answer"] is None
+    answered = chats.answer(chat["id"], 1, 2)  # the same evidence as attempt 1's answer
+    assert answered["answer"] and answered["pipeline"]["answer_cached"] is True
+    assert {k: v for k, v in answered["pipeline"].items() if k != "answer_cached"} == {
+        k: v for k, v in rerun["pipeline"].items() if k != "answer_cached"
+    }
+
+
+def test_answering_a_legacy_attempt_keeps_its_pipeline_none(tmp_path):
+    chats, _ = build(tmp_path)
+    chat = chats.create(["a"])
+    n = db.add_chat_message(chats.conn, chat["id"], ENZYME)
+    row = {"search_text": "an old text", "decisions": [], "evidence": [], "answer": None}
+    row.update(citations=[], usd=0.0, search_error=None, error=None, model=None)
+    db.add_chat_attempt(chats.conn, chat["id"], n, row)  # from before the pipeline
+    answered = chats.answer(chat["id"], n, 1)
+    assert answered["answer"] and answered["pipeline"] is None
+    rerun = chats.rerun(chat["id"], n)
+    assert rerun["search_text"] == "an old text" and rerun["pipeline"]["search_from"] == "legacy"
+
+
+def test_a_cached_rewrite_alone_is_not_marked(tmp_path):
+    chats, prompts = build(tmp_path)
+    first = chats.update(chats.create(["a"])["id"], {"rewrite": True})
+    chats.ask(first["id"], ENZYME)
+    chats.ask(first["id"], "and its rate?")
+    assert len(rewrites(prompts)) == 1
+    # The same messages, so the same rewrite; fewer passages, so a fresh answer.
+    second = chats.update(chats.create(["a"])["id"], {"rewrite": True, "evidence_size": 3})
+    chats.ask(second["id"], ENZYME)
+    before = len(chat_prompts(prompts))
+    two = attempt(chats.ask(second["id"], "and its rate?"))
+    assert len(rewrites(prompts)) == 1  # served from the cache
+    assert two["pipeline"]["search_from"] == "rewrite"
+    assert len(chat_prompts(prompts)) == before + 1 and two["answer"]
+    assert two["pipeline"]["answer_cached"] is False

@@ -81,12 +81,16 @@ def test_the_documents_type_in_plain_words():
         "ndcg@10": "Right passages ranked first",
         "recall@10": "Right passages found (top 10)",
         "mrr@10": "How soon the first right passage comes",
+        "accuracy": "Answers judged right",
     }
+    assert c["metric_labels_by_type"]["documents"]["accuracy"] == "Answers judged right"
     assert c["metric_says_by_type"]["documents"] == {
         "ndcg@10": "Right passages near the top count most",
         "recall@10": "Share of a question's right passages in the top 10",
         "mrr@10": "1 when the first hit is right, 1/2 when the second is, 0 when none is in"
         " the top 10",
+        "accuracy": "Share of judged answers the AI marked right against the question's"
+        " reference answer; questions with no reference answer are left out",
     }
     assert c["recipes"]["documents"] == {
         "label": "documents",
@@ -100,10 +104,10 @@ def test_the_documents_type_in_plain_words():
     assert c["type_recipes"]["mcq"] == ["worked_examples", "reference", "paper_2024"]
     assert QUERY_TASK["documents"] == "Given a question, retrieve passages that answer it"
     assert RETRIEVAL_METRICS["documents"] == ("ndcg@10", "recall@10", "mrr@10")
-    assert ANSWER_METRICS["documents"] == ()
+    assert ANSWER_METRICS["documents"] == ("accuracy",)
     assert MISS_METRIC["documents"] == "recall@10"
     assert ANSWER_TOKENS["documents"] == CHAT_TOKENS
-    assert "documents" not in PAIR_ANSWER_METRIC  # its runs are refused answers
+    assert PAIR_ANSWER_METRIC["documents"] == "accuracy"  # judged answers only
 
 
 def test_qa_types_and_catalog_shape():

@@ -64,7 +64,7 @@ create table if not exists questions (
 );
 create table if not exists eval_sets (
   name text primary key, qa_type text not null, version text,
-  include_leaked integer not null default 0, created_at text not null
+  include_leaked integer not null default 0, created_at text not null, store text
 );
 create table if not exists eval_set_versions (
   eval_set text not null, version text not null, questions_json text not null,
@@ -123,6 +123,9 @@ def connect(path: Path) -> Connection:
     for column in NEW_COLLECTION_COLUMNS:
         if column not in columns:
             conn.execute(f"alter table collections add column {column} text")
+    columns = {row["name"] for row in conn.execute("pragma table_info(eval_sets)")}
+    if "store" not in columns:  # before a set linked the store it is labelled against
+        conn.execute("alter table eval_sets add column store text")
     columns = {row["name"] for row in conn.execute("pragma table_info(chat_attempts)")}
     if "search_error" not in columns:  # before an answer kept a failed rewrite's note
         conn.execute("alter table chat_attempts add column search_error text")
@@ -562,16 +565,20 @@ def list_vocabularies(conn: Connection, name: str) -> list[dict]:
     ]
 
 
-def create_eval_set(conn: Connection, name: str, qa_type: QaType) -> None:
+def create_eval_set(conn: Connection, name: str, qa_type: QaType, store: str | None = None) -> None:
     if not NAME.match(name):
         raise ValueError(f"eval set name {name!r} must match {NAME.pattern}")
     with conn.lock:
         if get_eval_set(conn, name):
             raise ValueError(f"eval set '{name}' already exists")
         conn.execute(
-            "insert into eval_sets (name, qa_type, created_at) values (?, ?, ?)",
-            (name, qa_type, now()),
+            "insert into eval_sets (name, qa_type, created_at, store) values (?, ?, ?, ?)",
+            (name, qa_type, now(), store),
         )
+
+
+def set_eval_set_store(conn: Connection, name: str, store: str | None) -> None:
+    conn.execute("update eval_sets set store = ? where name = ?", (store, name))
 
 
 def ensure_eval_set(conn: Connection, name: str, qa_type: QaType) -> None:
@@ -601,6 +608,7 @@ def _eval_set(row: sqlite3.Row, questions: int) -> dict:
         "version": row["version"],
         "include_leaked": bool(row["include_leaked"]),
         "created_at": row["created_at"],
+        "store": row["store"],
         "questions": questions,
     }
 
@@ -646,12 +654,29 @@ def eval_set_versions(conn: Connection, name: str) -> list[dict]:
     ]
 
 
+def judged_with_gold(q: Question) -> Question:
+    """The question with judged_ids a superset of gold_ids: the stored order, then each gold id
+    not yet in it. Unknown (None) stays unknown."""
+    if q.judged_ids is None:
+        return q
+    return replace(q, judged_ids=list(dict.fromkeys([*q.judged_ids, *q.gold_ids])))
+
+
+def question_json(q: Question) -> str:
+    """What a questions row stores. An unknown judged_ids is left out, so a set that never had
+    the key keeps its version."""
+    data = asdict(judged_with_gold(q))
+    if data["judged_ids"] is None:
+        del data["judged_ids"]
+    return json.dumps(data)
+
+
 def save_questions(conn: Connection, name: str, questions: list[Question]) -> None:
     with conn.lock:
         _ensure_for_write(conn, name)
         conn.executemany(
             "insert or replace into questions values (?, ?, ?)",
-            [(name, q.id, json.dumps(asdict(q))) for q in questions],
+            [(name, q.id, question_json(q)) for q in questions],
         )
         snapshot_eval_set(conn, name)
 
@@ -689,7 +714,7 @@ def replace_questions(
             conn.execute("delete from questions where collection = ?", (name,))
             conn.executemany(
                 "insert into questions values (?, ?, ?)",
-                [(name, q.id, json.dumps(asdict(q))) for q in questions],
+                [(name, q.id, question_json(q)) for q in questions],
             )
             version = snapshot_eval_set(conn, name)
             conn.execute("commit")
@@ -697,6 +722,79 @@ def replace_questions(
             conn.execute("rollback")
             raise
         return version
+
+
+def _stored_question(conn: Connection, name: str, question_id: str) -> Question | None:
+    row = first(
+        conn.execute(
+            "select json from questions where collection = ? and id = ?", (name, question_id)
+        )
+    )
+    return None if row is None else Question(**json.loads(row["json"]))
+
+
+def _in_transaction(conn: Connection, name: str, write) -> str:
+    """Runs `write` in one immediate transaction and snapshots the set; returns the version."""
+    with conn.lock:
+        _ensure_for_write(conn, name)
+        conn.execute("begin immediate")
+        try:
+            write()
+            version = snapshot_eval_set(conn, name)
+            conn.execute("commit")
+        except BaseException:
+            conn.execute("rollback")
+            raise
+        return version
+
+
+def add_question(conn: Connection, name: str, q: Question) -> tuple[str, str]:
+    """Adds one question under q.id, or the first `-2`, `-3`... not yet stored; returns its id
+    and the new version. The id is picked inside the lock, so two adds never clash."""
+    with conn.lock:
+        _ensure_for_write(conn, name)
+        conn.execute("begin immediate")
+        try:
+            new_id, n = q.id, 2
+            while _stored_question(conn, name, new_id) is not None:
+                new_id, n = f"{q.id}-{n}", n + 1
+            conn.execute(
+                "insert into questions values (?, ?, ?)",
+                (name, new_id, question_json(replace(q, id=new_id))),
+            )
+            version = snapshot_eval_set(conn, name)
+            conn.execute("commit")
+        except BaseException:
+            conn.execute("rollback")
+            raise
+        return new_id, version
+
+
+def upsert_question(conn: Connection, name: str, q: Question, base: Question) -> str:
+    """Replaces one stored question; refuses when it is gone (KeyError) or differs from `base`,
+    the question as the caller read it (ValueError)."""
+
+    def write() -> None:
+        stored = _stored_question(conn, name, q.id)
+        if stored is None:
+            raise KeyError(q.id)
+        if asdict(stored) != asdict(base):
+            raise ValueError("This question was changed by someone else since you opened it")
+        conn.execute(
+            "update questions set json = ? where collection = ? and id = ?",
+            (question_json(q), name, q.id),
+        )
+
+    return _in_transaction(conn, name, write)
+
+
+def delete_question(conn: Connection, name: str, question_id: str) -> str:
+    def write() -> None:
+        if _stored_question(conn, name, question_id) is None:
+            raise KeyError(question_id)
+        conn.execute("delete from questions where collection = ? and id = ?", (name, question_id))
+
+    return _in_transaction(conn, name, write)
 
 
 def get_questions(conn: Connection, name: str, version: str | None = None) -> list[Question]:
@@ -771,6 +869,13 @@ def default_eval_set(conn: Connection, collection: str) -> str | None:
     if row and row["eval_set"]:
         return row["eval_set"]
     return collection if get_eval_set(conn, collection) else None
+
+
+def default_eval_sets(conn: Connection) -> dict[str, str | None]:
+    """Every store's default_eval_set, read in two queries rather than per store."""
+    named = {r["name"] for r in conn.execute("select name from eval_sets")}
+    rows = conn.execute("select name, eval_set from collections")
+    return {r["name"]: r["eval_set"] or (r["name"] if r["name"] in named else None) for r in rows}
 
 
 def set_default_eval_set(conn: Connection, collection: str, eval_set: str | None) -> None:
@@ -1053,6 +1158,7 @@ def delete_collection_rows(conn: Connection, name: str) -> None:
     conn.execute("delete from disabled_sources where collection = ?", (name,))
     conn.execute("delete from keyword_lists where collection = ?", (name,))
     conn.execute("delete from vocabularies where collection = ?", (name,))
+    conn.execute("update eval_sets set store = null where store = ?", (name,))
     conn.execute("delete from collections where name = ?", (name,))
 
 
@@ -1257,10 +1363,16 @@ def add_chat_attempt(conn: Connection, chat_id: str, n: int, attempt: dict) -> i
 
 
 def answer_chat_attempt(
-    conn: Connection, chat_id: str, n: int, attempt: int, answered: dict
+    conn: Connection,
+    chat_id: str,
+    n: int,
+    attempt: int,
+    answered: dict,
+    pipeline: dict | None = None,
 ) -> bool:
-    """Writes an unanswered attempt's answer, citations, usd and model, and as its error its
-    search_error then the answer's own error. False, writing nothing, when it has an answer."""
+    """Writes an unanswered attempt's answer, citations, usd and model, its pipeline when one
+    is given, and as its error its search_error then the answer's own error. False, writing
+    nothing, when it has an answer."""
     where = " where chat_id = ? and n = ? and attempt = ? and answer is null"
     with conn.lock:  # no other statement between the read, the update and changes()
         row = first(
@@ -1271,13 +1383,14 @@ def answer_chat_attempt(
         error = "; ".join(e for e in (row["search_error"], answered["error"]) if e) or None
         conn.execute(
             "update chat_attempts set answer = ?, citations_json = ?, usd = ?, error = ?,"
-            f" model = ?{where}",
+            f" model = ?, pipeline_json = coalesce(?, pipeline_json){where}",
             (
                 answered["answer"],
                 json.dumps(answered["citations"]),
                 answered["usd"],
                 error,
                 answered["model"],
+                json.dumps(pipeline) if pipeline is not None else None,
                 chat_id,
                 n,
                 attempt,

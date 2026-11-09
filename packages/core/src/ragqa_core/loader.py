@@ -72,6 +72,23 @@ def chunk_of(item_id: str) -> str | None:
     return base if mark and CHUNK_MARK.fullmatch(part) else None
 
 
+def keep_labels(old: Question, new: Question) -> Question:
+    """The file's question over the stored one in a Documents set. A file that carries
+    judged_ids replaces the stored question whole. Otherwise its text and meta win, its gold
+    ids join the stored ones, and the stored judged passages and typed answers are kept
+    unless the file has answers of its own. The result is what gets stored."""
+    if new.judged_ids is not None:
+        return db.judged_with_gold(new)
+    gold_ids = list(dict.fromkeys([*old.gold_ids, *new.gold_ids]))
+    merged = replace(
+        new,
+        gold_ids=gold_ids,
+        gold_answers=new.gold_answers or old.gold_answers,
+        judged_ids=old.judged_ids,
+    )
+    return db.judged_with_gold(merged)
+
+
 class Loader:
     def __init__(
         self,
@@ -295,9 +312,13 @@ class Loader:
     ) -> tuple[dict, list[Question]]:
         """New, updated, unchanged against the eval set's questions."""
         stored = {q.id: q for q in db.get_questions(self.conn, eval_set)}
+        found = db.get_eval_set(self.conn, eval_set)
+        documents = found is not None and found["qa_type"] == "documents"
         counts, todo = {"new": 0, "updated": 0, "unchanged": 0}, []
         for q in questions:
             old = stored.get(q.id)
+            if old is not None and documents:
+                q = keep_labels(old, q)
             if old is None:
                 counts["new"] += 1
             elif asdict(q) == asdict(old):
@@ -335,8 +356,9 @@ class Loader:
                 self.set_chunk_meta(name, setup["source"], built)
         else:
             eval_set = self.questions_set(spec)
-            counts, todo = self.question_counts(eval_set, built)
-            db.save_questions(conn, eval_set, todo)
+            with conn.lock:  # no labeller's save between reading the set and writing it
+                counts, todo = self.question_counts(eval_set, built)
+                db.save_questions(conn, eval_set, todo)
         progress(1.0)
         return {
             **counts,

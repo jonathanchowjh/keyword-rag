@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 
 from ragqa_api.app import collection_state, create_app
 from ragqa_core import db, imports, search_defaults
+from ragqa_core.chats import relevance
+from ragqa_core.evaluator import no_ai
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
+from ragqa_core.indexer import ModelMismatch
 from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
@@ -4280,17 +4283,75 @@ def test_documents_upload_keeps_passages_whole(client):
     assert client.app.state.store.count("c") == 3
 
 
-def test_a_documents_run_with_answers_is_refused(client):
+def test_a_documents_run_may_ask_for_answers(client):
     add_documents(client)
     store_import(client, "x.md", b"some text about passwords")
-    message = (
-        "Documents runs score retrieval only for now; answer judging comes with Documents eval sets"
+    r = client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+    assert r.status_code == 201, r.text
+    held = passages(client)[0].id
+    r = put_questions(client, "s", [{"id": "a", "text": "passwords?", "gold_ids": [held]}])
+    assert r.status_code == 200, r.text
+    calls = count_ai(client)
+    body = {"collection": "c", "methods": ["hybrid"], "answer": True, "eval_set": "s"}
+    r = client.post("/eval", json=body)
+    assert r.status_code == 200, r.text
+    estimate = r.json()["estimate"]
+    assert estimate["calls"] == 1 and estimate["evidence_size"] == 8
+    assert calls == []
+    evaluator, conn = client.app.state.evaluator, client.app.state.conn
+    estimate_now = evaluator.estimate
+
+    def then_settings_change(*args, **kw):  # after the estimate priced 8, before queue
+        out = estimate_now(*args, **kw)
+        search_defaults.save(conn, {"evidence_size": 5})
+        return out
+
+    evaluator.estimate = then_settings_change
+    r = client.post("/eval", json={**body, "confirm": True})
+    assert r.status_code == 202, r.text
+    assert r.json()["estimate"]["evidence_size"] == 8
+    job_id = r.json()["job_id"]
+    job = wait(client, job_id)
+    assert job["status"] == "done", job
+    assert db.get_job(conn, job_id)["setup"]["evidence_size"] == 8  # what the estimate priced
+    (row,) = db.run_items(conn, job_id)
+    assert row["pred"] and row["answer"] == {}
+    assert calls == ["complete_many"]
+
+
+def test_judge_answers_over_the_api(client):
+    add_documents(client)
+    store_import(client, "x.md", b"some text about passwords")
+    r = client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+    assert r.status_code == 201, r.text
+    held = passages(client)[0].id
+    question = {"id": "a", "text": "passwords?", "gold_ids": [held], "gold_answers": ["Ask IT"]}
+    r = put_questions(client, "s", [question])
+    assert r.status_code == 200, r.text
+    calls = count_ai(client)
+    body = {
+        "collection": "c",
+        "methods": ["hybrid"],
+        "answer": True,
+        "judge": True,
+        "eval_set": "s",
+    }
+    r = client.post("/eval", json=body)
+    assert r.status_code == 200, r.text
+    estimate = r.json()["estimate"]
+    assert estimate["calls"] == 2 and estimate["references"] == 1
+    assert calls == []
+    r = client.post("/eval", json={**body, "confirm": True})
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert calls == ["complete_many", "complete_many"]
+    table = client.get(f"/eval/{r.json()['job_id']}").json()
+    assert table["answers"]["judged"] is True
+    r = client.post("/eval", json={**body, "answer": False})
+    assert r.status_code == 422 and r.json()["detail"] == (
+        "Judge answers needs the AI's answers: tick Have the AI answer the questions"
     )
-    for confirm in (False, True):
-        body = {"collection": "c", "methods": ["hybrid"], "answer": True, "confirm": confirm}
-        r = client.post("/eval", json=body)
-        assert r.status_code == 422 and r.json()["detail"] == message
-    assert db.list_jobs(client.app.state.conn, kind="eval") == []
 
 
 def test_an_empty_documents_store_reads_and_a_blank_file_is_refused(client):
@@ -4677,3 +4738,726 @@ def test_messages_without_brief_keep_the_full_reply(client):
         r = client.post(f"/chats/{chat['id']}/messages{query}", json={"content": "enzyme rate"})
         (attempt,) = r.json()["attempts"]
         assert {"decisions", "evidence", "pipeline"} <= set(attempt)
+
+
+def test_put_questions_keeps_judged_ids(client):
+    client.post("/eval-sets", json={"name": "d", "qa_type": "documents"})
+    labelled = {"id": "a", "text": "one?", "judged_ids": ["a"], "gold_ids": ["b"]}
+    r = put_questions(client, "d", [labelled, {"id": "b", "text": "two?"}])
+    assert r.status_code == 200, r.text
+    got = {q["id"]: q for q in client.get("/eval-sets/d").json()["questions"]}
+    assert got["a"]["judged_ids"] == ["a", "b"]
+    assert got["b"]["judged_ids"] is None
+
+
+def test_a_documents_set_round_trips_through_its_json(client, tmp_path):
+    for name in ("d1", "d2"):
+        client.post("/eval-sets", json={"name": name, "qa_type": "documents"})
+    qs = [
+        {"id": "a", "text": "one?", "gold_ids": ["p1"], "judged_ids": ["p1", "p2"]},
+        {
+            "id": "b",
+            "text": "two?",
+            "gold_ids": ["p3"],
+            "judged_ids": ["p3"],
+            "gold_answers": ["x"],
+        },
+        {"id": "c", "text": "three?"},
+    ]
+    assert put_questions(client, "d1", qs).status_code == 200
+    first = client.get("/eval-sets/d1").json()["questions"]
+    (tmp_path / "qs.json").write_text(json.dumps(first))
+    up = client.post(
+        "/eval-sets/d2/uploads",
+        params={"filename": "qs.json"},
+        content=(tmp_path / "qs.json").read_bytes(),
+    )
+    assert up.status_code == 200, up.text
+    body = {
+        "upload_id": up.json()["upload_id"],
+        "mapping": up.json()["preview"]["mapping"],
+        "source_name": "qs",
+    }
+    assert client.post("/eval-sets/d2/imports", json=body).status_code == 200
+    second = client.get("/eval-sets/d2").json()["questions"]
+    keys = ("id", "text", "gold_ids", "judged_ids", "gold_answers")
+    assert [{k: q[k] for k in keys} for q in second] == [{k: q[k] for k in keys} for q in first]
+    assert second[2]["judged_ids"] is None
+
+
+def test_a_label_saved_while_an_import_merges_is_never_overwritten(client):
+    import threading
+
+    new_set(client, "d", "documents")
+    q = {"id": "q1", "text": "one?", "gold_ids": ["p1"], "judged_ids": ["p1"]}
+    assert put_questions(client, "d", [q]).status_code == 200
+    read = Question(**client.get("/eval-sets/d").json()["questions"][0])
+    conn, loader = client.app.state.conn, client.app.state.loader
+    counts, saved, threads = loader.question_counts, [], []
+
+    def label() -> None:  # a labeller's PUT of q1, sent while the import is merging
+        marked = replace(read, gold_ids=["p9"], judged_ids=["p1", "p9"])
+        try:
+            db.upsert_question(conn, "d", marked, read)
+            saved.append("saved")
+        except ValueError:
+            saved.append("refused")
+
+    def merge_slowly(name, questions):
+        out = counts(name, questions)
+        threads.append(threading.Thread(target=label))
+        threads[0].start()
+        threads[0].join(0.3)  # time for the PUT to land between the merge and its write
+        return out
+
+    loader.question_counts = merge_slowly
+    row = json.dumps({"id": "q1", "text": "one?", "gold_ids": ["p2"]})
+    up = client.post("/eval-sets/d/uploads", params={"filename": "qs.jsonl"}, content=row)
+    assert up.status_code == 200, up.text
+    body = {
+        "upload_id": up.json()["upload_id"],
+        "mapping": up.json()["preview"]["mapping"],
+        "source_name": "qs",
+    }
+    assert client.post("/eval-sets/d/imports", json=body).status_code == 200
+    threads[0].join(5)
+    assert saved == ["refused"]  # it waited for the import, then found q1 had changed
+    assert client.get("/eval-sets/d").json()["questions"][0]["gold_ids"] == ["p1", "p2"]
+
+
+# -- An eval set's linked store ---------------------------------------------------------
+
+
+def test_the_store_list_names_each_stores_default_eval_set(client):
+    client.app.state.worker.stop()
+    for name in ("h", "k", "n"):
+        add_documents(client, name)
+    body = {"name": "hq", "qa_type": "documents", "store": "h"}
+    assert client.post("/eval-sets", json=body).status_code == 201
+    assert client.post("/eval-sets", json={"name": "n", "qa_type": "documents"}).status_code == 201
+    got = {c["name"]: c["eval_set"] for c in client.get("/collections").json()}
+    assert got == {"h": "hq", "k": None, "n": "n"}  # n's is the set named after it
+
+
+def test_creating_a_set_for_a_store_links_both_ways(client):
+    client.app.state.worker.stop()
+    add_documents(client, "h")
+    body = {"name": "hq", "qa_type": "documents", "store": "h"}
+    assert client.post("/eval-sets", json=body).status_code == 201
+    assert client.get("/eval-sets/hq").json()["store"] == "h"
+    assert client.get("/collections/h").json()["eval_set"] == "hq"
+    assert client.post("/eval-sets", json={**body, "name": "hq2"}).status_code == 201
+    assert client.get("/eval-sets/hq2").json()["store"] == "h"
+    assert client.get("/collections/h").json()["eval_set"] == "hq"  # the first stays
+
+
+def test_creating_a_linked_set_checks_the_store(client):
+    client.app.state.worker.stop()
+    add_documents(client, "h")
+    add_collection(client, name="m", questions=False, lists=False)
+    body = {"name": "x", "qa_type": "documents", "store": "nope"}
+    assert client.post("/eval-sets", json=body).status_code == 404
+    r = client.post("/eval-sets", json={**body, "store": "m"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "eval set 'x' is documents; store 'm' is mcq"
+    db.create_job(client.app.state.conn, "load", "h", {"dataset": "scienceqa"})
+    r = client.post("/eval-sets", json={**body, "store": "h"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "a load or question import is under way on 'h'; wait"
+    assert db.get_eval_set(client.app.state.conn, "x") is None
+
+
+def test_patch_eval_set_links_and_unlinks_a_store(client):
+    client.app.state.worker.stop()
+    add_documents(client, "h")
+    add_collection(client, name="m", questions=False, lists=False)
+    client.post("/eval-sets", json={"name": "e", "qa_type": "documents"})
+    assert client.get("/eval-sets/e").json()["store"] is None
+    r = client.patch("/eval-sets/e", json={"store": "h"})
+    assert r.status_code == 200 and r.json()["store"] == "h"
+    r = client.patch("/eval-sets/e", json={"include_leaked": True})
+    assert r.json()["store"] == "h" and r.json()["include_leaked"] is True
+    r = client.patch("/eval-sets/e", json={"store": None})
+    assert r.status_code == 200 and r.json()["store"] is None
+    assert r.json()["include_leaked"] is True
+    for bad in ({"include_leaked": None}, {"nonsense": 1}):
+        assert client.patch("/eval-sets/e", json=bad).status_code == 422
+    r = client.patch("/eval-sets/e", json={"include_leaked": None})
+    assert r.json()["detail"] == "include_leaked cannot be null: leave it out to keep it"
+    assert client.patch("/eval-sets/e", json={"store": "nope"}).status_code == 404
+    r = client.patch("/eval-sets/e", json={"store": "m"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "eval set 'e' is documents; store 'm' is mcq"
+    assert client.get("/eval-sets/e").json()["store"] is None
+
+
+def test_deleting_a_store_unlinks_its_eval_sets_and_keeps_their_labels(client):
+    client.app.state.worker.stop()
+    add_documents(client, "h")
+    body = {"name": "hq", "qa_type": "documents", "store": "h"}
+    assert client.post("/eval-sets", json=body).status_code == 201
+    q = {"id": "q1", "text": "where?", "gold_ids": ["a"], "judged_ids": ["a", "b"]}
+    assert put_questions(client, "hq", [q]).status_code == 200
+    assert client.delete("/collections/h").status_code == 204
+    got = client.get("/eval-sets/hq").json()
+    assert got["store"] is None
+    assert (got["questions"][0]["gold_ids"], got["questions"][0]["judged_ids"]) == (
+        ["a"],
+        ["a", "b"],
+    )
+
+
+def test_get_eval_set_names_labelled_passages_no_longer_in_its_store(client):
+    add_collection(client, questions=False, lists=False)
+    old = handbook("")
+    store_import(client, "x.md", old)
+    ids = ids_of("x.md", old)
+    body = {"name": "lq", "qa_type": "mcq", "store": "c"}
+    assert client.post("/eval-sets", json=body).status_code == 201
+    assert client.get("/eval-sets/lq").json()["missing"] == {}
+    mcq = {"choices": ["x", "y"], "gold_answers": ["A"]}
+    qs = [
+        {"id": "q1", "text": "where?", "gold_ids": [ids[0]], **mcq},
+        {"id": "q2", "text": "none?", **mcq},
+    ]
+    r = put_questions(client, "lq", qs)
+    assert r.status_code == 200, r.text
+    got = client.get("/eval-sets/lq").json()
+    assert got["missing"] == {}
+    store_import(client, "x.md", handbook("A new first paragraph."))
+    got = client.get("/eval-sets/lq").json()
+    assert got["missing"] == {"q1": [ids[0]]}
+    assert got["questions"][0]["gold_ids"] == [ids[0]]
+    client.patch("/eval-sets/lq", json={"store": None})
+    assert client.get("/eval-sets/lq").json()["missing"] == {}
+
+
+def new_set(client, name="e", qa_type="mcq"):
+    assert client.post("/eval-sets", json={"name": name, "qa_type": qa_type}).status_code == 201
+
+
+def qpath(name, qid=None):
+    return f"/eval-sets/{name}/questions" + (f"/{qid}" if qid else "")
+
+
+def test_post_question_names_it_by_its_text(client):
+    new_set(client)
+    body = {
+        "question": {"text": "How long is leave?", "choices": ["x", "y"], "gold_answers": ["A"]}
+    }
+    r = client.post(qpath("e"), json=body)
+    assert r.status_code == 201, r.text
+    want = imports.make_id("q-", "How long is leave?")
+    assert r.json()["id"] == want
+    again = client.post(qpath("e"), json=body)
+    assert again.status_code == 201 and again.json()["id"] == want + "-2"
+    got = client.get("/eval-sets/e").json()
+    assert got["version"] == again.json()["version"]
+    assert {q["id"]: q["meta"]["source"] for q in got["questions"]} == {
+        want: "hand",
+        want + "-2": "hand",
+    }
+    sent = {"question": {**body["question"], "meta": {"source": "upload:x"}, "text": "other?"}}
+    r = client.post(qpath("e"), json=sent)
+    q = next(q for q in client.get("/eval-sets/e").json()["questions"] if q["id"] == r.json()["id"])
+    assert q["meta"]["source"] == "upload:x"
+    assert (
+        client.post(qpath("e"), json={"question": {**body["question"], "text": ""}}).status_code
+        == 422
+    )
+    assert client.post(qpath("nope"), json=body).status_code == 404
+
+
+def test_two_labellers_on_different_questions_both_keep_their_marks(client):
+    new_set(client)
+    q1, q2 = MCQ, {**MCQ, "id": "b"}
+    assert put_questions(client, "e", [q1, q2]).status_code == 200
+    read = {q["id"]: q for q in client.get("/eval-sets/e").json()["questions"]}
+    n1 = {**read["a"], "gold_ids": ["p1"], "judged_ids": ["p1", "p2"]}
+    n2 = {**read["b"], "gold_ids": ["p3"], "judged_ids": ["p3"]}
+    r1 = client.put(qpath("e", "a"), json={"question": n1, "base": read["a"]})
+    r2 = client.put(qpath("e", "b"), json={"question": n2, "base": read["b"]})
+    assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+    got = {q["id"]: q for q in client.get("/eval-sets/e").json()["questions"]}
+    assert got["a"]["judged_ids"] == ["p1", "p2"] and got["b"]["gold_ids"] == ["p3"]
+    assert client.get("/eval-sets/e").json()["version"] == r2.json()["version"]
+
+
+def test_a_stale_question_save_is_409_and_changes_nothing(client):
+    new_set(client)
+    assert put_questions(client, "e", [MCQ]).status_code == 200
+    got = client.get("/eval-sets/e").json()
+    read = got["questions"][0]
+    first = {**read, "gold_ids": ["p1"]}
+    assert client.put(qpath("e", "a"), json={"question": first, "base": read}).status_code == 200
+    second = {**read, "gold_ids": ["p2"]}
+    r = client.put(qpath("e", "a"), json={"question": second, "base": read})
+    assert r.status_code == 409 and "changed by someone else" in r.json()["detail"]
+    assert client.get("/eval-sets/e").json()["questions"][0]["gold_ids"] == ["p1"]
+    old = put_questions(client, "e", [MCQ], got["version"])
+    assert old.status_code == 409
+
+
+def test_put_or_delete_of_a_gone_question_is_404(client):
+    new_set(client)
+    assert put_questions(client, "e", [MCQ]).status_code == 200
+    read = client.get("/eval-sets/e").json()["questions"][0]
+    assert client.delete(qpath("e", "a")).status_code == 200
+    gone = "This question was deleted since you opened it"
+    r = client.put(qpath("e", "a"), json={"question": read, "base": read})
+    assert r.status_code == 404 and r.json()["detail"] == gone
+    r = client.put(qpath("e", "other"), json={"question": read, "base": read})
+    assert r.status_code == 422 and "must match the address" in r.json()["detail"]
+    r = client.delete(qpath("e", "a"))
+    assert r.status_code == 404 and r.json()["detail"] == gone
+    assert client.delete(qpath("nope", "a")).status_code == 404
+
+
+def test_a_question_id_with_a_slash_saves_and_deletes_one_at_a_time(client):
+    from urllib.parse import quote
+
+    new_set(client, "d", "documents")
+    one = {"id": "hr/leave-1", "text": "how long is leave?"}
+    two = {"id": "hr/leave-2", "text": "who approves leave?"}
+    assert put_questions(client, "d", [one, two]).status_code == 200
+    read = {q["id"]: q for q in client.get("/eval-sets/d").json()["questions"]}
+    marked = {**read["hr/leave-1"], "gold_ids": ["x.md#aaaaaaaaaaaa"]}
+    r = client.put(
+        qpath("d", quote("hr/leave-1", safe="")),
+        json={"question": marked, "base": read["hr/leave-1"]},
+    )
+    assert r.status_code == 200, r.text
+    got = {q["id"]: q for q in client.get("/eval-sets/d").json()["questions"]}
+    assert got["hr/leave-1"]["gold_ids"] == ["x.md#aaaaaaaaaaaa"]
+    r = client.delete(qpath("d", quote("hr/leave-2", safe="")))
+    assert r.status_code == 200, r.text
+    assert [q["id"] for q in client.get("/eval-sets/d").json()["questions"]] == ["hr/leave-1"]
+    gone = client.delete(qpath("d", quote("hr/leave-2", safe="")))
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == "This question was deleted since you opened it"
+
+
+def test_question_writes_wait_for_a_load(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    conn = client.app.state.conn
+    db.create_job(conn, "load", "c", {"dataset": "musique", "limit": None})
+    stored = client.get("/eval-sets/c").json()["questions"][0]
+    new = {"question": {"text": "x?", "choices": ["x", "y"], "gold_answers": ["A"]}}
+    assert client.post(qpath("c"), json=new).status_code == 409
+    put = {"question": stored, "base": stored}
+    assert client.put(qpath("c", stored["id"]), json=put).status_code == 409
+    assert client.delete(qpath("c", stored["id"])).status_code == 409
+
+
+def test_get_eval_set_reads_an_old_version(client):
+    new_set(client)
+    v1 = put_questions(client, "e", [MCQ]).json()["version"]
+    v2 = put_questions(client, "e", [MCQ, {**MCQ, "id": "b"}], v1).json()["version"]
+    got = client.get("/eval-sets/e", params={"version": v1}).json()
+    assert [q["id"] for q in got["questions"]] == ["a"]
+    assert got["version"] == v2 and got["questions_version"] == v1
+    now = client.get("/eval-sets/e").json()
+    assert now["questions_version"] == v2 and len(now["questions"]) == 2
+    r = client.get("/eval-sets/e", params={"version": "nope"})
+    assert r.status_code == 404 and r.json()["detail"] == "That version of 'e' doesn't exist"
+
+
+def test_restoring_an_old_version_puts_its_questions_back(client):
+    new_set(client)
+    conn = client.app.state.conn
+    q = Question("a", "which one?", ["x", "y"], ["A"], ["p1"], judged_ids=["p1", "p2"])
+    db.save_questions(conn, "e", [q])
+    v1 = client.get("/eval-sets/e").json()["version"]
+    changed = {**MCQ, "text": "changed?"}
+    cur = put_questions(client, "e", [changed], v1).json()["version"]
+    assert cur != v1
+    old = client.get("/eval-sets/e", params={"version": v1}).json()["questions"]
+    r = put_questions(client, "e", old, cur)
+    assert r.status_code == 200 and r.json()["version"] == v1
+    got = client.get("/eval-sets/e").json()["questions"]
+    assert got[0]["judged_ids"] == ["p1", "p2"] and "source" not in got[0]["meta"]
+
+
+def test_restoring_a_version_from_before_judged_ids_leaves_them_unknown(client):
+    new_set(client)
+    row = [
+        {
+            "id": "a",
+            "text": "t",
+            "choices": ["x", "y"],
+            "gold_answers": ["A"],
+            "gold_ids": [],
+            "meta": {},
+        }
+    ]
+    client.app.state.conn.execute(
+        "insert into eval_set_versions values (?, ?, ?, ?)", ("e", "old", json.dumps(row), "now")
+    )
+    old = client.get("/eval-sets/e", params={"version": "old"}).json()["questions"]
+    assert put_questions(client, "e", old).status_code == 200
+    assert [q["judged_ids"] for q in client.get("/eval-sets/e").json()["questions"]] == [None]
+
+
+# -- Find passages: the labelling pool ------------------------------------------------------
+
+POOL_WORDS = [
+    "alpha",
+    "brine",
+    "cocoa",
+    "delta",
+    "ember",
+    "fjord",
+    "gusto",
+    "haven",
+    "irony",
+    "jumbo",
+    "kiosk",
+    "lemon",
+    "mango",
+    "nylon",
+    "otter",
+]
+POOL_KEYS = {"id", "text", "file", "part", "parts", "relevance"}
+POOL_LOADING_NOTE = (
+    "The ranking model is still loading, so passages are in search order, not best first"
+)
+POOL_UNAVAILABLE_NOTE = (
+    "The ranking model is unavailable, so passages are in search order, not best first"
+)
+KEYWORD_TAGS_NOTE = (
+    "Keyword-tag search was left out: its tags would use AI, and Find passages is free"
+)
+FREE = ["vector", "keyword", "hybrid"]
+
+
+def pool_store(client) -> None:
+    """Store c: a Documents store of 15 one-word passages from x.md, and the Documents eval
+    set s labelled against it."""
+    add_documents(client)
+    store_import(client, "x.md", long_text(POOL_WORDS))
+    assert client.app.state.store.count("c") == 15
+    r = client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+    assert r.status_code == 201, r.text
+
+
+def count_ai(client) -> list[str]:
+    """Every AI call from here on, by kind; the calls still go through."""
+    ai, calls = client.app.state.ai, []
+    complete, complete_many = ai.complete, ai.complete_many
+
+    def one(*args, **kw):
+        calls.append("complete")
+        return complete(*args, **kw)
+
+    def many(*args, **kw):
+        calls.append("complete_many")
+        return complete_many(*args, **kw)
+
+    ai.complete, ai.complete_many = one, many
+    return calls
+
+
+def count_reranks(client) -> list[str]:
+    models, calls = client.app.state.models, []
+    real = models.rerank
+
+    def rerank(query, texts, model=None):
+        calls.append(query)
+        return real(query, texts, model)
+
+    models.rerank = rerank
+    return calls
+
+
+def find_passages(client, question: str, labelled: list[str] | None = None, name="s") -> dict:
+    body = {"question": question, "labelled": labelled or []}
+    r = client.post(f"/eval-sets/{name}/pool", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def top_ids(client, question: str, method: str) -> list[str]:
+    return [h.id for h in client.app.state.retriever.retrieve("c", question, method, 10)]
+
+
+def test_pool_takes_the_top_10_of_each_free_method_once_in_rerank_order(client):
+    pool_store(client)
+    calls = count_ai(client)
+    retriever = client.app.state.retriever
+    real = retriever.retrieve
+    searched = set()
+
+    def retrieve(collection, question, method, k=5, *args, **kw):
+        searched.add((method, k))
+        return real(collection, question, method, k, *args, **kw)
+
+    retriever.retrieve = retrieve
+    question = "alpha brine cocoa"
+    body = find_passages(client, question)
+    assert searched == {("vector", 10), ("keyword", 10), ("hybrid", 10)}
+    assert body["store"] == "c" and body["methods"] == FREE
+    assert body["merged_by"] == "rerank" and body["notes"] == []
+    found = body["passages"]
+    ids = [p["id"] for p in found]
+    assert len(ids) == len(set(ids)) >= 10
+    scores = client.app.state.models.rerank(question, [p["text"] for p in found])
+    assert scores == sorted(scores, reverse=True) and scores[0] > 0
+    assert [p["relevance"] for p in found] == [relevance(s) for s in scores]
+    assert all(set(p) == POOL_KEYS and p["file"] == "x.md" for p in found)
+    assert all(p["parts"] == 15 and 1 <= p["part"] <= 15 for p in found)
+    assert body["labelled"] == [] and body["missing"] == []
+    assert calls == []
+
+
+def test_pool_adds_keyword_rag_only_once_tags_are_built(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        pool_store(client)
+        r = add_tags(client, True)
+        assert r.status_code == 202, r.text
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        calls = count_ai(client)
+        body = find_passages(client, "alpha brine")
+        assert body["methods"] == [*FREE, "keyword_rag"] and body["notes"] == []
+        conn = client.app.state.conn
+        newest = db.list_jobs(conn, kind="tag_build", collection="c")[0]
+        db.update_job(conn, newest["id"], status="interrupted")
+        body = find_passages(client, "alpha brine")
+        assert body["methods"] == FREE and body["notes"] == []
+        assert calls == []
+
+
+def test_pool_leaves_out_keyword_rag_when_its_tags_would_call_ai(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        pool_store(client)
+        r = add_tags(client, True)
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        r = client.put("/collections/c/search", json={"query_tags": "model"})
+        assert r.status_code == 200, r.text
+        calls = count_ai(client)
+        body = find_passages(client, "alpha brine")
+        assert body["methods"] == FREE and body["notes"] == [KEYWORD_TAGS_NOTE]
+        assert body["passages"]
+        client.app.state.ai.set_role("query", None)
+        body = find_passages(client, "alpha brine")
+        assert body["methods"] == FREE and body["notes"] == [KEYWORD_TAGS_NOTE]
+        assert calls == []
+
+
+def test_pool_searches_keyword_rag_with_the_settings_it_checked(tmp_path):
+    from ragqa_core.types import SearchSettings
+
+    with make_client(tmp_path, reply=terms_reply) as client:
+        pool_store(client)
+        r = add_tags(client, True)
+        assert wait(client, r.json()["job_id"])["status"] == "done"
+        chats, conn = client.app.state.chats, client.app.state.conn
+        why_not = chats.why_not
+
+        def flip(spec, method):  # PUT /collections/c/search {"query_tags": "model"} mid-pool
+            if method == "keyword_rag":
+                search = spec.search or SearchSettings()
+                db.set_search(conn, "c", replace(search, query_tags="model"))
+            return why_not(spec, method)
+
+        chats.why_not = flip
+        calls = count_ai(client)
+        body = find_passages(client, "alpha brine")
+        assert body["methods"] == [*FREE, "keyword_rag"] and body["notes"] == []
+        assert calls == []
+        assert db.get_collection(conn, "c").search.query_tags == "model"
+
+
+def test_pool_falls_back_to_search_order_while_the_reranker_loads(client):
+    pool_store(client)
+    models = client.app.state.models
+    reranked = count_reranks(client)
+    question = "alpha brine"
+    lists = {m: top_ids(client, question, m) for m in FREE}
+    expected: list[str] = []
+    for i in range(10):
+        for m in FREE:
+            if i < len(lists[m]) and lists[m][i] not in expected:
+                expected.append(lists[m][i])
+    for status, note in (("loading", POOL_LOADING_NOTE), ("failed", POOL_UNAVAILABLE_NOTE)):
+        models.rerank_status = lambda model=None, status=status: status
+        body = find_passages(client, question)
+        assert body["merged_by"] == "rank" and body["notes"] == [note], status
+        assert [p["id"] for p in body["passages"]] == expected
+        assert all(p["relevance"] is None for p in body["passages"])
+    assert reranked == []
+
+
+def test_pool_on_an_empty_store_finds_nothing_and_never_reranks(client):
+    add_documents(client)
+    r = client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+    assert r.status_code == 201, r.text
+    reranked = count_reranks(client)
+    body = find_passages(client, "anything")
+    assert body["passages"] == [] and body["notes"] == ["No passages found in c"]
+    assert reranked == []
+
+
+def test_pool_leaves_out_a_method_that_fails_with_a_note(client):
+    pool_store(client)
+    question = "alpha brine"
+    wanted = set(top_ids(client, question, "keyword")) | set(top_ids(client, question, "hybrid"))
+    retriever = client.app.state.retriever
+    real = retriever.retrieve
+
+    def retrieve(collection, question, method, *args, **kw):
+        if method == "vector":
+            raise ModelMismatch("x")
+        return real(collection, question, method, *args, **kw)
+
+    retriever.retrieve = retrieve
+    body = find_passages(client, question)
+    assert body["methods"] == ["keyword", "hybrid"]
+    assert body["notes"] == ["Vector search was left out: x"]
+    assert {p["id"] for p in body["passages"]} == wanted
+
+
+def test_pool_returns_labelled_passages_it_did_not_find_and_names_missing_ones(client):
+    pool_store(client)
+    every = sorted(h.id for h in passages(client))
+    pooled = find_passages(client, "alpha")["passages"][0]["id"]
+    gone = "x.md#000000000000"
+    labelled = [pooled, gone, *[i for i in every if i != pooled]]
+    body = find_passages(client, "alpha", labelled)
+    found = [p["id"] for p in body["passages"]]
+    extra = [p["id"] for p in body["labelled"]]
+    assert extra and sorted(found + extra) == every  # each held id once
+    assert extra == [i for i in labelled if i in set(extra)]  # in the order given
+    assert all(set(p) == POOL_KEYS and p["relevance"] is None for p in body["labelled"])
+    assert all(p["file"] == "x.md" for p in body["labelled"])
+    assert body["missing"] == [gone]
+
+
+def test_pool_refuses_without_a_documents_set_and_store(client):
+    pool_store(client)
+    assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
+    assert client.post("/eval-sets", json={"name": "d", "qa_type": "documents"}).status_code == 201
+    for name, status, detail in (
+        ("m", 422, "Find passages is for Documents eval sets"),
+        ("d", 409, "pick a store for this eval set first"),
+        ("nope", 404, "no eval set 'nope'"),
+    ):
+        r = client.post(f"/eval-sets/{name}/pool", json={"question": "alpha"})
+        assert (r.status_code, r.json()["detail"]) == (status, detail), name
+    for bad in ({"question": ""}, {"question": "alpha", "x": 1}, {}):
+        assert client.post("/eval-sets/s/pool", json=bad).status_code == 422, bad
+
+
+def answer_store(client) -> list[str]:
+    """Store c holding handbook("") as x.md and the linked Documents set cq; the ids of c."""
+    add_documents(client)
+    store_import(client, "x.md", handbook(""))
+    r = client.post("/eval-sets", json={"name": "cq", "qa_type": "documents", "store": "c"})
+    assert r.status_code == 201, r.text
+    return sorted(h.id for h in passages(client))
+
+
+def record_purposes(client) -> list[str]:
+    """Every complete_many purpose from here on; the calls still go through."""
+    ai, seen = client.app.state.ai, []
+    real = ai.complete_many
+
+    def many(prompts, **kw):
+        seen.append(kw["purpose"])
+        return real(prompts, **kw)
+
+    ai.complete_many = many
+    return seen
+
+
+def ask_answer(client, ids, confirm=False, name="cq", **body):
+    body = {"question": "How many days?", "passages": ids, "confirm": confirm, **body}
+    return client.post(f"/eval-sets/{name}/answer", json=body)
+
+
+def test_reference_answer_estimate_spends_nothing_and_confirm_makes_one_call(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Ten days [1].") as client:
+        ids = answer_store(client)
+        before = client.get("/eval-sets/cq").json()
+        seen = record_purposes(client)
+        r = ask_answer(client, ids[:2])
+        assert r.status_code == 200, r.text
+        estimate = r.json()["estimate"]
+        assert estimate["calls"] == 1 and estimate["est_usd"] > 0
+        assert seen == []
+        r = ask_answer(client, ids[:2], True)
+        assert r.status_code == 200, r.text
+        assert r.json()["answer"] == "Ten days." and r.json()["usd"] >= 0
+        assert seen == ["reference_answer"]
+        r = ask_answer(client, ids[:2])
+        assert r.json()["estimate"] == {"est_usd": 0, "calls": 0}
+        assert seen == ["reference_answer"]
+        after = client.get("/eval-sets/cq").json()
+        assert (after["version"], after["questions"]) == (before["version"], before["questions"])
+
+
+def test_reference_answer_over_the_cap_is_402_and_saves_nothing(tmp_path):
+    with make_client(tmp_path) as client:
+        ids = answer_store(client)
+        before = client.get("/eval-sets/cq").json()
+        client.app.state.ai.set_cap(0)
+        assert ask_answer(client, ids[:1], True).status_code == 402
+        assert client.get("/eval-sets/cq").json() == before
+
+
+def test_reference_answer_with_no_answer_model(tmp_path):
+    with make_client(tmp_path) as client:
+        ids = answer_store(client)
+        client.app.state.ai.set_role("default", None)
+        assert ask_answer(client, ids[:1]).json()["estimate"]["est_usd"] is None
+        r = ask_answer(client, ids[:1], True)
+        assert r.status_code == 503 and r.json()["detail"] == no_ai("answer")
+        assert client.get("/eval-sets/cq").json()["answer_available"] is False
+
+
+def test_reference_answer_refuses_what_it_cannot_answer(client):
+    ids = answer_store(client)
+    assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
+    assert client.post("/eval-sets", json={"name": "d", "qa_type": "documents"}).status_code == 201
+    seen = record_purposes(client)
+    for name, status, detail in (
+        ("m", 422, "The AI's answer is for Documents eval sets"),
+        ("d", 409, "pick a store for this eval set first"),
+        ("nope", 404, "no eval set 'nope'"),
+    ):
+        r = ask_answer(client, ids[:1], True, name=name)
+        assert (r.status_code, r.json()["detail"]) == (status, detail), name
+    assert ask_answer(client, []).status_code == 422
+    assert ask_answer(client, [f"p{i}" for i in range(21)]).status_code == 422
+    assert ask_answer(client, ids[:1], extra=1).status_code == 422
+    r = ask_answer(client, ids[:1], question="  ")
+    assert (r.status_code, r.json()["detail"]) == (422, "a question needs some text")
+    r = ask_answer(client, ["gone"], True)
+    assert (r.status_code, r.json()["detail"]) == (
+        422,
+        "mark at least one passage y that is in c first",
+    )
+    assert seen == []
+
+
+def test_get_eval_set_says_whether_an_answer_model_is_connected(client):
+    answer_store(client)
+    assert client.get("/eval-sets/cq").json()["answer_available"] is True
+
+
+def test_collection_reports_the_newest_load_error(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    conn = client.app.state.conn
+
+    def load(status, error=""):
+        db.update_job(conn, db.create_job(conn, "load", "c", {}), status=status, error=error)
+        return client.get("/collections/c").json()["load_error"]
+
+    assert load("failed", "HF said no") == "HF said no"
+    assert load("done") is None  # a later try that finished clears it
+    assert load("cancelled") is None
+    assert load("failed") == "the load failed"
+    assert load("interrupted") == "the load was interrupted by a restart"
+    assert load("stopped_budget") == "the load stopped at the monthly cap"
+    assert load("stopped_odd") == "the load stopped_odd"  # a status with no phrasing yet

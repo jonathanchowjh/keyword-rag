@@ -1119,3 +1119,136 @@ def test_set_dense_model_changes_only_the_model_and_dimension(conn):
 
 def test_a_rebuild_is_an_item_job():
     assert "reembed" in db.ITEM_JOBS
+
+
+# -- judged_ids ----------------------------------------------------------------
+
+
+def stored_json(conn, name, id_):
+    return conn.execute("select json from questions where collection = ? and id = ?", (name, id_))[
+        0
+    ]["json"]
+
+
+def test_a_write_keeps_judged_a_superset_of_gold(conn):
+    db.create_eval_set(conn, "e", "documents")
+    q = Question("q1", "t", None, [], ["a", "b"], {}, ["a", "c"])
+    save_questions(conn, "e", [q])
+    assert get_questions(conn, "e")[0].judged_ids == ["a", "c", "b"]
+    unknown = Question("q2", "t", None, [], ["a"], {}, None)
+    save_questions(conn, "e", [unknown])
+    assert get_questions(conn, "e")[1].judged_ids is None
+    assert "judged_ids" not in json.loads(stored_json(conn, "e", "q2"))
+    db.replace_questions(conn, "e", [q, unknown], None)
+    got = {x.id: x.judged_ids for x in get_questions(conn, "e")}
+    assert got == {"q1": ["a", "c", "b"], "q2": None}
+    assert "judged_ids" not in json.loads(stored_json(conn, "e", "q2"))
+
+
+OLD_QUESTION = {
+    "id": "q1",
+    "text": "t",
+    "choices": None,
+    "gold_answers": [],
+    "gold_ids": ["a"],
+    "meta": {},
+}
+
+
+def old_set(conn):
+    db.create_eval_set(conn, "e", "documents")
+    conn.execute("insert into questions values (?, ?, ?)", ("e", "q1", json.dumps(OLD_QUESTION)))
+    return db.snapshot_eval_set(conn, "e")
+
+
+def test_old_question_json_reads_with_judged_unknown(conn):
+    version = old_set(conn)
+    assert get_questions(conn, "e")[0].judged_ids is None
+    assert get_questions(conn, "e", version)[0].judged_ids is None
+
+
+def test_an_unchanged_old_set_keeps_its_version(conn):
+    version = old_set(conn)
+    save_questions(conn, "e", get_questions(conn, "e"))
+    assert db.get_eval_set(conn, "e")["version"] == version
+    assert len(conn.execute("select * from eval_set_versions")) == 1
+
+
+def test_a_snapshot_keeps_judged_ids(conn):
+    db.create_eval_set(conn, "e", "documents")
+    save_questions(conn, "e", [Question("q1", "t", None, [], ["a"], {}, ["a", "b"])])
+    version = db.get_eval_set(conn, "e")["version"]
+    save_questions(conn, "e", [Question("q1", "t2", None, [], ["a"], {}, ["a"])])
+    assert get_questions(conn, "e", version)[0].judged_ids == ["a", "b"]
+
+
+def test_connect_adds_the_eval_set_store_column(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(db.SCHEMA)
+    old.executescript(
+        """
+        drop table eval_sets;
+        create table eval_sets (
+          name text primary key, qa_type text not null, version text,
+          include_leaked integer not null default 0, created_at text not null
+        );
+        """
+    )
+    old.execute(
+        "insert into collections (name, qa_type, summarize, dense_model, dense_dim, created_at)"
+        " values ('c', 'mcq', 0, 'm', 8, 'now')"
+    )
+    old.execute("insert into eval_sets (name, qa_type, created_at) values ('c', 'mcq', 'now')")
+    old.execute("insert into questions values (?, ?, ?)", ("c", "q1", json.dumps(OLD_QUESTION)))
+    old.commit()
+    old.close()
+    conn = connect(path)  # _migrate_eval_sets reads the set through _eval_set
+    assert db.get_eval_set(conn, "c")["store"] is None
+    db.set_eval_set_store(conn, "c", "c")
+    assert db.get_eval_set(conn, "c")["store"] == "c"
+
+
+def test_upsert_question_refuses_a_stale_base(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    q1, q2 = questions_of("one", "two")
+    save_questions(conn, "e", [q1, q2])
+    q1a = Question(q1.id, "one a", None, ["a"], [])
+    q1b = Question(q1.id, "one b", None, ["a"], [])
+    q2a = Question(q2.id, "two a", None, ["a"], [])
+    db.upsert_question(conn, "e", q1a, q1)
+    with pytest.raises(ValueError, match="changed by someone else since you opened it"):
+        db.upsert_question(conn, "e", q1b, q1)
+    db.upsert_question(conn, "e", q2a, q2)
+    assert [q.text for q in get_questions(conn, "e")] == ["one a", "two a"]
+    db.delete_question(conn, "e", q2.id)
+    with pytest.raises(KeyError):
+        db.upsert_question(conn, "e", q2a, q2a)
+
+
+def test_add_question_picks_a_free_id(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    q = Question("q-x", "one", None, ["a"], [])
+    first, _ = db.add_question(conn, "e", q)
+    second, _ = db.add_question(conn, "e", q)
+    third, _ = db.add_question(conn, "e", q)
+    assert (first, second, third) == ("q-x", "q-x-2", "q-x-3")
+
+
+def test_upsert_and_delete_make_a_version_each(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    q = Question("q0", "t0", None, ["a"], [], judged_ids=["j"])
+    _, v = db.add_question(conn, "e", q)
+    seen = {v}
+    for i in (1, 2):
+        new = Question("q0", f"t{i}", None, ["a"], [], judged_ids=["j"])
+        v = db.upsert_question(conn, "e", new, q)
+        q = new
+        assert v not in seen
+        seen.add(v)
+        assert len(db.eval_set_versions(conn, "e")) == len(seen)
+    assert get_questions(conn, "e")[0].judged_ids == ["j"]
+    v = db.delete_question(conn, "e", "q0")
+    assert v not in seen and get_questions(conn, "e") == []
+    with pytest.raises(KeyError):
+        db.delete_question(conn, "e", "q0")

@@ -77,7 +77,8 @@ class Item:
 @dataclass
 class Question:
     """A query with its gold. For mcq, meta carries skill, topic and solution;
-    for table, meta carries scale. gold_ids are supporting item ids (empty for mcq)."""
+    for table, meta carries scale. gold_ids are supporting item ids (empty for mcq). judged_ids is
+    a superset of gold_ids once anyone has labelled the question."""
 
     id: str
     text: str
@@ -85,6 +86,7 @@ class Question:
     gold_answers: list[str]
     gold_ids: list[str]
     meta: dict = field(default_factory=dict)
+    judged_ids: list[str] | None = None  # every passage marked right or wrong; None: unknown
 
 
 @dataclass

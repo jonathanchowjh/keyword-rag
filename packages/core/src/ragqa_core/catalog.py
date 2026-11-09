@@ -144,6 +144,7 @@ METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
         "ndcg@10": "Right passages ranked first",
         "recall@10": "Right passages found (top 10)",
         "mrr@10": "How soon the first right passage comes",
+        "accuracy": "Answers judged right",
     },
     "science": WORKED_RECALL_LABEL,
     "mcq": WORKED_RECALL_LABEL,
@@ -157,6 +158,8 @@ METRIC_SAYS_BY_TYPE: dict[QaType, dict[str, str]] = {
         "recall@10": "Share of a question's right passages in the top 10",
         "mrr@10": "1 when the first hit is right, 1/2 when the second is, 0 when none is in the"
         " top 10",
+        "accuracy": "Share of judged answers the AI marked right against the question's"
+        " reference answer; questions with no reference answer are left out",
     },
     "science": {
         "accuracy": "Share answered right: the choice, a number within 5% of the gold, "
@@ -182,12 +185,12 @@ QA_TYPES: dict[QaType, dict] = {
     "science": {
         "label": "Science problems",
         "item_noun": "worked example",
-        "retrieves": "worked examples to copy the reasoning of, with or without choices",
+        "retrieves": "worked examples whose reasoning carries over, with or without choices",
     },
     "mcq": {
         "label": "Exam multiple choice",
         "item_noun": "example",
-        "retrieves": "worked examples to copy the reasoning of",
+        "retrieves": "worked examples whose reasoning carries over",
     },
     "multihop": {
         "label": "Multi-hop",
@@ -197,7 +200,7 @@ QA_TYPES: dict[QaType, dict] = {
     "table": {
         "label": "Tables",
         "item_noun": "table",
-        "retrieves": "a table and its text to compute from",
+        "retrieves": "the table and text that hold the figures for the answer",
     },
 }
 

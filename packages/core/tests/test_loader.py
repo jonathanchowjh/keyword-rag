@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -611,3 +612,76 @@ def test_chunk_of_reads_old_and_new_ids():
     assert loader.chunk_of("a.md#0123456789ab-") is None
     assert loader.chunk_of("a.md#٣") is None  # an Arabic-Indic digit is not a part number
     assert loader.chunk_of("a.md") is None
+
+
+def stored_labelled(tmp_path, qa_type):
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, lambda p: ""))
+    db.create_eval_set(conn, "s", qa_type)
+    old = Question("q1", "old text", None, ["Ten days"], ["a"], {}, ["a", "b"])
+    db.save_questions(
+        conn, "s", [old] if qa_type == "documents" else [replace(old, judged_ids=None)]
+    )
+    return loader_for(ix, tmp_path)
+
+
+def test_reimporting_a_documents_set_keeps_its_labels(tmp_path):
+    ld = stored_labelled(tmp_path, "documents")
+    counts, todo = ld.question_counts("s", [Question("q1", "new text", None, [], ["c"], {}, None)])
+    assert counts["updated"] == 1
+    assert todo[0].gold_ids == ["a", "c"] and todo[0].judged_ids == ["a", "b", "c"]
+    assert todo[0].gold_answers == ["Ten days"] and todo[0].text == "new text"
+    (tmp_path / "m").mkdir()
+    ld = stored_labelled(tmp_path / "m", "multihop")
+    _, todo = ld.question_counts("s", [Question("q1", "new text", None, [], ["c"], {}, None)])
+    assert todo[0].gold_ids == ["c"] and todo[0].judged_ids is None
+
+
+def test_reimporting_labelled_questions_replaces_them(tmp_path):
+    ld = stored_labelled(tmp_path, "documents")
+    new = Question("q1", "new text", None, [], ["c"], {}, ["c"])
+    _, todo = ld.question_counts("s", [new])
+    assert todo[0].gold_ids == ["c"] and todo[0].judged_ids == ["c"]
+    assert todo[0].gold_answers == []
+
+
+def test_a_label_saved_while_a_question_import_job_merges_is_never_overwritten(tmp_path):
+    import threading
+
+    from ragqa_core import imports
+
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, lambda p: ""))
+    ix.create("d", "documents", False, "documents")
+    read = Question("q1", "one?", None, [], ["p1"], {}, ["p1"])
+    db.save_questions(conn, "d", [read])
+    ld = loader_for(ix, tmp_path)
+    counts, saved, threads = ld.question_counts, [], []
+
+    def label() -> None:  # a labeller's PUT of q1, sent while the job is merging
+        try:
+            db.upsert_question(conn, "d", replace(read, gold_ids=["p9"], judged_ids=["p9"]), read)
+            saved.append("saved")
+        except ValueError:
+            saved.append("refused")
+
+    def merge_slowly(name, questions):
+        out = counts(name, questions)
+        threads.append(threading.Thread(target=label))
+        threads[0].start()
+        threads[0].join(0.3)  # time for the PUT to land between the merge and its write
+        return out
+
+    ld.question_counts = merge_slowly
+    rows = [{"id": "q1", "text": "one?", "gold_ids": ["p2"]}]
+    mapping = imports.guess_mapping(imports.columns(rows), "questions")
+    ld.run_import(import_job(conn, tmp_path, "questions", rows, mapping, name="d"), lambda p: None)
+    threads[0].join(5)
+    assert saved == ["refused"]  # it waited for the job, then found q1 had changed
+    assert get_questions(conn, "d")[0].gold_ids == ["p1", "p2"]
+
+
+def test_question_counts_on_a_set_not_made_yet(tmp_path):
+    ld = stored_labelled(tmp_path, "documents")
+    counts, todo = ld.question_counts("nope", [Question("q", "t", None, [], [], {}, None)])
+    assert counts["new"] == 1 and len(todo) == 1

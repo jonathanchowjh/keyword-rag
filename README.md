@@ -150,6 +150,20 @@ paths still say `collections` for stores; the pages and this text say store.)
 The default eval set of a store `X` is the one its `eval_set` names, else the eval
 set called `X`, else none. A run uses the default unless you pick another.
 
+The Stores page leads with **Start here**, four steps worked out from what exists:
+`Connect AI` (done when a model is enabled, priced and has a connection with a key,
+or a local or manual one; its note reads `Optional for Documents: without it, chat
+gives passages only.`), `Pick or make a store` (a store holds items), `Chat` (a chat
+has a message) and `Test with an eval set` (a run has finished). The strip hides once
+the store, chat and run steps are done; `Connect AI` is optional and does not keep it
+up. Nothing about it is stored, and a step whose check fails shows as not done.
+**+ New store** → **Create** opens the new store, and a store page has **Chat with this
+store**, which an empty store disables with `Add items first: an empty store has nothing
+to search.`
+
+A store whose last load stopped shows `Last load stopped: <error>` on its Stores row
+and its page, until a later load succeeds.
+
 On the home page, **Add a default store** loads any built-in dataset in one click,
 and **Set up the four benchmark stores** creates and loads ScienceQA, MuSiQue,
 TAT-QA and SciBench, asking before anything that would spend. Or do it over the API,
@@ -238,18 +252,123 @@ Create one on the Stores page, then add files on the store page.
   An import is refused while the job is queued or running.
 - **Runs:** a run scores Recall@10, MRR@10 and nDCG@10 at depth 10, and the head
   metric is nDCG@10. The leak check is off for a Documents store: a question
-  whose words sit in your passages is expected. A run that asks for answers is
-  refused (`Documents runs score retrieval only for now; answer judging comes with
-  Documents eval sets`). Answer runs come with Documents eval sets. A store with
-  passages and no keyword lists reads Ready.
+  whose words sit in your passages is expected. A run may also have the AI answer
+  (**Have the AI answer the questions**, unchecked by default; with it ticked the run
+  form says `<r> of <n> questions have a reference answer.`, and with Judge answers
+  ticked too, `<r> of <n> questions have a reference answer; the rest are not
+  judged.`). Each method's top evidence-size
+  passages (Settings' `evidence_size`, recorded in `setup.evidence_size` when the run
+  is queued) go to chat's answer prompt, and the `[n]` markers are stripped from the
+  reply. A method whose search finds nothing for a question still asks, with no
+  passages. Without **Judge answers** the answers are shown unscored.
+  With **Judge answers** (it costs money, and needs the answers ticked) the run's
+  answer model marks each answer right or wrong against the question's reference
+  answer (`gold_answers`); the run records it as `setup.answer_judge_model`, always
+  the run's answer model. The share marked right is `Answers judged right`. The judge
+  is asked to reply with exactly one word; its verdict is read from the last non-empty
+  line of the reply, allowing a leading `Verdict:` and a trailing `.` or `!`. A
+  question with no reference answer is answered, and paid for, but not judged, and
+  the run counts it. A reply that cannot be read is not judged either, and is counted;
+  the raw reply is kept with the row. One model answers and judges, which may flatter
+  its own answers. nDCG@10 stays the headline. Judge answers is refused on a store
+  that is not a Documents store, without the answers ticked, and when no question in
+  the run has a reference answer. A run that is not judged is refused when the store
+  holds none of the set's right passages: `nothing to measure: this store holds none
+  of the eval set's right passages; tick Judge answers to score the answers, or
+  choose another store` when some question in the run has a reference answer, else
+  `nothing to measure: this store holds none of the eval set's evidence; choose
+  another store`. A judged run is allowed there. A resume's estimate checks the AI
+  cache for the answers and verdicts it can rebuild from the stored rows, and prices
+  the rest in full. The store's answer is its newest run with both methods of the
+  pair, judged or not, and reads retrieval only: nDCG@10 is a Documents headline
+  either way. A store with passages and no keyword lists reads Ready.
+- **Labelling:** a Documents eval set is built by labelling. Link the set to one
+  Documents store (**Create one** on the store page makes a set already linked;
+  on `/e/{name}` pick a store under `Pick a store to label against:` and press
+  `Link`; it starts on the store whose default set this is, else the store of the
+  same name, else the first). Type a question under `Label a question` and press
+  **Find passages**.
+  Find passages takes the top 10 of each free method the store can run (vector,
+  keyword and hybrid, plus `keyword_rag` once its tags are built), drops repeats
+  and sorts the rest with the Settings reranker, best first. It shows no method
+  names. While the reranker loads, or if it failed, the passages stay in search
+  order and a note says so. Mark each passage `y` (right) or `n` (wrong); press a
+  mark again to clear it. `None of these? Search the store` runs a hybrid search
+  and lists its hits under `From your search`. Passages you already marked stay in
+  view when you find again. **Save question** stores it (the `Reference answer`
+  is a typed field, optional, and only a right answer is kept as `gold_answers`);
+  **Save and write the next** clears the panel. The table below lists each
+  question with its right and judged counts; **Label** reopens one and **Delete**
+  asks first. Find, Save, Label and Delete use no AI and spend nothing. Find passages reranks
+  up to 40 passages (10 from each of four methods) and ignores **Rerank up to**
+  (Settings `rerank_pool`, default 20), which caps chat only. A reranker not loaded
+  yet (the first Find after it changes, say) loads then, so that Find can take a few
+  seconds. While a save is under way, Find, Save, Label and Delete are disabled.
+  While the open question has unsaved marks or typing, **Label** and
+  **Delete** first say `This question has unsaved marks.` and offer `Discard them`
+  or `Keep editing`. If someone else deleted the question, saving shows the 404 and
+  keeps your marks, and they save as a new question. A question id may hold a `/`
+  (an imported `hr/leave-1`, say); it saves and deletes like any other.
+- **Get the AI's answer:** under the `Reference answer` field, enabled once the
+  question has text and at least one passage is marked `y`. It shows its price first;
+  **Start** pays, and the AI answers from the passages marked `y` with chat's prompt.
+  Asking again with the same question and passages is free (the AI cache). Then press
+  **y** to put the answer in the reference-answer field, replacing what was typed
+  there, or **n** to drop it. Nothing is stored until **Save question**. The button
+  is hidden when no answer model is connected.
+- **Labels:** a question has `gold_ids` (the right passages) and `judged_ids`
+  (every passage you marked, right or wrong). Every write keeps judged a superset
+  of gold. `judged_ids` null means the question is old, imported or unknown;
+  `[]` means labelled with nothing judged. A passage a right answer names that the
+  store no longer holds is unmeasured, not a miss. The set page says `<n> labelled
+  passages are no longer in <store>` and lists them by id per question, and
+  **Label** runs Find passages again. A question with no right passage is asked
+  but not scored. The linked store is separate from the store's default eval set:
+  linking an existing set (`PATCH`) does not change which set a run uses by
+  default. A set created with a store becomes that store's default only when the
+  store has none. Any set type can be linked, but Find passages is for Documents sets only (422 otherwise, and 409
+  with no store linked).
+- **Two people labelling:** saving one question sends the question as it was read.
+  If someone saved it since, the save is refused (409, `This question was changed
+  by someone else since you opened it`) and the page offers `Reload it (discard my
+  marks)`. A question deleted meanwhile is 404 (`This question was deleted since
+  you opened it`). Saving or deleting a question is also refused (409, `a load or
+  question import is under way on a store of '<set>'`) while a load or question
+  import writes to the set; the page offers Reload on any 409. Deleting has no
+  stale-base check. The whole-set save still checks `base_version`.
+- **Run warnings:** a Documents run page leads with `How well does this store find
+  the right passages?`. For each method it counts how many of a question's top 10
+  were never in that question's `judged_ids`, takes the mean over the questions the
+  method scored whose `judged_ids` are known, and flags the method when the mean
+  is over 3: `score unreliable: on average <n> of its top 10 were never judged`,
+  with `<n>` rounded up. The controls and `question_only` are left out, and the
+  flags show once the run is done (while it runs the page says `The scores appear
+  when the run finishes.`). A run page also counts questions it could not measure,
+  because the store held none of their right passages (`<n> questions unmeasured:
+  their right passages aren't in this store`; the count is the one the run was
+  scored with, so removing passages later does not change an old run), and
+  questions with no right passage. A set with no `judged_ids` at all says
+  `This eval set doesn't record which passages were judged, so score reliability
+  can't be checked`. Unjudged hits in a question's rows read `(never judged)`.
+  `hybrid_rerank` reranks hybrid's top 50, and chat may keep passages from hybrid's
+  candidates 11-20; labelling pooled neither, so either can raise the flag. That is
+  what the flag is for. The run form also warns, for
+  any store, when most of the chosen set's questions have no right passage in the
+  store (`only <held> of <named> do`); it is worked out from the free estimate,
+  which runs whenever a set is chosen, including when the form opens with one.
 
 ## Your own corpus
 
 Any store takes your own items (what is retrieved). Your own questions (what is
 asked) go into an eval set. On the store page (items) or the eval set page
 (`/e/{name}`, questions) choose a file, check the preview, fix the field mapping if
-the guess is wrong, and import. Item imports queue a job and spend nothing until you
-confirm the estimate. A question import on the eval set page
+the guess is wrong, and import. On the store page, an items import queues a job on one
+click of **Import**, which is the confirm: its price and AI-call count sit beside it,
+nothing is spent before the click, and the server prices the same upload and mapping
+again when it confirms. The line follows the job:
+`Waiting for the store's other job…`, `Adding… <pct>%`, then `Added <n> <items>.`
+with `<k> already in the store.` when some were; a stopped job reads
+`The import <status>: <error>`. A question import on the eval set page
 (`/eval-sets/{name}/imports`) runs in the request; one through the store
 (`/collections/{name}/imports` with `kind=questions`) still queues a job.
 
@@ -313,9 +432,20 @@ confirm the estimate. A question import on the eval set page
   unmeasured, not 0. If it holds some, the metric reads "on n of N". The run's
   estimate returns `evidence_named` and `evidence_held`, and the Run page says so
   when a store holds none.
-- **Eval sets:** `/eval-sets` lists and creates them (a name and a QA type). On
-  `/e/{name}` edit questions in place, add or delete them, and Save; import a file;
-  switch "include leaked"; read the versions; or delete the set.
+- **Eval sets:** `/eval-sets` lists and creates them (a name and a QA type, and
+  optionally the store they are labelled against). On `/e/{name}` edit questions in
+  place, add or delete them, and Save; import a file; switch "include leaked"; read
+  the versions; or delete the set. A Documents set's page has no Leaked questions
+  section. A set with a linked store (any type) offers **Run against its store**,
+  which opens the store's run form with that set chosen.
+- **Re-importing into a Documents set:** for a question whose id is already there,
+  a file that carries `judged_ids` (a `judged_ids` or `judged` column; an export
+  does) replaces the stored question whole. A file without them keeps the stored
+  judged passages and typed answers (unless the file has answers of its own), joins
+  its `gold_ids` to the stored ones, and takes the file's text and `meta`. Either
+  way judged still holds gold. Other types replace the whole question. The
+  `gold_answers` column is read as an `answer` synonym, so the `questions` of
+  `GET /eval-sets/{name}`, saved as `.json`, imports back with its labels.
 - **Versions:** every write that changes the questions saves a snapshot. Its id is
   the first 12 hex digits of the SHA-256 of the questions' canonical JSON, sorted by
   id. Save sends the `base_version` it started from and is refused with 409 when the
@@ -323,6 +453,21 @@ confirm the estimate. A question import on the eval set page
   first run, and always reads that version, so later edits never change a run and a
   resume asks the same questions. The migration made a set for every existing
   collection that had questions, and pinned every existing run to that snapshot.
+  A set saved unchanged keeps its version id, including a set from before
+  `judged_ids`, so old runs are not flagged "eval set changed". Per-question saves
+  and deletes each make a version too.
+- **View and Restore:** `/e/{name}` lists the newest 20 versions, and **Show all
+  versions** lists the rest. **View** (`GET /eval-sets/{name}?version=`) shows an old
+  version's questions (`Version <v>: <n> questions`), with `Back to the current
+  version`. **Restore this version** saves those questions as a new version, the
+  whole-set save with the current `base_version`; it says `Restored version <v>.`
+  Ids the set once held are not marked hand-written again. It is disabled while the
+  page has unsaved edits or unsaved marks, or a question is being saved. While its
+  save is under way the labelling panel holds still: marks, Find, Save, Label and
+  Delete are disabled. Then the panel clears, unless you typed in it meanwhile, when
+  it is left as it is (its next Save is checked against the question as you read
+  it). The current version is always listed, marked `current`, even when a Restore
+  has made an older one current again.
 - **Deletes:** deleting a store keeps its eval sets. Deleting an eval set deletes the
   runs that used it, after a confirm that gives their count; it is refused (409) while
   an eval or a load uses the set.
@@ -552,6 +697,14 @@ again when Settings picks another one, so a chat does not wait for it on its
 first message. It scores in ONNX batches of 16 and the embedder in batches of 8.
 The first start downloads the model into the `ragqa` volume (about 0.13 GB for
 the default).
+
+**Cached answers and notes.** An answer served from the AI cache shows
+`Cost $0.00 · answer cached` (the answer only: a paid rewrite is not marked). The
+chat's own notes (an added file, a failed send) are kept in this browser across a
+reload, and dropped when the chat is deleted. On a phone the conversation comes
+first. The header keeps the store chips, Add store, Model, Add document and Use from
+your app; the retrieval settings (Evidence size, Rerank, Rewrite) are in *Settings
+for this chat*, under the latest message.
 
 **Passages only, without AI.** With no answer model, Send still works: the
 reply is the retrieval step and the evidence, marked `Passages only: no answer
@@ -883,7 +1036,8 @@ A store whose model can't be loaded refuses search and new items with a 409.
 - **No price, no call.** A model with no price is refused before anything is
   sent. A model priced $0 is free to the budget, so price paid models.
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
-  imports and keyword-list proposals return the estimate unless
+  imports, keyword-list proposals, Documents answers and Judge answers, and Get
+  the AI's answer on the labelling panel return the estimate unless
   `confirm: true` is set. The Lab (`/query`) and the chat (`/chat`, `/chats`) are the
   exception: they spend at once and show each reply's and attempt's cost after
   (the follow-up rewrite, one AI call per follow-up, is part of it), and the
@@ -908,12 +1062,12 @@ The side nav reads Stores, Chat, Eval sets, Lab, Settings. The store pages live 
 
 | Route | What it shows |
 |---|---|
-| `/` | Every store with its answer (does keyword retrieval help?), the run it came from and its state; add a default store (one that exists is opened instead), create a store (the form leads with Documents, offers each type's own recipes and says `Embedded with <model> (Settings → Search defaults)`) or set up the benchmarks |
-| `/c/{name}` | One store: the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), its **Embedding model** (what it was built with; rebuild with another, with progress, cancel and resume), for a Documents store its **Keyword tags** (`Not built` with an **Add keyword tags** button that shows the estimate first, `Adding keyword tags: <pct>`, a stopped build with Resume, or `Built: <n> terms`; a Documents store has no keyword lists section and its imports take `.md` and `.txt` only), its **Chat settings** (the method and candidates a chat uses for it, each with where the value comes from, and Reset to Settings for one saved on the store), delete |
+| `/` | **Start here** (four steps, hidden once a store, a chat and a run are done), then every store with its answer (does keyword retrieval help?), the run it came from, its state and, if its last load stopped, `Last load stopped: <error>`; add a default store (one that exists is opened instead), create a store (the form leads with Documents, offers each type's own recipes and says `Embedded with <model> (Settings → Search defaults)`) or set up the benchmarks; **+ New store** → **Create** opens the new store |
+| `/c/{name}` | One store: **Chat with this store** (disabled while it is empty), the answer with its gap bar, its runs and a form to start one (pick the eval set), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), its **Embedding model** (what it was built with; rebuild with another, with progress, cancel and resume), for a Documents store its **Keyword tags** (`Not built` with an **Add keyword tags** button that shows the estimate first, `Adding keyword tags: <pct>`, a stopped build with Resume, or `Built: <n> terms`; a Documents store has no keyword lists section and its imports take `.md` and `.txt` only), its **Chat settings** (the method and candidates a chat uses for it, each with where the value comes from, and Reset to Settings for one saved on the store), delete |
 | `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
-| `/chat` | Chat. The left lists your saved chats (chats are saved on the server; conversations that lived only in a browser tab before are not migrated). A chat has a list of stores. Each reply has `[n]` links to its sources (id, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). Send works without an answer model: the reply is the passages, with a note linking to Settings. Under each answer a **retrieval step** shows the search text, what it was reranked against, each store's candidates and the evidence, and under the latest message one **Settings for this chat** panel holds the chat's evidence size, rerank and rewrite, each store's method and candidates, Re-run and Set as default; **Use from your app** holds the curl lines to send the next message and to start a copy of the chat, see [Chat from your own app](#chat-from-your-own-app); see [Chat](#chat) |
-| `/eval-sets` | Every eval set; create one |
-| `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions, delete the set |
+| `/chat` | Chat. The left lists your saved chats (chats are saved on the server; conversations that lived only in a browser tab before are not migrated). A chat has a list of stores. Each reply has `[n]` links to its sources (id, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. On a phone the conversation comes first. A cached answer reads `Cost $0.00 · answer cached`, and the chat's own notes survive a reload in this browser. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). Send works without an answer model: the reply is the passages, with a note linking to Settings. Under each answer a **retrieval step** shows the search text, what it was reranked against, each store's candidates and the evidence, and under the latest message one **Settings for this chat** panel holds the chat's evidence size, rerank and rewrite, each store's method and candidates, Re-run and Set as default; **Use from your app** holds the curl lines to send the next message and to start a copy of the chat, see [Chat from your own app](#chat-from-your-own-app); see [Chat](#chat) |
+| `/eval-sets` | Every eval set; create one, with a store to label against |
+| `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions (View, Restore this version, Show all versions), its linked store, and for a Documents set the labelling panel (Find passages) and a Run against its store link; delete the set |
 | `/lab` | One question, methods side by side |
 | `/worker` | The worker, its queue and what needs a person; a `tag_build` job is named Adding keyword tags |
 | `/settings` | AI connections, models and prices, the model each job uses (each with a note on what uses it, under an intro saying AI writes chat answers, rewrites follow-ups and builds keyword tags, and that search and eval runs work without it), the monthly cap, and [Search defaults](#search-defaults), including Embedding model for new stores |
@@ -928,15 +1082,20 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `GET /health` | Liveness, and whether the `answer` job has an AI model (`{ok, ai}`) |
 | `POST /collections` | `{name, qa_type: documents\|science\|mcq\|multihop\|table, summarize, recipe?: documents\|documents_tagged\|worked_examples\|reference\|paper_2024, dense_model?}`; no `recipe` takes the type's default: `documents` for a Documents store and paper 2024 for the others, as before. No `dense_model` takes the Settings one (422 for one fastembed does not list). 409 when the name is taken, or an eval set of that name has another type; 422 for a name ending in `__rebuild` or `__chunks`, which are kept for a store's search data |
 | `GET /eval-sets` | Every eval set (the page, for a browser that asks for `text/html`; JSON otherwise) |
-| `POST /eval-sets` | `{name, qa_type}`; 409 when the name is taken, or a store of that name has another type |
-| `GET /eval-sets/{name}` | The set, its questions and its versions |
+| `POST /eval-sets` | `{name, qa_type, store?}`; 409 when the name is taken, or a store of that name has another type. With `store` the set is linked to it (404 for an unknown store, 409 for another type), and becomes that store's default set when the store has none (409 while a load or question import is under way on it) |
+| `GET /eval-sets/{name}` | The set, its `store`, `answer_available` (true when an answer model is connected), its questions (each with `judged_ids`, null when unknown), its versions, `missing` (per question, the right passage ids the linked store no longer holds) and `questions_version`. `?version=` reads an old version (404 `That version of '<name>' doesn't exist`). Saved as `.json`, its `questions` import back |
+| `POST /eval-sets/{name}/questions` | `{question}`: adds one question, with the id made from its text (`-2`, `-3` if taken), `source: "hand"`; returns `{id, version}`. 409 while a load or question import writes to the set; 422 for a bad question |
+| `PUT /eval-sets/{name}/questions/{id}` | `{question, base}`: saves one question; `base` is the question as read. 409 when the stored question differs, or while a load or question import writes to the set; 404 when it is gone, 422 when an id does not match the address. Returns `{version}`; `{id}` may hold a `/` |
+| `DELETE /eval-sets/{name}/questions/{id}` | Deletes one question, with no stale-base check; 409 while a load or question import writes to the set; 404 when it is gone. Returns `{version}`; `{id}` may hold a `/` |
+| `POST /eval-sets/{name}/answer` | `{question, passages, confirm}`: the AI's answer for Get the AI's answer; `passages` are 1 to 20 passage ids, and other fields are refused. Without `confirm`: `{estimate: {est_usd, calls}}` (`est_usd` null with no answer model). With it: `{answer, usd}`, one capped call, cached. Nothing is stored. 404 for an unknown set; 422 `The AI's answer is for Documents eval sets`; 409 `pick a store for this eval set first`; 422 `a question needs some text`; 422 `mark at least one passage y that is in <store> first` when none of the passages sent is in the store; 503 when confirming with no answer model |
+| `POST /eval-sets/{name}/pool` | `{question, labelled?}`: Find passages. Returns `passages` (each `id`, `text`, `file`, `part`, `parts`, `relevance`, which is null when ordered by search rank), `merged_by` (`rerank` or `rank`), `notes`, and `labelled` and `missing` for the ids sent that the pool did not hold. 422 for a set that is not Documents, 409 with no store linked. Free |
 | `PUT /eval-sets/{name}/questions` | `{questions, base_version}`: replace the set's questions, all or nothing; returns `{version}`. 409 when `base_version` is stale, or while a load or question import writes to the set; 422 for a bad or repeated id |
-| `PATCH /eval-sets/{name}` | `{include_leaked}`: whether leaked questions are used by runs |
+| `PATCH /eval-sets/{name}` | `{include_leaked?, store?}`: whether leaked questions are used by runs, and the store its labels are made against (`null` unlinks). `store` only links: it does not change any store's default set. `include_leaked` cannot be null (422) |
 | `DELETE /eval-sets/{name}` | Without `?confirm=true`, `{runs}`: how many runs would go. With it, deletes the set and those runs. 409 while an eval or load uses the set |
 | `POST /eval-sets/{name}/uploads?filename=` | The raw file as the body; returns `{upload_id, preview}` |
 | `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
 | `POST /collections/{name}/reembed` | `{model}`: queue a `reembed` job that re-embeds the store with another model into `<name>__rebuild`, then switches; free, no `confirm`. 404 for an unknown store; 422 for a model fastembed does not list; 409 while any job is queued or running on the store, for the model it already has, and `resume it first` while a switch has stopped part-way |
-| `GET /collections`, `GET /collections/{name}` | Specs; one store's count, keyword lists, available methods, its saved chat settings `chat_method` and `chat_k` (candidates per store; null when none is saved) and `chat_settings`, what chat uses for it with the level each value comes from (`store`, `settings` or `recommended`), `state` (a running job's `loading`, `rekeying`, `retagging`, `tagging` (Add keyword tags), `copying`, `evaluating`, `importing`, `labelling` or `rebuilding`; else `queued`, `empty`, `no_lists` or `ready`; a Documents store with passages and no keyword lists is `ready`) with its job and progress, `keyword_tags` (for a Documents store; null for any other: `{state: none}`, `{state: building, job_id, progress}`, `{state: stopped, job_id}` or `{state: built, terms}`), question counts, its answer and number of runs; `rebuild` (`{job_id, status, model, from, progress, switching}`) while the newest re-embed is unfinished |
+| `GET /collections`, `GET /collections/{name}` | Specs, each with `eval_set`, the store's default eval set (null for none); one store's `load_error` (why its last load stopped; null when the newest load did not fail), count, keyword lists, available methods, its saved chat settings `chat_method` and `chat_k` (candidates per store; null when none is saved) and `chat_settings`, what chat uses for it with the level each value comes from (`store`, `settings` or `recommended`), `state` (a running job's `loading`, `rekeying`, `retagging`, `tagging` (Add keyword tags), `copying`, `evaluating`, `importing`, `labelling` or `rebuilding`; else `queued`, `empty`, `no_lists` or `ready`; a Documents store with passages and no keyword lists is `ready`) with its job and progress, `keyword_tags` (for a Documents store; null for any other: `{state: none}`, `{state: building, job_id, progress}`, `{state: stopped, job_id}` or `{state: built, terms}`), question counts, its answer and number of runs; `rebuild` (`{job_id, status, model, from, progress, switching}`) while the newest re-embed is unfinished |
 | `PATCH /collections/{name}` | `{eval_set, chat_method, chat_k}`, each optional: a field left out is kept. `eval_set` makes that eval set the store's default; `null` clears it, so the set named after the store (if any) is the default again. `chat_method` is a chat method (not `hybrid_rerank` or `iterative`) and `chat_k` the candidates per store (1 to 60); `null` for either goes back to Settings. Any other field, such as the removed `route_profile`, is 422. Returns the store as `GET /collections/{name}` does. 404 for an unknown store or set; 409 when the set's type differs from the store's, or, for `eval_set` only, while a load or question import is queued or running on the store, or when the store cannot run `chat_method` |
 | `DELETE /collections/{name}` | Delete a store, its items, lists and runs. Its eval sets stay. Its queued jobs are cancelled; 409 while one of its jobs runs |
 | `POST /collections/{name}/documents` | Add your own items `{items: [{id, text, answer?, explanation?, meta?}], confirm}`; a Documents store takes plain `{text}` items here too (the hand-add path for an API client; the `.md` and `.txt` rule is for file uploads and imports); 409 while a load, re-key, `retag`, `copy`, `import`, `backfill`, `reembed`, `tag_build` or eval on the collection is queued or running, and while a rebuild's switch has stopped part-way. Over 20 items it queues an import job instead and returns `{job_id}`. Recipes other than paper 2024 run their build steps on the new items in the request; their cost is in the estimate, and a confirmed request with no model for `keywords` is 503. While such a request runs, any job queued on the collection is refused with 409 |
@@ -958,15 +1117,15 @@ Every endpoint is listed with its schema at http://localhost:8080/docs.
 | `PUT /collections/{name}/vocabulary` | `{terms, confirm}` (the GET body, edited, is the import). Without `confirm`, returns `{estimate}` for tagging every item and saves nothing; with `confirm: true`, saves the terms as a version and queues a `retag` job, which tags every item and then switches to the version; returns `{version, job_id}`. 503 when the collection tags with the AI and no model is set up for `keywords`; 409 when the collection uses keyword lists, or while a load, import, retag, `reembed` or eval is queued or running on it, and `has no keyword tags yet; use Add keyword tags on the store page` for a Documents store using the `documents` recipe; 422 for an empty list |
 | `GET /chats`, `POST /chats` | Saved chats, newest first; create one with `{stores, title?}` or `{from, title?}`: `from` is the id of a chat to copy (its stores and saved settings, no messages; a store since deleted is left out). 404 for an unknown store, or an unknown `from` chat; 422 for no stores, `a chat needs stores, or from: a chat to copy` with neither, `send stores or from, not both` with both, and `a chat needs at least one store` when none of the copied chat's stores is left |
 | `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, its own `settings`, and `in_force`, what the next search uses with the level each value comes from; change `{title, stores, evidence_size, rewrite, rerank}`; delete. A null `evidence_size`, `rewrite` or `rerank` inherits from Settings. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, a null title or stores, or an unknown field (such as `routing`) |
-| `POST /chats/{id}/messages` | `{content, model?, answer?}`: search every store on the chat, pool and rerank their passages, and answer (or, with no answer model, return the passages alone). `answer` defaults to true; with `"answer": false` the attempt is searched, pooled and reranked as usual (a follow-up rewrite still runs when it is on) but no answer call is made and nothing is paid for one. With `?brief=true` it returns the short reply instead (`n`, `answer`, `citations`, `passages`, `passages_only`, `error`, `usd`; see [Chat from your own app](#chat-from-your-own-app)), whose `passages_only` is true when no answer model was available or `answer` was false. Without it, returns the message with its first attempt: `search_text`, `decisions` (per store: `method`, `candidates`, `search`, `tags`, `found`, `used`, `note`, `usd`, `error`), `evidence` (each passage with its `store`, `rank`, `score`, `relevance` and `channels`), `answer`, `citations`, `usd`, `error` and `pipeline` (where the search text came from, what it was reranked against and by which model, the pool, the notes, `passages_only`: no answer model was available when this attempt was made, and `answer_skipped`: this attempt was made without an answer call. It is true for a message sent with `"answer": false` and for every re-run, and stays true after **Answer from this attempt** fills the answer). A failed answer is still 200 with `error` set, and the message is saved. 404 for an unknown chat; 422 for empty text, a field other than `content`, `model` and `answer` (so a misspelt `answer` is refused, not answered and paid for), or an answer model that is unknown or has no price, before anything is saved |
+| `POST /chats/{id}/messages` | `{content, model?, answer?}`: search every store on the chat, pool and rerank their passages, and answer (or, with no answer model, return the passages alone). `answer` defaults to true; with `"answer": false` the attempt is searched, pooled and reranked as usual (a follow-up rewrite still runs when it is on) but no answer call is made and nothing is paid for one. With `?brief=true` it returns the short reply instead (`n`, `answer`, `citations`, `passages`, `passages_only`, `error`, `usd`; see [Chat from your own app](#chat-from-your-own-app)), whose `passages_only` is true when no answer model was available or `answer` was false. Without it, returns the message with its first attempt: `search_text`, `decisions` (per store: `method`, `candidates`, `search`, `tags`, `found`, `used`, `note`, `usd`, `error`), `evidence` (each passage with its `store`, `rank`, `score`, `relevance` and `channels`), `answer`, `citations`, `usd`, `error` and `pipeline` (where the search text came from, what it was reranked against and by which model, the pool, the notes, `passages_only`: no answer model was available when this attempt was made, `answer_cached`: the answer came from the AI cache, and `answer_skipped`: this attempt was made without an answer call. It is true for a message sent with `"answer": false` and for every re-run, and stays true after **Answer from this attempt** fills the answer). A failed answer is still 200 with `error` set, and the message is saved. 404 for an unknown chat; 422 for empty text, a field other than `content`, `model` and `answer` (so a misspelt `answer` is refused, not answered and paid for), or an answer model that is unknown or has no price, before anything is saved |
 | `POST /chats/{id}/messages/{n}/attempts` | `{settings: {evidence_size?, rerank?, rewrite?}, stores: {store: {method?, candidates?}}}`: save those values on the chat (`null` inherits, a field left out is kept) and re-run message `n`, adding an attempt without answering. The attempt reuses the latest attempt's search text unless the rewrite or follow-up turns now in force differ from how it was made; a message from before this pipeline always keeps its text, with no paid rewrite. 404 for an unknown chat, message or store not on the chat; 409 for a method the store cannot run, or that needs AI when none is connected; 422 for a bad value, and then none is saved |
 | `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered or another request is answering it (nothing is paid twice). An answer model that is unknown or has no price becomes the attempt's `error`, after any note the attempt already had (a failed rewrite) |
 | `POST /chats/{id}/stores/{store}/default` | Set as default: save the method and candidates the chat holds for the store as the store's own, then clear them from the chat so it inherits them. Returns `{chat_method, chat_k, in_force}`. 404 for an unknown chat, or a store not on it; 409 when the store cannot run the method the chat holds (nothing is saved, since every chat that inherits it would fail) |
 | `POST /chat` | The single-store chat, through the same pipeline as a chat of one store. `{collection, messages: [{role, content}], method?, k?, model?}`: an answer from the store's passages for the last message, which must be the user's (422 otherwise). Only the last 6 turns are used, and retrieval uses the latest question only. No `method` means the store's chat method as a chat inherits it (store, then Settings); `k` is the evidence size (1 to 20), Settings' when left out. Candidates come from the store (then Settings); rerank, RRF k, the reranker and Rerank up to are Settings'. An unknown method is 422, and so are `iterative`, `hybrid_rerank` and the other methods that are not chat methods; a method the store cannot run is 409 with the reason, and an explicit paid method (or `keyword_rag` with model tags) when no AI is connected is 409 `needs AI`. An unknown or unpriced `model` is the reply's `error`. The model gets the history and numbered passages (each cut to 1,500 characters) and cites `[n]`; `[n, m]` and `[n-m]` cite each number. Returns `{answer, citations: [{n, id, text, source, part, parts}], hit_ids, method, query_tags, usd, error, notes}`; citations are in the order cited. Spends like `/query`: no estimate, and over the budget cap `error` says so and `answer` is null |
 | `POST /query` | One question, several methods side by side, optionally answered; each method's `usd` is every AI call it made (query summary, hops, answer). With no `methods` it runs Settings' default method, and with no `rrf_k` Settings' RRF k (the Lab sends both). `search` overrides the collection's search settings in part (`{weights: {meaning, words, keywords}, query_tags, example, program}`); 422 for an unknown key or value, and for `query_tags: "oracle"` with `keyword_rag`. `keyword_rag` also returns its `query_tags`, and each hit its `tags` and the `channels` that found it. A method that cannot run reports its own `error` with status 200: `keyword_rag` on a Documents store reads `needs keyword tags: Add keyword tags on the store page`, also while Add keyword tags is unfinished |
-| `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary (on a Documents store, while Add keyword tags is unfinished); 422 `Documents runs score retrieval only for now; answer judging comes with Documents eval sets` for a Documents run that asks for answers. `rerank_pool` (1 to 50, default 50) and `rerank_model` are read by `hybrid_rerank` alone: how many of hybrid's top it reranks, and with which model (none takes the Settings reranker when the run is queued; the run records it in `setup.rerank_model`). `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
+| `POST /eval` | `eval_set` (default: the store's default set) picks the questions; 409 for a QA type mismatch, 422 when there is no eval set, and a retrieval-only run that would measure nothing is refused. Without `confirm`: the estimate, which includes `questions`, `dev_questions`, `evidence_named` and `evidence_held`, and for a Documents store `references` (questions in the chosen split with a reference answer) and, when answering, `evidence_size`. A resume's estimate checks the AI cache for the answers and verdicts it can rebuild from the stored rows, and prices the rest in full. With it: queues a run and returns `{job_id, estimate}`; 503 when the run would spend and no AI model is set up; 409 for `keyword_rag` without a usable vocabulary (on a Documents store, while Add keyword tags is unfinished); `judge: true` (Documents only) has the run's answer model judge each answer against its reference answer, recording `setup.answer_judge_model`; it is refused with 422 `Judge answers is for Documents stores`, `Judge answers needs the AI's answers: tick Have the AI answer the questions`, or `none of the questions in this run has a reference answer to judge against; add reference answers on the eval set page, or choose All`. A Documents run that is not judged on a store holding none of the set's right passages is refused with `nothing to measure: ...` (see [Your own documents](#your-own-documents)). `rerank_pool` (1 to 50, default 50) and `rerank_model` are read by `hybrid_rerank` alone: how many of hybrid's top it reranks, and with which model (none takes the Settings reranker when the run is queued; the run records it in `setup.rerank_model`). `search` as for `/query` (here `query_tags: "oracle"` is allowed); the run's setup records the effective settings and the vocabulary version, and each `keyword_rag` row its `query_tags` |
 | `GET /eval?collection=` | Every run, newest first, one summary row each |
-| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows |
+| `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows. `GET /eval/{job_id}` of a Documents run also has `answers` (null unless it answered; see [Reading a run](#reading-a-run)) and `labels` (`tracked`, `unjudged` per method as `{shown, questions, flag}`, `unmeasured`, `no_right_passage`) |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome`; `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
 | `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log |
@@ -1030,6 +1189,18 @@ service:
   (never 0) and the Run page explains why; when it holds some, a metric reads "on n of N".
   Leaked questions are worked out for the run's store and eval set, and the page says how
   many were left out.
+- **`answers`** (a Documents run that answered; else null): `{judged, no_reference,
+  methods: {method: {answered, judged, correct, unreadable}}}`. The Run page leads
+  with `How often are its answers right?` when the run was judged, then one line per
+  method, `<method>: <c> of <j> answers judged right` (`1 answer` when one), and
+  `<n> questions not judged: they have no reference answer` and `<n> answers not
+  judged: the judge's reply couldn't be read` when there are any. A run that
+  answered without Judge answers says `The AI's answers are not scored.` and how to
+  score them: a new run from the store page with Judge answers ticked. A judged run
+  that stopped or was cancelled adds the `Partial: …` line. Each question shows `The
+  AI's answer: …` and, once judged, `(judged right)`, `(judged wrong)`, `(not judged:
+  no reference answer)` or `(not judged: the judge's reply couldn't be read)`, the
+  last followed by `Judge's reply: …`. **Re-run** keeps Judge answers.
 - Every run records its full setup: models, keyword-list version, `k`,
   `rrf_k`, seed, dataset filter, sources and question ids. `log` holds the
   run's last 50 events.

@@ -712,3 +712,29 @@ def test_a_documents_eval_set_imports_gold_ids_without_answers(tmp_path):
     mapping = {**shown["mapping"], "answer": "answer"}
     [q], _ = imports.build_questions(answered, mapping, "documents")
     assert q.gold_answers == ["Settings, then Reset"]
+
+
+def test_questions_import_reads_judged_ids():
+    def built(rows, qa_type="documents"):
+        mapping = imports.guess_mapping(imports.columns(rows), "questions")
+        return imports.build_questions(rows, mapping, qa_type)[0]
+
+    qs = built(
+        [
+            {"id": "1", "text": "a", "judged": "a|b"},
+            {"id": "2", "text": "b", "judged": "  "},
+            {"id": "3", "text": "c", "judged": "[]"},
+            {"id": "4", "text": "d", "judged": None},
+        ]
+    )
+    assert [q.judged_ids for q in qs] == [["a", "b"], None, [], None]
+    assert built([{"id": "1", "text": "a"}])[0].judged_ids is None
+    qs = built(
+        [
+            {"id": "1", "text": "a", "judged_ids": None},
+            {"id": "2", "text": "b", "judged_ids": []},
+            {"id": "3", "text": "c", "judged_ids": ["x"], "gold_answers": ["Ten days"]},
+        ]
+    )
+    assert [q.judged_ids for q in qs] == [None, [], ["x"]]
+    assert qs[2].gold_answers == ["Ten days"]

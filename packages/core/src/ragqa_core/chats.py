@@ -18,11 +18,12 @@ import hashlib
 import math
 import threading
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from typing import Any
 
 from aiconnect.ai import AI, NoConnection, UnknownModel, UnknownPrice
-from ragqa_core import db, search_defaults
+from ragqa_core import catalog, db, search_defaults
 from ragqa_core.connection import Connection
 from ragqa_core.evaluator import no_ai
 from ragqa_core.prompts import (
@@ -34,6 +35,7 @@ from ragqa_core.prompts import (
     cited_numbers,
     edge_order,
     rewrite_prompt,
+    strip_citations,
 )
 from ragqa_core.retriever import (
     PER_METHOD_ERRORS,
@@ -55,6 +57,16 @@ STORE_FIELDS = ("method", "candidates")  # per store; null: the store's own
 UPDATE_FIELDS = ("title", "stores", *CHAT_FIELDS)
 RERANK_LOADING = "reranker still loading: merged by rank"
 RERANK_UNAVAILABLE = "reranker unavailable: merged by rank"
+# Find passages, the labelling pool: the top POOL_DEPTH of each free method a store can run.
+POOL_DEPTH = 10
+POOL_METHODS = ("vector", "keyword", "hybrid", "keyword_rag")
+POOL_LOADING = "The ranking model is still loading, so passages are in search order, not best first"
+POOL_UNAVAILABLE = (
+    "The ranking model is unavailable, so passages are in search order, not best first"
+)
+POOL_MODEL_TAGS = (
+    "Keyword-tag search was left out: its tags would use AI, and Find passages is free"
+)
 
 
 class AlreadyAnswered(Exception):
@@ -97,23 +109,28 @@ def text_key(text: str) -> str:
     return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
 
 
-def round_robin(lists: dict[str, list[Hit]], cap: int) -> list[tuple[str, Hit, int]]:
-    """The stores' lists pooled as (store, hit, rank in its store's list): rank 1 of each
-    store in the chat's order, then rank 2, and so on, skipping a text already taken, up to
-    `cap`. With every key distinct this is RRF's order over separate lists."""
+def round_robin(
+    lists: dict[str, list[Hit]],
+    cap: int | None,
+    key: Callable[[Hit], str] = lambda h: text_key(h.text),
+) -> list[tuple[str, Hit, int]]:
+    """The lists pooled as (list's name, hit, rank in its list): rank 1 of each list in the
+    dict's order, then rank 2, and so on, skipping a hit whose key is already taken, up to
+    `cap` (None: every hit). Chat pools stores by text; the labelling pool pools methods by
+    id. With every key distinct this is RRF's order over separate lists."""
     pool: list[tuple[str, Hit, int]] = []
     taken: set[str] = set()
     longest = max((len(hits) for hits in lists.values()), default=0)
     for i in range(longest):
-        for store, hits in lists.items():
+        for name, hits in lists.items():
             if i >= len(hits):
                 continue
-            key = text_key(hits[i].text)
-            if key in taken:
+            k = key(hits[i])
+            if k in taken:
                 continue
-            taken.add(key)
-            pool.append((store, hits[i], i + 1))
-            if len(pool) >= cap:
+            taken.add(k)
+            pool.append((name, hits[i], i + 1))
+            if cap is not None and len(pool) >= cap:
                 return pool
     return pool
 
@@ -146,6 +163,14 @@ def evidence_of(merged: list[tuple[str, Hit, int, float, float | None]]) -> list
         }
         for i, (store, hit, rank, score, rel) in enumerate(merged)
     ]
+
+
+def pool_passage(hit: Hit, rel: float | None) -> dict:
+    """A labelling pool's passage: where it is in its file, and no store, rank or method."""
+    meta = hit.meta
+    text = hit.text[:CHAT_PASSAGE_CHARS]
+    found = {"part": meta.get("part"), "parts": meta.get("parts"), "relevance": rel}
+    return {"id": hit.id, "text": text, "file": meta.get("file"), **found}
 
 
 class Chats:
@@ -353,7 +378,10 @@ class Chats:
                 raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
             answered = self._answer(chat_id, n, message["content"], found["evidence"], model)
             answered["usd"] += found["usd"]
-            if not db.answer_chat_attempt(self.conn, chat_id, n, attempt, answered):
+            pipeline = found["pipeline"]  # None on an old attempt: it stays None
+            if pipeline is not None:
+                pipeline = {**pipeline, "answer_cached": answered["cached"]}
+            if not db.answer_chat_attempt(self.conn, chat_id, n, attempt, answered, pipeline):
                 raise AlreadyAnswered(f"attempt {attempt} of message {n} is already answered")
         finally:
             with self._lock:
@@ -479,12 +507,14 @@ class Chats:
                 "notes": found["notes"],
                 "passages_only": passages_only,
                 "answer_skipped": not answer,
+                "answer_cached": False,  # True once the AI cache serves its answer
             },
         }
         if answer and not passages_only:
             answered = self._answer(chat["id"], n, content, found["evidence"], model)
             row.update(answer=answered["answer"], citations=answered["citations"])
             row.update(model=answered["model"], usd=row["usd"] + answered["usd"])
+            row["pipeline"]["answer_cached"] = answered["cached"]
             if answered["error"]:
                 errors.append(answered["error"])
         row["error"] = "; ".join(errors) or None
@@ -539,6 +569,100 @@ class Chats:
             "notes": notes,
             "usd": sum(d["usd"] for d in decisions),
         }
+
+    def labelling_pool(self, store: str, question: str, labelled: list[str]) -> dict:
+        """Find passages: the top POOL_DEPTH of each free method the store can run, searched
+        as a chat searches it, pooled once by id and reranked against the question with the
+        Settings reranker, whatever chat's rerank says. A loading or failed reranker keeps
+        round-robin order, with a note. keyword_rag whose tags would be the AI's is left out
+        with a note, AI or none; so is a method whose search fails. `labelled` passages the
+        pool missed come back under `labelled`; those the store no longer holds, `missing`."""
+        spec = db.get_collection(self.conn, store)
+        if spec is None:
+            raise UnknownCollection(f"no collection named '{store}'")
+        settings: dict[str, Any] = search_defaults.in_force(self.conn)
+        rrf_k = int(settings["rrf_k"])
+        reranker = str(settings["rerank_model"] or self.retriever.models.rerank_model)
+        notes: list[str] = []
+        lists: dict[str, list[Hit]] = {}
+        reasons = self._reasons(spec)
+        search = chat_search(spec)  # searched as checked: a settings change mid-pool can't spend
+        for method in POOL_METHODS:
+            ready = reasons[method] is None
+            if method == "keyword_rag" and ready and search.query_tags == "model":
+                notes.append(POOL_MODEL_TAGS)  # checked first: why_not would say "needs AI"
+                continue
+            if self.why_not(spec, method) is not None or self.retriever.is_paid(spec, method):
+                continue
+            try:
+                hits, _ = self._retrieve(spec, question, method, POOL_DEPTH, rrf_k, search)
+            except CHAT_ERRORS as e:
+                label = catalog.METHODS[method]["label"]
+                notes.append(f"{label} was left out: {error_text(e)}")
+                continue
+            lists[method] = hits
+        pool = round_robin(lists, None, key=lambda h: h.id)
+        merged: list[tuple[Hit, float | None]] = [(hit, None) for _, hit, _ in pool]
+        merged_by = "rank"
+        if not pool:
+            notes.append(f"No passages found in {store}")
+        else:
+            said: list[str] = []
+            scores = self._rerank(question, pool, reranker, said)
+            if scores is None:
+                notes.append(POOL_LOADING if said == [RERANK_LOADING] else POOL_UNAVAILABLE)
+            else:
+                order = sorted(range(len(pool)), key=lambda i: (-scores[i], i))
+                merged = [(pool[i][1], relevance(scores[i])) for i in order]
+                merged_by = "rerank"
+        pooled = {hit.id for hit, _ in merged}
+        wanted = [i for i in dict.fromkeys(labelled) if i not in pooled]
+        held = self.retriever.store.get(store, wanted) if wanted else []
+        held_ids = {hit.id for hit in held}
+        return {
+            "store": store,
+            "methods": list(lists),
+            "passages": [pool_passage(hit, rel) for hit, rel in merged],
+            "merged_by": merged_by,
+            "notes": notes,
+            "labelled": [pool_passage(hit, None) for hit in held],
+            "missing": [i for i in wanted if i not in held_ids],
+        }
+
+    def reference_prompt(
+        self, store: str, question: str, passage_ids: list[str]
+    ) -> tuple[str, str]:
+        """The labelling answer's prompt: chat's, over the store's held passages among
+        `passage_ids`, each once in the order sent, with no history."""
+        if db.get_collection(self.conn, store) is None:
+            raise UnknownCollection(f"no collection named '{store}'")
+        hits = self.retriever.store.get(store, list(dict.fromkeys(passage_ids)))
+        if not hits:
+            raise ValueError(f"mark at least one passage y that is in {store} first")
+        return chat_prompt(question, [], hits)
+
+    def reference_answer(
+        self, store: str, question: str, passage_ids: list[str], confirm: bool
+    ) -> dict:
+        """The AI's answer to a labelled question from its y passages, one `complete`, cached.
+        Without `confirm`, only its estimate: {"estimate": {"est_usd", "calls"}} (est_usd None
+        when no answer model is set up). Nothing is stored."""
+        system, user = self.reference_prompt(store, question, passage_ids)
+        if not confirm:
+            try:
+                usd, calls = self.ai.plan_many([user], CHAT_TOKENS, role="answer", system=system)
+            except NoConnection:
+                return {"estimate": {"est_usd": None, "calls": 1}}
+            return {"estimate": {"est_usd": usd, "calls": calls}}
+        with self.ai.tally() as spent:
+            done = self.ai.complete(
+                user,
+                role="answer",
+                system=system,
+                max_tokens=CHAT_TOKENS,
+                purpose="reference_answer",
+            )
+        return {"answer": strip_citations(done.text), "usd": spent["usd"]}
 
     def _rerank(
         self, text: str, pool: list[tuple[str, Hit, int]], model: str, notes: list[str]
@@ -634,11 +758,13 @@ class Chats:
         self, content: str, history: list, evidence: list[dict], model: str | None
     ) -> dict:
         """The answer to `content` after `history` ([{role, content}]) from evidence (kept in
-        merged order, so the prompt numbers it as `n` says), with its citations, usd, error
-        and model. POST /chat answers through it too."""
+        merged order, so the prompt numbers it as `n` says), with its citations, usd, error,
+        model, and whether the AI cache served it (False when it failed). POST /chat answers
+        through it too."""
         hits = [Hit(e["id"], e["text"], e["score"], {}, [], None, None, {}) for e in evidence]
         system, user = chat_prompt(content, history, hits)
         out: dict = {"answer": None, "citations": [], "error": None, "model": None}
+        out["cached"] = False
         with self.ai.tally() as spent:
             try:
                 out["model"] = model or self.ai.model_for("answer")
@@ -650,7 +776,7 @@ class Chats:
                     max_tokens=CHAT_TOKENS,
                     purpose="chat",
                 )
-                out["answer"] = done.text
+                out.update(answer=done.text, cached=done.cached)
             except CHAT_ERRORS as e:
                 out.update(error=error_text(e), model=None)
         out["usd"] = spent["usd"]

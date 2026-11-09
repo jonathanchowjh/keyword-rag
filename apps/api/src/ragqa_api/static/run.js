@@ -1,5 +1,5 @@
 import { $, BUSY, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
-  confirmSpend, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
+  confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
   pill, plural, pts, refreshSpend, shell, short, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
@@ -64,7 +64,84 @@ function headHtml() {
   }) + failed;
 }
 
+const VERDICT_TEXT = {
+  correct: "judged right",
+  incorrect: "judged wrong",
+  no_reference: "not judged: no reference answer",
+  unreadable: "not judged: the judge's reply couldn't be read",
+};
+
+// What the AI's answers scored, or that they were not scored; "" for a run with no answers.
+function answersHtml() {
+  const a = run.answers;
+  if (!a || busy()) return "";
+  if (!run.setup.judge) {
+    return `<p class="verdict"><strong>The AI's answers are not scored.</strong></p>
+      <p class="muted">To score them, start a new run from the store page with Judge answers ticked. It judges the questions that have a reference answer; add them on the eval set page.</p>`;
+  }
+  const lines = [];
+  let unreadable = 0;
+  for (const m of run.setup.methods) {
+    const r = a.methods[m];
+    if (!r) continue;
+    unreadable += r.unreadable;
+    if (r.judged > 0) {
+      lines.push(`${method(m)}: ${count(r.correct)} of ${r.judged === 1 ? "1 answer" : `${count(r.judged)} answers`} judged right`);
+    }
+  }
+  if (a.no_reference > 0) {
+    lines.push(a.no_reference === 1
+      ? "1 question not judged: it has no reference answer"
+      : `${count(a.no_reference)} questions not judged: they have no reference answer`);
+  }
+  if (unreadable > 0) {
+    lines.push(unreadable === 1
+      ? "1 answer not judged: the judge's reply couldn't be read"
+      : `${count(unreadable)} answers not judged: the judge's reply couldn't be read`);
+  }
+  return `<p class="verdict"><strong>How often are its answers right?</strong></p>${lines.map((n) => `<p>${esc(n)}</p>`).join("")}${partialHtml()}`;
+}
+
+// A run that ended early answers from the questions it reached, not the whole set.
+function partialHtml() {
+  if (run.status === "done") return "";
+  const ended = run.status === "cancelled" ? "was cancelled" : "stopped";
+  const rest = RESUMABLE.has(run.status) ? "; resume it for the rest" : "";
+  return `<p class="warn" data-partial>Partial: the run ${ended}
+    before it finished, so this is from the questions it reached${rest}.</p>`;
+}
+
+// A Documents run asks how well the store finds the right passages, then says what weakens
+// its scores. Each method's flag waits for the end: mid-run its average is partial.
+function documentsAnswerHtml() {
+  const lead = "<strong>How well does this store find the right passages?</strong>";
+  const l = run.labels;
+  const lines = [];
+  if (!busy()) {
+    for (const m of run.setup.methods) {
+      const u = l.unjudged[m];
+      if (u?.flag) lines.push(`${method(m)}: score unreliable: on average ${u.shown} of its top 10 were never judged`);
+    }
+  }
+  if (l.unmeasured > 0) {
+    lines.push(l.unmeasured === 1
+      ? "1 question unmeasured: its right passages aren't in this store"
+      : `${count(l.unmeasured)} questions unmeasured: their right passages aren't in this store`);
+  }
+  if (l.no_right_passage > 0) {
+    lines.push(l.no_right_passage === 1
+      ? "1 question has no right passage; it is not scored"
+      : `${count(l.no_right_passage)} questions have no right passage; they are not scored`);
+  }
+  if (!l.tracked) {
+    lines.push("This eval set doesn't record which passages were judged, so score reliability can't be checked");
+  }
+  const wait = busy() ? " The scores appear when the run finishes." : "";
+  return `<p class="verdict">${lead}${wait}</p>${lines.map((n) => `<p class="warn">${esc(n)}</p>`).join("")}${answersHtml()}`;
+}
+
 function answerHtml() {
+  if (qaType === "documents") return documentsAnswerHtml();
   const lead = "<strong>Do keywords help?</strong>";
   if (busy()) return `<p class="verdict">${lead} The answer appears when the run finishes.</p>`;
   const a = run.answer;
@@ -78,13 +155,8 @@ function answerHtml() {
   const notes = verdictNotes({ ...a, proxy_trusted: run.proxy_trusted }, { raw: rawScale() })
     .map((n) => `${n.charAt(0).toUpperCase()}${n.slice(1)}.`)
     .join(" ");
-  // A run that ended early answers from the questions it reached, not the whole set.
-  const ended = run.status === "cancelled" ? "was cancelled" : "stopped";
-  const rest = RESUMABLE.has(run.status) ? "; resume it for the rest" : "";
-  const partial = run.status === "done" ? "" : `<p class="warn" data-partial>Partial: the run ${ended}
-    before it finished, so this is from the questions it reached${rest}.</p>`;
   return `<p class="verdict">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
-    plural(run.question_count, "question"))}.</p>${partial}
+    plural(run.question_count, "question"))}.</p>${partialHtml()}
     ${notes ? `<p class="muted">${esc(notes)}</p>` : ""}
     ${legendHtml("Ahead, behind and can't tell in the table below read the same way.")}`;
 }
@@ -150,12 +222,25 @@ function gapRow(g, span) {
 const EVIDENCE_METRIC = /^(recall|ndcg)@/;
 
 function unmeasuredHtml() {
+  // A Documents run has no answers, and its own lines already say what went unmeasured.
+  if (qaType === "documents") return "";
   return run.evidence_named > 0 && run.evidence_held === 0 && EVIDENCE_METRIC.test(run.headline ?? "")
     ? `<p class="warn" data-no-evidence>This store holds none of the eval set's evidence, so retrieval isn't measured; the answers are.</p>`
     : "";
 }
 
+// Under the gaps. A Documents run has no declared pair and no answer to rest on one.
+function leadNote() {
+  return qaType === "documents"
+    ? "Leading is not winning: the order above is this run's alone."
+    : "Leading is not winning: the order above is this run's, and the declared pair is the only comparison the answer rests on.";
+}
+
+// A Documents run draws the gaps only when keyword_rag ran: there they show what it adds.
+const gapsShown = () => qaType !== "documents" || run.setup.methods.includes("keyword_rag");
+
 function gapsHtml() {
+  if (!gapsShown()) return unmeasuredHtml();
   if (busy()) return '<p class="muted">The gaps appear when the run finishes.</p>';
   const ref = method(run.reference);
   if (!run.gaps.length) {
@@ -188,7 +273,7 @@ function gapsHtml() {
 
 function bestHtml() {
   const b = run.best_of_each;
-  if (!b || busy()) return "";
+  if (!b || busy() || qaType === "documents") return ""; // a Documents run doesn't ask it
   return `<p>Best keyword method against the best other: ${esc(method(b.candidate))} ${esc(
     pts(b.diff, b.lo, b.hi))} vs ${esc(method(b.reference))}.
     <span class="muted">Picked after the fact, so the gap is likely overstated.</span></p>`;
@@ -272,17 +357,25 @@ function setupHtml() {
 
 // -- questions --------------------------------------------------------------------------------
 
-// One method's hits and parsed answer, one column of an opened question.
-function methodHtml(m, row) {
+// One method's hits and parsed answer, one column of an opened question. A hit outside
+// `judged`, the question's judged passages, was never judged; null marks none.
+function methodHtml(m, row, judged) {
+  const seen = judged == null ? null : new Set(judged);
   const hits = (row?.hit_ids ?? [])
     .map((h, i) => {
       const skill = row.hit_skills?.[i];
       const words = show(row.hit_matched?.[i]); // rows from before hit_matched lack it
-      return `<li>${esc(skill ? `${h} (${skill})` : h)}, matched keywords:
+      const never = seen && !seen.has(h) ? ' <span class="muted" data-unjudged>(never judged)</span>' : "";
+      return `<li>${esc(skill ? `${h} (${skill})` : h)}${never}, matched keywords:
         <span data-matched>${esc(words)}</span></li>`;
     })
     .join("");
-  const parsed = row?.pred == null ? "" : `<p>Parsed answer: ${esc(show(row.pred))}
+  const raw = row?.judge === "unreadable" && typeof row.judge_raw === "string" && row.judge_raw
+    ? ` <span class="muted" data-judge-raw>Judge's reply: ${esc(row.judge_raw)}</span>` : "";
+  const verdict = row?.judge ? ` <span class="muted" data-judge>(${esc(VERDICT_TEXT[row.judge])})</span>${raw}` : "";
+  const parsed = row?.pred == null ? ""
+    : qaType === "documents" ? `<p data-ai-answer>The AI's answer: ${esc(show(row.pred))}${verdict}</p>`
+    : `<p>Parsed answer: ${esc(show(row.pred))}
     <span class="muted">${esc(show(row.raw))}</span></p>`;
   return `<div data-method-hits><strong>${esc(method(m))}</strong>${parsed}
     <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></div>`;
@@ -302,7 +395,7 @@ function questionHtml(q, picked) {
   const outcome = q.methods[picked]?.outcome;
   const mark = outcome ? `${outcome} ` : "";
   const choices = (q.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
-  const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m]));
+  const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m], q.judged_ids));
   return `<details><summary>${esc(mark)}${esc(q.question ?? q.question_id)}</summary>
     ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
     <p>Gold: ${goldHtml(q)}</p>
@@ -398,10 +491,10 @@ async function cancel() {
 async function rerun() {
   say("");
   // The recorded search settings too, so the repeat is this run, not today's defaults.
-  const { collection, split, methods, answer, model, k, rrf_k, search, eval_set } = run.setup;
+  const { collection, split, methods, answer, model, k, rrf_k, search, eval_set, judge } = run.setup;
   const r = reranked(run.setup);
   const request = { collection, split, methods, answer, model, k, rrf_k, ...(search ? { search } : {}),
-    ...(eval_set ? { eval_set } : {}),
+    ...(eval_set ? { eval_set } : {}), ...(judge ? { judge } : {}),
     ...(r ? { rerank_model: r.model, rerank_pool: r.pool } : {}) };
   try {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
@@ -448,7 +541,11 @@ async function refresh() {
     run = await api(`/eval/${encodeURIComponent(id)}`);
     // Finished while the questions were open: what they show was fetched while rows were coming.
     if (BUSY.has(was) && !busy() && $("questions-box").open) loadQuestions();
-    qaType ??= (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
+    if (qaType === null) {
+      qaType = (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
+      // A Documents run's scores are its answer, so they start open.
+      if (qaType === "documents") $("scores-box").open = true;
+    }
     if (run.status !== probedStatus) resumeProbe = null;
     if (RESUMABLE.has(run.status) && resumeProbe === null) {
       await probeResume();
@@ -457,9 +554,7 @@ async function refresh() {
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("gaps", gapsHtml());
-    $("note").textContent = run.gaps.length && !busy()
-      ? "Leading is not winning: the order above is this run's, and the declared pair is the only comparison the answer rests on."
-      : "";
+    $("note").textContent = run.gaps.length && !busy() && gapsShown() ? leadNote() : "";
     paint("best", bestHtml());
     paint("scores", scoresHtml());
     paint("proxy", proxyHtml());

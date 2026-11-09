@@ -30,7 +30,9 @@ let versions = []; // GET /collections/{name}/keyword-lists, newest first
 let loadJob = null; // the newest load job, or null
 let listsVersion = undefined; // the keyword-lists version the textareas were filled from
 let listsDirty = false;
+let chatting = false; // a chat is being made: a refresh must not re-enable its button
 let imports = null; // the items import box, built once the store's type is known
+let wanted = new URLSearchParams(location.search).get("eval_set"); // ?eval_set=: the first refresh opens the run form with it
 
 shell(`c/${name}`);
 
@@ -123,6 +125,14 @@ function evidenceHtml(counts) {
   return `<p>${esc(plural(counts.questions, "question"))} in this eval set.</p>${held}`;
 }
 
+// Most of the chosen set's questions name right passages this store does not hold.
+function fewEvidenceHtml(estimate) {
+  const { evidence_named: named, evidence_held: held } = estimate;
+  if (!(named > 0 && held * 2 < named)) return "";
+  return `<p class="warn" data-few-evidence>${esc(`Most of this eval set's questions have no right passage in this store: only ${
+    count(held)} of ${count(named)} do.`)}</p>`;
+}
+
 function setOptions(sets) {
   const blank = col.eval_set ? "" : '<option value="">(choose one)</option>';
   const options = sets
@@ -131,8 +141,8 @@ function setOptions(sets) {
   return blank + options;
 }
 
-// A Documents store runs no keyword-list methods and asks for no answers: its runs score
-// retrieval only, and the API refuses an answer run.
+// A Documents store runs no keyword-list methods. Its answers are off until ticked, and
+// Judge answers needs them.
 function runFormHtml(ai, sets) {
   const groups = GROUPS.filter(([id]) => !(documents() && id === "keywords")).map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
@@ -149,9 +159,13 @@ function runFormHtml(ai, sets) {
     return boxes ? `<fieldset><legend>${esc(title)}</legend><div class="checks">${boxes}</div></fieldset>` : "";
   }).join("");
   const models = modelOptions(ai.models, ai.roles.answer ?? ai.roles.default);
+  const answerBox = (on) =>
+    `<label class="check"><input type="checkbox" id="rf-answer" ${on ? "checked" : ""}> Have the AI answer the questions <span class="cost muted">costs money</span></label>`;
   const answer = documents()
-    ? ""
-    : `<label class="check"><input type="checkbox" id="rf-answer" checked> Have the AI answer the questions <span class="cost muted">costs money</span></label>`;
+    ? `${answerBox(false)}
+    <label class="check"><input type="checkbox" id="rf-judge" disabled> Judge answers: the AI marks each answer right or wrong against its reference answer <span class="cost muted">costs money</span></label>
+    <div id="rf-references"></div>`
+    : answerBox(true);
   return `<div class="card form">${groups}
     ${answer}
     <div class="row"><label>Model<select id="rf-model">${models}</select></label>
@@ -164,19 +178,31 @@ function runFormHtml(ai, sets) {
       <span id="rf-confirm"></span><span id="rf-msg" class="err" role="status"></span></div></div>`;
 }
 
+// How many of the chosen split's questions the judge can mark.
+function referencesHtml(estimate) {
+  const n = $("rf-split").value === "dev" ? estimate.dev_questions : estimate.questions;
+  const rest = $("rf-judge")?.checked ? "; the rest are not judged" : "";
+  return `<p data-references>${esc(count(estimate.references))} of ${esc(count(n))} questions have a reference answer${rest}.</p>`;
+}
+
 function bindRunForm() {
   const form = $("run-form");
   const body = () => ({
     collection: name,
     methods: [...form.querySelectorAll("input[name=method]:checked")].map((i) => i.value),
     answer: $("rf-answer")?.checked ?? false,
+    judge: $("rf-judge")?.checked ?? false,
     model: $("rf-model").value || null,
     split: $("rf-split").value,
     eval_set: $("rf-set").value || null,
     k: 5,
     rrf_k: 60,
   });
-  const forget = () => ($("rf-confirm").innerHTML = "");
+  let estimating = 0; // bumped by each Estimate and each change, so a late estimate draws no Start
+  const forget = () => {
+    estimating++;
+    $("rf-confirm").innerHTML = "";
+  };
   form.addEventListener("change", forget);
   // The counts follow the chosen eval set and split: re-read from the estimate, which is free.
   let counting = 0; // bumped by each re-read, so an older answer can't overwrite a newer one
@@ -184,7 +210,7 @@ function bindRunForm() {
     $("rf-split").querySelector("[value=dev]").textContent = `Dev slice (${dev})`;
     $("rf-split").querySelector("[value=full]").textContent = `All (${all})`;
   };
-  const recount = async () => {
+  const recount = async ({ keep = false } = {}) => {
     const mine = ++counting;
     $("rf-msg").textContent = "";
     const request = body();
@@ -194,19 +220,33 @@ function bindRunForm() {
       const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
       if (mine !== counting) return;
       labels(count(estimate.dev_questions), count(estimate.questions));
-      $("rf-measure").innerHTML = measureHtml(chosen === col.eval_set ? col : estimate);
+      $("rf-measure").innerHTML = measureHtml(chosen === col.eval_set ? col : estimate) + fewEvidenceHtml(estimate);
+      if ($("rf-references")) {
+        $("rf-references").innerHTML = $("rf-answer").checked ? referencesHtml(estimate) : "";
+      }
     } catch (e) {
       if (mine !== counting) return;
-      labels("–", "–"); // not the last set's counts
-      $("rf-measure").innerHTML = "";
+      if ($("rf-references")) $("rf-references").innerHTML = "";
+      if (!keep) {
+        labels("–", "–"); // not the last set's counts
+        $("rf-measure").innerHTML = "";
+      }
       $("rf-msg").textContent = e.message;
     }
   };
-  $("rf-set").addEventListener("change", recount);
-  $("rf-split").addEventListener("change", recount);
+  $("rf-set").addEventListener("change", () => recount());
+  $("rf-split").addEventListener("change", () => recount());
+  $("rf-answer").addEventListener("change", () => {
+    const judge = $("rf-judge");
+    if (judge && !$("rf-answer").checked) judge.checked = false;
+    if (judge) judge.disabled = !$("rf-answer").checked;
+    if (documents()) recount(); // only a Documents store's references line follows it
+  });
+  $("rf-judge")?.addEventListener("change", () => recount({ keep: true }));
   $("rf-estimate").addEventListener("click", async () => {
     $("rf-msg").textContent = "";
     forget();
+    const mine = estimating;
     const request = body();
     if (!request.methods.length) {
       $("rf-msg").textContent = "Pick at least one method.";
@@ -214,6 +254,7 @@ function bindRunForm() {
     }
     try {
       const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
+      if (mine !== estimating) return;
       confirmSpend($("rf-confirm"), estimate, async () => {
         try {
           await api("/eval", { method: "POST", body: { ...request, confirm: true } });
@@ -226,7 +267,7 @@ function bindRunForm() {
         }
       });
     } catch (e) {
-      $("rf-msg").textContent = e.message;
+      if (mine === estimating) $("rf-msg").textContent = e.message;
     }
   });
 }
@@ -242,9 +283,14 @@ async function toggleRunForm() {
     form.innerHTML = runFormHtml(ai, sets.filter((e) => e.qa_type === col.qa_type));
   } catch (e) {
     form.innerHTML = `<p class="err">${esc(e.message)}</p>`;
+    form.hidden = false;
+    return;
   }
   form.hidden = false;
   bindRunForm();
+  // The free estimate runs on open, for the counts and the warnings. With no set chosen it
+  // would only be refused.
+  if ($("rf-set").value) $("rf-set").dispatchEvent(new Event("change"));
 }
 
 // -- items and questions --------------------------------------------------------------
@@ -382,7 +428,7 @@ function leakedHtml() {
 
 function askedHtml() {
   if (!col.eval_set) {
-    return `<p>No eval set yet. <a href="/eval-sets">Create one</a> to ask this store questions.</p>${defaultPickHtml()}`;
+    return `<p>No eval set yet. <a href="/eval-sets?store=${enc}">Create one</a> to ask this store questions.</p>${defaultPickHtml()}`;
   }
   return `<p><a href="/e/${encodeURIComponent(col.eval_set)}">${esc(col.eval_set)}</a>:
     ${esc(plural(col.questions, "question"))}, of which ${esc(count(col.dev_questions))} in the dev slice
@@ -712,6 +758,11 @@ async function refresh() {
     loadJob = loads[0] ?? null;
     sets = everySet.filter((e) => e.qa_type === col.qa_type);
     $("head").innerHTML = headHtml();
+    const empty = col.count === 0;
+    const why = empty ? "Add items first: an empty store has nothing to search." : "";
+    $("chat-store").disabled = empty || chatting;
+    $("chat-store").title = why;
+    $("chat-store-why").textContent = why;
     paint("answer", answerHtml());
     paint("runs", runsHtml());
     paint("asked", askedHtml());
@@ -719,7 +770,9 @@ async function refresh() {
     paint("sources", sourcesHtml());
     paint("embedding", embeddingHtml());
     paint("chat-settings", chatSettingsHtml());
-    if (paint("benchmark", benchmarkHtml())) bindLoad();
+    const loadError = col.load_error
+      ? `<p class="err" data-load-error>${esc("Last load stopped: " + col.load_error)}</p>` : "";
+    if (paint("benchmark", loadError + benchmarkHtml())) bindLoad();
     if (paint("tags", tagsHtml())) {
       $("tags-confirm").innerHTML = ""; // an estimate or a message for a state now gone
       $("tags-msg").textContent = "";
@@ -731,9 +784,19 @@ async function refresh() {
       importPath: `/collections/${enc}/imports`,
       kind: "items",
       qaType: col.qa_type,
+      noun: cat.qa_types[col.qa_type]?.item_noun ?? "item",
       done: () => refresh(),
     });
     syncLists();
+    const pick = wanted; // Run against its store on an eval set's page
+    wanted = null;
+    if (pick && sets.some((e) => e.name === pick)) {
+      await toggleRunForm();
+      if ($("rf-set")) {
+        $("rf-set").value = pick;
+        $("rf-set").dispatchEvent(new Event("change"));
+      }
+    }
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
@@ -742,6 +805,26 @@ async function refresh() {
 }
 
 $("new-run").addEventListener("click", toggleRunForm);
+$("chat-store").addEventListener("click", async () => {
+  chatting = true;
+  $("chat-store").disabled = true;
+  $("chat-store-msg").textContent = "";
+  try {
+    const made = await api("/chats", { method: "POST", body: { stores: [name] } });
+    location.href = "/chat#" + made.id;
+  } catch (e) {
+    chatting = false;
+    $("chat-store").disabled = false;
+    $("chat-store-msg").textContent = e.message;
+  }
+});
+// Back from the chat the button opened: the browser may restore this page as it left it, with
+// the button still waiting on that chat.
+window.addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  chatting = false;
+  refresh();
+});
 buildLists();
 buildDelete();
 bindSources();

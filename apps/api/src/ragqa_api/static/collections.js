@@ -11,6 +11,9 @@ const BENCHMARKS = [
 
 let cat = null;
 let lastList = "";
+let startHidden = false;
+let startDraw = 0; // the newest draw's number: an older, slower draw never paints
+const startDone = new Set(); // steps found done: kept for the page's life, not fetched again
 
 shell("collections");
 $("head").innerHTML = head({
@@ -34,7 +37,8 @@ function rowHtml(c) {
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
   return `<a class="row-link" href="/c/${encodeURIComponent(c.name)}">
     <div><strong>${esc(c.name)}</strong> · ${esc(type?.label ?? c.qa_type)}
-      <div class="small">${esc(counts)}</div></div>
+      <div class="small">${esc(counts)}</div>${c.load_error
+        ? `<div class="small err">${esc("Last load stopped: " + c.load_error)}</div>` : ""}</div>
     <div>${answer}</div>
     <div>${pill(c.state)}${esc(progress)}</div></a>`;
 }
@@ -52,11 +56,79 @@ async function refresh() {
       $("list").innerHTML = html;
       lastList = html;
     }
+    drawStart(full);
   } catch (e) {
     $("list").innerHTML = `<p class="err">${esc(e.message)}</p>`;
     lastList = "";
   }
 }
+
+// -- start here -----------------------------------------------------------------
+// Four steps worked out from what exists; nothing about them is stored.
+
+const attempt = async (path, usable) => {
+  try {
+    return usable(await api(path));
+  } catch {
+    return false; // a failed request leaves its step not done for this draw
+  }
+};
+
+function aiUsable(ai) {
+  const kinds = new Map(ai.connections.map((c) => [c.id, c]));
+  return ai.models.some((m) => {
+    if (!m.enabled || m.price_in == null || m.price_out == null) return false;
+    const c = kinds.get(m.connection_id);
+    return c != null && (Boolean(c.key) || c.kind === "openai" || c.kind === "manual");
+  });
+}
+
+async function startSteps(full) {
+  const steps = [
+    { key: "ai", label: "Connect AI", href: "/settings", optional: true,
+      check: () => attempt("/ai", aiUsable) },
+    { key: "store", label: "Pick or make a store", href: "#new", optional: false,
+      check: async () => full.some((c) => c.count > 0) },
+    { key: "chat", label: "Chat", href: "/chat", optional: false,
+      check: () => attempt("/chats", (rows) => rows.some((r) => r.messages > 0)) },
+    { key: "run", label: "Test with an eval set", href: "/eval-sets", optional: false,
+      check: () => attempt("/jobs?kind=eval&status=done&limit=1", (rows) => rows.length > 0) },
+  ];
+  const done = await Promise.all(
+    steps.map((s) => (startDone.has(s.key) ? true : s.check())));
+  return steps.map(({ check, ...s }, i) => {
+    if (done[i]) startDone.add(s.key);
+    return { ...s, done: done[i] };
+  });
+}
+
+function startHtml(steps) {
+  if (steps.every((s) => s.optional || s.done)) return "";
+  const items = steps.map((s) => `<li data-step="${esc(s.key)}" data-done="${s.done}">
+    <a href="${esc(s.href)}">${esc(s.label)}</a> <span class="muted">${s.done ? "done" : "not done"}</span>${s.key === "ai"
+      ? ' <span class="muted">Optional for Documents: without it, chat gives passages only.</span>' : ""}</li>`);
+  return `<section class="card" id="start-here"><h2>Start here</h2><ol class="start-steps">${items.join("")}</ol></section>`;
+}
+
+async function drawStart(full) {
+  if (startHidden) return;
+  const mine = ++startDraw;
+  try {
+    const html = startHtml(await startSteps(full));
+    if (mine !== startDraw || startHidden) return;
+    paint("start", html);
+    startHidden = html === "";
+  } catch {
+    // the strip is a guide: it never breaks the list
+  }
+}
+
+$("start").addEventListener("click", (e) => {
+  if (e.target.closest('a[href="#new"]')) {
+    e.preventDefault();
+    showForm();
+  }
+});
 
 const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -88,6 +160,7 @@ async function showForm() {
   $("f-type").addEventListener("change", showType);
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));
   $("f-create").addEventListener("click", create);
+  $("f-name").focus(); // scrolls the form, below the list, into view
 }
 
 // The selected type's own recipes, paper 2024 first where it is one. documents_tagged is
@@ -112,8 +185,7 @@ async function create() {
       method: "POST",
       body: { name, qa_type: $("f-type").value, summarize: $("f-sum").checked, recipe: $("f-recipe").value },
     });
-    $("form").hidden = true;
-    await refresh();
+    location.href = "/c/" + encodeURIComponent(name);
   } catch (e) {
     $("f-msg").textContent = e.message;
   }

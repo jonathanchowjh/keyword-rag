@@ -1,6 +1,7 @@
 import { $, api, catalog, clock, esc, head, plural, shell, short } from "/static/ui.js";
 
 let cat = null;
+let linked = null; // the store the open form's set is made for (Create one on a store page), or null
 
 shell("eval-sets");
 $("head").innerHTML = head({
@@ -30,26 +31,56 @@ async function refresh() {
   }
 }
 
-async function showForm() {
-  cat = await catalog();
+// The new-set form. For a store (`store`), it is named after it and takes its type; otherwise a
+// Documents set may pick a Documents store to label against.
+async function showForm(store = null) {
+  let stores;
+  try {
+    [cat, stores] = await Promise.all([catalog(), api("/collections")]);
+  } catch (e) {
+    $("form").hidden = false;
+    $("form").innerHTML = `<p class="err">${esc(e.message)}</p>`;
+    return;
+  }
+  linked = store;
+  const own = stores.find((c) => c.name === store);
   const types = Object.entries(cat.qa_types)
-    .map(([id, t]) => `<option value="${esc(id)}">${esc(t.label)}</option>`)
+    .map(([id, t]) => `<option value="${esc(id)}"${own?.qa_type === id ? " selected" : ""}>${esc(t.label)}</option>`)
     .join("");
+  const documents = stores.filter((c) => c.qa_type === "documents").map((c) => c.name).sort();
+  const pick = ['<option value="">(none)</option>']
+    .concat(documents.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`))
+    .join("");
+  const link = store
+    ? `<p>${esc(`Linked store: ${store}`)}</p>`
+    : `<label id="f-store-wrap" hidden>Store to label against<select id="f-store">${pick}</select></label>`;
   $("form").hidden = false;
   $("form").innerHTML = `<div class="card form">
-    <label>Name<input id="f-name" autocomplete="off"></label>
-    <label>Type<select id="f-type">${types}</select></label>
+    <label>Name<input id="f-name" autocomplete="off" value="${esc(store ?? "")}"></label>
+    <label>Type<select id="f-type"${own ? " disabled" : ""}>${types}</select></label>
+    ${link}
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
       <span id="f-msg" class="err" role="status"></span></div></div>`;
+  const showPick = () => {
+    if ($("f-store-wrap")) $("f-store-wrap").hidden = $("f-type").value !== "documents";
+  };
+  showPick();
+  $("f-type").addEventListener("change", showPick);
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));
   $("f-create").addEventListener("click", create);
 }
 
 async function create() {
   const name = $("f-name").value.trim();
+  const qa_type = $("f-type").value;
+  const store = linked ?? (qa_type === "documents" ? $("f-store").value || null : null);
   try {
-    await api("/eval-sets", { method: "POST", body: { name, qa_type: $("f-type").value } });
+    await api("/eval-sets", { method: "POST", body: { name, qa_type, ...(store ? { store } : {}) } });
+    if (store) {
+      location.href = `/e/${encodeURIComponent(name)}`; // labelled against its store: open it
+      return;
+    }
     $("form").hidden = true;
     await refresh();
   } catch (e) {
@@ -57,5 +88,7 @@ async function create() {
   }
 }
 
-$("new").addEventListener("click", showForm);
+$("new").addEventListener("click", () => showForm());
 refresh();
+const asked = new URLSearchParams(location.search).get("store"); // ?store=: Create one on a store page
+if (asked) showForm(asked);

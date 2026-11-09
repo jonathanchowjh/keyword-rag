@@ -384,6 +384,17 @@ function sideHtml(active, names) {
     <div class="spend" id="spend"></div>`;
 }
 
+// Follows a job until it finishes: `onWait(job)` on each poll that finds it queued or running,
+// then the finished job. A failed poll rejects, for the caller to show.
+export async function followJob(jobId, onWait, every = 500) {
+  for (;;) {
+    const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
+    if (!BUSY.has(job.status)) return job;
+    onWait(job);
+    await new Promise((resolve) => setTimeout(resolve, every));
+  }
+}
+
 // The sidebar's spend line; pages call it after anything that may have spent.
 export function refreshSpend() {
   return api("/budget")
@@ -449,11 +460,14 @@ export function shell(active) {
 
 // The upload-preview-import widget for a store's items (queues a job, priced first) or an eval set's
 // questions (imported in the request, no estimate). Fills `el`; `done` runs after an import.
+// Items: the price sits beside Import, and the click on Import is the confirm; the line then
+// follows the job to what it added, counted in `noun` (the store type's item noun).
 // A Documents store's items (`qaType` "documents") are .md and .txt files of passages: the
 // preview shows the passages, with no column mapping to pick, and the guessed one is sent.
 class ImportBox {
-  constructor(el, { uploadPath, importPath, kind, qaType, done }) {
+  constructor(el, { uploadPath, importPath, kind, qaType, noun = "item", done }) {
     this.el = el;
+    this.noun = noun;
     this.uploadPath = uploadPath;
     this.importPath = importPath;
     this.kind = kind;
@@ -485,7 +499,7 @@ class ImportBox {
     if (kind === "items") {
       this.own("source").addEventListener("input", () => this.uploadId && this.previewAgain());
       this.own("preview").addEventListener("change", (e) => {
-        if (e.target.closest("select[data-field]")) this.previewAgain();
+        if (this.uploadId && e.target.closest("select[data-field]")) this.previewAgain();
       });
     }
   }
@@ -502,6 +516,7 @@ class ImportBox {
       const path = `${this.uploadPath}?filename=${encodeURIComponent(file.name)}&kind=${this.kind}`;
       const got = await upload(path, file);
       this.uploadId = got.upload_id;
+      this.ticket++; // a new preview: an import line or an estimate still on its way paints nothing
       this.show(got.preview, got.estimate);
       // The upload is priced under its cleaned file name; a name typed first is priced anew.
       const typed = this.own("source").value;
@@ -580,8 +595,10 @@ class ImportBox {
       : "";
     // A questions import cannot be previewed again under a new mapping: the server judges it.
     const open = p.ready || this.kind === "questions";
+    // Items have no Start: the click on Import, beside the price, is the confirm.
+    const confirm = this.kind === "questions" ? '<span id="imp-questions-confirm"></span>' : "";
     return `<div class="row"><button type="button" id="imp-${this.kind}-import" ${open ? "" : "disabled"}>Import</button>
-        ${cost}<span id="imp-${this.kind}-confirm"></span></div>`;
+        ${cost}${confirm}</div>`;
   }
 
   show(preview, estimate) {
@@ -593,13 +610,12 @@ class ImportBox {
   async start(estimate) {
     const msg = this.own("msg");
     msg.textContent = "";
+    if (this.kind === "items") return this.queueItems();
     const queue = async () => {
       try {
         const got = await api(this.importPath, { method: "POST", body: this.body(true) });
-        this.own("preview").innerHTML = this.kind === "items"
-          ? `<p class="ok">Queued (job ${esc(short(got.job_id))})</p>`
-          : `<p class="ok">Imported: ${esc(got.new)} new, ${esc(got.updated)} updated, ${esc(got.unchanged)} unchanged, ${esc(
-            got.skipped)} skipped. Version ${esc(short(got.version))}.</p>`;
+        this.own("preview").innerHTML = `<p class="ok">Imported: ${esc(got.new)} new, ${esc(got.updated)} updated, ${esc(
+          got.unchanged)} unchanged, ${esc(got.skipped)} skipped. Version ${esc(short(got.version))}.</p>`;
         this.uploadId = null;
         this.own("file").value = "";
         refreshSpend();
@@ -611,6 +627,61 @@ class ImportBox {
     // An unpriced (null) estimate is not free: it is shown and confirmed, like a priced one.
     if (estimate && estimate.est_usd !== 0) confirmSpend(this.own("confirm"), estimate, queue);
     else await queue();
+  }
+
+  // Items: the click on Import, with its price beside it, queues the import (the server prices it
+  // again first). The button stays disabled, so a second click queues nothing; a refusal frees it.
+  // The click takes the upload over: an edit while it is sent previews nothing, so no Import is
+  // armed for it again. The line then follows the job, until a new file takes the box over.
+  async queueItems() {
+    const button = this.own("import");
+    button.disabled = true;
+    const ticket = this.ticket;
+    const body = this.body(true);
+    const uploadId = this.uploadId;
+    this.uploadId = null;
+    let got;
+    try {
+      got = await api(this.importPath, { method: "POST", body });
+    } catch (e) {
+      if (ticket === this.ticket) {
+        this.uploadId = uploadId; // a refusal can be tried again
+        // edited while it was sent: priced again first, under the new name or mapping
+        if (JSON.stringify(this.body(true)) === JSON.stringify(body)) button.disabled = false;
+        else this.previewAgain();
+      }
+      this.own("msg").textContent = e.message;
+      return;
+    }
+    const line = (html) => {
+      if (ticket === this.ticket) this.own("preview").innerHTML = html;
+    };
+    if (ticket === this.ticket) this.own("file").value = ""; // else a new file or upload took over
+    let job;
+    try {
+      job = await followJob(got.job_id, (j) => line(j.status === "queued"
+        ? "<p>Waiting for the store's other job…</p>"
+        : `<p>Adding… ${esc(Math.round((j.progress ?? 0) * 100))}%</p>`));
+    } catch (e) {
+      line(`<p class="err">${esc(e.message)}</p>`);
+      return;
+    }
+    line(this.doneHtml(job));
+    refreshSpend();
+    await this.done?.();
+  }
+
+  // What a finished import job did, in a line.
+  doneHtml(job) {
+    if (job.status !== "done") {
+      const why = job.error ? `: ${job.error}` : ".";
+      return `<p class="err">${esc(`The import ${job.status.replaceAll("_", " ")}${why}`)}</p>`;
+    }
+    const r = job.result ?? {};
+    const added = Number(r.new ?? 0) + Number(r.updated ?? 0);
+    const kept = Number(r.unchanged ?? 0);
+    const already = kept > 0 ? ` ${count(kept)} already in the store.` : "";
+    return `<p class="ok">${esc(`Added ${plural(added, this.noun)}.${already}`)}</p>`;
   }
 }
 

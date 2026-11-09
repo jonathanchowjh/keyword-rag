@@ -123,6 +123,7 @@ def test_headline_for_documents_is_ndcg_at_10():
     measured = {"ndcg@10", "recall@10", "mrr@10"}
     assert headline_metric("documents", False, None, measured) == "ndcg@10"
     assert headline_metric("documents", False, None, set()) == "ndcg@10"
+    assert headline_metric("documents", True, None, measured | {"accuracy"}) == "ndcg@10"
 
 
 def test_headline_falls_back_to_same_skill_when_proxy_failed():

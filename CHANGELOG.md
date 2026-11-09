@@ -2,6 +2,138 @@
 
 ## Unreleased
 
+- The Stores page leads with **Start here**: `Connect AI`, `Pick or make a store`,
+  `Chat` and `Test with an eval set`, each worked out from what exists (nothing is
+  stored). `Connect AI` reads `Optional for Documents: without it, chat gives
+  passages only.` and does not keep the strip up; it hides once the store, chat and run
+  steps are done. A step whose check fails shows as not done.
+- **+ New store** → **Create** opens the new store.
+- A store page has **Chat with this store**; an empty store disables it with `Add items
+  first: an empty store has nothing to search.`
+- A store page's items import queues on one click of Import, which is the confirm: its
+  price and AI-call count sit beside it, and the server prices the same upload again on
+  confirm. The
+  line follows the job: `Waiting for the store's other job…`, `Adding… <pct>%`, then
+  `Added <n> <items>.` with `<k> already in the store.` when some were.
+- `GET /collections/{name}` returns `load_error`, and a store whose last load stopped
+  shows `Last load stopped: <error>` on its Stores row and its page.
+- A chat answer from the AI cache reads `Cost $0.00 · answer cached`
+  (`pipeline.answer_cached` on the attempt); a paid rewrite is not marked.
+- A chat's own notes (an added file, a failed send) are kept in this browser across a
+  reload, and dropped for chats that no longer exist.
+- Small walkthrough fixes: the Lab says store, the chat delete prompt has one `?`, the
+  chat's New chat picker and Add store list show store type labels, the conversation
+  comes first on a phone, and the store-type sentences read `worked examples whose
+  reasoning carries over` and `the table and text that hold the figures for the answer`.
+
+- A Documents run may have the AI answer. Each method's top evidence-size passages
+  (Settings' `evidence_size`, fixed in `setup.evidence_size` when the run is queued, so
+  the run sends what its estimate priced) go to chat's answer prompt, `[n]` markers
+  stripped; a method that finds nothing still asks, with no passages. Without Judge
+  answers the answers are shown unscored.
+- Judge answers (`judge: true` on `POST /eval`, Documents only): the run's answer model
+  marks each answer right or wrong against the question's reference answer, recorded as
+  `setup.answer_judge_model`, and the share right is `Answers judged right`. The judge
+  is asked for one word, its verdict is read from the last non-empty line, and its raw
+  reply is kept as `judge_raw`. A question with no reference answer, or a reply that
+  can't be read, is answered but not judged, and the run counts both. Refused: not a
+  Documents store, answers not ticked, no question with a reference answer. A judged
+  run is allowed on a store holding none of the set's right passages; an unjudged one
+  is refused, offering Judge answers when a question has a reference answer.
+- A Documents resume's estimate checks the AI cache for the answers and verdicts it can
+  rebuild from the stored rows, and prices the rest in full.
+- A Documents store's answer is its newest run with the pair, judged or not, and reads
+  retrieval only: a judged run no longer hides a newer free one, and one that measured
+  no nDCG@10 is passed over.
+- The Documents run form has **Have the AI answer the questions** (off by default) and
+  **Judge answers** (enabled when answers are ticked), and says `<r> of <n> questions
+  have a reference answer.`, or with Judge answers ticked `<r> of <n> questions have a
+  reference answer; the rest are not judged.` The estimate returns `references` and,
+  when answering, `evidence_size`. An Estimate that returns after the form changed
+  draws no Start.
+- The Documents run page says `How often are its answers right?`: per method, `<c> of
+  <j> answers judged right`, then the questions with no reference answer and the
+  answers whose verdict couldn't be read, with the partial note when the run stopped;
+  an unjudged answer run says `The AI's answers are not scored.` and to start a new run
+  from the store page with Judge answers ticked. Each question shows the AI's answer
+  and its verdict, and an unreadable verdict the judge's reply. `GET /eval/{id}` returns
+  `answers`.
+- **Get the AI's answer** on the labelling panel: `POST /eval-sets/{name}/answer`
+  prices first, then (confirmed) makes one cached call from the passages marked `y` with
+  chat's prompt; **y** puts the answer in the reference-answer field and nothing is
+  stored until **Save question**. It is refused with 422 `mark at least one passage y
+  that is in <store> first` when none of the passages is in the store. `GET
+  /eval-sets/{name}` returns `answer_available`.
+- Removed: the 422 `Documents runs score retrieval only for now; judging answers is
+  not available yet` (`ANSWERS_LATER`).
+- Fixed: a Documents run's answers are no longer scored by token overlap,
+  `PAIR_ANSWER_METRIC` for Documents is accuracy, and the evidence size is fixed at
+  queue time.
+- Documents eval sets are built by labelling. A question has `judged_ids`, the
+  passages marked right or wrong (null: old, imported or unknown; `[]`: labelled with
+  nothing judged), and every write keeps judged a superset of `gold_ids`. A set
+  from before it, saved unchanged, keeps its version ids, so old runs are not
+  flagged "eval set changed".
+- Re-importing into a Documents set: a file that carries `judged_ids` replaces a
+  stored question whole; one that does not keeps the stored judged passages and
+  typed answers, joins the gold ids, and takes the file's text and `meta`. Other
+  types replace the question. `gold_answers` is read as an `answer` synonym, so
+  `GET /eval-sets/{name}` saved as `.json` imports back with its labels.
+- An eval set can be linked to a store: `POST /eval-sets` takes `store` (and makes
+  the set that store's default when it has none), `PATCH /eval-sets/{name}` takes
+  `store` (only links it), and **Create one** on a store page opens the new-set form
+  with the store and its type filled in. `GET /eval-sets/{name}` returns `store`,
+  `missing` (right passages the store no longer holds) and `questions_version`.
+- Per-question writes: `POST`, `PUT` and `DELETE` on
+  `/eval-sets/{name}/questions[/{id}]`. A `PUT` sends the question as read and is
+  refused (409) when it changed since; a deleted question is 404. Each makes a
+  version. The whole-set save keeps its `base_version` check.
+- Versions: `GET /eval-sets/{name}?version=` reads an old one, and the set page
+  lists the newest 20 with **View**, **Show all versions** and **Restore this
+  version**, which is disabled while there are unsaved edits or marks.
+- **Find passages** (`POST /eval-sets/{name}/pool`) and the labelling page: the top
+  10 of each free method, deduplicated and reranked with the Settings reranker, to
+  mark `y` or `n`; **Run against its store** opens the store's run form with the
+  set chosen. Free, with no AI.
+- The run form warns when most of the chosen set's questions have no right passage in
+  the store. The free estimate now also runs when the form opens with a set already
+  chosen.
+- A Documents run page leads with `How well does this store find the right
+  passages?` and flags a method whose top 10 averaged more than 3 never-judged
+  passages (`score unreliable`), once the run is done. It counts the questions it
+  could not measure (as scored, so later changes to the store do not alter it) and
+  those with no right passage. `GET /eval/{id}` returns `labels`.
+- Fixed: the eval set page's table could read "NaN questions".
+- Labelling keeps unsaved marks: while the open question has any, **Label** on a
+  row and **Delete** first say `This question has unsaved marks.` and offer
+  `Discard them` or `Keep editing`. Delete is disabled while a question is being
+  saved.
+- **Restore this version** holds the labelling panel still while its save is under
+  way (marks, Find, Save, Label and Delete are disabled), then clears it only when
+  nothing was typed meanwhile. A Documents set's restore brings back `judged_ids`.
+- The versions list always shows the current version, marked `current`, even after
+  a Restore made an older one current again.
+- Linking an older Documents set starts the store picker on the store whose default
+  set it is, else the store of the same name. `GET /collections` returns each
+  store's default `eval_set`.
+- A question id holding a `/` (an imported `hr/leave-1`) saves and deletes one at a
+  time; it used to answer a bare `Not Found`, and the page then saved the marks as a
+  new question.
+- A Documents run on a store holding none of the set's right passages is refused
+  with `…; choose another store`, without offering an AI answer it would also
+  refuse. Its run page no longer says the answers are measured, shows no
+  Best-keyword line, and its note under the gaps reads `Leading is not winning: the
+  order above is this run's alone.`
+- `PATCH /eval-sets/{name}` with `include_leaked: null` now says `include_leaked
+  cannot be null: leave it out to keep it`.
+- Find passages searches with the store settings it checked, so a change to them
+  mid-search can't make it spend. An import's merge and a per-question save no
+  longer overwrite each other: each waits for the other.
+- Find passages reranks up to 40 passages, whatever **Rerank up to** says, and the
+  first Find after the reranker changes waits while it loads.
+- The refusal of a Documents run that asks for answers now reads `Documents runs
+  score retrieval only for now; judging answers is not available yet`; it no longer
+  promises answers "with Documents eval sets".
 - The New store form defaults to a Documents store (`qa_type` `documents`, recipe
   `documents`; `POST /collections` still needs a `qa_type`): it keeps your passages
   as uploaded and searches them by meaning and by words, with no AI. `POST /collections` with no `recipe` takes the type's default

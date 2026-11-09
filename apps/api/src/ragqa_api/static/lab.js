@@ -15,7 +15,7 @@ async function loadCollections() {
   const list = await api("/collections");
   $("collection").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
   if (list.length) await loadMethods();
-  else $("status").textContent = "No collections yet. Create one from the Collections page.";
+  else $("status").textContent = "No stores yet. Create one from the Stores page.";
 }
 
 let asking = 0; // bumped by each pick, so only the newest one draws the method list

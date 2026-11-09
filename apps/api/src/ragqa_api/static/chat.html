@@ -40,7 +40,7 @@
   #box { min-height:60px; }
   #compose #note { margin:0; }
   .spoken { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-  @media (max-width: 768px) { #chat-page { grid-template-columns:minmax(0, 1fr); } }
+  @media (max-width: 768px) { #chat-page { grid-template-columns:minmax(0, 1fr); } #convo { order:-1; } }
 </style>
 </head>
 <body>
@@ -49,7 +49,7 @@
   <div id="head"></div>
   <div id="chat-page">
     <nav id="chats" aria-label="Saved chats">
-      <button id="new" type="button">New chat</button>
+      <button id="new" type="button" disabled>New chat</button>
       <div id="picking"></div>
       <ul id="chat-list"></ul>
       <div id="deleting"></div>
