@@ -265,6 +265,43 @@ def test_estimate_matches_how_calls_are_sent(env):
     assert modes == {1} and small["calls"] == 65 * 6
 
 
+def _questions(start, count):
+    return [
+        Question(f"u{i}", f"enzyme question {i}", ["yes", "no"], ["A"], [], {"skill": "enzyme"})
+        for i in range(start, start + count)
+    ]
+
+
+def test_estimate_is_never_below_a_run_whose_misses_fall_under_the_batch_threshold(env):
+    conn, ev = env
+    save_questions(conn, "c", _questions(0, 5))  # 10 questions
+    ev.run(create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True, split="full")))
+    save_questions(conn, "c", _questions(5, 41))  # 51 in all, 41 of them misses
+    est = ev.estimate("c", "full", ["hybrid"], answer=True, model=None)
+    sent = []
+    real = ev.ai._usd
+
+    def record(rates, system, prompts, max_tokens, batch):
+        usd = real(rates, system, prompts, max_tokens, batch)
+        sent.append((batch, usd))
+        return usd
+
+    ev.ai._usd = record
+    ev.run(create_job(conn, "eval", "c", setup_for(["hybrid"], answer=True, split="full")))
+    assert sent and all(not batch for batch, _ in sent)
+    assert est["est_usd"] >= sum(usd for _, usd in sent)
+
+
+def test_a_part_of_fifty_calls_is_priced_real_time_and_fifty_one_at_its_worst_case(env):
+    conn, ev = env
+    save_questions(conn, "c", _questions(0, 45))  # 50 questions
+    est50 = ev.estimate("c", "full", ["hybrid"], answer=True, model=None)
+    save_questions(conn, "c", _questions(45, 1))  # 51
+    est51 = ev.estimate("c", "full", ["hybrid"], answer=True, model=None)
+    assert est50["calls"] == 50 and est51["calls"] == 51
+    assert est51["est_usd"] == pytest.approx(est50["est_usd"])
+
+
 def test_estimate_does_not_halve_for_runs_whose_methods_stay_under_50(env):
     conn, ev = env
     extra = [

@@ -533,6 +533,7 @@ function bindActions() {
 // -- refresh --------------------------------------------------------------------------------------
 
 let timer = null;
+let shownOnce = false; // the first refresh has painted (or failed): the toggle may load from now on
 async function refresh() {
   clearTimeout(timer);
   try {
@@ -562,11 +563,13 @@ async function refresh() {
     paint("setup", setupHtml());
     fillMethodPicker();
     if (paint("actions", actionsHtml())) bindActions();
-    // Opened before the run arrived: it could not load then, so it loads now.
-    if (was === undefined && $("questions-box").open) loadQuestions();
+    // Questions opened before the first refresh painted could not load then, so they load now.
+    if (!shownOnce && $("questions-box").open) loadQuestions();
   } catch (e) {
     $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
+  } finally {
+    if (run) shownOnce = true;
   }
   if (run && BUSY.has(run.status)) timer = setTimeout(refresh, POLL_MS);
 }
@@ -575,6 +578,6 @@ $("q-method").addEventListener("change", loadQuestions);
 $("q-wrong").addEventListener("change", loadQuestions);
 $("q-disagree").addEventListener("change", loadQuestions);
 $("questions-box").addEventListener("toggle", () => {
-  if ($("questions-box").open && run) loadQuestions();
+  if ($("questions-box").open && shownOnce) loadQuestions();
 });
 refresh();

@@ -791,12 +791,13 @@ async function refresh() {
     const pick = wanted; // Run against its store on an eval set's page
     wanted = null;
     if (pick && sets.some((e) => e.name === pick)) {
-      await toggleRunForm();
+      if ($("run-form").hidden) await toggleRunForm(); // already open: leave it
       if ($("rf-set")) {
         $("rf-set").value = pick;
         $("rf-set").dispatchEvent(new Event("change"));
       }
     }
+    $("new-run").disabled = false; // toggleRunForm reads col
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;

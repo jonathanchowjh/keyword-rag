@@ -597,8 +597,11 @@ class ImportBox {
     const open = p.ready || this.kind === "questions";
     // Items have no Start: the click on Import, beside the price, is the confirm.
     const confirm = this.kind === "questions" ? '<span id="imp-questions-confirm"></span>' : "";
+    const removed = estimate?.removed > 0
+      ? `<p class="warn" data-removed>${esc(`${plural(estimate.removed, "old " + this.noun)} will be removed, since the text changed.`)}</p>`
+      : "";
     return `<div class="row"><button type="button" id="imp-${this.kind}-import" ${open ? "" : "disabled"}>Import</button>
-        ${cost}${confirm}</div>`;
+        ${cost}${confirm}</div>${removed}`;
   }
 
   show(preview, estimate) {
@@ -610,7 +613,7 @@ class ImportBox {
   async start(estimate) {
     const msg = this.own("msg");
     msg.textContent = "";
-    if (this.kind === "items") return this.queueItems();
+    if (this.kind === "items") return this.queueItems(estimate);
     const queue = async () => {
       try {
         const got = await api(this.importPath, { method: "POST", body: this.body(true) });
@@ -630,10 +633,11 @@ class ImportBox {
   }
 
   // Items: the click on Import, with its price beside it, queues the import (the server prices it
-  // again first). The button stays disabled, so a second click queues nothing; a refusal frees it.
-  // The click takes the upload over: an edit while it is sent previews nothing, so no Import is
-  // armed for it again. The line then follows the job, until a new file takes the box over.
-  async queueItems() {
+  // again first, and refuses it when its calls are not the `estimate` drawn here). The button stays
+  // disabled, so a second click queues nothing; a refusal frees it. The click takes the upload
+  // over: an edit while it is sent previews nothing, so no Import is armed for it again. The line
+  // then follows the job, until a new file takes the box over.
+  async queueItems(estimate) {
     const button = this.own("import");
     button.disabled = true;
     const ticket = this.ticket;
@@ -642,12 +646,15 @@ class ImportBox {
     this.uploadId = null;
     let got;
     try {
-      got = await api(this.importPath, { method: "POST", body });
+      const shown = { calls: estimate?.calls, est_usd: estimate?.est_usd };
+      got = await api(this.importPath, { method: "POST", body: { ...body, ...shown } });
     } catch (e) {
       if (ticket === this.ticket) {
         this.uploadId = uploadId; // a refusal can be tried again
-        // edited while it was sent: priced again first, under the new name or mapping
-        if (JSON.stringify(this.body(true)) === JSON.stringify(body)) button.disabled = false;
+        // edited while it was sent, or refused as it stands (a 409, such as a price that
+        // changed since it was drawn): priced again first
+        const same = JSON.stringify(this.body(true)) === JSON.stringify(body);
+        if (same && e.status !== 409) button.disabled = false;
         else this.previewAgain();
       }
       this.own("msg").textContent = e.message;
@@ -681,7 +688,9 @@ class ImportBox {
     const added = Number(r.new ?? 0) + Number(r.updated ?? 0);
     const kept = Number(r.unchanged ?? 0);
     const already = kept > 0 ? ` ${count(kept)} already in the store.` : "";
-    return `<p class="ok">${esc(`Added ${plural(added, this.noun)}.${already}`)}</p>`;
+    const removed = Number(r.removed ?? 0);
+    const gone = removed > 0 ? ` ${plural(removed, "old " + this.noun)} removed.` : "";
+    return `<p class="ok">${esc(`Added ${plural(added, this.noun)}.${already}${gone}`)}</p>`;
   }
 }
 

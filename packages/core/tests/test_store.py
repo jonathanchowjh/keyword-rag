@@ -1,8 +1,15 @@
+import inspect
+import re
+import threading
+import time
+
 import pytest
 from qdrant_client.models import Distance, Modifier, SparseVectorParams, VectorParams
 
+from ragqa_core import store
 from ragqa_core.fakes import fake_models
 from ragqa_core.store import (
+    CLIENT_CALLS,
     SPARSE,
     VECTORS,
     Store,
@@ -387,3 +394,84 @@ def test_points_and_chunk_points_carry_ids_vectors_and_payloads(setup):
     chunks = s.chunk_points("c", ["1"])
     assert sorted(p["text"] for _, p in chunks) == ["enzyme kinetics", "rate"]
     assert {p["parent_id"] for _, p in chunks} == {"1"}
+
+
+def populated(tmp_path, n=40):
+    """A path store, local Qdrant with no lock of its own, holding n sourced items."""
+    s, m = Store(None, tmp_path), fake_models()
+    s.create("c", m.dense_dim())
+    items = [Item(f"i{k}", f"item number {k}", meta={"source": "a"}) for k in range(n)]
+    texts = [i.text for i in items]
+    s.upsert_items("c", items, m.embed(texts), m.sparse(texts), [None] * n)
+    return s, m
+
+
+def test_a_local_store_counts_safely_while_another_thread_writes(tmp_path):
+    s, m = populated(tmp_path)
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def writer():
+        """New items each round, so local Qdrant's arrays grow under the reads."""
+        k = 0
+        try:
+            while not stop.is_set():
+                items = [
+                    Item(f"w{k}-{j}", f"written {k} {j}", meta={"source": "b"}) for j in range(5)
+                ]
+                texts = [i.text for i in items]
+                s.upsert_items("c", items, m.embed(texts), m.sparse(texts), [None] * 5)
+                s.delete_items("c", [items[0].id])
+                k += 1
+        except Exception as e:  # the main thread reports it
+            errors.append(e)
+
+    t = threading.Thread(target=writer)
+    t.start()
+    deadline = time.time() + 1
+    try:
+        while time.time() < deadline and not errors:
+            s.count("c")
+            s.source_counts("c")
+    except Exception as e:
+        errors.append(e)
+    finally:
+        stop.set()
+        t.join()
+    assert errors == []
+
+
+def test_a_store_read_during_recreate_sees_an_empty_store_not_an_error(tmp_path):
+    s, m = populated(tmp_path, n=3)
+    seen = []
+    real_create = s.create
+
+    def create(name, dim):
+        seen.append((s.count(name), s.held(name, ["x"]), s.field_counts(name)))
+        real_create(name, dim)
+
+    s.create = create
+    s.recreate("c", m.dense_dim())
+    assert seen == [(0, set(), {"explanation": 0, "skill": 0})]
+    assert s.count("c") == 0
+
+
+def test_store_methods_that_call_each_other_do_not_deadlock(tmp_path):
+    s, m = populated(tmp_path, n=5)
+    counts: list[int] = []
+
+    def calls():
+        for _ in s.scroll("c", batch=2):
+            counts.append(s.count("c"))
+        s.recreate("c", m.dense_dim())
+
+    t = threading.Thread(target=calls, daemon=True)  # a deadlock fails, not hangs
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert counts == [5, 5, 5] and s.count("c") == 0
+
+
+def test_every_client_call_the_store_makes_is_one_it_locks():
+    called = set(re.findall(r"self\.client\.(\w+)", inspect.getsource(store)))
+    assert called and called <= set(CLIENT_CALLS), called - set(CLIENT_CALLS)

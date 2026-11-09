@@ -43,7 +43,7 @@ def build(tmp_path, monkeypatch, reply=lambda p: "I cannot help with that."):
     ]
     questions = [Question("q1", "enzyme rate", None, ["x"], ["a"], {})]
     monkeypatch.setattr(loader, "load_dataset", lambda name, cache: (items, questions))
-    job_id = create_job(conn, "load", "m", {"dataset": "musique", "limit": None})
+    job_id = create_job(conn, "load", "m", {"dataset": "musique", "limit": None, "propose": True})
     return conn, ix, loader_for(ix, tmp_path), get_job(conn, job_id)
 
 
@@ -209,9 +209,22 @@ def upload(tmp_path, name, rows, collection="m"):
     return imports.save_upload(tmp_path, collection, name, [data])
 
 
-def import_job(conn, tmp_path, kind, rows, mapping, source="upload:notes", name="m"):
+def import_job(
+    conn,
+    tmp_path,
+    kind,
+    rows,
+    mapping,
+    source="upload:notes",
+    name="m",
+    propose: bool | None = True,
+):
+    """`propose`: whether the import priced a keywords proposal; None leaves the key out,
+    as a job queued before it was recorded."""
     upload_id = upload(tmp_path, "rows.jsonl", rows, name)
     setup = {"upload_id": upload_id, "kind": kind, "mapping": mapping, "source": source}
+    if propose is not None:
+        setup["propose"] = propose
     return get_job(conn, create_job(conn, "import", name, setup))
 
 
@@ -273,6 +286,45 @@ def test_import_items_without_ai_makes_no_lists(tmp_path, monkeypatch):
     ld.ai.update_connection("anthropic", api_key=None)
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
     assert ix.spec("m").keyword_version is None
+
+
+def test_an_import_priced_without_a_keywords_model_proposes_nothing_when_one_appears(
+    tmp_path, monkeypatch
+):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
+    ld.ai.update_connection("anthropic", api_key=None)
+    job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, propose=False)
+    assert ld.estimate_import(ix.spec("m"), job["setup"])["calls"] == 0
+    ld.ai.update_connection("anthropic", api_key="test")  # set up while the job waits
+    result = ld.run_import(job, lambda p: None)
+    assert result["new"] == 4 and result["lists_source"] is None
+    assert "propose" not in purposes(conn) and get_keyword_lists(conn, "m") is None
+
+
+def test_a_load_priced_without_a_keywords_model_proposes_nothing_when_one_appears(
+    tmp_path, monkeypatch
+):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
+    ld.ai.update_connection("anthropic", api_key=None)
+    assert ld.estimate_load(ix.spec("m"), "musique", None)["calls"] == 0
+    setup = {"dataset": "musique", "limit": None, "propose": False}
+    job = get_job(conn, create_job(conn, "load", "m", setup))
+    ld.ai.update_connection("anthropic", api_key="test")
+    seen: list[float] = []
+    result = ld.run(job, seen.append)
+    assert result["added"] == 3 and result["lists_source"] is None
+    assert "propose" not in purposes(conn) and get_keyword_lists(conn, "m") is None
+    assert seen[-1] == pytest.approx(1.0)
+
+
+def test_a_job_queued_before_propose_was_recorded_does_not_propose(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
+    assert ld.ai.ready("keywords") and ld.makes_lists(ix.spec("m"))
+    job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, propose=None)
+    assert "propose" not in job["setup"]
+    result = ld.run_import(job, lambda p: None)
+    assert result["new"] == 4 and result["lists_source"] is None
+    assert "propose" not in purposes(conn) and get_keyword_lists(conn, "m") is None
 
 
 LONG = "the enzyme rate rose sharply after the temperature was raised"
@@ -685,3 +737,41 @@ def test_question_counts_on_a_set_not_made_yet(tmp_path):
     ld = stored_labelled(tmp_path, "documents")
     counts, todo = ld.question_counts("nope", [Question("q", "t", None, [], [], {}, None)])
     assert counts["new"] == 1 and len(todo) == 1
+
+
+def two_sections(second="brine ") -> str:
+    """A .md of two sections, each about 1,000 characters, so each is its own chunk."""
+    return "# Alpha\n\n" + "alpha " * 160 + "\n\n# Brine\n\n" + second * 160
+
+
+def reimport(tmp_path, ld, conn, body):
+    """Upload `body` as x.md and import it; returns the estimate and the run's result."""
+    from ragqa_core import imports
+
+    setup = {
+        "upload_id": imports.save_upload(tmp_path, "m", "x.md", [body.encode()]),
+        "kind": "items",
+        "mapping": {"id": "file", "text": "text", "meta": "meta"},
+        "source": "upload:notes",
+        "propose": False,
+    }
+    estimate = ld.estimate_import(ld.indexer.spec("m"), setup)
+    job = get_job(conn, create_job(conn, "import", "m", setup))
+    return estimate, ld.run_import(job, lambda f: None)
+
+
+def test_an_items_import_estimate_counts_the_chunks_it_will_remove(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)
+    first, _ = reimport(tmp_path, ld, conn, two_sections())
+    assert first["removed"] == 0
+    estimate, result = reimport(tmp_path, ld, conn, two_sections("cocoa "))
+    assert estimate["removed"] == 1
+    assert result["removed"] == 1
+
+
+def test_a_reimport_with_no_changes_removes_nothing(tmp_path, monkeypatch):
+    conn, ix, ld, _ = build(tmp_path, monkeypatch)
+    reimport(tmp_path, ld, conn, two_sections())
+    estimate, result = reimport(tmp_path, ld, conn, two_sections())
+    assert estimate["removed"] == 0
+    assert result["removed"] == 0

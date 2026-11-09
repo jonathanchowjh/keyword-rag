@@ -365,6 +365,7 @@ let unsaved = false; // a mark, the text or the reference answer changed since t
 let discarding = null; // what Label or Delete will do once its unsaved marks are discarded
 let asking = 0; // the latest Get the AI's answer: a price drawn for an older one is dropped
 let answering = 0; // the question the panel holds: a paid answer for an older one is not shown
+let paying = false; // the confirmed AI's answer is out: Start can't buy it again
 
 const busy = () => saving || restoring;
 
@@ -478,7 +479,14 @@ function canSave() {
   const right = listedIds().some((id) => marks.get(id) === "y");
   $("lab-ai").disabled = blank || !right || busy();
   for (const b of $("lab-ai-answer").querySelectorAll("button[data-ai-mark]")) b.disabled = busy();
+  for (const b of $("lab-ai-confirm").querySelectorAll("button")) b.disabled = busy() || paying;
   showRestore();
+}
+
+// A change to the panel. A Delete asked before it checked for unsaved marks, so it is withdrawn.
+function markUnsaved() {
+  unsaved = true;
+  $("lab-del").innerHTML = "";
 }
 
 // Label and Delete would drop the panel's unsaved marks (Delete reloads the page), so while
@@ -577,7 +585,7 @@ function toggleMark(id, m) {
   forgetAnswer();
   if (marks.get(id) === m) marks.delete(id); // clicked again: back to not judged
   else marks.set(id, m);
-  unsaved = true;
+  markUnsaved();
   drawPanel();
 }
 
@@ -602,10 +610,13 @@ async function askAnswer() {
     const { estimate } = await api(path, { method: "POST", body });
     if (asking !== mine) return; // the panel changed while it was priced
     confirmSpend($("lab-ai-confirm"), estimate, async () => {
+      // A save or Restore may reset the panel, dropping what was paid for; one call per confirm.
+      if (busy() || paying) return;
       if (asking !== mine) {
         $("lab-ai-confirm").innerHTML = "";
         return;
       }
+      paying = true;
       try {
         const { answer } = await api(path, { method: "POST", body: { ...body, confirm: true } });
         refreshSpend();
@@ -613,8 +624,12 @@ async function askAnswer() {
         if (answering === opened) showAnswer(answer); // a mark change keeps it; a question change doesn't
       } catch (e) {
         if (answering === opened) say("lab-ai-msg", e.message);
+      } finally {
+        paying = false;
+        canSave();
       }
     });
+    canSave(); // Start waits out a save or Restore under way
   } catch (e) {
     if (asking === mine) say("lab-ai-msg", e.message);
   }
@@ -634,7 +649,7 @@ function takeAnswer(m) {
   const box = $("lab-ai-answer");
   if (m === "y") {
     $("lab-answer").value = box.querySelector(".full").textContent;
-    unsaved = true;
+    markUnsaved();
     showRestore();
     say("lab-ai-msg", "Added as the reference answer. Save question to keep it.", "ok");
   }
@@ -693,7 +708,7 @@ async function writeQuestion(next) {
     say("lab-ai-msg", ""); // "Save question to keep it" reads wrong once it is kept
   } catch (e) {
     say("lab-msg", e.message); // every mark stays where it is
-    unsaved = true;
+    markUnsaved();
     if (e.status === 404 && open === before && before) {
       // Deleted meanwhile: its row goes, and the next Save writes these marks as a new question.
       try {
@@ -761,12 +776,12 @@ function bindLabelling() {
     }
   });
   $("lab-text").addEventListener("input", () => {
-    unsaved = true;
+    markUnsaved();
     forgetAnswer();
     canSave();
   });
   $("lab-answer").addEventListener("input", () => {
-    unsaved = true;
+    markUnsaved();
     showRestore();
     say("lab-ai-msg", ""); // edited by hand, the field no longer holds the AI's answer
   });

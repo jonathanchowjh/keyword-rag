@@ -255,6 +255,9 @@ class ImportRequest(BaseModel):
     mapping: dict[str, str | None] | None = None
     source_name: str
     confirm: bool = False
+    # What the caller was shown: on confirm, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class SourceSwitch(BaseModel):
@@ -500,6 +503,18 @@ def check_mapping(kind: str, mapping: dict | None) -> None:
         raise HTTPException(422, f"unknown fields {unknown}; known: {list(FIELDS[kind])}")
 
 
+def price_changed(estimate: dict, calls: int | None, est_usd: float | None) -> bool:
+    """Whether the estimate differs from what the caller was shown: other calls, or a price
+    that rose or can no longer be priced. A lower price is no reason to refuse."""
+    if calls is not None and estimate["calls"] != calls:
+        return True
+    if est_usd is None:
+        return False
+    if estimate["est_usd"] is None:
+        return estimate["calls"] > 0
+    return estimate["est_usd"] > est_usd + 1e-9
+
+
 def body_chunks(request: Request):
     """The request body, chunk by chunk, for a plain (threaded) route."""
     stream = request.stream().__aiter__()
@@ -706,6 +721,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             shutil.rmtree(path.parent, ignore_errors=True)
             raise
+
+    def proposes(spec: CollectionSpec) -> bool:
+        """Whether an import or load queued now has a keywords proposal in its price, as the
+        loader's estimate counts it. Recorded in the job's setup: the job proposes only then."""
+        return state.ai.ready("keywords") and state.loader.makes_lists(spec)
 
     def estimate_upload(spec: CollectionSpec, upload_id: str, kind: str, shown: dict, source: str):
         """What importing would do; None until the mapping is complete."""
@@ -930,6 +950,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.confirm:
                     raise NoConnection(role)
                 return JSONResponse({"estimate": estimate}, 200)
+            setup["propose"] = proposes(spec)
             with not_adding(spec.name):
                 job_id = db.create_job(state.conn, "import", spec.name, setup)
             queued = True
@@ -990,6 +1011,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         estimate = estimate_upload(spec, body.upload_id, body.kind, shown, source)
         if not body.confirm:
             return JSONResponse({"preview": shown, "estimate": estimate}, 200)
+        if estimate is not None and price_changed(estimate, body.calls, body.est_usd):
+            raise HTTPException(409, "the price changed since you saw it: check it again")
         if estimate is None:
             why = (
                 f"map these fields first: {shown['missing']}"
@@ -1008,6 +1031,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "kind": body.kind,
             "mapping": shown["mapping"],
             "source": source,
+            "propose": proposes(spec),
         }
         with not_adding(name):
             # It was priced on the recipe now; a queued tag_build would switch it first.
@@ -1402,13 +1426,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # What the loader spends on: summaries, a proposal when there are no lists, and
         # the build steps. Whether the build spends depends on the items (and on the Hub), so
         # a load that builds is priced even when confirmed.
-        proposes = state.ai.ready("keywords") and state.loader.makes_lists(spec)
-        setup = {"dataset": body.dataset, "limit": body.limit}
-        if builds(spec) or ((spec.summarize or proposes) and not body.confirm):
+        propose = proposes(spec)
+        setup = {"dataset": body.dataset, "limit": body.limit, "propose": propose}
+        if builds(spec) or ((spec.summarize or propose) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
             if builds(spec) and estimate["est_usd"] != 0:  # None: no model to price it
                 need_ai("keywords")
-            spends = spec.summarize or proposes or estimate["est_usd"] != 0
+            spends = spec.summarize or propose or estimate["est_usd"] != 0
             if spends and not body.confirm:
                 return JSONResponse({"estimate": estimate}, 200)
             if not body.confirm and estimate["hub"].get("entry"):

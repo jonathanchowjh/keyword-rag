@@ -1126,6 +1126,33 @@ def test_questions_filter_without_refetching_and_sort_naturally(page, seeded):
     assert seen == {"false": 1, "true": 1}
 
 
+def test_opening_questions_during_the_first_load_fetches_them_once(page, seeded):
+    run_id = disagreeing_run(seeded, "qfirst")
+    seen = questions_counter(page, run_id)
+    held = []
+
+    def running(route):  # a busy run keeps nothing, so a second load would fetch again
+        response = route.fetch()
+        route.fulfill(response=response, json={**response.json(), "status": "running"})
+
+    page.route(f"**/eval/{run_id}", running)
+    page.route("**/collections/qfirst", lambda route: held.append(route))
+    page.goto(f"{seeded.url}/c/qfirst/runs/{run_id}")
+    for _ in range(200):  # the run is in; the first load waits on its store
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held
+    page.get_by_text("Questions", exact=True).click()
+    page.wait_for_timeout(300)  # the toggle's own load, if it starts one, reaches the route
+    page.unroute("**/collections/qfirst")  # a later refetch goes straight through
+    for route in held:
+        route.continue_()
+    expect(page.locator("#questions details")).to_have_count(40)
+    page.wait_for_timeout(300)  # a second fetch, if one was started, has arrived by now
+    assert seen["false"] == 1
+
+
 def test_questions_on_a_busy_run_refetch_until_it_finishes(page, seeded):
     run_id = disagreeing_run(seeded, "qbusy")
     seen = questions_counter(page, run_id)
@@ -1142,13 +1169,16 @@ def test_questions_on_a_busy_run_refetch_until_it_finishes(page, seeded):
     page.goto(f"{seeded.url}/c/qbusy/runs/{run_id}")
     page.get_by_text("Questions", exact=True).click()
     expect(page.locator("#questions details")).to_have_count(40)
-    page.wait_for_timeout(3500)  # past a poll: the filters must still work on a running run
+    with page.expect_response(f"**/eval/{run_id}"):  # one poll seen: the filters must still work
+        pass
     page.locator("#q-method").select_option("hybrid")
     page.get_by_label("Wrong only").check()
     expect(page.locator("#questions details")).to_have_count(1)
     assert seen["false"] == 3  # rows still coming: fetched each time, never kept
-    busy["on"] = False  # finishes: the open view reloads once, then filters from what it kept
-    page.wait_for_timeout(3500)  # the next poll sees it done
+    # finishes: the next poll sees it done, and the open view reloads once, then filters from
+    # what it kept. A response wait: `seen` is bumped in the route handler.
+    with page.expect_response(lambda r: "/questions?disagree=false" in r.url, timeout=10000):
+        busy["on"] = False
     assert seen["false"] == 4
     page.get_by_label("Wrong only").uncheck()
     expect(page.locator("#questions details")).to_have_count(40)
@@ -1481,6 +1511,45 @@ def test_an_import_refused_after_an_edit_is_priced_again_before_it_can_be_retrie
     expect(page.locator("#imp-items-msg")).to_have_text("busy")
     expect(button).to_be_enabled()  # once the fresh estimate is in
     assert previews == ["renamed"]
+
+
+def test_store_import_redraws_a_price_that_changed(page, seeded, tmp_path):
+    seeded.build("repriced")  # keyword lists made: the import is free, 0 AI calls
+    notes = tmp_path / "notes.jsonl"
+    notes.write_text(json.dumps({"id": "p1", "text": "a note about reefs"}))
+    page.goto(f"{seeded.url}/c/repriced")
+    upload_and_preview(page, "items", notes)
+    button = page.locator("#imp-items-import")
+    expect(button).to_be_enabled()
+    confirms, previews = [], []
+    changed = "the price changed since you saw it: check it again"
+
+    def route(r):
+        sent = json.loads(r.request.post_data)
+        if not sent["confirm"]:
+            return previews.append(r)  # held, to see Import wait for the fresh price
+        confirms.append(sent)
+        if len(confirms) == 1:
+            return r.fulfill(status=409, json={"detail": changed})
+        r.fallback()
+
+    page.route("**/collections/repriced/imports", route)
+    page.expected = ["409"]
+    button.click()
+    expect(page.locator("#imp-items-msg")).to_have_text(changed)
+    assert (confirms[0]["calls"], confirms[0]["est_usd"]) == (0, 0)  # what was drawn
+    for _ in range(100):
+        if previews:
+            break
+        page.wait_for_timeout(20)
+    assert len(previews) == 1, "the price was never asked for again"
+    expect(button).to_be_disabled()  # until the fresh estimate is drawn
+    previews[0].continue_()
+    expect(button).to_be_enabled()
+    expect(page.locator("#imp-items-msg")).to_have_text(changed)
+    button.click()
+    expect(page.locator("#imp-items-preview")).to_contain_text("Added 1 ")
+    assert len(confirms) == 2 and len(import_jobs(seeded, "repriced")) == 1
 
 
 def test_store_import_says_it_waits_behind_the_stores_other_job(page, seeded, tmp_path):
@@ -4364,8 +4433,9 @@ def test_store_page_names_its_embedding_model_and_rebuilds_with_another(page, se
     expect(page.locator("#embedding-confirm")).to_contain_text(
         f"Rebuild rb with {REBUILD_MODEL}? Every item is embedded again on this machine: free"
     )
-    page.get_by_role("button", name="Yes, rebuild").click()
-    job = httpx.get(seeded.url + "/collections/rb").json()["rebuild"]["job_id"]
+    with page.expect_response("**/collections/rb/reembed") as r:
+        page.get_by_role("button", name="Yes, rebuild").click()
+    job = r.value.json()["job_id"]
     for _ in range(600):  # the rebuild runs on fakes: moments
         if httpx.get(f"{seeded.url}/jobs/{job}").json()["status"] not in ("queued", "running"):
             break
@@ -5057,6 +5127,24 @@ def test_labelling_delete_asks_before_dropping_unsaved_marks(page, seeded):
     assert [q["text"] for q in got] == ["alpha first?"]
 
 
+def test_labelling_a_mark_made_after_delete_was_asked_withdraws_the_delete(page, seeded):
+    labelling_set(seeded, "lab14")
+    labelled_questions(seeded, "lab14", ["alpha to delete?"])
+    page.goto(seeded.url + "/e/lab14q")
+    row = page.locator("#lab-questions tbody tr").first
+    panel = page.locator("#lab-panel")
+    passages = panel.locator("li[data-passage]")
+    row.get_by_role("button", name="Label").click()
+    expect(passages).to_have_count(2)
+    row.get_by_role("button", name="Delete").click()
+    expect(page.locator("main").get_by_text("Delete this question and its marks?")).to_be_visible()
+    mark(passages.first, "y")
+    expect(page.locator("#lab-del")).to_be_empty()
+    row.get_by_role("button", name="Delete").click()
+    expect(panel.get_by_text(UNSAVED, exact=True)).to_be_visible()
+    assert len(httpx.get(f"{seeded.url}/eval-sets/lab14q").json()["questions"]) == 1
+
+
 # -- the AI's answer on the labelling panel -----------------------------------------------------
 
 ASK_AI = "Get the AI's answer"
@@ -5337,6 +5425,38 @@ def test_labelling_ai_answer_strips_citations(page, seeded):
         expect(page.locator("#lab-ai-answer .full")).to_have_text("Ten days.")
 
 
+def test_labelling_answer_start_cannot_be_bought_twice(page, seeded):
+    labelling_set(seeded, "ai9")
+    held = []
+
+    def hold_paid(route):
+        if route.request.post_data_json["confirm"] and not held:
+            held.append(route)
+        else:
+            route.continue_()  # a second paid call goes through, so the test sees it
+
+    page.route("**/eval-sets/ai9q/answer", hold_paid)
+    panel, passages, sent = ai_panel(page, seeded, "ai9", "How long is leave? (ai9)")
+    mark(passages.first, "y")
+    start = page.locator("#lab-ai-confirm").get_by_role("button", name="Start")
+    with ai_calls(seeded) as purposes:
+        panel.get_by_role("button", name=ASK_AI).click()
+        start.click()
+        wait_for(page, held)
+        panel.get_by_role("button", name="Save question").click()
+        expect(page.locator("#lab-msg")).to_contain_text("Saved as version")
+        expect(start).to_be_disabled()
+        start.dispatch_event("click")
+        page.wait_for_timeout(300)  # a second paid call would have left by now
+        with page.expect_response("**/eval-sets/ai9q/answer") as reply:
+            held[0].continue_()
+        reply.value.finished()
+        expect(page.locator("#lab-ai-answer .full")).to_have_text("Answer: A")
+    page.unroute("**/eval-sets/ai9q/answer")
+    assert purposes == ["reference_answer"]
+    assert [body["confirm"] for body in sent] == [False, True]
+
+
 # -- versions, Create one, Run against its store, the run form's warning -------------------------
 
 
@@ -5535,6 +5655,57 @@ def test_eval_set_page_restore_keeps_what_was_typed_while_it_ran(page, seeded):
     kept = page.locator(f'#lab-panel li[data-passage="{other}"]')
     expect(pressed(kept, "n")).to_have_attribute("aria-pressed", "true")
     expect(panel.get_by_role("button", name="Save question")).to_be_enabled()
+
+
+def test_labelling_answer_start_waits_out_a_restore(page, seeded):
+    # restorable() leaves no right passage, so the AI could not be asked: this one is the
+    # other way round, with the current version right on the first passage.
+    labelling_set(seeded, "rs3")
+    pool = httpx.post(f"{seeded.url}/eval-sets/rs3q/pool", json={"question": "alpha"})
+    assert pool.status_code == 200, pool.text
+    right, other = (p["id"] for p in pool.json()["passages"])
+    question = {"text": "alpha restored?", "judged_ids": [other]}
+    r = httpx.post(f"{seeded.url}/eval-sets/rs3q/questions", json={"question": question})
+    assert r.status_code == 201, r.text
+    qid, first = r.json()["id"], r.json()["version"]
+    stored = question_map(seeded, "rs3q")[qid]
+    current = {**stored, "gold_ids": [right], "judged_ids": [right, other]}
+    r = httpx.put(
+        f"{seeded.url}/eval-sets/rs3q/questions/{qid}",
+        json={"question": current, "base": stored},
+    )
+    assert r.status_code == 200, r.text
+    sent = []
+
+    def record(request):
+        if request.url.endswith("/eval-sets/rs3q/answer"):
+            sent.append(request.post_data_json)
+
+    page.on("request", record)
+    page.goto(f"{seeded.url}/e/rs3q")
+    page.locator("#lab-questions tbody tr").first.get_by_role("button", name="Label").click()
+    panel = page.locator("#lab-panel")
+    expect(panel.locator("li[data-passage]")).to_have_count(2)
+    kept = page.locator(f'#lab-panel li[data-passage="{right}"]')
+    expect(pressed(kept, "y")).to_have_attribute("aria-pressed", "true")
+    start = page.locator("#lab-ai-confirm").get_by_role("button", name="Start")
+    with ai_calls(seeded) as purposes:
+        panel.get_by_role("button", name=ASK_AI).click()
+        expect(start).to_be_visible()
+        page.locator("#versions li", has_text=first[:8]).get_by_role("button", name="View").click()
+        held = []
+        page.route("**/eval-sets/rs3q/questions", lambda route: held.append(route))
+        page.get_by_role("button", name="Restore this version").click()
+        wait_for(page, held)
+        expect(start).to_be_disabled()
+        start.dispatch_event("click")
+        page.wait_for_timeout(300)  # a paid call would have left by now
+        held[0].continue_()
+        expect(page.locator("#ver-msg")).to_have_text(f"Restored version {first[:8]}.")
+        page.unroute("**/eval-sets/rs3q/questions")
+        expect(page.locator("#lab-ai-confirm")).to_be_empty()
+    assert "reference_answer" not in purposes
+    assert not any(body["confirm"] for body in sent)
 
 
 def test_eval_set_page_lists_the_current_version_after_restoring_an_old_one(page, seeded):
@@ -5859,6 +6030,60 @@ def run_form_set(seeded, name, reference=True):
             question["gold_answers"] = ["Ten days"]
         r = httpx.post(f"{seeded.url}/eval-sets/{name}q/questions", json={"question": question})
         assert r.status_code == 201, r.text
+
+
+def hold_first_store_get(page, name):
+    """Hold the store's first GET; later ones go through. Returns the held routes."""
+    held = []
+
+    def hold(route):
+        if held:
+            route.continue_()
+        else:
+            held.append(route)
+
+    page.route(f"**/collections/{name}", hold)
+    return held
+
+
+def wait_held(page, held):
+    for _ in range(100):
+        if held:
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError("the store GET was never made")
+
+
+def test_new_run_waits_for_the_store(page, seeded):
+    run_form_set(seeded, "nrw1")
+    held = hold_first_store_get(page, "nrw1")
+    page.goto(seeded.url + "/c/nrw1")
+    wait_held(page, held)
+    expect(page.locator("#new-run")).to_be_disabled()
+    held[0].continue_()
+    expect(page.locator("#new-run")).to_be_enabled()
+    page.locator("#new-run").click()
+    expect(page.locator("#rf-split")).to_be_visible()
+
+
+def test_run_against_its_store_picks_the_set_without_toggling_an_open_form_shut(page, seeded):
+    run_form_set(seeded, "nrw2")
+    held = hold_first_store_get(page, "nrw2")
+    page.goto(seeded.url + "/c/nrw2?eval_set=nrw2q")
+    wait_held(page, held)
+    # A click can't open the form before the store has loaded (col is null), so set the state
+    # it would leave by hand: the form open when the pick runs.
+    page.evaluate(
+        "const f = document.getElementById('run-form');"
+        'f.innerHTML = \'<select id="rf-set"><option value=""></option>'
+        '<option value="nrw2q">nrw2q</option></select>\'; f.hidden = false'
+    )
+    held[0].continue_()
+    expect(page.locator("#new-run")).to_be_enabled()
+    expect(page.locator("#run-form")).to_be_visible()  # the pick must not toggle it shut
+    expect(page.locator("#rf-set")).to_have_value("nrw2q")
+    page.locator("#new-run").click()
+    expect(page.locator("#run-form")).to_be_hidden()
 
 
 def test_documents_run_form_offers_answers_and_judging(page, seeded):
@@ -6315,3 +6540,25 @@ def test_create_store_refused_stays_on_the_form(page, seeded):
     expect(page.locator("#f-msg")).to_contain_text("already exists")
     expect(page).to_have_url(seeded.url + "/")
     expect(page.locator("#form")).to_be_visible()
+
+
+def test_store_import_says_which_old_passages_it_will_remove(page, seeded, tmp_path):
+    documents_store(seeded, "oldpass", passages=False)
+    handbook = tmp_path / "x.md"
+    handbook.write_text(two_sections())
+    page.goto(seeded.url + "/c/oldpass")
+    preview = page.locator("#imp-items-preview")
+    upload_and_preview(page, "items", handbook)
+    expect(page.locator("#imp-items-import")).to_be_enabled()
+    page.locator("#imp-items-import").click()
+    expect(preview).to_have_text("Added 2 passages.")
+    handbook.write_text(two_sections().replace("brine " * 160, "brine " * 159 + "cocoa"))
+    upload_and_preview(page, "items", handbook)
+    expect(page.locator("[data-removed]")).to_have_text(
+        "1 old passage will be removed, since the text changed."
+    )
+    page.locator("#imp-items-import").click()
+    expect(preview).to_have_text("Added 1 passage. 1 already in the store. 1 old passage removed.")
+    upload_and_preview(page, "items", handbook)
+    expect(page.locator("#imp-items-import")).to_be_enabled()
+    expect(page.locator("[data-removed]")).to_have_count(0)

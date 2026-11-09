@@ -2112,6 +2112,102 @@ def test_import_that_costs_needs_a_key(tmp_path):
         assert do_import(client, up, confirm=True).status_code == 503
 
 
+PROPOSING = lambda p: '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'  # noqa: E731
+
+
+def test_every_import_and_load_path_records_that_it_priced_the_proposal(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, reply=PROPOSING) as client:
+        add_collection(client, lists=False)
+        client.app.state.worker.stop()  # the jobs stay queued, to read their setup
+        assert client.app.state.ai.ready("keywords")
+        many = [{"id": f"m{i}", "text": f"note {i} about reefs"} for i in range(21)]
+        r = client.post("/collections/c/documents", json={"items": many, "confirm": True})
+        assert r.status_code == 202, r.text
+        jobs = [r.json()["job_id"]]
+        r = do_import(client, upload(client).json(), confirm=True)
+        assert r.status_code == 202, r.text
+        jobs.append(r.json()["job_id"])
+        r = client.post("/collections/c/load", json={"dataset": "scienceqa", "confirm": True})
+        assert r.status_code == 202, r.text
+        jobs.append(r.json()["job_id"])
+        assert [client.get(f"/jobs/{j}").json()["setup"]["propose"] for j in jobs] == [True] * 3
+        client.app.state.worker.start()
+        done = [wait(client, j) for j in jobs]
+        assert [j["status"] for j in done] == ["done"] * 3, done
+        assert done[0]["result"]["lists_source"] == "ai"  # the first makes them; then none
+        assert client.get("/collections/c").json()["keyword_lists"] is not None
+        assert ledger_purposes(client) == ["propose"]
+
+
+def test_an_import_priced_without_a_keywords_model_records_no_proposal(tmp_path):
+    with make_client(tmp_path, reply=PROPOSING) as client:
+        add_collection(client, lists=False)
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        ai.update_connection("anthropic", api_key=None)
+        r = do_import(client, upload(client).json(), confirm=True)
+        assert r.status_code == 202, r.text
+        job_id = r.json()["job_id"]
+        assert client.get(f"/jobs/{job_id}").json()["setup"]["propose"] is False
+        ai.update_connection("anthropic", api_key="test")  # set up while the job waits
+        client.app.state.worker.start()
+        job = wait(client, job_id)
+        assert job["status"] == "done" and job["result"]["lists_source"] is None
+        assert "propose" not in ledger_purposes(client)
+
+
+def test_an_import_whose_price_changed_since_it_was_shown_is_refused(tmp_path):
+    with make_client(tmp_path, reply=PROPOSING) as client:
+        add_collection(client, lists=False)
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        ai.update_connection("anthropic", api_key=None)
+        up = upload(client).json()
+        assert up["estimate"]["calls"] == 0
+        ai.update_connection("anthropic", api_key="test")  # now it would propose
+        r = do_import(client, up, confirm=True, calls=0)
+        assert r.status_code == 409
+        assert r.json()["detail"] == "the price changed since you saw it: check it again"
+        assert db.list_jobs(client.app.state.conn, collection="c", limit=db.ALL) == []
+        r = do_import(client, up, confirm=True)  # without calls: as before
+        assert r.status_code == 202 and set(r.json()) == {"job_id"}
+
+
+def summarised_import_repriced(client, times: float) -> tuple[dict, dict]:
+    """A summarised store's upload previewed, then the default model's price scaled by
+    `times`: the calls stay the same, the price moves."""
+    add_collection(client, summarize=True, lists=False)
+    client.app.state.worker.stop()
+    up = upload(client).json()
+    shown = up["estimate"]
+    assert shown["calls"] > 0 and shown["est_usd"] > 0
+    ai = client.get("/ai").json()
+    ref = ai["roles"]["default"]
+    model = next(m for m in ai["models"] if m["ref"] == ref)
+    price = {"price_in": model["price_in"] * times, "price_out": model["price_out"] * times}
+    assert client.put(f"/ai/models/{ref}", json=price).status_code == 200
+    again = do_import(client, up).json()["estimate"]
+    assert again["calls"] == shown["calls"] and again["est_usd"] != shown["est_usd"]
+    return up, shown
+
+
+def test_an_import_whose_price_rose_with_the_same_calls_is_refused(tmp_path):
+    with make_client(tmp_path) as client:
+        up, shown = summarised_import_repriced(client, 3)
+        r = do_import(client, up, confirm=True, calls=shown["calls"], est_usd=shown["est_usd"])
+        assert r.status_code == 409
+        assert r.json()["detail"] == "the price changed since you saw it: check it again"
+        assert db.list_jobs(client.app.state.conn, collection="c", limit=db.ALL) == []
+
+
+def test_an_import_whose_price_fell_is_queued(tmp_path):
+    with make_client(tmp_path) as client:
+        up, shown = summarised_import_repriced(client, 0.5)
+        r = do_import(client, up, confirm=True, calls=shown["calls"], est_usd=shown["est_usd"])
+        assert r.status_code == 202 and set(r.json()) == {"job_id"}
+
+
 def test_import_questions_with_a_mapping(client):
     client.post("/collections", json={"name": "sci", "qa_type": "science"})
     rows = jsonl(
@@ -2160,8 +2256,10 @@ def test_unknown_source_is_404(client):
 def test_switch_refused_while_eval_running(client):
     add_collection(client)
     import_items(client)
-    job_id = db.create_job(client.app.state.conn, "eval", "c", {})
-    db.update_job(client.app.state.conn, job_id, status="running")
+    conn = client.app.state.conn
+    with conn.lock:  # the worker can't claim the job between the two calls
+        job_id = db.create_job(conn, "eval", "c", {})
+        db.update_job(conn, job_id, status="running")
     r = client.patch("/collections/c/sources/upload:notes", json={"enabled": False})
     assert r.status_code == 409 and "eval is running" in r.json()["detail"]
 
@@ -3049,8 +3147,9 @@ def test_eval_set_import_runs_in_the_request(client, monkeypatch):
 def test_deleting_an_eval_set_deletes_its_runs_and_a_store_keeps_its_sets(client):
     add_collection(client)
     conn = client.app.state.conn
-    run = db.create_job(conn, "eval", "c", {"eval_set": "c"})
-    db.update_job(conn, run, status="done")
+    with conn.lock:  # the worker can't claim the run between the two calls
+        run = db.create_job(conn, "eval", "c", {"eval_set": "c"})
+        db.update_job(conn, run, status="done")
     r = client.delete("/eval-sets/c")
     assert r.status_code == 200 and r.json() == {"runs": 1}
     assert db.get_job(conn, run) is not None and db.get_eval_set(conn, "c") is not None
@@ -4052,6 +4151,32 @@ def test_rebuild_with_another_model_re_embeds_and_switches(client, monkeypatch):
     assert "dense model" in body["answer"]["since"]["changes"]
 
 
+def test_a_store_reads_cleanly_through_a_rebuild_switch(client, monkeypatch):
+    small_model(client, monkeypatch)
+    add_collection(client)
+    r = reembed(client, name="c", model="fake/small")
+    assert r.status_code == 202, r.text
+    job_id, statuses = r.json()["job_id"], []
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        got = client.get("/collections/c")
+        statuses.append(got.status_code)
+        if client.get(f"/jobs/{job_id}").json()["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.01)
+    job = client.get(f"/jobs/{job_id}").json()
+    assert job["status"] == "done", job["error"]
+    assert set(statuses) == {200}, [s for s in statuses if s != 200]
+
+
+def test_a_store_whose_search_data_is_gone_still_reads(client):
+    add_collection(client)
+    client.app.state.store.drop("c")
+    r = client.get("/collections/c")
+    assert r.status_code == 200, r.text
+    assert r.json()["count"] == 0
+
+
 def test_rebuild_is_refused_for_an_unknown_or_the_same_model_or_a_busy_store(tmp_path, monkeypatch):
     client = make_client(tmp_path)  # not entered: no worker, so a queued job stays queued
     small_model(client, monkeypatch)
@@ -4930,6 +5055,26 @@ def test_get_eval_set_names_labelled_passages_no_longer_in_its_store(client):
     assert got["questions"][0]["gold_ids"] == [ids[0]]
     client.patch("/eval-sets/lq", json={"store": None})
     assert client.get("/eval-sets/lq").json()["missing"] == {}
+
+
+def test_an_eval_set_whose_store_lost_its_search_data_lists_every_passage_missing(client):
+    add_collection(client, questions=False, lists=False)
+    body = handbook("")
+    store_import(client, "x.md", body)
+    ids = ids_of("x.md", body)
+    new = {"name": "lq", "qa_type": "mcq", "store": "c"}
+    assert client.post("/eval-sets", json=new).status_code == 201
+    mcq = {"choices": ["x", "y"], "gold_answers": ["A"]}
+    qs = [
+        {"id": "q1", "text": "where?", "gold_ids": [ids[0]], **mcq},
+        {"id": "q2", "text": "and here?", "gold_ids": [ids[1], ids[2]], **mcq},
+        {"id": "q3", "text": "none?", **mcq},
+    ]
+    assert put_questions(client, "lq", qs).status_code == 200
+    client.app.state.store.drop("c")
+    r = client.get("/eval-sets/lq")
+    assert r.status_code == 200, r.text
+    assert r.json()["missing"] == {"q1": [ids[0]], "q2": [ids[1], ids[2]]}
 
 
 def new_set(client, name="e", qa_type="mcq"):

@@ -7,8 +7,9 @@ retriever live in a sibling collection, `<name>__chunks`.
 
 import hashlib
 import json
+import threading
 import uuid
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,25 @@ VECTORS = (
 )
 SPARSE = "text_sparse"
 CHUNK = "chunk_dense"
+# Every client method Store calls: on a local client each one holds Store.lock.
+CLIENT_CALLS = (
+    "batch_update_points",
+    "collection_exists",
+    "count",
+    "create_collection",
+    "create_payload_index",
+    "delete",
+    "delete_collection",
+    "delete_vectors",
+    "facet",
+    "get_collection",
+    "query_points",
+    "retrieve",
+    "scroll",
+    "set_payload",
+    "update_vectors",
+    "upsert",
+)
 
 
 def point_id(name: str, item_id: str) -> str:
@@ -107,6 +127,16 @@ def parents_excluded(exclude: Collection[str]) -> FieldCondition | None:
     return FieldCondition(key="parent_id", match=MatchAny(any=sorted(exclude)))
 
 
+def locked(call: Callable, lock: threading.RLock) -> Callable:
+    """`call`, made while holding `lock`."""
+
+    def holding(*args, **kwargs):
+        with lock:
+            return call(*args, **kwargs)
+
+    return holding
+
+
 def to_hit(point: ScoredPoint | Record, score: float = 0.0) -> Hit:
     p = point.payload or {}
     return Hit(
@@ -126,29 +156,38 @@ def to_hit(point: ScoredPoint | Record, score: float = 0.0) -> Hit:
 
 class Store:
     def __init__(self, url: str | None, path: Path | None) -> None:
+        """Local Qdrant (a path or :memory:) has no lock: a read while another thread
+        writes can raise. So on a local client every method Store calls holds `lock`,
+        one per call: a generator never holds it between yields. In both modes recreate
+        and the store page's reads hold it, so no read falls between a delete and a create."""
         self.server = bool(url)
+        self.lock = threading.RLock()
         if url:
             self.client = QdrantClient(url=url)
         elif path:
             self.client = QdrantClient(path=str(path))
         else:
             self.client = QdrantClient(location=":memory:")
+        if not self.server:
+            for method in CLIENT_CALLS:
+                setattr(self.client, method, locked(getattr(self.client, method), self.lock))
 
     def create(self, name: str, dim: int) -> None:
-        if not self.client.collection_exists(name):
-            self.client.create_collection(
-                name,
-                vectors_config={
-                    v: VectorParams(size=dim, distance=Distance.COSINE) for v in VECTORS
-                },
-                sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
-            )
-        if not self.client.collection_exists(chunks_of(name)):
-            self.client.create_collection(
-                chunks_of(name),
-                vectors_config={CHUNK: VectorParams(size=dim, distance=Distance.COSINE)},
-            )
-        self.ensure_indexes(name)
+        with self.lock:  # no read between a check and the create it decides
+            if not self.client.collection_exists(name):
+                self.client.create_collection(
+                    name,
+                    vectors_config={
+                        v: VectorParams(size=dim, distance=Distance.COSINE) for v in VECTORS
+                    },
+                    sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
+                )
+            if not self.client.collection_exists(chunks_of(name)):
+                self.client.create_collection(
+                    chunks_of(name),
+                    vectors_config={CHUNK: VectorParams(size=dim, distance=Distance.COSINE)},
+                )
+            self.ensure_indexes(name)
 
     def ensure_indexes(self, name: str) -> None:
         """Keyword indexes make the source filters fast; local Qdrant ignores them and warns."""
@@ -170,8 +209,9 @@ class Store:
 
     def recreate(self, name: str, dim: int) -> None:
         """The store and its chunks, empty, at `dim` dimensions; a rebuild stays."""
-        self._delete(name, chunks_of(name))
-        self.create(name, dim)
+        with self.lock:
+            self._delete(name, chunks_of(name))
+            self.create(name, dim)
 
     def _delete(self, *collections: str) -> None:
         for collection in collections:
@@ -251,7 +291,10 @@ class Store:
         return set(vectors) if isinstance(vectors, dict) else set()
 
     def count(self, name: str) -> int:
-        return self.client.count(name, exact=True).count
+        with self.lock:
+            if not self.client.collection_exists(name):
+                return 0
+            return self.client.count(name, exact=True).count
 
     def upsert_items(
         self,
@@ -417,9 +460,12 @@ class Store:
 
     def held(self, name: str, ids: list[str]) -> set[str]:
         """Which of these item ids the store holds, read without the payload texts."""
-        records = self.client.retrieve(
-            name, [point_id(name, i) for i in ids], with_payload=["item_id"]
-        )
+        with self.lock:
+            if not self.client.collection_exists(name):
+                return set()
+            records = self.client.retrieve(
+                name, [point_id(name, i) for i in ids], with_payload=["item_id"]
+            )
         return {(r.payload or {})["item_id"] for r in records}
 
     def ids(self, name: str, batch: int = 1024, skip: tuple[str, ...] = ()) -> list[str]:
@@ -483,7 +529,10 @@ class Store:
         return out
 
     def source_counts(self, name: str) -> dict[str, int]:
-        facet = self.client.facet(name, key="meta.source", limit=10_000, exact=True)
+        with self.lock:
+            if not self.client.collection_exists(name):
+                return {}
+            facet = self.client.facet(name, key="meta.source", limit=10_000, exact=True)
         return {str(h.value): h.count for h in facet.hits}
 
     def sources_of(self, name: str, ids: list[str]) -> dict[str, str | None]:
@@ -503,17 +552,23 @@ class Store:
     def unsourced(self, name: str) -> int:
         """Item points and chunk points that carry no source."""
         empty = Filter(must=[IsEmptyCondition(is_empty=PayloadField(key="meta.source"))])
-        return sum(
-            self.client.count(c, count_filter=empty, exact=True).count
-            for c in (name, chunks_of(name))
-        )
+        with self.lock:
+            if not self.client.collection_exists(name):
+                return 0
+            return sum(
+                self.client.count(c, count_filter=empty, exact=True).count
+                for c in (name, chunks_of(name))
+            )
 
     def field_counts(self, name: str) -> dict[str, int]:
         def filled(key: str) -> int:
             f = Filter(must_not=[IsEmptyCondition(is_empty=PayloadField(key=key))])
             return self.client.count(name, count_filter=f, exact=True).count
 
-        return {"explanation": filled("explanation"), "skill": filled("meta.skill")}
+        with self.lock:
+            if not self.client.collection_exists(name):
+                return {"explanation": 0, "skill": 0}
+            return {"explanation": filled("explanation"), "skill": filled("meta.skill")}
 
     def source_ids(self, name: str, source: str) -> list[str]:
         """The ids of the items in one source, read without the payload texts."""

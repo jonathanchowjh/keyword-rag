@@ -686,13 +686,25 @@ class Evaluator:
         roles = list(dict.fromkeys(spending))
         try:
             usd = exact_usd + sum(
-                c * self.ai.estimate_usd(int(chars), out, role=role, model=m, batch=batch)
+                self._part_usd(c, int(chars), out, batch, role, m)
                 for c, chars, out, batch, role, m in parts
             )
         except NoConnection:
             usd, no_model = None, True
         # None when a job has no model.
         return {"calls": calls, "est_usd": None if no_model else usd, "roles": roles}
+
+    def _part_usd(
+        self, calls: int, chars: int, out: int, batch: bool, role: str, model: str | None
+    ) -> float:
+        """A part's price. complete_many batches only when more than BATCH_THRESHOLD calls miss
+        the cache, and a new run's prompts can't be checked against it, so a batched part is
+        priced at the worst case: at least BATCH_THRESHOLD calls at the full price."""
+        full = self.ai.estimate_usd(chars, out, role=role, model=model)
+        if not batch:
+            return calls * full
+        batched = self.ai.estimate_usd(chars, out, role=role, model=model, batch=True)
+        return max(calls * batched, BATCH_THRESHOLD * full)
 
     def _answer_chars(
         self,

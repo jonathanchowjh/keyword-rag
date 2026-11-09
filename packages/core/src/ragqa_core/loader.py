@@ -133,7 +133,10 @@ class Loader:
             )
         if "skipped" in hub:
             db.log_job(conn, job["id"], f"Hub: {hub['skipped']}; building locally")
-        source, build_result, counts = self._add(spec, items, dataset, progress, published)
+        propose = bool(job["setup"].get("propose", False))
+        source, build_result, counts = self._add(
+            spec, items, dataset, progress, published, propose=propose
+        )
         if hub:
             build_result = {**build_result, "hub": hub}
         # EVERY LOAD RE-READS THE DATASET'S FULL EXCLUDED LISTS, so a later, larger load
@@ -157,17 +160,22 @@ class Loader:
         source: str,
         progress: Callable[[float], None],
         published: dict | None = None,
+        *,
+        propose: bool,
     ) -> tuple[str | None, dict, dict[str, int]]:
         """Add the items, then make the lists or run the build: (where the lists came
         from, the build's result, the add counts). Only the items this adds are built; with
-        a published build that covers them all, it is applied instead, with no AI call."""
+        a published build that covers them all, it is applied instead, with no AI call.
+        `propose`: the job priced a keywords proposal when it was confirmed."""
         makes_lists, building = self.makes_lists(spec), builds(spec)
         todo, _ = self.indexer.changed(spec, items, source)
         share = 0.5 if makes_lists or building else 1.0
         counts = self.indexer.add(spec, items, source, progress=lambda p: progress(share * p))
         lists_source = None
         if makes_lists:
-            lists_source = self._make_lists(spec, items, lambda p: progress(0.5 + 0.5 * p))
+            lists_source = self._make_lists(
+                spec, items, lambda p: progress(0.5 + 0.5 * p), propose=propose
+            )
         if published is not None:
             build_result = self.builder.apply_outputs(
                 spec, published["terms"], published["outputs"]
@@ -219,13 +227,21 @@ class Loader:
         )
 
     def _make_lists(
-        self, spec: CollectionSpec, items: list[Item], progress: Callable[[float], None]
+        self,
+        spec: CollectionSpec,
+        items: list[Item],
+        progress: Callable[[float], None],
+        *,
+        propose: bool,
     ) -> str | None:
         """Give the collection the AI's proposed lists, and say where they came from. With no
         model for keywords it gets none (spec §15: no TF-IDF fallback) and the source is
         None; a paid reply without all three lists is named, so its charge is explained.
-        Either way its lists can be proposed or written later."""
-        if not self.ai.ready("keywords"):
+        Either way its lists can be proposed or written later. ONLY A PRICED PROPOSAL IS
+        MADE: without `propose` (the job was confirmed with no proposal in its price, or was
+        queued before that was recorded) it gets none, as with no model, even when a model
+        for keywords was set up while the job waited."""
+        if not (propose and self.ai.ready("keywords")):
             progress(1.0)  # the step is over, with nothing to re-key
             return None
         try:
@@ -274,17 +290,23 @@ class Loader:
         files = imports.text_files(rows) if fmt in ("text", "zip") else set()
         return built, len(rows) - len(built), files
 
-    def drop_stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> int:
-        """Delete the source's items of these text files that the import no longer yields:
+    def stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> list[str]:
+        """The source's items of these text files that the import no longer yields:
         ids equal to a file name (an old load's one-chunk file) or a chunk id of one (chunk_of),
         less the ids just written. A chunk whose text changed has a new id, so its old one
         goes, and so do an old load's positional ids; a file named `a.md#b.md` is not a chunk
-        of `a.md`. Returns how many went."""
-        stale = [
+        of `a.md`."""
+        if not files:
+            return []
+        return [
             i
             for i in self.indexer.store.source_ids(name, source)
             if i not in written and (i in files or chunk_of(i) in files)
         ]
+
+    def drop_stale_chunks(self, name: str, source: str, files: set[str], written: set[str]) -> int:
+        """Delete what stale_chunks selects. Returns how many went."""
+        stale = self.stale_chunks(name, source, files, written)
         if stale:
             self.indexer.store.delete_items(name, stale)
         return len(stale)
@@ -330,14 +352,20 @@ class Loader:
         return counts, todo
 
     def estimate_import(self, spec: CollectionSpec, setup: dict) -> dict:
-        built, skipped, _ = self._read_upload(spec, setup)
+        built, skipped, files = self._read_upload(spec, setup)
         if setup["kind"] == "questions":
             counts, _ = self.question_counts(
                 db.default_eval_set(self.conn, spec.name) or spec.name, built
             )
-            return {"est_usd": 0.0, "calls": 0, **counts, "skipped": skipped}
+            return {"est_usd": 0.0, "calls": 0, **counts, "skipped": skipped, "removed": 0}
         _, counts = self.indexer.changed(spec, built, setup["source"])
-        return {**self._estimate(spec, built, setup["source"]), **counts, "skipped": skipped}
+        stale = self.stale_chunks(spec.name, setup["source"], files, {i.id for i in built})
+        return {
+            **self._estimate(spec, built, setup["source"]),
+            **counts,
+            "skipped": skipped,
+            "removed": len(stale),
+        }
 
     def run_import(self, job: dict, progress: Callable[[float], None]) -> dict:
         """Import the job's upload as items (indexed under the source) or as questions."""
@@ -348,7 +376,10 @@ class Loader:
         built, skipped, files = self._read_upload(spec, setup)
         lists_source, build_result = None, {}
         if setup["kind"] == "items":
-            lists_source, build_result, counts = self._add(spec, built, setup["source"], progress)
+            propose = bool(setup.get("propose", False))
+            lists_source, build_result, counts = self._add(
+                spec, built, setup["source"], progress, propose=propose
+            )
             # After the add, so an import that fails removes nothing.
             written = {i.id for i in built}
             counts["removed"] = self.drop_stale_chunks(name, setup["source"], files, written)

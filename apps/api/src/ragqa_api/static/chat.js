@@ -1035,7 +1035,7 @@ async function addFile(store, file) {
   const free = up.estimate?.est_usd === 0; // unpriced (null) is not free
   if (!free && !(await askToAdd(file.name, up.estimate ?? { est_usd: null }))) return null;
   $("adding").textContent = `Adding ${file.name}…`;
-  const body = { upload_id: up.upload_id, kind: "items", mapping: up.preview.mapping, source_name: up.source_name, confirm: true };
+  const body = { upload_id: up.upload_id, kind: "items", mapping: up.preview.mapping, source_name: up.source_name, confirm: true, calls: up.estimate?.calls, est_usd: up.estimate?.est_usd };
   const queued = await api(`/collections/${name}/imports`, { method: "POST", body });
   const job = await follow(file.name, queued.job_id);
   if (job.status !== "done") throw new Error(job.error || `the import ${job.status}`);

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- A run's estimate prices a batched part at its worst case, `max(n × batched,
+  50 × full)`, so it is never below what the run spends; a 51–100 call part can show
+  up to about twice its likely cost.
+- Imports and loads decide whether to propose keyword lists when they are queued, so
+  a keywords model set up afterwards doesn't make them spend; a job queued before this
+  change proposes nothing.
+- An items import whose price changed since it was shown is refused with `the price
+  changed since you saw it: check it again`; `POST /collections/{name}/imports` takes
+  an optional `calls` and `est_usd`, and refuses when the estimate now has other
+  `calls` or a higher `est_usd`.
+- The store serializes its calls to embedded Qdrant (`Store.lock`), waits out a
+  rebuild's switch, and reads a store whose search data is gone as empty, not an error.
+- An eval set whose store lost its search data lists every labelled passage as
+  missing instead of failing.
+- **New run** is disabled until the store page has loaded, and `?eval_set=` opens the
+  run form once with the set picked.
+- An items import preview says `N old passages will be removed, since the text
+  changed.`, and the done line adds ` N old passages removed.`
+- Labelling: a mark made while a question's Delete confirm is up withdraws it, and
+  the AI's answer Start can't be clicked twice or during a save or Restore.
+- Three flaky tests no longer race the worker or the run page's poll.
+
 - The Stores page leads with **Start here**: `Connect AI`, `Pick or make a store`,
   `Chat` and `Test with an eval set`, each worked out from what exists (nothing is
   stored). `Connect AI` reads `Optional for Documents: without it, chat gives
