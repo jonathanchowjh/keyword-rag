@@ -11,7 +11,7 @@ from ragqa_core.fakes import fake_ai, fake_hub, fake_models
 from ragqa_core.hub import MANIFEST, Hub, entry_id, sha256, write_entry
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
-from ragqa_core.recipes import build_for
+from ragqa_core.recipes import RECIPES, build_for
 from ragqa_core.store import Store
 from ragqa_core.types import Item
 
@@ -241,3 +241,155 @@ def test_a_load_free_because_of_an_entry_never_builds_locally(tmp_path, monkeypa
         ld.run(job, lambda p: None)
     assert ix.store.ids("aops") == []  # nothing was added
     assert conn.execute("select count(*) from ai_ledger")[0][0] == 0
+
+
+# What build_for gives each recipe, with and without a summary. A Hub entry"s build must
+# equal it to be applied, so a change here leaves every published entry unused.
+BUILD_SETTINGS = {
+    ("worked_examples", False): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "solution",
+        "tagging": "ai",
+        "abstracted": True,
+        "classifier": True,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("worked_examples", True): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "solution",
+        "tagging": "ai",
+        "abstracted": True,
+        "classifier": True,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("reference", False): {
+        "units": "chunks",
+        "added_text": "title_prefix",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": True,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 10,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("reference", True): {
+        "units": "chunks",
+        "added_text": "title_prefix",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": True,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 10,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("paper_2024", False): {
+        "units": "chunks",
+        "added_text": "none",
+        "vocabulary": "lists",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("paper_2024", True): {
+        "units": "chunks",
+        "added_text": "summary",
+        "vocabulary": "lists",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": True,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("documents", False): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": False,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("documents", True): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": False,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("documents_tagged", False): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": False,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+    ("documents_tagged", True): {
+        "units": "whole",
+        "added_text": "none",
+        "vocabulary": "induced",
+        "describes": "text",
+        "tagging": "similarity",
+        "abstracted": False,
+        "classifier": False,
+        "profile": False,
+        "chunk_words": 100,
+        "chunk_overlap": 25,
+        "tag_k": 3,
+        "tag_cutoff": 0.5,
+    },
+}
+
+
+def test_hub_build_settings_are_pinned():
+    assert {
+        (r, s): asdict(build_for(r, s)) for r in RECIPES for s in (False, True)
+    } == BUILD_SETTINGS

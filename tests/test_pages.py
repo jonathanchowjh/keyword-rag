@@ -24,6 +24,7 @@ def test_collections_page_shows_the_answer(page, seeded):
     page.goto(seeded.url + "/")
     row = page.locator('main a.row-link[href="/c/c"]')
     expect(row).to_be_visible()
+    expect(row).to_contain_text("Do keywords help? ")
     expect(row).to_contain_text("Keywords per list")
     expect(row).to_contain_text("run " + seeded.run_id[:8])
     expect(row).to_contain_text("Ready")
@@ -170,10 +171,10 @@ def test_collection_page_shows_verdict_gap_bar_and_runs(page, seeded):
 def test_lists_save_shows_rekey_count_and_keeps_edits(page, seeded):
     seeded.build("lists")
     page.goto(seeded.url + "/c/lists")
-    expect(page.get_by_text("Saving re-keys 3 items, free")).to_be_visible()
+    expect(page.get_by_text("Saving re-keys 3 examples, free")).to_be_visible()
     page.locator("#kw-topic").fill("alpha\nbeta")
     page.get_by_role("button", name="Save lists").click()
-    expect(page.get_by_text("re-keys 3 items", exact=False).first).to_be_visible()
+    expect(page.get_by_text("re-keys 3 examples", exact=False).first).to_be_visible()
     page.wait_for_timeout(3500)  # past one fast refresh
     assert page.locator("#kw-topic").input_value() == "alpha\nbeta"
 
@@ -230,14 +231,35 @@ def test_new_run_estimates_then_starts(page, seeded):
     page.get_by_role("button", name="Estimate").click()
     expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
     page.get_by_role("button", name="Start").click()
-    expect(page.locator("#runs tbody tr")).to_have_count(2)
+    expect(page).to_have_url(re.compile(r"/c/runs/runs/[^/]+$"))
+
+
+def test_a_refused_start_stays_on_the_run_form(page, seeded):
+    seeded.build("nostart", run=True)
+    refusal = "the price changed since you saw it: check it again"
+
+    def refuse(route):
+        if route.request.method == "POST" and route.request.post_data_json.get("confirm"):
+            route.fulfill(status=409, json={"detail": refusal})
+        else:
+            route.fallback()
+
+    page.route("**/eval", refuse)
+    page.expected = ["409"]
+    page.goto(seeded.url + "/c/nostart")
+    page.get_by_role("button", name="New run").click()
+    page.get_by_role("button", name="Estimate").click()
+    page.get_by_role("button", name="Start").click()
+    expect(page.locator("#rf-msg")).to_have_text(refusal)
+    expect(page).to_have_url(seeded.url + "/c/nostart")
+    expect(page.locator("#run-form")).to_be_visible()
 
 
 def test_delete_asks_inline_first(page, seeded):
     page.goto(seeded.url + "/c/c")
-    page.get_by_role("button", name="Delete…").click()
+    page.get_by_role("button", name="Delete store…").click()
     expect(page.get_by_role("button", name="Yes, delete c")).to_be_visible()
-    page.get_by_role("button", name="Keep it").click()
+    page.get_by_role("button", name="Cancel").click()
     expect(page.get_by_role("button", name="Yes, delete c")).to_have_count(0)
 
 
@@ -372,6 +394,35 @@ def test_an_opened_question_shows_every_methods_hits(page, seeded):
     expect(opened.locator("[data-method-hits]").nth(1)).to_contain_text("matched keywords")
 
 
+def test_run_picker_defaults_to_reference(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details").first).to_be_visible()
+    expect(page.locator("#q-method")).to_have_value("hybrid")  # not the first method, kw_individual
+
+
+def test_outcome_is_a_badge(page, seeded):
+    run_id = disagreeing_run(seeded, "badge")
+    page.goto(f"{seeded.url}/c/badge/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#questions details")).to_have_count(40)
+    wrong = page.locator("#questions summary .badge.bad")
+    expect(wrong).to_have_count(1)
+    expect(wrong).to_have_text("Wrong")
+    right = page.locator("#questions summary .badge.ok")
+    expect(right).to_have_count(39)
+    expect(right.first).to_have_text("Right")
+
+
+def test_free_score_is_explained(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Can the free score be trusted here?").click()
+    expect(page.locator("#proxy-box")).to_contain_text(
+        "The free score is measured without the AI answering, so it costs nothing; "
+        "this checks it against the answered score."
+    )
+
+
 def test_where_methods_disagree_filters_the_questions(page, seeded):
     run_id = disagreeing_run(seeded, "dis")
     page.goto(f"{seeded.url}/c/dis/runs/{run_id}")
@@ -405,13 +456,46 @@ def test_run_rerun_estimates_then_starts(page, seeded):
     assert len(httpx.get(f"{seeded.url}/eval", params={"collection": "rerun"}).json()) == 2
 
 
+def test_run_form_and_rerun_send_the_price_they_showed(page, seeded):
+    run_id = seeded.build("rsp", run=True)
+    shown, confirms = [], []
+
+    def record(route):
+        if route.request.method != "POST":
+            return route.fallback()
+        sent = route.request.post_data_json
+        if sent.get("confirm"):
+            confirms.append((sent, shown[-1]))  # the estimate the page drew last
+            return route.continue_()
+        reply = route.fetch()
+        shown.append(reply.json()["estimate"])
+        route.fulfill(response=reply)
+
+    page.route("**/eval", record)
+    page.goto(seeded.url + "/c/rsp")
+    page.get_by_role("button", name="New run").click()
+    page.get_by_role("button", name="Estimate").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    page.get_by_role("button", name="Start").click()
+    page.wait_for_url(re.compile(r"/c/rsp/runs/[^/]+$"))
+    page.goto(f"{seeded.url}/c/rsp/runs/{run_id}")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.get_by_text("AI calls", exact=False)).to_be_visible()
+    page.get_by_role("button", name="Start").click()
+    page.wait_for_url(lambda u: "/runs/" in u and run_id not in u)
+    assert len(confirms) == 2
+    for sent, estimate in confirms:
+        assert (sent["calls"], sent["est_usd"]) == (estimate["calls"], estimate["est_usd"])
+    assert confirms[1][1]["calls"] > 0  # the Re-run answers, so it was priced
+
+
 def test_run_delete_asks_inline_then_deletes(page, seeded):
     run_id = seeded.build("gone", run=True)
     page.goto(f"{seeded.url}/c/gone/runs/{run_id}")
-    page.get_by_role("button", name="Delete…").click()
-    page.get_by_role("button", name="Keep it").click()
+    page.get_by_role("button", name="Delete run…").click()
+    page.get_by_role("button", name="Cancel").click()
     expect(page.get_by_role("button", name="Yes, delete this run")).to_have_count(0)
-    page.get_by_role("button", name="Delete…").click()
+    page.get_by_role("button", name="Delete run…").click()
     page.get_by_role("button", name="Yes, delete this run").click()
     page.wait_for_url(f"{seeded.url}/c/gone")
     assert httpx.get(f"{seeded.url}/eval", params={"collection": "gone"}).json() == []
@@ -444,6 +528,64 @@ def test_resume_without_refusal_shows_the_button(page, seeded):
     assert httpx.get(f"{seeded.url}/jobs/{run_id}").json()["status"] == "interrupted"
 
 
+def test_resume_proposal_and_tags_send_the_price_they_showed(page, seeded):
+    seeded.build("rps")
+    worker = seeded.app.state.worker
+    worker.stop()
+    try:
+        run_id = seeded.queue_eval("rps")
+        interrupt(seeded, run_id)  # stopped before it answered: its resume is priced
+    finally:
+        worker.start()
+    documents_store(seeded, "dps")
+    shown, confirms = [], []
+
+    def record(route):
+        if route.request.method != "POST":
+            return route.fallback()
+        sent = route.request.post_data_json or {}
+        if sent.get("confirm"):
+            confirms.append((sent, shown[-1]))  # the estimate the page drew last
+            return route.continue_()
+        reply = route.fetch()
+        shown.append(reply.json()["estimate"])
+        route.fulfill(response=reply)
+
+    page.route(f"**/jobs/{run_id}/resume", record)
+    page.route("**/collections/rps/keyword-lists/propose", record)
+    page.route("**/collections/dps/keyword-tags", record)
+    ai = seeded.app.state.ai
+    try:
+        page.goto(f"{seeded.url}/c/rps/runs/{run_id}")
+        page.get_by_role("button", name="Resume").click()
+        expect(page.get_by_text("AI call", exact=False)).to_be_visible()
+        page.get_by_role("button", name="Start").click()
+        expect(page.get_by_role("button", name="Start")).to_have_count(0)
+        assert seeded.wait(run_id)["status"] == "done"
+        lists = '{"topic": ["enzymes"], "method": ["assay"], "common": ["rate"]}'
+        fake_replies(ai, lambda p: lists)
+        page.goto(seeded.url + "/c/rps")
+        page.get_by_role("button", name="Propose with AI").click()
+        expect(page.get_by_text("AI call", exact=False)).to_be_visible()
+        page.get_by_role("button", name="Start").click()
+        expect(page.locator("#kw-topic")).to_have_value("enzymes")
+        fake_replies(ai, lambda p: '{"terms": ["alpha", "brine", "cocoa"]}')
+        page.goto(seeded.url + "/c/dps")
+        page.get_by_role("button", name="Add keyword tags").click()
+        confirm = page.locator("#tags-confirm")
+        expect(confirm).to_contain_text("AI call")
+        confirm.get_by_role("button", name="Start").click()
+        expect(confirm.get_by_role("button", name="Start")).to_have_count(0)
+        (job,) = tag_jobs(seeded, "dps")
+        assert seeded.wait(job["id"])["status"] == "done"
+    finally:
+        fake_replies(ai, lambda p: "Answer: A")
+    assert len(confirms) == 3
+    for sent, estimate in confirms:
+        assert (sent["calls"], sent["est_usd"]) == (estimate["calls"], estimate["est_usd"])
+        assert estimate["calls"] > 0  # each was priced
+
+
 @contextmanager
 def worker_stopped(seeded, name):
     """Stop the shared worker and queue an eval on its own collection `name`. Always leaves the
@@ -474,7 +616,7 @@ def test_worker_page_shows_problems_and_queue(page, seeded):
 def test_worker_page_cancels_a_queued_job(page, seeded):
     with worker_stopped(seeded, "wc") as job_id:
         page.goto(seeded.url + "/worker")
-        page.locator("[data-queued-job] button", has_text="Cancel").click()
+        page.locator("[data-queued-job] button", has_text="Stop job").click()
         expect(page.locator("[data-queued-job]")).to_have_count(0)
         expect(page.locator(f"[data-finished-job='{job_id}']")).to_contain_text("Cancelled")
         assert httpx.get(f"{seeded.url}/jobs/{job_id}").json()["status"] == "cancelled"
@@ -521,7 +663,7 @@ def test_one_path_end_to_end(page, seeded):
     page.get_by_label("Name").fill("e2e")
     page.get_by_role("button", name="Create").click()
     expect(page).to_have_url(seeded.url + "/c/e2e")
-    expect(page.get_by_text("No answer yet").first).to_be_visible()
+    expect(page.get_by_text("No score yet: run Hybrid + reranker to get one").first).to_be_visible()
     page.goto(seeded.url + "/worker")
     expect(page.locator("#main")).to_be_visible()
 
@@ -562,6 +704,7 @@ def test_collection_load_shows_its_estimate_and_queues_only_on_start(page, seede
     page.get_by_role("button", name="Start").click()
     expect(page.get_by_text("Queued (job ab12cd)")).to_be_visible()
     assert [b.get("confirm") for b in seen] == [False, True]
+    assert (seen[1]["calls"], seen[1]["est_usd"]) == (51, 0.12)  # what was shown
 
 
 def test_collection_load_that_is_free_queues_at_once(page, seeded):
@@ -579,6 +722,7 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     paying = {"sqa": 0.10, "tq": 0.25}
     seen = {n: route_load(page, n, _reply(paying, n)) for n in ("sqa", "mq", "tq", "sb")}
     page.goto(seeded.url + "/")
+    page.get_by_text("Try a built-in benchmark").click()
     page.get_by_role("button", name="Set up the four benchmark stores").click()
     expect(page.get_by_text("5 AI calls")).to_be_visible()
     expect(page.get_by_text("$0.35")).to_be_visible()
@@ -589,7 +733,26 @@ def test_setup_benchmarks_sums_one_estimate_and_confirms_the_paying_loads(page, 
     expect(page.get_by_text("tq: loading tatqa (queued, job tq012345)")).to_be_visible()
     assert [b.get("confirm") for b in seen["sqa"]] == [None, True]
     assert [b.get("confirm") for b in seen["tq"]] == [None, True]
+    # Each load says the price it showed, not the sum.
+    assert (seen["sqa"][1]["calls"], seen["sqa"][1]["est_usd"]) == (2, 0.10)
+    assert (seen["tq"][1]["calls"], seen["tq"][1]["est_usd"]) == (3, 0.25)
     assert len(seen["mq"]) == 1  # already queued by its first answer, never posted twice
+
+
+def test_setup_benchmarks_with_an_unpriced_load_shows_no_total(page, seeded):
+    names = ("sqa", "mq", "tq", "sb")
+    for n in names:  # the benchmark stores, as the test above may have left them
+        httpx.delete(f"{seeded.url}/collections/{n}")
+    paying = {"sqa": 0.10, "tq": None}  # tq: no model to price it
+    for n in names:
+        route_load(page, n, _reply(paying, n))
+    page.goto(seeded.url + "/")
+    page.get_by_text("Try a built-in benchmark").click()
+    page.get_by_role("button", name="Set up the four benchmark stores").click()
+    expect(page.get_by_text("5 AI calls")).to_be_visible()
+    cost = page.locator("#steps .confirm")
+    expect(cost).to_contain_text("cost unknown: no AI model is set up")
+    expect(cost).not_to_contain_text("$")
 
 
 def test_new_store_form_defaults_to_documents(page, seeded):
@@ -924,7 +1087,7 @@ def test_sidebar_shows_no_problem_text_when_there_are_none(page, seeded):
 # -- console polish, batch E (R58-R60) ---------------------------------------------
 
 
-def test_a_queued_run_waits_for_its_answer_and_offers_only_cancel(page, seeded):
+def test_a_queued_run_waits_for_its_answer_and_offers_only_stop_run(page, seeded):
     with worker_stopped(seeded, "qr") as run_id:
         page.goto(f"{seeded.url}/c/qr/runs/{run_id}")
         expect(page.locator("#answer")).to_contain_text("The answer appears when the run finishes")
@@ -932,9 +1095,60 @@ def test_a_queued_run_waits_for_its_answer_and_offers_only_cancel(page, seeded):
         expect(page.locator("#head")).to_contain_text("– questions")
         expect(page.locator("#head")).not_to_contain_text("0 questions")
         expect(page.get_by_text("does not include")).to_have_count(0)
-        expect(page.get_by_role("button", name="Cancel")).to_be_visible()
-        expect(page.get_by_role("button", name="Delete…")).to_have_count(0)
+        expect(page.get_by_role("button", name="Stop run")).to_be_visible()
+        expect(page.get_by_role("button", name="Delete run…")).to_have_count(0)
         expect(page.get_by_role("button", name="Re-run")).to_have_count(0)
+
+
+def test_buttons_use_one_wording(page, seeded):
+    old = ["Keep it", "Keep editing", "Delete…", "New run", "New chat"]
+
+    def no_old_wording():
+        names = [b.inner_text().strip() for b in page.get_by_role("button").all()]
+        for word in old:
+            assert word not in names, f"{page.url}: a button still reads {word!r}"
+
+    seeded.build("bw")
+    page.goto(seeded.url + "/c/bw")
+    expect(page.get_by_role("button", name="+ New run")).to_be_visible()
+    expect(page.get_by_role("button", name="Delete store…")).to_be_visible()
+    sources = page.locator("#sources tbody tr button")
+    expect(sources.first).to_be_visible()
+    assert {t.strip() for t in sources.all_inner_texts()} == {"Delete source…"}
+    no_old_wording()
+    page.goto(seeded.url + "/e/bw")  # the draft rows of a set are removed unsaved: no confirm
+    no_old_wording()
+    labelling_set(seeded, "bwd")
+    q = {"text": "how long does alpha last?", "gold_ids": []}
+    made = httpx.post(f"{seeded.url}/eval-sets/bwdq/questions", json={"question": q})
+    assert made.status_code == 201, made.text
+    page.goto(seeded.url + "/e/bwdq")
+    saved = page.locator("main button[data-del]")
+    expect(saved.first).to_be_visible()
+    assert {t.strip() for t in saved.all_inner_texts()} == {"Delete question…"}
+    no_old_wording()
+    page.goto(seeded.url + "/")
+    expect(page.get_by_role("button", name="+ New store")).to_be_visible()
+    no_old_wording()
+    page.goto(seeded.url + "/eval-sets")
+    expect(page.get_by_role("button", name="+ New eval set")).to_be_visible()
+    no_old_wording()
+    page.goto(seeded.url + "/chat")
+    expect(page.get_by_role("button", name="+ New chat")).to_be_visible()
+    no_old_wording()
+    done = seeded.build("bwr", run=True)
+    page.goto(f"{seeded.url}/c/bwr/runs/{done}")
+    expect(page.get_by_role("button", name="Delete run…")).to_be_visible()
+    no_old_wording()
+    page.goto(seeded.url + "/chat")
+    with worker_stopped(seeded, "bwq") as run_id:
+        page.goto(f"{seeded.url}/c/bwq/runs/{run_id}")
+        expect(page.get_by_role("button", name="Stop run")).to_be_visible()
+        expect(page.get_by_role("button", name="Cancel")).to_have_count(0)
+        no_old_wording()
+        page.goto(seeded.url + "/worker")
+        expect(page.locator("[data-queued-job] button")).to_have_text("Stop job")
+        expect(page.locator("[data-queued-job] button", has_text="Cancel")).to_have_count(0)
 
 
 def test_a_finished_run_names_only_the_method_it_lacks(page, seeded):
@@ -946,7 +1160,7 @@ def test_a_finished_run_names_only_the_method_it_lacks(page, seeded):
     )
     expect(page.locator("#answer")).not_to_contain_text("and Hybrid")
     expect(page.locator("#gaps")).to_contain_text("no other method has results")
-    expect(page.get_by_role("button", name="Delete…")).to_be_visible()
+    expect(page.get_by_role("button", name="Delete run…")).to_be_visible()
 
 
 def test_verdicts_explain_the_range_and_their_words(page, seeded):
@@ -1307,12 +1521,12 @@ def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_p
     # no keyword lists yet, so the import pays to make them: its price sits beside Import,
     # and the one click on Import queues it
     page.locator("#imp-items-import").click()
-    expect(preview).to_have_text("Added 3 worked examples.")
+    expect(preview).to_have_text(re.compile(r"^Added 3 worked examples\. Next: "))
     jobs_done(seeded, "imp")
     page.reload()
-    row = page.locator("#sources tbody tr", has_text="upload:notes")
+    row = page.locator("#sources tbody tr", has_text="notes (uploaded)")
     expect(row).to_contain_text("3")
-    box = row.get_by_role("checkbox")
+    box = row.get_by_role("checkbox", name="Use notes (uploaded) in retrieval")
     expect(box).to_be_checked()
     box.uncheck()
     expect(box).not_to_be_checked()
@@ -1323,12 +1537,12 @@ def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_p
     page.locator("#sources tbody tr", has_text="hand").get_by_role("checkbox").uncheck()
     expect(page.locator("#sources-msg")).to_contain_text("at least one source must stay on")
     # delete asks first, with the question in the brief's words
-    page.locator("#sources tbody tr", has_text="upload:notes").get_by_role("button").click()
+    page.locator("#sources tbody tr", has_text="notes (uploaded)").get_by_role("button").click()
     expect(page.locator("#sources-confirm")).to_contain_text(
-        "Delete source upload:notes: its 3 items?"
+        "Delete source notes (uploaded): its 3 worked examples?"
     )
-    page.get_by_role("button", name="Yes, delete upload:notes").click()
-    expect(page.locator("#sources tbody tr", has_text="upload:notes")).to_have_count(0)
+    page.get_by_role("button", name="Yes, delete notes (uploaded)").click()
+    expect(page.locator("#sources tbody tr", has_text="notes (uploaded)")).to_have_count(0)
 
 
 def test_an_unpriced_items_import_asks_before_it_queues(page, seeded, tmp_path):
@@ -1403,7 +1617,7 @@ def test_store_import_queues_on_one_click_and_says_what_it_added(page, seeded, t
     preview = page.locator("#imp-items-preview")
     expect(preview).to_contain_text("2 passages")
     page.locator("#imp-items-import").click()
-    expect(preview).to_have_text("Added 2 passages.")
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
     expect(page.get_by_role("button", name="Start")).to_have_count(0)
     assert len(queued) == 1
     assert len(import_jobs(seeded, "oneclick")) == 1
@@ -1439,7 +1653,7 @@ def test_paid_store_import_queues_once_on_a_double_click(page, seeded, tmp_path)
     # before the click, the price and the AI calls sit beside Import
     expect(preview).to_contain_text(f"{price} · {calls} AI call{'' if calls == 1 else 's'}")
     page.locator("#imp-items-import").dblclick()
-    expect(preview).to_have_text("Added 3 worked examples.")
+    expect(preview).to_have_text(re.compile(r"^Added 3 worked examples\. Next: "))
     assert len(queued) == 1
     assert len(import_jobs(seeded, "dbl")) == 1
 
@@ -1572,7 +1786,7 @@ def test_store_import_says_it_waits_behind_the_stores_other_job(page, seeded, tm
     expect(preview).to_contain_text("2 passages")
     page.locator("#imp-items-import").click()
     expect(preview).to_have_text("Waiting for the store's other job…")
-    expect(preview).to_have_text("Added 2 passages.")
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
 
 
 def test_a_stopped_store_import_says_its_status_in_words(page, seeded, tmp_path):
@@ -1599,7 +1813,129 @@ def test_store_import_reimport_counts_what_was_already_there(page, seeded, tmp_p
         upload_and_preview(page, "items", handbook)
         expect(page.locator("#imp-items-import")).to_be_enabled()
         page.locator("#imp-items-import").click()
-        expect(preview).to_have_text(said)
+        expect(preview).to_have_text(re.compile("^" + re.escape(said) + " Next: "))
+
+
+def two_files(tmp_path):
+    """a.md and b.md, two passages each."""
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text(two_sections())
+    b.write_text("# Coral\n\n" + "coral " * 160 + "\n\n# Delta\n\n" + "delta " * 160)
+    return a, b
+
+
+def test_import_several_files(page, seeded, tmp_path):
+    documents_store(seeded, "severalmd", passages=False)
+    a, b = two_files(tmp_path)
+    queued = import_posts(page, "severalmd")
+    page.goto(seeded.url + "/c/severalmd")
+    file = page.locator("#imp-items-file")
+    expect(file).to_have_attribute("multiple", "")
+    file.set_input_files([str(a), str(b)])
+    expect(page.locator("#imp-items-source")).to_be_hidden()  # each file names its own source
+    page.get_by_role("button", name="Preview").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text(re.compile(r"2 files: 4 passages to add · at most (\$|<)"))
+    expect(preview).to_contain_text("a.md: 2 passages")
+    expect(preview).to_contain_text("b.md: 2 passages")
+    button = page.locator("#imp-items-import")
+    expect(button).to_have_count(1)
+    expect(button).to_have_text(re.compile(r"^Import \(at most (\$|<).*\)$"))
+    button.click()
+    expect(preview).to_have_text(re.compile(r"^Added 4 passages\. Next: "))
+    first, second = (json.loads(r.post_data) for r in queued)
+    assert (first["source_name"], second["source_name"]) == ("a", "b")
+    assert "calls" in first and "est_usd" in first
+    assert "calls" not in second and "est_usd" in second  # a price that rose is still refused
+    assert {"upload:a", "upload:b"} <= {s["source"] for s in sources(seeded, "severalmd")}
+
+
+def test_import_several_files_one_refused(page, seeded, tmp_path):
+    documents_store(seeded, "manyref", passages=False)
+    a, _ = two_files(tmp_path)
+    pdf = tmp_path / "c.pdf"
+    pdf.write_bytes(b"%PDF-1.4 not text")
+    queued = import_posts(page, "manyref")
+    page.goto(seeded.url + "/c/manyref")
+    page.expected = ["422"]  # the .pdf is refused, which is the point
+    page.locator("#imp-items-file").set_input_files([str(a), str(pdf)])
+    page.locator("#imp-items-go").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text("c.pdf: A Documents store takes .md and .txt files")
+    expect(preview).to_contain_text("a.md: 2 passages")
+    expect(preview).to_contain_text(re.compile(r"1 file: 2 passages to add · (\$|<)"))
+    page.locator("#imp-items-import").click()
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
+    assert [json.loads(r.post_data)["source_name"] for r in queued] == ["a"]
+
+
+def test_import_several_files_price_rise_stops_there(page, seeded, tmp_path):
+    documents_store(seeded, "rise", passages=False)
+    a, b = two_files(tmp_path)
+    confirms = []
+    changed = "the price changed since you saw it: check it again"
+
+    def route(r):
+        sent = json.loads(r.request.post_data)
+        if sent["confirm"]:
+            confirms.append(sent)
+            if sent["source_name"] == "b" and len(confirms) == 2:
+                return r.fulfill(status=409, json={"detail": changed})
+        r.fallback()
+
+    page.route("**/collections/rise/imports", route)
+    page.goto(seeded.url + "/c/rise")
+    page.expected = ["409"]
+    page.locator("#imp-items-file").set_input_files([str(a), str(b)])
+    page.locator("#imp-items-go").click()
+    button = page.locator("#imp-items-import")
+    expect(button).to_be_enabled()
+    button.click()
+    expect(page.locator("#imp-items-msg")).to_have_text("The price of b.md changed: check it again")
+    preview = page.locator("#imp-items-preview")
+    # a.md is in; b.md is priced again and left for the next click
+    expect(preview).to_contain_text(re.compile(r"1 file: 2 passages to add · (\$|<)"))
+    expect(preview).not_to_contain_text("a.md")
+    expect(button).to_be_enabled()
+    assert len(import_jobs(seeded, "rise")) == 1
+    # the store page shows a.md without a reload
+    expect(page.locator("#sources tbody tr", has_text="a (uploaded)")).to_be_visible()
+    button.click()
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
+    assert [c["source_name"] for c in confirms] == ["a", "b", "b"]
+    assert "calls" in confirms[2]  # now the first file of its own import
+    assert len(import_jobs(seeded, "rise")) == 2
+
+
+def test_import_several_files_one_unpriced(page, seeded, tmp_path):
+    documents_store(seeded, "manyunp", passages=False)
+    a, b = two_files(tmp_path)
+
+    def unpriced(route):
+        body = route.fetch().json()
+        if body["filename"] == "b.md":
+            body["estimate"] = {**body["estimate"], "est_usd": None, "calls": 3}
+        route.fulfill(json=body)
+
+    page.route("**/collections/manyunp/uploads?*", unpriced)
+    queued = import_posts(page, "manyunp")
+    page.goto(seeded.url + "/c/manyunp")
+    page.locator("#imp-items-file").set_input_files([str(a), str(b)])
+    page.locator("#imp-items-go").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text("Can't price b.md: set up a model in Settings")
+    expect(page.locator("#imp-items-import")).to_be_disabled()
+    assert queued == []
+
+
+def test_mcq_import_takes_one_file(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "onefile", "qa_type": "mcq"})
+    page.goto(seeded.url + "/c/onefile")
+    file = page.locator("#imp-items-file")
+    expect(file).to_be_visible()
+    expect(file).not_to_have_attribute("multiple", "")
+    expect(page.locator("#imp-items-source")).to_be_visible()
+    expect(page.locator("#imp-items-go")).to_have_text("Preview")
 
 
 def test_import_questions_on_the_eval_set_page_then_include_leaked(page, seeded, tmp_path):
@@ -1640,7 +1976,9 @@ def test_own_science_collection_offers_import_and_benchmark(page, seeded, tmp_pa
     # no keyword lists yet, so the import pays to make them: its price sits beside Import,
     # and the one click on Import queues it
     page.locator("#imp-items-import").click()
-    expect(page.locator("#imp-items-preview")).to_have_text("Added 2 worked examples.")
+    expect(page.locator("#imp-items-preview")).to_have_text(
+        re.compile(r"^Added 2 worked examples\. Next: ")
+    )
     jobs_done(seeded, "own")
     page.reload()
     expect(page.locator("#imp-items-file")).to_be_visible()
@@ -1884,7 +2222,7 @@ def test_run_page_lists_what_the_run_left_out(page, seeded):
     page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
     page.get_by_text("Setup this ran with").click()
     left = page.locator("#setup")
-    expect(left).to_contain_text("Retrieval left out: upload:notes")
+    expect(left).to_contain_text("Retrieval left out: notes (uploaded)")
     expect(left).to_contain_text("2 questions' evidence is switched off")
     expect(left).to_contain_text("3 leaked questions left out")
 
@@ -1948,6 +2286,57 @@ def test_settings_page_says_what_each_job_does_and_what_works_without_ai(page, s
     expect(
         page.get_by_text("Used by chat and POST /chat, and by POST /query when no method is given.")
     ).to_be_visible()
+
+
+def test_settings_jobs_use_labels(page, seeded):
+    page.goto(seeded.url + "/settings")
+    labels = {
+        "default": "Default model",
+        "answer": "Answers",
+        "summary": "Summaries",
+        "keywords": "Keyword lists and tags",
+        "query": "Query keywords",
+        "rewrite": "Follow-up rewriting",
+    }
+    for role, label in labels.items():
+        row = page.locator(f'#roles label:has([data-role="{role}"])')
+        expect(row).to_contain_text(label)
+        expect(row.locator("select option").first).to_have_text(
+            "none chosen" if role == "default" else "same as default"
+        )
+    expect(page.get_by_text("Each change is saved at once.")).to_be_visible()
+
+
+def test_rewrite_note_follows_default(page, seeded):
+    def resolved(rewrite):
+        def handler(route):
+            body = route.fetch().json()
+            route.fulfill(json={**body, "resolved": {**body["resolved"], "rewrite": rewrite}})
+
+        return handler
+
+    note = page.locator(
+        '#search label:has([name="rewrite"]) .muted', has_text="needs a rewrite model"
+    )
+    page.route("**/ai", resolved(False))
+    page.goto(seeded.url + "/settings")
+    expect(page.locator('#search [name="rewrite"]')).to_be_attached()
+    expect(note).to_be_visible()
+    page.unroute("**/ai")
+    page.route("**/ai", resolved(True))
+    page.reload()
+    expect(page.locator('#search [name="rewrite"]')).to_be_attached()
+    expect(note).to_be_hidden()
+
+
+def test_settings_save_buttons_name_their_part(page, seeded):
+    page.goto(seeded.url + "/settings")
+    expect(page.get_by_role("button", name="Save budget", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Save search defaults", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Save prices", exact=True).first).to_be_visible()
+    expect(page.get_by_role("button", name="Save", exact=True)).to_have_count(0)
+    expect(page.get_by_role("heading", name="Add a connection")).to_be_visible()
+    expect(page.get_by_label("Connection id (a short name you choose)")).to_be_visible()
 
 
 def test_settings_says_why_rerank_is_off_by_default(page, seeded):
@@ -2096,7 +2485,7 @@ def test_a_fetched_model_starts_at_zero_and_takes_a_listed_typed_or_no_price(
         with page.expect_response(
             lambda r: r.request.method == "PUT" and "remote/gpt-new" in r.url
         ):
-            model.get_by_role("button", name="Save").click()
+            model.get_by_role("button", name="Save prices").click()
         return next(m for m in ai_state(seeded)["models"] if m["ref"] == "remote/gpt-new")
 
     price.select_option(label="Haiku 5.5 rates: $0.1 in, $0.5 out")
@@ -2127,7 +2516,7 @@ def test_half_a_price_is_not_sent_and_typing_is_kept(page, seeded, monkeypatch):
     model.locator("select[name=price]").select_option(label="Enter by hand…")
     model.locator("input[name=price_in]").fill("1")
     model.locator("input[name=price_out]").fill("")  # the boxes start at the price in force
-    model.get_by_role("button", name="Save").click()
+    model.get_by_role("button", name="Save prices").click()
     expect(page.locator("#msg")).to_contain_text("Give both prices")
     assert model.locator("input[name=price_in]").input_value() == "1"
     assert (
@@ -2142,13 +2531,43 @@ def test_env_connection_has_no_remove(page, seeded):
     page.goto(seeded.url + "/settings")
     env = page.locator('#connections [data-connection="anthropic"]')
     expect(env).to_be_visible()
-    expect(env.get_by_role("button", name="Remove")).to_have_count(0)
+    expect(env.get_by_role("button", name="Delete connection…")).to_have_count(0)
     add_connection(page, seeded, "OpenRouter", "removable", key="sk-or-TEST123456")
     expect(
         page.locator('#connections [data-connection="removable"]').get_by_role(
-            "button", name="Remove"
+            "button", name="Delete connection…"
         )
     ).to_have_count(1)
+
+
+def test_delete_connection_asks_first(page, seeded):
+    row = add_connection(page, seeded, "OpenRouter", "askdel", key="sk-or-TEST123456")
+    row.get_by_role("button", name="Delete connection…").click()
+    assert any(c["id"] == "askdel" for c in ai_state(seeded)["connections"])
+    row.get_by_role("button", name="Cancel").click()
+    expect(row.locator(".ask")).to_be_empty()
+    row.get_by_role("button", name="Delete connection…").click()
+    row.get_by_role("button", name="Yes, delete").click()
+    expect(page.locator('#connections [data-connection="askdel"]')).to_have_count(0)
+    assert not any(c["id"] == "askdel" for c in ai_state(seeded)["connections"])
+
+
+def test_delete_connection_in_use_says_why(page, seeded):
+    page.expected = ["409"]
+    before = ai_state(seeded)["roles"].get("answer")
+    add_connection(page, seeded, "OpenRouter", "inuse", key="sk-or-TEST123456")
+    page.request.post(seeded.url + "/ai/connections/inuse/models", data={"model_id": "m"})
+    page.request.put(seeded.url + "/ai/roles/answer", data={"model": "inuse/m"})
+    try:
+        page.reload()
+        row = page.locator('#connections [data-connection="inuse"]')
+        row.get_by_role("button", name="Delete connection…").click()
+        row.get_by_role("button", name="Yes, delete").click()
+        expect(row.locator(".ask .err")).to_contain_text("is used by answer")
+        assert any(c["id"] == "inuse" for c in ai_state(seeded)["connections"])
+    finally:  # seeded is module-scoped: leave it as found
+        page.request.put(seeded.url + "/ai/roles/answer", data={"model": before})
+        page.request.delete(seeded.url + "/ai/connections/inuse")
 
 
 def test_empty_save_key_leaves_the_key_alone(page, seeded):
@@ -2258,6 +2677,19 @@ def test_nav_says_stores_and_eval_sets(page, seeded):
     expect(page.locator("main h1")).to_have_text("Stores")
 
 
+def test_nav_lists_eval_sets(page, seeded):
+    mcq_set(seeded, "navset", 1)
+    page.goto(seeded.url + "/e/navset")
+    expect(page.locator('#side a.sub[href="/e/navset"]')).to_have_text("navset")
+    expect(page.locator('#side a.sub[href="/e/c"]')).to_have_text("c")  # seeded; the store c too
+    expect(page.locator('#side a.sub[href="/e/navset"]')).to_have_class("sub active")
+    expect(page.locator('#side a.sub[href="/e/c"]')).not_to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator('#side a.sub[href="/c/c"]')).to_have_class("sub")
+    expect(page.locator('#side a[href="/eval-sets"]')).not_to_have_class(re.compile(r"\bactive\b"))
+    page.goto(seeded.url + "/eval-sets")
+    expect(page.locator('#side a[href="/eval-sets"]')).to_have_class(re.compile(r"\bactive\b"))
+
+
 def test_create_store_form_offers_the_recipes(page, seeded):
     page.goto(seeded.url + "/")
     page.get_by_role("button", name="+ New store").click()
@@ -2295,7 +2727,7 @@ def test_an_empty_documents_store_offers_no_benchmark(page, seeded):
 
 NEEDS_TAGS = "needs keyword tags: Add keyword tags on the store page"
 NOT_BUILT = (
-    "Not built. Keyword tags let keyword_rag search this store: an AI proposes a vocabulary "
+    "Not built. Keyword tags let Keyword-RAG search this store: an AI proposes a vocabulary "
     "from your passages, then tags each passage by similarity."
 )
 
@@ -2341,9 +2773,12 @@ def test_documents_store_imports_md_without_a_mapping_table(page, seeded, tmp_pa
     expect(preview).to_contain_text("alpha alpha")  # a sample of the passages
     expect(preview.locator("select[data-field]")).to_have_count(0)
     page.locator("#imp-items-import").click()
-    expect(preview).to_have_text("Added 2 passages.")
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
     jobs_done(seeded, "dmd")
     assert httpx.get(f"{seeded.url}/collections/dmd").json()["count"] == 2
+    httpx.post(
+        f"{seeded.url}/eval-sets", json={"name": "dmd", "qa_type": "documents"}
+    )  # New run waits for a set
     page.reload()
     expect(page.get_by_text("2 passages.", exact=True)).to_be_visible()
     expect(page.locator("#head .pill")).to_have_text("Ready")
@@ -2427,7 +2862,7 @@ def test_keyword_tags_section_shows_progress_and_resume(page, seeded):
     assert resumes == [{"confirm": False}]  # the click only asks for the estimate
     confirm.get_by_role("button", name="Start").click()
     expect(confirm.get_by_role("button", name="Start")).to_have_count(0)
-    assert resumes == [{"confirm": False}, {"confirm": True}]
+    assert resumes == [{"confirm": False}, {"confirm": True, "calls": 3, "est_usd": 0.02}]
 
 
 def test_keyword_tags_message_goes_when_the_state_changes(page, seeded):
@@ -2450,6 +2885,9 @@ def test_keyword_tags_message_goes_when_the_state_changes(page, seeded):
 
 def test_run_form_says_why_keyword_rag_is_off(page, seeded):
     documents_store(seeded, "dwhy", passages=False)
+    httpx.post(
+        f"{seeded.url}/eval-sets", json={"name": "dwhy", "qa_type": "documents"}
+    )  # New run waits for a set
     page.goto(seeded.url + "/c/dwhy")
     page.get_by_role("button", name="New run").click()
     box = page.locator("input[name=method][value=keyword_rag]")
@@ -2504,11 +2942,31 @@ def test_worker_page_names_a_tag_build_and_resumes_it(page, seeded):
     assert resumes == [{"confirm": False}]
 
 
+def test_stores_page_leads_with_new_store(page, seeded):
+    page.goto(seeded.url + "/")
+    assert page.title().startswith("keyword-rag")
+    expect(page.locator("#side")).to_contain_text("keyword-rag")
+    expect(page.locator("#benchmarks")).not_to_have_attribute("open", "")
+    expect(page.get_by_role("button", name="Add scienceqa")).to_be_hidden()
+    expect(page.locator("#defaults button")).not_to_have_count(0)  # drawn, only folded away
+    order = page.evaluate(
+        """() => {
+          const all = [...document.querySelectorAll("main button")]
+          .map((b) => b.textContent.trim());
+          return [all.indexOf("+ New store"), all.findIndex((t) => t.startsWith("Add scienceqa"))];
+        }"""
+    )
+    assert 0 <= order[0] < order[1]
+    page.get_by_text("Try a built-in benchmark").click()
+    expect(page.get_by_role("button", name="Add scienceqa")).to_be_visible()
+
+
 def test_add_a_default_store_lists_every_dataset_and_loads_one(page, seeded):
     datasets = httpx.get(f"{seeded.url}/catalog").json()["datasets"]
     seen = route_load(page, "gpqa", lambda b: (202, {"job_id": "dd11ee22"}))
     page.goto(seeded.url + "/")
-    expect(page.get_by_role("heading", name="Add a default store")).to_be_visible()
+    expect(page.get_by_role("heading", name="Make a store from your documents")).to_be_visible()
+    page.get_by_text("Try a built-in benchmark").click()
     buttons = page.locator("#defaults button")
     expect(buttons).to_have_count(len(datasets))
     expect(page.locator("#defaults")).to_contain_text("Exam multiple choice")
@@ -2529,17 +2987,21 @@ def test_add_a_default_store_asks_before_it_spends(page, seeded):
         ),
     )
     page.goto(seeded.url + "/")
+    page.get_by_text("Try a built-in benchmark").click()
     page.get_by_role("button", name="Add tatqa").click()
     expect(page.get_by_text("7 AI calls")).to_be_visible()
     assert [b.get("confirm") for b in seen] == [False]
     page.locator("#defaults-confirm").get_by_role("button", name="Start").click()
     expect(page.get_by_text("Queued (job ff00aa11)")).to_be_visible()
+    assert [b.get("confirm") for b in seen] == [False, True]
+    assert (seen[1]["calls"], seen[1]["est_usd"]) == (7, 0.2)  # what was shown
 
 
 def test_add_a_default_store_shows_a_hub_build_as_free(page, seeded):
     estimate = {"est_usd": 0, "items": 5, "calls": 0, "hub": {"entry": "x/y"}}
     route_load(page, "musique", lambda b: (200, {"estimate": estimate}))
     page.goto(seeded.url + "/")
+    page.get_by_text("Try a built-in benchmark").click()
     page.get_by_role("button", name="Add musique").click()
     expect(page.locator("#defaults-confirm")).to_contain_text("Free")
 
@@ -2585,7 +3047,7 @@ def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
     row.locator("[data-field=text]").fill("enzyme question zero, reworded")
     row.get_by_role("button", name="Done").click()
     q1 = rows.filter(has=page.locator("td", has_text="q1")).first
-    q1.get_by_role("button", name="Delete").click()
+    q1.get_by_role("button", name="Delete", exact=True).click()
     page.get_by_role("button", name="Add question").click()
     fresh = rows.last
     fresh.locator("[data-field=text]").fill("a brand new question")
@@ -2675,7 +3137,7 @@ def test_run_form_picks_an_eval_set_of_the_store_type_and_shows_its_counts(page,
     expect(page.locator("#rf-split option[value=full]")).to_have_text("All (3)")
     page.get_by_role("button", name="Estimate").click()
     page.get_by_role("button", name="Start").click()
-    expect(page.locator("#runs tbody tr")).to_have_count(1)
+    expect(page).to_have_url(re.compile(r"/c/rf1/runs/[^/]+$"))
     runs = httpx.get(f"{seeded.url}/eval?collection=rf1").json()
     assert [r["eval_set"] for r in runs] == ["rf2"]
 
@@ -2860,6 +3322,7 @@ def test_a_default_store_that_exists_is_opened_not_added_again(page, seeded):
     r = httpx.post(f"{seeded.url}/collections", json={"name": "scienceqa", "qa_type": "mcq"})
     assert r.status_code == 201, r.text
     page.goto(seeded.url + "/")
+    page.get_by_text("Try a built-in benchmark").click()
     expect(page.locator("#defaults").get_by_role("link", name="Open scienceqa")).to_have_attribute(
         "href", "/c/scienceqa"
     )
@@ -3026,18 +3489,18 @@ def test_new_chat_picks_stores_and_lists_saved_chats(page, seeded):
 
     # Delete asks first.
     row = page.locator("#chat-list li", has=page.locator(f'a[href="#{second}"]'))
-    row.get_by_role("button", name="Delete").click()
+    row.get_by_role("button", name="Delete chat").click()
     expect(page.get_by_text("Delete chat the second of two saved chats?")).to_be_visible()
-    page.get_by_role("button", name="Keep it").click()
+    page.get_by_role("button", name="Cancel").click()
     expect(page.get_by_text("Delete chat the second of two saved chats?")).to_have_count(0)
-    row.get_by_role("button", name="Delete").click()
+    row.get_by_role("button", name="Delete chat").click()
     page.get_by_role("button", name="Yes, delete").click()
     expect(chat_link(page, second)).to_have_count(0)
     assert httpx.get(f"{seeded.url}/chats/{second}").status_code == 404
     expect(page.locator("#log .user")).to_have_text("the first of two saved chats")  # still open
     # Deleting the open chat closes it.
     open_row = page.locator("#chat-list li", has=page.locator(f'a[href="#{first}"]'))
-    open_row.get_by_role("button", name="Delete").click()
+    open_row.get_by_role("button", name="Delete chat").click()
     page.get_by_role("button", name="Yes, delete").click()
     expect(chat_link(page, first)).to_have_count(0)
     expect(page.locator("#log .msg")).to_have_count(0)
@@ -3364,7 +3827,7 @@ def test_chat_page_sends_shows_citations_and_cost(page, seeded):
     first = reply_box.locator(".sources li").first
     expect(first).to_contain_text("enzyme-item")
     expect(first).to_contain_text("hand")
-    expect(first.locator(".what")).to_have_text("[1] enzyme-item · hand · c")
+    expect(first.locator(".what")).to_have_text("[1] enzyme-item · added by hand · c")
     expect(first.locator("details")).to_have_count(1)  # longer than 300 characters
     assert len(first.locator("summary").inner_text()) <= 305
     first.locator("summary").click()
@@ -3397,14 +3860,15 @@ def test_chat_links_each_number_of_a_grouped_citation(page, seeded):
     expect(page.locator("#log li:target")).to_contain_text("other")
 
 
-def test_chat_sources_name_the_part_of_a_split_file(page, seeded):
+def test_chat_sources_name_the_file_and_part_of_a_split_file(page, seeded):
     part = {"n": 1, "id": "x.md#2", "text": "x.md\n\nbrine", "source": "upload:x", "store": "c"}
-    citations = [{**part, "part": 2, "parts": 3}, CHAT_ATTEMPT["citations"][1]]
+    citations = [{**part, "file": "x.md", "part": 2, "parts": 3}, CHAT_ATTEMPT["citations"][1]]
     chat_route(page, lambda route: route.fulfill(json=chat_message(route, citations=citations)))
     open_chat(page, seeded)
     chat_ask(page, "parts?")
     sources_ = page.locator("#log .reply .sources li .what")
-    expect(sources_.first).to_have_text("[1] x.md#2 · upload:x · part 2 of 3 · c")
+    expect(sources_.first).to_have_text("[1] x.md · part 2 of 3 · x (uploaded) · c")
+    expect(sources_.first.locator('[title="x.md#2"]')).to_have_text("x.md · part 2 of 3")
     expect(sources_.nth(1)).not_to_contain_text("part")
 
 
@@ -3654,7 +4118,7 @@ def test_added_file_note_survives_a_reload(page, seeded, tmp_path):
     expect(note).to_have_text("Added kept.md to kept-notes")
     page.wait_for_function("localStorage.getItem('chat-notes:gone') === null")
     row = page.locator("#chat-list li", has=page.locator(f'a[href="#{chat_id}"]'))
-    row.get_by_role("button", name="Delete").click()
+    row.get_by_role("button", name="Delete chat").click()
     page.get_by_role("button", name="Yes, delete").click()
     expect(chat_link(page, chat_id)).to_have_count(0)
     assert page.evaluate(f"localStorage.getItem('chat-notes:{chat_id}')") is None
@@ -3728,7 +4192,7 @@ def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_store(page, se
         )
         open_chat(page, seeded, ("c", "paid2"))
         chip = page.locator('#chips .chip[data-store="paid2"]')
-        expect(chip).to_contain_text("0 items")
+        expect(chip).to_contain_text("0 worked examples")
         page.locator("#doc-store").select_option("paid2")
         path = tmp_path / "pay.txt"
         path.write_text("coral reefs bleach when oceans warm")
@@ -3743,7 +4207,7 @@ def test_chat_upload_that_spends_adds_after_add_and_refreshes_the_store(page, se
         expect(page.locator("#log")).to_contain_text("Added pay.txt")
         assert [s["source"] for s in sources(seeded, "paid2")] == ["upload:pay"]
         # the store is looked up again after the add, so its chip shows the new item
-        expect(chip).to_contain_text("1 item")
+        expect(chip).to_contain_text("1 worked example")
         assert len(details) == 2
     finally:
         ai.set_role("keywords", None)
@@ -3879,7 +4343,9 @@ def test_retrieval_step_shows_counts_rerank_scores_and_notes(page, seeded):
     expect(step.locator(".reranked")).to_have_count(0)  # merged by rank: no reranker named
     expect(step.locator(".pooled")).to_have_text("Pooled 20 of 23 (Rerank up to 20)")
     passage = step.locator("#ev-1-1-1")
-    expect(passage.locator(".what")).to_have_text("[1] enzyme-item · c · hand · rank 1 in c")
+    expect(passage.locator(".what")).to_have_text(
+        "[1] enzyme-item · c · added by hand · rank 1 in c"
+    )
     expect(passage.locator("details")).to_have_count(1)  # longer than 300 characters
     assert len(passage.locator("summary").inner_text()) <= 305
 
@@ -3906,7 +4372,7 @@ def test_retrieval_step_shows_counts_rerank_scores_and_notes(page, seeded):
     expect(reranked).to_contain_text("Reranked against: the rate?")
     expect(reranked).to_contain_text("by jina-reranker-v1-tiny-en")
     expect(two.locator("#ev-2-1-1 .what")).to_have_text(
-        "[1] enzyme-item · c · hand · rank 1 in c · rerank 0.77"
+        "[1] enzyme-item · c · added by hand · rank 1 in c · rerank 0.77"
     )
     expect(two.locator(".notes")).to_have_count(0)
     chat_ask(page, "asked")
@@ -4472,7 +4938,7 @@ def test_store_page_shows_rebuild_progress_cancel_and_a_stopped_switch(page, see
     page.goto(seeded.url + "/c/rbp")
     box = page.locator("#embedding")
     expect(box).to_contain_text(f"Rebuilding with {REBUILD_MODEL}: 40%")
-    box.get_by_role("button", name="Cancel").click()
+    box.get_by_role("button", name="Stop job").click()
     expect(box.locator("select")).to_be_disabled()
     expect(box).to_contain_text("Wait for the rebuilding job to finish.")
     assert posts and posts[0][0] == ["job-1", "cancel"]
@@ -4494,7 +4960,7 @@ def test_store_page_shows_rebuild_progress_cancel_and_a_stopped_switch(page, see
     current["rebuild"] = {**rebuild, "switching": True}
     page.goto(seeded.url + "/c/rbp")
     expect(box).to_contain_text(f"Switching to {REBUILD_MODEL}…")
-    expect(box.get_by_role("button", name="Cancel")).to_have_count(0)
+    expect(box.get_by_role("button", name="Stop job")).to_have_count(0)
 
 
 def test_new_store_form_says_which_model_it_embeds_with(page, seeded):
@@ -4731,12 +5197,15 @@ def labelling_set(seeded, name, store=True):
     assert r.status_code == 201, r.text
 
 
+BUTTON = {"y": "Right", "n": "Wrong"}  # a mark, "y" or "n", as its button reads
+
+
 def mark(passage, which):
-    passage.get_by_role("button", name=which, exact=True).click()
+    passage.get_by_role("button", name=BUTTON[which], exact=True).click()
 
 
 def pressed(passage, which):
-    return passage.get_by_role("button", name=which, exact=True)
+    return passage.get_by_role("button", name=BUTTON[which], exact=True)
 
 
 def test_documents_eval_set_labels_a_question_and_saves_it(page, seeded):
@@ -4747,7 +5216,7 @@ def test_documents_eval_set_labels_a_question_and_saves_it(page, seeded):
     panel.get_by_role("button", name="Find passages").click()
     passages = panel.locator("li[data-passage]")
     expect(passages).to_have_count(2)
-    expect(passages.first).to_contain_text("x.md, part 1 of 2")
+    expect(passages.first).to_contain_text("x.md · part 1 of 2")
     shown = panel.inner_text()
     for word in ("vector", "keyword", "hybrid"):
         assert word not in shown.lower(), word
@@ -4844,7 +5313,7 @@ def test_labelling_page_searches_the_store_for_a_missing_passage(page, seeded):
     expect(found).to_contain_text("From your search")
     expect(found.locator("li[data-passage]")).to_have_count(1)
     hit = found.locator(f'li[data-passage="{second["id"]}"]')
-    expect(hit).to_contain_text("x.md, part 2 of 2")
+    expect(hit).to_contain_text("x.md · part 2 of 2")
     mark(hit, "y")
     panel.get_by_role("button", name="Save question").click()
     expect(page.locator("#lab-msg")).to_contain_text("Saved as version")
@@ -4944,7 +5413,7 @@ def test_documents_eval_set_page_flags_missing_and_unlabelled_questions(page, se
     gone = page.locator(f'#lab-panel li[data-passage="{lost}"]')
     expect(gone).to_contain_text(lost)
     expect(pressed(gone, "y")).to_have_attribute("aria-pressed", "true")
-    q2.get_by_role("button", name="Delete").click()
+    q2.get_by_role("button", name="Delete question…").click()
     expect(main.get_by_text("Delete this question and its marks?")).to_be_visible()
     assert len(httpx.get(f"{seeded.url}/eval-sets/lab7q").json()["questions"]) == 2
     page.get_by_role("button", name="Yes, delete it").click()
@@ -5000,7 +5469,7 @@ def test_labelling_a_save_in_flight_keeps_each_question_its_own(page, seeded):
         rows.filter(has_text="brine second?").get_by_role("button", name="Label")
     ).to_be_disabled()
     expect(
-        rows.filter(has_text="brine second?").get_by_role("button", name="Delete")
+        rows.filter(has_text="brine second?").get_by_role("button", name="Delete question…")
     ).to_be_disabled()
     expect(panel.get_by_role("button", name="Save question")).to_be_disabled()
     expect(panel.get_by_role("button", name="Find passages")).to_be_disabled()
@@ -5085,7 +5554,7 @@ def test_labelling_label_on_another_row_asks_before_dropping_unsaved_marks(page,
     notice = panel.get_by_text(UNSAVED, exact=True)
     expect(notice).to_be_visible()
     expect(question).to_have_value("alpha first?")
-    panel.get_by_role("button", name="Keep editing").click()
+    panel.get_by_role("button", name="Cancel").click()
     expect(notice).to_have_count(0)
     expect(question).to_have_value("alpha first?")
     expect(pressed(passages.first, "y")).to_have_attribute("aria-pressed", "true")
@@ -5109,16 +5578,16 @@ def test_labelling_delete_asks_before_dropping_unsaved_marks(page, seeded):
     rows.filter(has_text="alpha first?").get_by_role("button", name="Label").click()
     expect(passages).to_have_count(2)
     mark(passages.first, "y")
-    rows.filter(has_text="brine second?").get_by_role("button", name="Delete").click()
+    rows.filter(has_text="brine second?").get_by_role("button", name="Delete question…").click()
     notice = panel.get_by_text(UNSAVED, exact=True)
     expect(notice).to_be_visible()
     expect(confirm).to_have_count(0)
-    panel.get_by_role("button", name="Keep editing").click()
+    panel.get_by_role("button", name="Cancel").click()
     expect(notice).to_have_count(0)
     expect(confirm).to_have_count(0)
     expect(pressed(passages.first, "y")).to_have_attribute("aria-pressed", "true")
     assert len(httpx.get(f"{seeded.url}/eval-sets/lab13q").json()["questions"]) == 2
-    rows.filter(has_text="brine second?").get_by_role("button", name="Delete").click()
+    rows.filter(has_text="brine second?").get_by_role("button", name="Delete question…").click()
     panel.get_by_role("button", name="Discard them").click()
     expect(confirm).to_be_visible()
     page.get_by_role("button", name="Yes, delete it").click()
@@ -5136,11 +5605,11 @@ def test_labelling_a_mark_made_after_delete_was_asked_withdraws_the_delete(page,
     passages = panel.locator("li[data-passage]")
     row.get_by_role("button", name="Label").click()
     expect(passages).to_have_count(2)
-    row.get_by_role("button", name="Delete").click()
+    row.get_by_role("button", name="Delete question…").click()
     expect(page.locator("main").get_by_text("Delete this question and its marks?")).to_be_visible()
     mark(passages.first, "y")
     expect(page.locator("#lab-del")).to_be_empty()
-    row.get_by_role("button", name="Delete").click()
+    row.get_by_role("button", name="Delete question…").click()
     expect(panel.get_by_text(UNSAVED, exact=True)).to_be_visible()
     assert len(httpx.get(f"{seeded.url}/eval-sets/lab14q").json()["questions"]) == 1
 
@@ -5219,14 +5688,15 @@ def test_labelling_ai_answer_asks_before_it_spends(page, seeded):
     expect(answer).to_be_empty()
     question = "How long is leave? (ai1)"
     assert sent == [{"question": question, "passages": [first], "confirm": False}]
+    shown = httpx.post(f"{seeded.url}/eval-sets/ai1q/answer", json=sent[0]).json()["estimate"]
     with ai_calls(seeded) as purposes:
         start.click()
         expect(answer.get_by_text("Is this the right answer?", exact=True)).to_be_visible()
         expect(answer.locator(".full")).to_have_text("Answer: A")
     assert purposes == ["reference_answer"]
-    assert sent[1:] == [{"question": question, "passages": [first], "confirm": True}]
+    assert sent[1:] == [{"question": question, "passages": [first], "confirm": True, **shown}]
     expect(page.locator("#lab-ai-confirm")).to_be_empty()
-    answer.get_by_role("button", name="y", exact=True).click()
+    answer.get_by_role("button", name="Right", exact=True).click()
     expect(panel.get_by_label(REFERENCE)).to_have_value("Answer: A")
     expect(page.locator("#lab-ai-msg")).to_have_text(ADDED)
     expect(answer).to_be_empty()
@@ -5235,6 +5705,21 @@ def test_labelling_ai_answer_asks_before_it_spends(page, seeded):
     expect(page.locator("#lab-ai-msg")).to_have_text("")  # it is kept now
     got = httpx.get(f"{seeded.url}/eval-sets/ai1q").json()["questions"]
     assert [q["gold_answers"] for q in got] == [["Answer: A"]]
+
+
+def test_reference_answer_sends_the_price_it_showed(page, seeded):
+    labelling_set(seeded, "ai10")
+    panel, passages, sent = ai_panel(page, seeded, "ai10", "How long is leave? (ai10)")
+    mark(passages.first, "y")
+    with page.expect_response("**/eval-sets/ai10q/answer") as priced:
+        panel.get_by_role("button", name=ASK_AI).click()
+    estimate = priced.value.json()["estimate"]
+    assert estimate["calls"] == 1 and estimate["est_usd"] > 0
+    page.locator("#lab-ai-confirm").get_by_role("button", name="Start").click()
+    expect(page.locator("#lab-ai-answer .full")).to_have_text("Answer: A")
+    confirming = sent[1]
+    assert confirming["confirm"] is True
+    assert (confirming["calls"], confirming["est_usd"]) == (estimate["calls"], estimate["est_usd"])
 
 
 def test_labelling_ai_answer_n_keeps_nothing_and_survives_a_mark(page, seeded):
@@ -5247,7 +5732,7 @@ def test_labelling_ai_answer_n_keeps_nothing_and_survives_a_mark(page, seeded):
     expect(answer.locator(".full")).to_have_text("Answer: A")
     mark(passages.nth(1), "n")
     expect(answer.locator(".full")).to_have_text("Answer: A")
-    answer.get_by_role("button", name="n", exact=True).click()
+    answer.get_by_role("button", name="Wrong", exact=True).click()
     expect(answer).to_be_empty()
     expect(panel.get_by_label(REFERENCE)).to_have_value("")
     panel.get_by_role("button", name="Save question").click()
@@ -5262,7 +5747,7 @@ def test_labelling_ai_answer_waits_for_a_y_mark(page, seeded):
     ask = panel.get_by_role("button", name=ASK_AI)
     expect(ask).to_be_visible()
     expect(
-        page.get_by_text("The AI answers from the passages marked y.", exact=True)
+        page.get_by_text("The AI answers from the passages marked Right.", exact=True)
     ).to_be_visible()
     expect(ask).to_be_disabled()
     mark(passages.first, "n")
@@ -5321,8 +5806,8 @@ def test_labelling_ai_answer_waits_for_a_save(page, seeded):
     page.route("**/eval-sets/ai5q/questions", lambda route: held.append(route))
     panel.get_by_role("button", name="Save question").click()
     wait_for(page, held)
-    y = answer.get_by_role("button", name="y", exact=True)
-    n = answer.get_by_role("button", name="n", exact=True)
+    y = answer.get_by_role("button", name="Right", exact=True)
+    n = answer.get_by_role("button", name="Wrong", exact=True)
     expect(y).to_be_disabled()
     expect(n).to_be_disabled()
     y.dispatch_event("click")
@@ -5352,7 +5837,7 @@ def test_labelling_ai_answer_goes_with_its_question(page, seeded):
     mark(passages.first, "y")
     ask.click()
     start.click()
-    answer.get_by_role("button", name="y", exact=True).click()
+    answer.get_by_role("button", name="Right", exact=True).click()
     expect(msg).to_have_text(ADDED)
     panel.get_by_label(REFERENCE).press_sequentially(" or so")
     expect(msg).to_have_text("")  # edited by hand, it is no longer the AI's answer
@@ -5625,7 +6110,7 @@ def test_eval_set_page_restore_holds_the_panel_still_and_brings_back_judged_ids(
     for button in ("Save question", "Save and write the next", "Find passages"):
         expect(panel.get_by_role("button", name=button)).to_be_disabled()
     expect(row.get_by_role("button", name="Label")).to_be_disabled()
-    expect(row.get_by_role("button", name="Delete")).to_be_disabled()
+    expect(row.get_by_role("button", name="Delete question…")).to_be_disabled()
     for passage in panel.locator("li[data-passage]").all():
         expect(pressed(passage, "y")).to_be_disabled()
         expect(pressed(passage, "n")).to_be_disabled()
@@ -5635,7 +6120,7 @@ def test_eval_set_page_restore_holds_the_panel_still_and_brings_back_judged_ids(
     assert (got["gold_ids"], got["judged_ids"]) == ([right], [right, other])
     expect(panel.get_by_label("Question", exact=True)).to_have_value("")  # nothing unsaved
     expect(row.get_by_role("button", name="Label")).to_be_enabled()
-    expect(row.get_by_role("button", name="Delete")).to_be_enabled()
+    expect(row.get_by_role("button", name="Delete question…")).to_be_enabled()
     expect(row.locator("td").nth(1)).to_have_text("1")
     expect(row.locator("td").nth(2)).to_have_text("2")
 
@@ -5908,9 +6393,121 @@ def test_documents_run_page_leads_with_finding_the_right_passages(page, seeded):
     expect(answer).not_to_contain_text(NOT_TRACKED)
     expect(page.locator("#scores-box")).to_have_attribute("open", "")
     expect(page.locator("#scores table")).to_be_visible()
-    expect(page.locator("#gaps table")).to_have_count(0)
-    expect(page.locator("[data-gap-row]")).to_have_count(0)
-    expect(page.locator("#note")).to_have_text("")
+    expect(page.locator("#proxy")).to_be_hidden()  # the free score is not a Documents idea
+    # Gaps now draw for a Documents run: against the run's scored method, not the keyword pair.
+    expect(page.locator("#gaps table")).to_be_visible()
+    expect(page.locator("[data-gap-row]")).to_have_count(1)
+    expect(page.locator("#note")).to_have_text(
+        "Leading is not winning: the order above is this run's alone."
+    )
+
+
+def test_documents_store_shows_its_chat_search_score(page, seeded):
+    documents_run(seeded, "dd", ["hybrid_rerank", "vector"])
+    page.goto(seeded.url + "/")
+    expect(page.locator(".th")).to_contain_text("Result")
+    expect(page.locator('a.row-link[href="/c/dd"]')).to_contain_text(
+        "for Hybrid + reranker, the search your chats use"
+    )
+    page.goto(seeded.url + "/c/dd")
+    expect(page.locator("#answer")).to_contain_text("How well does chat find the right passages?")
+    expect(page.locator("#answer")).to_contain_text(
+        "Chats can choose another method; this scores the store's setting."
+    )
+    expect(page.locator("#answer [data-gap-bar], #answer svg")).to_have_count(0)
+    expect(page.locator("body")).not_to_contain_text("Keywords per list")
+
+
+def test_documents_run_form_ticks_chat_method_not_controls(page, seeded):
+    run_form_set(seeded, "dd2")
+    page.goto(seeded.url + "/c/dd2")
+    page.get_by_role("button", name="New run").click()
+    box = lambda m: page.locator(f"input[name=method][value={m}]")  # noqa: E731
+    expect(box("hybrid_rerank")).to_be_checked()
+    expect(box("hybrid")).to_be_checked()
+    expect(box("random_example")).not_to_be_checked()
+    expect(box("fixed_example")).not_to_be_checked()
+    with page.expect_request(lambda r: r.url.endswith("/eval") and r.method == "POST") as sent:
+        page.get_by_role("button", name="Estimate").click()
+    posted = json.loads(sent.value.post_data)
+    assert posted["rerank_pool"] == 20
+
+
+def test_documents_unjudged_says_label_more(page, seeded):
+    run_id, ids = documents_run(seeded, "dd3", ["hybrid_rerank", "vector"])
+    conn = seeded.app.state.conn
+    for r in db.run_items(conn, run_id, "hybrid_rerank"):
+        row = {k: v for k, v in r.items() if k not in ("method", "question_id", "complete")}
+        row["hit_ids"] = ids + [f"dd3-never-{i}" for i in range(7)]
+        db.upsert_run_item(conn, run_id, "hybrid_rerank", r["question_id"], row, True)
+    page.goto(seeded.url + "/c/dd3")
+    expect(page.locator("#answer")).to_contain_text(
+        "No score yet: most of the top 10 from Hybrid + reranker were never judged. "
+        "Label more of its passages."
+    )
+    expect(page.locator("#answer")).not_to_contain_text("nDCG")
+
+
+def test_documents_score_few_questions_says_label_more(page, seeded):
+    documents_run(seeded, "dd4", ["hybrid_rerank", "vector"])
+    page.goto(seeded.url + "/c/dd4")
+    expect(page.locator("#answer")).to_contain_text(
+        "only 2 questions: label more for a firmer score"
+    )
+
+
+def test_documents_partial_run_says_partial(page, seeded):
+    run_id, _ = documents_run(seeded, "dd5", ["hybrid_rerank", "vector"])
+
+    def inject(route):
+        data = route.fetch().json()
+        data["status"] = "cancelled"
+        route.fulfill(json=data)
+
+    page.route(f"**/eval/{run_id}", inject)
+    page.expected = ["409"]  # the page asks to resume the run, which is really done
+    page.goto(f"{seeded.url}/c/dd5/runs/{run_id}")
+    expect(page.locator("#answer [data-partial]")).to_contain_text("Partial")
+    expect(page.locator("#answer")).to_contain_text("the search your chats use")
+
+
+def test_documents_no_score_names_the_method(page, seeded):
+    documents_run(seeded, "dd6", ["hybrid"])
+    r = httpx.put(f"{seeded.url}/search-defaults", json={"method": "vector"})
+    assert r.status_code == 200, r.text
+    try:
+        page.goto(seeded.url + "/c/dd6")
+        expect(page.locator("#answer")).to_contain_text(
+            "No score yet: run Vector search to get one"
+        )
+        page.goto(seeded.url + "/")
+        expect(page.locator('a.row-link[href="/c/dd6"]')).to_contain_text(
+            "No score yet: run Vector search to get one"
+        )
+    finally:
+        httpx.put(f"{seeded.url}/search-defaults", json={"method": "hybrid"})
+
+
+def test_documents_run_without_the_chats_vector_search_has_no_score(page, seeded):
+    r = httpx.put(f"{seeded.url}/search-defaults", json={"method": "vector"})
+    assert r.status_code == 200, r.text
+    try:
+        run_id, _ = documents_run(seeded, "dd8", ["hybrid"])  # frozen: the chats use Vector
+    finally:
+        httpx.put(f"{seeded.url}/search-defaults", json={"method": "hybrid"})
+    page.goto(f"{seeded.url}/c/dd8/runs/{run_id}")
+    expect(page.locator("#answer")).to_contain_text(
+        "This run doesn't include Vector search, the search your chats use."
+    )
+
+
+def test_documents_run_page_draws_gaps_against_chat_method(page, seeded):
+    run_id, _ = documents_run(seeded, "dd7", ["hybrid_rerank", "vector"])
+    page.goto(f"{seeded.url}/c/dd7/runs/{run_id}")
+    ref = page.locator("[data-ref-row]")
+    expect(ref).to_contain_text("Hybrid + reranker")
+    expect(ref).to_contain_text("(reference)")
+    expect(page.locator("#answer")).to_contain_text("the search your chats use")
 
 
 def test_documents_run_page_says_what_it_could_not_measure(page, seeded):
@@ -5957,7 +6554,7 @@ def test_documents_run_page_shows_the_unjudged_flag_only_once_the_run_is_done(pa
         f"{RUN_LEAD} The scores appear when the run finishes."
     )
     expect(answer.get_by_text(flag)).to_have_count(0)
-    expect(page.get_by_role("button", name="Cancel")).to_be_visible()
+    expect(page.get_by_role("button", name="Stop run")).to_be_visible()
     status["now"] = "done"
     page.reload()
     expect(answer.get_by_text(flag, exact=True)).to_be_visible()
@@ -6112,7 +6709,7 @@ def test_documents_run_form_offers_answers_and_judging(page, seeded):
         page.get_by_role("button", name="Estimate").click()
     assert json.loads(sent.value.post_data)["answer"] is True
     page.get_by_role("button", name="Start").click()
-    expect(page.locator("#runs tbody tr")).to_have_count(1)
+    expect(page).to_have_url(re.compile(r"/c/rfj1/runs/[^/]+$"))
     runs = httpx.get(f"{seeded.url}/eval?collection=rfj1").json()
     assert len(runs) == 1
     assert seeded.wait(runs[0]["id"])
@@ -6367,7 +6964,7 @@ def test_chat_delete_prompt_has_one_question_mark(page, seeded):
     chat_ask(page, "What is alpha?")
     expect(page.locator("#log .reply")).to_have_count(1)
     chat_id = page.url.split("#")[1]
-    chat_link(page, chat_id).locator("xpath=..").get_by_role("button", name="Delete").click()
+    chat_link(page, chat_id).locator("xpath=..").get_by_role("button", name="Delete chat").click()
     expect(page.locator("#deleting p")).to_have_text("Delete chat What is alpha?")
 
 
@@ -6461,7 +7058,7 @@ def test_stopped_load_shows_on_the_stores_row_and_the_store_page(page, seeded):
 
 # -- Plan 4, Task 4: Create store opens the store; the store page starts a chat ----------------
 
-EMPTY_WHY = "Add items first: an empty store has nothing to search."
+EMPTY_WHY = "Add passages first: an empty store has nothing to search."  # a Documents store
 
 
 def test_create_store_opens_its_page(page, seeded):
@@ -6522,6 +7119,84 @@ def test_store_page_chat_button_works_again_after_back(page, seeded):
     expect(button).to_be_enabled()
 
 
+def click_chat_store(page, name):
+    page.locator("#chat-store").click()
+    page.wait_for_url(re.compile(r"/chat#.+"))
+    chat_id = page.url.split("#", 1)[1]
+    page.goto(f"{page.url.split('/chat')[0]}/c/{name}")
+    expect(page.locator("#chat-store")).to_be_enabled()
+    return chat_id
+
+
+def test_chat_with_store_reuses_its_chat(page, seeded):
+    seeded.build("reuse1")
+    page.goto(seeded.url + "/c/reuse1")
+    first = click_chat_store(page, "reuse1")
+    page.locator("#chat-store").click()
+    page.wait_for_url(re.compile(r"/chat#.+"))
+    assert page.url.split("#", 1)[1] == first
+
+
+def test_chat_with_store_ignores_api_made_chats(page, seeded):
+    seeded.build("reuse2")
+    made = make_chat(seeded, ("reuse2",))
+    page.goto(seeded.url + "/c/reuse2")
+    page.locator("#chat-store").click()
+    page.wait_for_url(re.compile(r"/chat#.+"))
+    assert page.url.split("#", 1)[1] != made
+
+
+def test_chat_with_store_new_after_edit(page, seeded):
+    seeded.build("reuse3")
+    page.goto(seeded.url + "/c/reuse3")
+    first = click_chat_store(page, "reuse3")
+    r = httpx.patch(f"{seeded.url}/chats/{first}", json={"stores": ["reuse3", "c"]})
+    assert r.status_code == 200, r.text
+    page.locator("#chat-store").click()
+    page.wait_for_url(re.compile(r"/chat#.+"))
+    assert page.url.split("#", 1)[1] != first
+
+
+def test_chat_with_store_new_after_its_chat_is_deleted(page, seeded):
+    seeded.build("reuse4")
+    page.goto(seeded.url + "/c/reuse4")
+    first = click_chat_store(page, "reuse4")
+    assert httpx.delete(f"{seeded.url}/chats/{first}").status_code == 204
+    page.expected = ["404"]
+    page.locator("#chat-store").click()
+    page.wait_for_url(re.compile(r"/chat#.+"))
+    assert page.url.split("#", 1)[1] != first
+
+
+LOGIN_LINE = "With a login set, add -u user:password: the RAGQA_USERNAME and RAGQA_PASSWORD"
+
+
+def test_curl_box_copy_and_login_line(page, seeded):
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    open_chat(page, seeded, ("c",))
+    pres = your_app(page)
+    details = page.locator("#chat-head details")
+    expect(details).to_contain_text(LOGIN_LINE + " in the server's .env.")
+    expect(details).not_to_contain_text("add -u user:password. ")
+    buttons = details.locator("button[data-copy]")  # its name changes while it says Copied
+    expect(buttons).to_have_count(2)
+    expect(buttons).to_have_text(["Copy", "Copy"])
+    buttons.nth(1).click()
+    expect(buttons.nth(1)).to_have_text("Copied")
+    assert page.evaluate("navigator.clipboard.readText()") == pres.nth(1).inner_text()
+    expect(buttons.nth(1)).to_have_text("Copy", timeout=4000)
+
+
+def test_curl_box_copy_falls_back_to_selecting(page, seeded):
+    page.add_init_script("Object.defineProperty(navigator, 'clipboard', {value: undefined})")
+    open_chat(page, seeded, ("c",))
+    pres = your_app(page)
+    button = page.locator("#chat-head details button[data-copy]").first
+    button.click()
+    expect(button).to_have_text("Press Ctrl+C to copy")
+    assert page.evaluate("getSelection().toString()") == pres.first.inner_text()
+
+
 def test_chat_with_an_empty_store_is_disabled(page, seeded):
     r = httpx.post(f"{seeded.url}/collections", json={"name": "nochat", "qa_type": "documents"})
     assert r.status_code == 201, r.text
@@ -6551,14 +7226,308 @@ def test_store_import_says_which_old_passages_it_will_remove(page, seeded, tmp_p
     upload_and_preview(page, "items", handbook)
     expect(page.locator("#imp-items-import")).to_be_enabled()
     page.locator("#imp-items-import").click()
-    expect(preview).to_have_text("Added 2 passages.")
+    expect(preview).to_have_text(re.compile(r"^Added 2 passages\. Next: "))
     handbook.write_text(two_sections().replace("brine " * 160, "brine " * 159 + "cocoa"))
     upload_and_preview(page, "items", handbook)
     expect(page.locator("[data-removed]")).to_have_text(
         "1 old passage will be removed, since the text changed."
     )
     page.locator("#imp-items-import").click()
-    expect(preview).to_have_text("Added 1 passage. 1 already in the store. 1 old passage removed.")
+    expect(preview).to_have_text(
+        re.compile(r"^Added 1 passage\. 1 already in the store\. 1 old passage removed\. Next: ")
+    )
     upload_and_preview(page, "items", handbook)
     expect(page.locator("#imp-items-import")).to_be_enabled()
     expect(page.locator("[data-removed]")).to_have_count(0)
+
+
+def test_name_hint_suggests_slug(page, seeded):
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New store").click()
+    expect(page.get_by_text("Letters, digits, - or _; no spaces")).to_be_visible()
+    expect(page.get_by_role("button", name="Use team-handbook")).to_have_count(0)
+    page.get_by_label("Name").fill("Team Handbook")
+    page.get_by_role("button", name="Use team-handbook").click()
+    expect(page.locator("#f-name")).to_have_value("team-handbook")
+    expect(page.get_by_role("button", name=re.compile("^Use "))).to_have_count(0)
+    page.get_by_role("button", name="Create").click()
+    expect(page).to_have_url(seeded.url + "/c/team-handbook")
+
+
+def test_eval_set_name_hint_suggests_slug(page, seeded):
+    page.goto(seeded.url + "/eval-sets")
+    page.get_by_role("button", name="+ New eval set").click()
+    page.get_by_label("Name").fill("My Set")
+    page.get_by_role("button", name="Use my-set").click()
+    expect(page.locator("#f-name")).to_have_value("my-set")
+    page.get_by_role("button", name="Create").click()
+    expect(page.locator("main a.row-link", has_text="my-set")).to_be_visible()
+
+
+def test_page_slug_matches_the_server_slug(page, seeded):
+    from ragqa_core.types import slug
+
+    raws = ["Team Handbook", "Café notes", "***", "  a__b  ", "x" * 80, "Ünï cødé"]
+    page.goto(seeded.url + "/")
+    got = page.evaluate(
+        "async (raws) => { const m = await import('/static/ui.js'); return raws.map(m.slug); }",
+        raws,
+    )
+    assert got == [slug(r) for r in raws]
+
+
+def test_run_setup_uses_labels(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Setup this ran with").click()
+    setup = page.locator("#setup")
+    expect(setup).to_contain_text("Embedding model")
+    expect(setup).not_to_contain_text("dense_model")
+    expect(setup).not_to_contain_text("leaked_ids")  # an empty list has no row
+
+
+def test_documents_nouns_are_passages(page, seeded):
+    documents_store(seeded, "pass")
+    page.goto(seeded.url + "/c/pass")
+    expect(page.locator("#sources thead")).to_contain_text("Passages")
+    expect(page.locator("#sources thead")).not_to_contain_text("Items")
+    open_chat(page, seeded, ("pass",))
+    expect(page.locator("#chips .chip")).to_contain_text("· 2 passages")
+
+
+def test_sources_show_upload_label(page, seeded):
+    documents_store(seeded, "lbl")
+    page.goto(seeded.url + "/c/lbl")
+    expect(page.locator("#sources tbody tr").first).to_contain_text("x (uploaded)")
+    got = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+          return [m.sourceLabel('upload:leave'), m.sourceLabel('hand'), m.sourceLabel('mmlu')]; }"""
+    )
+    assert got == ["leave (uploaded)", "added by hand", "mmlu"]
+
+
+def top_of(page, selector):
+    return page.locator(selector).bounding_box()["y"]
+
+
+def test_empty_store_shows_import_first(page, seeded):
+    documents_store(seeded, "emptyfirst", passages=False)
+    page.goto(seeded.url + "/c/emptyfirst")
+    expect(page.locator("#imp-items-file")).to_be_visible()
+    assert top_of(page, "#imp-title") < top_of(page, "#answer")
+    assert top_of(page, "#imp-title") < top_of(page, "#new-run")
+    page.goto(seeded.url + "/c/c")  # a store with items keeps the order
+    expect(page.locator("#new-run")).to_be_visible()
+    assert top_of(page, "#answer") < top_of(page, "#imp-title")
+
+
+def test_new_run_disabled_without_eval_set_of_type(page, seeded):
+    # A table store: no other test makes a table eval set, so none exists in the shared `seeded`.
+    r = httpx.post(f"{seeded.url}/collections", json={"name": "noeval", "qa_type": "table"})
+    assert r.status_code == 201, r.text
+    page.goto(seeded.url + "/c/noeval")  # only sets of other types exist
+    button = page.get_by_role("button", name="New run")
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("title", "Create an eval set first")
+    why = page.locator("#new-run-why")
+    expect(why).to_have_text("Create an eval set first")
+    expect(why.get_by_role("link")).to_have_attribute("href", "/eval-sets?store=noeval")
+    r = httpx.post(f"{seeded.url}/eval-sets", json={"name": "other-table", "qa_type": "table"})
+    assert r.status_code == 201, r.text
+    try:
+        page.goto(seeded.url + "/c/noeval")  # a set of its type, though not its default
+        expect(button).to_be_enabled()
+        expect(why).to_have_text("")
+    finally:
+        httpx.delete(f"{seeded.url}/eval-sets/other-table", params={"confirm": True})
+        httpx.delete(f"{seeded.url}/collections/noeval", params={"confirm": True})
+
+
+def test_a_poll_keeps_focus_inside_the_import_box(page, seeded):
+    page.clock.install()
+    page.goto(seeded.url + "/c/c")  # a store with items: Import stays after them
+    file = page.locator("#imp-items-file")
+    expect(file).to_be_visible()
+    file.focus()
+    page.evaluate(
+        """() => {
+            window.moved = 0; // times the import section was taken out of the page
+            new MutationObserver((list) => {
+                for (const m of list) {
+                    for (const n of m.removedNodes) if (n.id === "sec-import") window.moved++;
+                }
+            }).observe(document.getElementById("main"), { childList: true });
+        }"""
+    )
+    with page.expect_response(lambda r: r.url.endswith("/search-defaults")):
+        page.clock.run_for(16000)  # the next poll repaints the page
+    page.evaluate("() => new Promise((done) => setTimeout(done, 0))")  # let the repaint finish
+    assert page.evaluate("window.moved") == 0
+    expect(file).to_be_focused()
+
+
+def test_create_eval_set_prefills_store_name(page, seeded):
+    documents_store(seeded, "prefillme", passages=False)
+    page.goto(seeded.url + "/eval-sets?store=prefillme")
+    expect(page.locator("#f-name")).to_have_value("prefillme")
+
+
+def test_import_result_links_next_steps(page, seeded, tmp_path):
+    documents_store(seeded, "nextsteps", passages=False)
+    handbook = tmp_path / "handbook.md"
+    handbook.write_text(two_sections())
+    page.goto(seeded.url + "/c/nextsteps")
+    upload_and_preview(page, "items", handbook)
+    page.locator("#imp-items-import").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview).to_contain_text(
+        "Added 2 passages. Next: Label questions · Chat with this store"
+    )
+    expect(preview.get_by_role("link", name="Label questions")).to_have_attribute(
+        "href", "/eval-sets?store=nextsteps"
+    )
+    httpx.post(
+        f"{seeded.url}/eval-sets",
+        json={"name": "nextsteps", "qa_type": "documents", "store": "nextsteps"},
+    )
+    a, b = two_files(tmp_path)
+    page.goto(seeded.url + "/c/nextsteps")
+    page.locator("#imp-items-file").set_input_files([str(a), str(b)])
+    page.get_by_role("button", name="Preview").click()
+    page.locator("#imp-items-import").click()
+    expect(preview).to_contain_text("Next: Label questions · Chat with this store")
+    expect(preview.get_by_role("link", name="Label questions")).to_have_attribute(
+        "href", "/e/nextsteps"
+    )
+    preview.get_by_role("link", name="Chat with this store").click()
+    expect(page).to_have_url(re.compile(r"/chat#"))
+
+
+# -- one passage renderer: Right/Wrong, folding, file names ---------------------------------
+
+
+def test_labelling_buttons_read_right_wrong(page, seeded):
+    labelling_set(seeded, "rw1")
+    page.goto(seeded.url + "/e/rw1q")
+    panel = page.locator("#lab-panel")
+    panel.get_by_label("Question", exact=True).fill("alpha")
+    panel.get_by_role("button", name="Find passages").click()
+    passages = panel.locator("li[data-passage]")
+    expect(passages).to_have_count(2)
+    expect(passages.first.get_by_role("button", name="Right", exact=True)).to_be_visible()
+    expect(passages.first.get_by_role("button", name="Wrong", exact=True)).to_be_visible()
+    expect(passages.first.get_by_role("button", name="y", exact=True)).to_have_count(0)
+    expect(page.locator("#lab-ai-hint")).to_have_text(
+        "The AI answers from the passages marked Right."
+    )
+
+
+def test_long_passage_collapses(page, seeded):
+    labelling_set(seeded, "rw2")
+    r = httpx.post(f"{seeded.url}/eval-sets/rw2q/pool", json={"question": "alpha"})
+    pool = r.json()
+    long = {**pool["passages"][0], "text": "long " * 120}
+    page.route(
+        "**/eval-sets/rw2q/pool", lambda route: route.fulfill(json={**pool, "passages": [long]})
+    )
+    page.goto(seeded.url + "/e/rw2q")
+    panel = page.locator("#lab-panel")
+    panel.get_by_label("Question", exact=True).fill("alpha")
+    panel.get_by_role("button", name="Find passages").click()
+    item = panel.locator("li[data-passage]")
+    expect(item.locator("details")).to_have_count(1)
+    expect(item.locator(".full")).to_be_hidden()
+    expect(item.locator("summary")).to_be_visible()
+    item.locator("summary").click()
+    expect(item.locator(".full")).to_be_visible()
+    assert len(item.locator(".full").inner_text()) > 590
+
+
+def test_chat_passage_stays_open_on_redraw(page, seeded):
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route)))
+    open_chat(page, seeded)
+    chat_ask(page, "kinetics?")
+    first = page.locator("#log .reply .sources li").first
+    first.locator("summary").click()
+    expect(first.locator("details")).to_have_attribute("open", "")
+    page.locator("#log .reply a.cite").nth(1).click()  # opens the retrieval step: a redraw
+    expect(page.locator("#msg-1 details.retrieval")).to_have_attribute("open", "")
+    expect(page.locator("#log .reply .sources li").first.locator("details")).to_have_attribute(
+        "open", ""
+    )
+
+
+def test_search_store_says_nothing_new(page, seeded):
+    labelling_set(seeded, "rw3")
+    page.goto(seeded.url + "/e/rw3q")
+    panel = page.locator("#lab-panel")
+    box = panel.get_by_label("None of these? Search the store")
+    box.fill("alpha")
+    panel.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#lab-found li[data-passage]")).not_to_have_count(0)
+    expect(page.locator("#lab-search-msg")).to_have_text("")
+    panel.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#lab-search-msg")).to_have_text(
+        "Nothing new: every passage the search found is already listed."
+    )
+
+
+def test_new_set_header_has_no_version(page, seeded):
+    labelling_set(seeded, "rw4")
+    page.goto(seeded.url + "/e/rw4q")
+    expect(page.locator("h1")).to_have_text("rw4q")
+    expect(page.locator(".head .aside")).to_have_count(0)
+    assert "version" not in page.locator(".head").inner_text().lower()
+
+
+def test_evidence_shows_file_and_part(page, seeded):
+    evidence = [
+        {**CHAT_ATTEMPT["evidence"][0], "id": "x.md#2", "file": "x.md", "part": 2, "parts": 3},
+        {**CHAT_ATTEMPT["evidence"][1], "id": "lone", "file": None, "part": None, "parts": None},
+    ]
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, evidence=evidence)))
+    open_chat(page, seeded)
+    chat_ask(page, "where?")
+    page.locator("#msg-1 details.retrieval > summary").first.click()
+    items = page.locator("#msg-1 ol.evidence > li")
+    expect(items.first.locator(".what")).to_contain_text("[1] x.md · part 2 of 3")
+    expect(items.first.locator(".what span[title]")).to_have_attribute("title", "x.md#2")
+    expect(items.nth(1).locator(".what")).to_contain_text("[2] lone")
+
+
+def test_theme_button_cycles_and_remembers(page, seeded):
+    page.goto(seeded.url + "/settings")
+    html = page.locator("html")
+    button = page.locator("#theme")
+    try:
+        expect(button).to_have_text("Theme: System")
+        expect(html).not_to_have_attribute("data-theme", re.compile(".*"))
+        for label, value in (("Light", "light"), ("Dark", "dark")):
+            button.click()
+            expect(button).to_have_text(f"Theme: {label}")
+            expect(html).to_have_attribute("data-theme", value)
+            expect(button).to_be_focused()  # the redraw keeps the keyboard on the button
+        page.keyboard.press("Enter")  # so a keyboard user can keep cycling
+        expect(button).to_have_text("Theme: System")
+        button.click()
+        button.click()  # back to Dark for the next page
+        page.goto(seeded.url + "/chat")
+        expect(html).to_have_attribute("data-theme", "dark")
+        expect(page.locator("#theme")).to_have_text("Theme: Dark")
+        page.locator("#theme").click()
+        expect(page.locator("#theme")).to_have_text("Theme: System")
+        expect(html).not_to_have_attribute("data-theme", re.compile(".*"))
+    finally:
+        page.evaluate("localStorage.removeItem('theme')")
+
+
+def test_dark_choice_beats_a_light_system(page, seeded):
+    bg = "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()"
+    try:
+        for system, choice, expected in (("light", "dark", "#141416"), ("dark", "light", "#fff")):
+            page.emulate_media(color_scheme=system)
+            page.goto(seeded.url + "/settings")
+            page.evaluate(f"localStorage.setItem('theme', '{choice}')")
+            page.reload()
+            assert page.evaluate(bg) == expected
+    finally:
+        page.evaluate("localStorage.removeItem('theme')")

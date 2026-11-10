@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -8,14 +9,17 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from starlette.routing import Match, Mount, Route
 
-from ragqa_api.app import collection_state, create_app
+from ragqa_api.app import PRICE_CHANGED, collection_state, create_app
 from ragqa_core import db, imports, search_defaults
 from ragqa_core.chats import relevance
 from ragqa_core.evaluator import no_ai
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
 from ragqa_core.indexer import ModelMismatch
+from ragqa_core.loader import QUESTION_IMPORT_GONE
 from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
 from ragqa_core.settings import load_settings
@@ -141,7 +145,7 @@ def test_create_without_recipe_is_paper_2024(client):
     assert (body["recipe"], body["corpus_type"]) == ("paper_2024", "worked")
     assert body["build"]["added_text"] == "none" and body["build"]["chunk_overlap"] == 25
     assert body["search"]["weights"] == {"meaning": 1.0, "words": 1.0, "keywords": 1.0}
-    assert body["vocabulary_version"] is None and body["profile"] == {}
+    assert body["vocabulary_version"] is None and "profile" not in body
     assert "recipes" in client.get("/catalog").json()
 
 
@@ -209,6 +213,99 @@ def test_query_answers_from_the_program_and_the_example_setting(tmp_path):
         result = client.post("/query", json=chosen).json()["results"]["vector"]
         assert result["answer"] == "" and result["program"] is None
         assert "```python" not in sent[-1] and "Example problem" in sent[-1]
+
+
+def record_queries(client) -> list[tuple[str, str, int]]:
+    """Every /query answer call from here on as (system, user, max_tokens); they go through."""
+    calls, complete_many = [], client.app.state.ai.complete_many
+
+    def recording(prompts, **kw):
+        if kw["purpose"] == "query":
+            calls.extend((kw.get("system", ""), p, kw["max_tokens"]) for p in prompts)
+        return complete_many(prompts, **kw)
+
+    client.app.state.ai.complete_many = recording
+    return calls
+
+
+def test_query_on_other_types_sends_the_prompt_it_always_did(tmp_path):
+    """Byte for byte what /query built before it shared the run's answer step: answer_prompt
+    over answer_hits, with answer_tokens."""
+    from ragqa_core.evaluator import answer_hits, answer_tokens
+    from ragqa_core.prompts import answer_prompt
+    from ragqa_core.types import Hit
+
+    reply = "plan\n```python\nprint(2)\n```\nAnswer: A"
+    with make_client(tmp_path, reply=lambda p: reply) as client:
+        add_collection(client)
+        client.post("/collections", json={"name": "mh", "qa_type": "multihop", "summarize": False})
+        r = client.post("/collections/mh/documents", json={"items": ITEMS, "confirm": True})
+        assert r.status_code == 200, r.text
+        calls = record_queries(client)
+        asks = [
+            ("c", "mcq", ["x", "y"], {}),
+            ("mh", "multihop", None, {"program": True}),
+        ]
+        for name, qa_type, choices, search in asks:
+            body = {"collection": name, "question": "enzyme rate?", "choices": choices}
+            body |= {"methods": ["vector"], "answer": True, "search": search}
+            result = client.post("/query", json=body).json()["results"]["vector"]
+            assert result["error"] is None and result["answer"]
+            hits = [Hit(**h) for h in result["hits"]]
+            spec = client.app.state.retriever.spec(name)
+            example = search.get("example", spec.search.example)
+            program = search.get("program", spec.search.program) and not choices
+            system, user = answer_prompt(
+                qa_type,
+                "enzyme rate?",
+                choices,
+                answer_hits(qa_type, hits, example),
+                example,
+                search.get("program", spec.search.program),
+            )
+            assert calls[-1] == (system, user, answer_tokens(qa_type, program))
+        assert calls[-1][2] > answer_tokens("multihop", False)  # the program's budget
+
+
+def test_query_documents_answers_like_a_run(client):
+    """A Documents store's /query answers as its run does: chat's prompt over the in-force
+    evidence size, CHAT_SYSTEM (with no passages for question_only), CHAT_TOKENS, and the
+    reply shown without its [n] markers."""
+    from ragqa_core.evaluator import run_prompt
+    from ragqa_core.types import Hit, SearchSettings
+
+    add_documents(client)
+    passages = [Item(f"p{n}", f"alpha beta passage {n}") for n in range(1, 7)]
+    client.app.state.indexer.add(client.app.state.indexer.spec("c"), passages, "upload:docs")
+    search_defaults.save(client.app.state.conn, {"evidence_size": 3})
+    fake_replies(client.app.state.ai, lambda p: "Ten days [1].")
+    calls = record_queries(client)
+    body = {"collection": "c", "question": "alpha beta", "methods": ["hybrid", "question_only"]}
+    results = client.post("/query", json={**body, "k": 6, "answer": True}).json()["results"]
+    question = Question("lab", "alpha beta", [], [], [])
+    search = client.app.state.retriever.spec("c").search or SearchSettings()
+    for method, sent in zip(body["methods"], calls, strict=True):
+        result = results[method]
+        assert result["error"] is None
+        hits = [Hit(**h) for h in result["hits"]]
+        assert len(hits) == (6 if method == "hybrid" else 0)
+        retrieves = method != "question_only"
+        system, user = run_prompt("documents", question, hits[:3], search, retrieves)
+        assert sent == (system, user, CHAT_TOKENS)
+        assert result["answer"] == "Ten days." and result["program"] is None
+    assert len(calls) == 2
+
+
+def test_query_documents_answer_reads_the_evidence_size(client):
+    add_documents(client)
+    store_import(client, "x.md", long_text([f"w{i}" for i in range(10)]))
+    assert client.app.state.store.count("c") == 10
+    fake_replies(client.app.state.ai, lambda p: "Ten days [1].")
+    q = {"collection": "c", "question": "w1", "methods": ["hybrid"], "k": 5}
+    hits = client.post("/query", json={**q, "answer": True}).json()["results"]["hybrid"]["hits"]
+    assert len(hits) == 8  # Settings' evidence size, the recommended 8
+    hits = client.post("/query", json=q).json()["results"]["hybrid"]["hits"]
+    assert len(hits) == 5
 
 
 def test_query_usd_counts_every_claude_call_of_the_method(client):
@@ -317,6 +414,13 @@ def test_eval_flow(client):
     assert (
         client.get(f"/eval/{job_id}/items", params={"method": "hybrid", "wrong": True}).json() == []
     )
+
+
+def test_errors_say_store(client):
+    assert client.get("/collections/nope").json()["detail"] == "no store named 'nope'"
+    add_collection(client)
+    r = client.post("/collections/c/load", json={"dataset": "tatqa"})
+    assert "store 'c'" in r.json()["detail"] and "collection" not in r.json()["detail"]
 
 
 def test_load_rejects_wrong_qa_type(client):
@@ -462,13 +566,68 @@ def test_a_load_free_only_because_of_a_hub_entry_holds_to_it(tmp_path, monkeypat
         client.app.state.worker.stop()  # the jobs stay queued, to read their setup
         assert client.post("/collections", json=WORKED).status_code == 201
         hub = {"entry": "scibench-all-worked_examples", "items": 3}
-        quote = {"est_usd": 0.0, "items": 3, "calls": 0, "hub": hub}
+        free = {"est_usd": 0.0, "items": 3, "calls": 0, "summary_calls": 0, "keyword_calls": 0}
+        quote = {**free, "hub": hub}
         client.app.state.loader.estimate_load = lambda spec, dataset, limit: quote
         for confirm in (False, True):
             r = client.post("/collections/w/load", json={"dataset": "scibench", "confirm": confirm})
             assert r.status_code == 202, r.text
             setup = client.get(f"/jobs/{r.json()['job_id']}").json()["setup"]
             assert setup.get("hub_entry") == (None if confirm else hub["entry"])
+
+
+def test_a_stale_price_is_refused_before_a_missing_model(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        body = {"dataset": "scienceqa", "confirm": True, "calls": 99}
+        r = client.post("/collections/s/load", json=body)
+        assert r.status_code == 409
+        assert r.json()["detail"] == "the price changed since you saw it: check it again"
+        state = client.app.state
+        now = state.loader.estimate_load(state.retriever.spec("s"), "scienceqa", None)
+        shown = {"calls": 3, "est_usd": now["est_usd"]}  # what it costs now
+        r = client.post("/collections/s/load", json={**body, **shown})
+        assert r.status_code == 503 and "'summary'" in r.json()["detail"]
+        assert client.get("/jobs").json() == []
+
+
+def test_a_confirm_that_saw_no_price_is_refused_once_priced(tmp_path):
+    with make_client(tmp_path) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        model = ai.roles()["default"]
+        ai.set_role("default", None)  # nothing can price the summaries
+        two = {"items": [{"id": f"t{i}", "text": f"tide note {i}"} for i in range(2)]}
+        seen = client.post("/collections/s/documents", json=two).json()["estimate"]
+        assert seen["calls"] == 2 and seen["est_usd"] is None
+        shown = {**two, "confirm": True, "calls": 2, "est_usd": None}
+        r = client.post("/collections/s/documents", json=shown)  # still unpriced: no model
+        assert r.status_code == 503 and "'summary'" in r.json()["detail"]
+        ai.set_role("default", model)  # now priced, above the nothing that was shown
+        r = client.post("/collections/s/documents", json=shown)
+        assert r.status_code == 409
+        assert r.json()["detail"] == "the price changed since you saw it: check it again"
+        assert client.get("/collections/s").json()["count"] == 0 and ledger_purposes(client) == []
+        r = client.post("/collections/s/documents", json={**two, "confirm": True})
+        assert r.status_code == 200 and r.json() == {"added": 2}  # no calls, no est_usd: no check
+
+
+def test_a_load_free_because_of_a_hub_build_needs_no_keywords_model(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        client.app.state.worker.stop()
+        assert client.post("/collections", json=WORKED).status_code == 201
+        r = client.post("/collections/w/load", json={"dataset": "scibench"})
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]  # it would build
+        loader = client.app.state.loader
+        published = {"entry": {"id": "scibench-all-worked_examples"}}
+        hub = {"entry": "scibench-all-worked_examples", "items": 3}
+        loader.from_hub = lambda spec, items, dataset, limit: (published, hub)
+        for confirm in (False, True):
+            r = client.post("/collections/w/load", json={"dataset": "scibench", "confirm": confirm})
+            assert r.status_code == 202, r.text
 
 
 def test_load_that_spends_nothing_queues_without_confirm(tmp_path, monkeypatch):
@@ -579,6 +738,18 @@ def test_vocabulary_estimate_prices_ai_tagging_without_spending(client):
     assert client.put("/collections/w/vocabulary", json={"terms": []}).status_code == 422
 
 
+def test_vocabulary_refuses_a_changed_price(client):
+    client.app.state.worker.stop()
+    stored_worked(client)  # store w: AI tagging
+    terms = ["enzymes", "markets"]
+    seen = client.put("/collections/w/vocabulary", json={"terms": terms}).json()["estimate"]
+    r = client.put("/collections/w/vocabulary", json={"terms": terms, **stale(seen)})
+    assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+    assert db.list_jobs(client.app.state.conn, kind="retag") == []
+    r = client.put("/collections/w/vocabulary", json={"terms": terms, "confirm": True})
+    assert r.status_code == 202
+
+
 def test_vocabulary_put_with_ai_tagging_and_no_model_is_503(tmp_path):
     with make_client(tmp_path, api_key=None) as client:
         client.app.state.worker.stop()
@@ -595,13 +766,55 @@ def test_vocabulary_put_with_ai_tagging_and_no_model_is_503(tmp_path):
         assert r.status_code == 202, r.text
 
 
+def test_cached_ai_retag_needs_no_model(client):
+    stored_worked(client)  # store w: worked examples, AI tagging, ITEMS stored
+    ai = client.app.state.ai
+    free_disabled_model(client, "keywords")
+    # The first retag runs on gw/llama: its prompts cache under it.
+    ai.update_model("gw", "llama", enabled=True)
+    terms = {"terms": ["enzymes", "markets"], "confirm": True}
+    r = client.put("/collections/w/vocabulary", json=terms)
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    ai.update_model("gw", "llama", enabled=False)
+    seen = client.put("/collections/w/vocabulary", json={"terms": terms["terms"]})
+    assert seen.json()["estimate"]["calls"] == 0, seen.text
+    r = client.put("/collections/w/vocabulary", json=terms)  # today: 503, the tagging is "ai"
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+
+
+def test_empty_ai_retag_needs_no_model(client):
+    client.post("/collections", json=WORKED)  # store w: AI tagging, nothing stored
+    ai = client.app.state.ai
+    ai.set_role("default", None)
+    ai.set_role("keywords", None)
+    r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes"], "confirm": True})
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"  # nothing to tag: no model
+    assert client.get("/collections/w/vocabulary").json()["version"] == r.json()["version"]
+
+
+def test_vocabulary_with_an_unpriced_model_is_still_503(client):  # a pin of today's 503
+    client.app.state.worker.stop()
+    stored_worked(client)
+    ai = client.app.state.ai
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "nop", price_in=None, price_out=None)  # unpriced: plan_many raises
+    ai.set_role("keywords", "gw/nop")
+    for body in ({"terms": ["enzymes"]}, {"terms": ["enzymes"], "confirm": True}):
+        r = client.put("/collections/w/vocabulary", json=body)
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"], r.text
+
+
 def test_vocabulary_retag_runs_and_switches(client):
     stored_worked(client)
     r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes"], "confirm": True})
     job = wait(client, r.json()["job_id"])
     assert job["status"] == "done" and job["result"] == {"version": r.json()["version"]}
     assert client.get("/collections/w/vocabulary").json()["version"] == r.json()["version"]
-    assert client.get("/collections/w").json()["profile"] == {"enzymes": 3}
+    hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
+    assert all(h.tags == ["enzymes"] for h in hits)
 
 
 def reference_with_vocabulary(client) -> None:
@@ -661,7 +874,7 @@ def test_query_keyword_rag_without_vocabulary_is_a_method_error(client):
     add_collection(client)
     body = {"collection": "c", "question": "enzyme", "methods": ["keyword_rag", "hybrid"]}
     results = client.post("/query", json=body).json()["results"]
-    assert "no vocabulary for collection 'c'" in results["keyword_rag"]["error"]
+    assert "no vocabulary for store 'c'" in results["keyword_rag"]["error"]
     assert results["hybrid"]["hits"]
 
 
@@ -670,7 +883,7 @@ def test_eval_keyword_rag_without_vocabulary_is_refused_before_queueing(client):
     run = {"collection": "c", "methods": ["hybrid", "keyword_rag"], "answer": True}
     assert "estimate" in client.post("/eval", json=run).json()
     r = client.post("/eval", json={**run, "confirm": True})
-    assert r.status_code == 409 and "no vocabulary for collection 'c'" in r.json()["detail"]
+    assert r.status_code == 409 and "no vocabulary for store 'c'" in r.json()["detail"]
     assert client.get("/eval?collection=c").json() == []
 
 
@@ -814,6 +1027,86 @@ def test_basic_auth_handles_non_ascii(tmp_path):
 def test_half_set_auth_is_503(tmp_path):
     r = TestClient(create_app(settings(tmp_path, username="u"))).get("/health")
     assert r.status_code == 503 and "RAGQA_PASSWORD" in r.json()["detail"]
+
+
+# -- guards on the API's shape: only a task that means to change the API changes these --
+
+SNAPSHOT = Path(__file__).with_name("api_snapshot.json")
+PAGE_PATHS = {
+    "/",
+    "/c/{name}",
+    "/e/{name}",
+    "/c/{name}/runs/{id}",
+    "/worker",
+    "/lab",
+    "/chat",
+    "/settings",
+    "/board",
+    "/static",
+}
+
+
+def api_shape(app) -> str:
+    """The paths and schemas of the app's OpenAPI document, without `info` (its version
+    changes on release)."""
+    spec = app.openapi()
+    shape = {"paths": spec["paths"], "schemas": spec["components"]["schemas"]}
+    return json.dumps(shape, indent=1, sort_keys=True)
+
+
+def sample_path(path: str) -> str:
+    """A URL the route answers: x1 for each path parameter, and a/b for a :path one."""
+    return re.sub(r"\{\w+(:path)?\}", lambda m: "a/b" if m.group(1) else "x1", path)
+
+
+def in_schema(route) -> bool:
+    return isinstance(route, APIRoute) and route.include_in_schema
+
+
+def test_api_matches_the_snapshot(tmp_path):
+    """RAGQA_WRITE_SNAPSHOT=1 rewrites the file first; never set it in CI."""
+    shape = api_shape(create_app(settings(tmp_path / "a")))
+    assert api_shape(create_app(settings(tmp_path / "b"))) == shape  # the home is not in it
+    if os.environ.get("RAGQA_WRITE_SNAPSHOT") == "1":
+        SNAPSHOT.write_text(shape + "\n")
+    assert json.loads(shape) == json.loads(SNAPSHOT.read_text())
+
+
+def test_every_sample_path_reaches_one_route(tmp_path):
+    app = create_app(settings(tmp_path))
+    for route in filter(in_schema, app.routes):
+        assert isinstance(route, APIRoute)
+        path = sample_path(route.path)
+        for method in route.methods:
+            scope = {"type": "http", "path": path, "method": method}
+            hits = [r for r in app.routes if r.matches(scope)[0] == Match.FULL]
+            assert hits == [route], (method, path, hits)
+
+
+def test_pages_and_static_come_after_the_api(tmp_path):
+    app = create_app(settings(tmp_path))
+    docs = {app.openapi_url, app.docs_url, f"{app.docs_url}/oauth2-redirect", app.redoc_url}
+    routes = [r for r in app.routes if not (isinstance(r, Route) and r.path in docs)]
+    last_api = max(i for i, r in enumerate(routes) if in_schema(r))
+    assert all(in_schema(r) for r in routes[:last_api])
+    after = routes[last_api + 1 :]
+    paths = [r.path for r in after if isinstance(r, (APIRoute, Mount))]
+    assert len(paths) == len(after) and set(paths) == PAGE_PATHS
+
+
+def test_every_route_needs_the_login(tmp_path):
+    app = create_app(settings(tmp_path, username="u", password="p"))
+    c = TestClient(app)
+    calls = []
+    for route in app.routes:
+        if isinstance(route, Mount):
+            calls.append(("GET", f"{route.path}/ui.js"))
+        else:
+            assert isinstance(route, Route)
+            calls += [(method, sample_path(route.path)) for method in route.methods or ()]
+    assert ("GET", "/health") in calls and ("GET", "/") in calls
+    for method, path in calls:
+        assert c.request(method, path).status_code == 401, (method, path)
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/ragqa_api/static"
@@ -1013,6 +1306,51 @@ def test_confirmed_paid_eval_without_a_key_is_503_and_queues_nothing(tmp_path):
         assert client.get("/eval").json() == []
         free = client.post("/eval", json={**EVAL, "confirm": True})  # nothing to pay for
         assert free.status_code == 202
+
+
+def test_eval_refuses_a_changed_price(client):
+    add_collection(client)
+    seen = client.post("/eval", json={**EVAL, "answer": True}).json()["estimate"]
+    base = {**EVAL, "answer": True, "confirm": True}
+    r = client.post("/eval", json={**base, "calls": seen["calls"] + 1, "est_usd": seen["est_usd"]})
+    assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+    assert client.get("/eval").json() == []
+    r = client.post("/eval", json={**base, "calls": seen["calls"], "est_usd": seen["est_usd"]})
+    assert r.status_code == 202
+
+
+def test_eval_confirm_without_a_shown_price_is_unchanged(client):
+    add_collection(client)
+    assert client.post("/eval", json={**EVAL, "confirm": True}).status_code == 202
+
+
+def test_rerun_that_saw_no_price_is_refused_once_priced(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        ai = client.app.state.ai
+        model = ai.roles()["default"]
+        ai.set_role("default", None)  # nothing can price the answers
+        seen = client.post("/eval", json={**EVAL, "answer": True}).json()["estimate"]
+        assert seen["est_usd"] is None and seen["calls"] >= 1
+        shown = {**EVAL, "answer": True, "confirm": True, "calls": seen["calls"], "est_usd": None}
+        r = client.post("/eval", json=shown)
+        assert r.status_code == 503 and "'answer' job" in r.json()["detail"]
+        ai.set_role("default", model)  # now priced, above the nothing that was shown
+        r = client.post("/eval", json=shown)
+        assert r.status_code == 409 and client.get("/eval").json() == []
+
+
+def test_stale_eval_confirm_with_the_model_off_is_409(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client)
+        client.app.state.worker.stop()
+        client.app.state.ai.set_role("default", None)  # the answer model is off: a 503 waits
+        seen = client.post("/eval", json={**EVAL, "answer": True}).json()["estimate"]
+        stale = {**EVAL, "answer": True, "confirm": True, "calls": seen["calls"] + 1}
+        r = client.post("/eval", json=stale)
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED  # before any 503
+        assert client.get("/eval").json() == []
 
 
 def bare_client(tmp_path) -> TestClient:
@@ -1274,6 +1612,41 @@ def test_resume_flow_estimates_then_requeues(client):
     r = client.post(f"/jobs/{rekey}/resume")
     assert r.status_code == 409 and r.json()["detail"] == "only evals can be resumed"
     assert client.post("/jobs/missing/resume").status_code == 404
+
+
+def stopped_eval_on(client, name: str) -> str:
+    """A stopped answered eval on the store, made as test_resume_flow_estimates_then_requeues
+    makes one."""
+    add_collection(client, name=name)
+    client.app.state.worker.stop()
+    body = {**EVAL, "collection": name, "methods": ["kw_individual"], "answer": True}
+    job = client.post("/eval", json={**body, "confirm": True}).json()["job_id"]
+    db.update_job(client.app.state.conn, job, status="interrupted")
+    return job
+
+
+def stopped_eval(client) -> str:
+    return stopped_eval_on(client, "c")
+
+
+def stale(seen: dict) -> dict:
+    """A confirm that saw another number of calls."""
+    return {"confirm": True, "calls": seen["calls"] + 1, "est_usd": seen["est_usd"]}
+
+
+def test_resume_refuses_a_changed_price(client):
+    job = stopped_eval(client)
+    seen = client.post(f"/jobs/{job}/resume", json={"confirm": False}).json()["estimate"]
+    r = client.post(f"/jobs/{job}/resume", json=stale(seen))
+    assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+    assert db.get_job(client.app.state.conn, job)["status"] == "interrupted"
+    shown = {"confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
+    assert client.post(f"/jobs/{job}/resume", json=shown).status_code == 202
+
+
+def test_resume_confirm_without_a_shown_price_is_unchanged(client):
+    job = stopped_eval(client)
+    assert client.post(f"/jobs/{job}/resume", json={"confirm": True}).status_code == 202
 
 
 def test_status_reports_problems(client):
@@ -2208,23 +2581,34 @@ def test_an_import_whose_price_fell_is_queued(tmp_path):
         assert r.status_code == 202 and set(r.json()) == {"job_id"}
 
 
-def test_import_questions_with_a_mapping(client):
-    client.post("/collections", json={"name": "sci", "qa_type": "science"})
-    rows = jsonl(
-        {"qid": "a", "ask": "How warm is the lagoon?", "ans": "28 C"},
-        {"qid": "b", "ask": "How deep is the trench?", "ans": "10 km"},
+def test_store_question_routes_are_gone(client):
+    add_collection(client)
+    assert client.get("/collections/c/questions").status_code in (404, 405)
+    r = client.patch("/collections/c/questions/leaked", json={"include": True})
+    assert r.status_code in (404, 405)
+    r = client.post(
+        "/collections/c/uploads",
+        params={"filename": "q.jsonl", "kind": "questions"},
+        content=b"{}\n",
     )
-    up = upload(client, rows, kind="questions", name="sci").json()
-    assert up["preview"]["ready"] is False and up["preview"]["missing"] == ["text", "answer"]
-    mapping = {"id": "qid", "text": "ask", "answer": "ans"}
-    r = do_import(client, up, "qs", kind="questions", name="sci", mapping=mapping)
-    assert r.status_code == 200 and r.json()["preview"]["ready"]
-    r = do_import(client, up, "qs", kind="questions", name="sci", mapping=mapping, confirm=True)
-    assert wait(client, r.json()["job_id"])["status"] == "done"
-    est = client.post("/eval", json={"collection": "sci", "methods": ["vector"]}).json()
-    assert est["estimate"]["questions"] == 2
-    page = client.get("/collections/sci/questions").json()
-    assert page["total"] == 2 and page["questions"][0]["source"] == "upload:qs"
+    assert r.status_code == 422
+
+
+def test_old_question_import_job_fails_and_wont_resume(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    setup = {"upload_id": "x", "kind": "questions", "mapping": {}, "source": "upload:q"}
+    job = db.create_job(conn, "import", "c", setup)
+    row = wait(client, job)
+    assert row["status"] == "failed" and QUESTION_IMPORT_GONE in row["error"]
+    r = client.post(f"/jobs/{job}/resume", json={"confirm": True})
+    assert r.status_code == 409 and QUESTION_IMPORT_GONE in r.json()["detail"]
+
+
+def test_store_replies_have_no_profile(client):
+    add_collection(client)
+    assert "profile" not in client.get("/collections/c").json()
+    assert all("profile" not in c for c in client.get("/collections").json())
 
 
 def test_sources_list_switch_and_query_skips_disabled(client):
@@ -2283,12 +2667,8 @@ def test_last_source_cannot_be_switched_off(client):
 def test_store_sources_count_items_and_deleting_one_keeps_questions(client):
     add_collection(client)
     import_items(client)
-    qs = jsonl(
-        {"id": "uq", "text": "do tides follow the moon?", "choices": ["yes", "no"], "answer": "A"}
-    )
-    up = upload(client, qs, kind="questions").json()
-    r = do_import(client, up, "notes", kind="questions", confirm=True)  # the same source
-    wait(client, r.json()["job_id"])
+    uq = Question("uq", "do tides follow the moon?", ["yes", "no"], ["A"], [], {})
+    db.save_questions(client.app.state.conn, "c", [uq])
     store = client.app.state.store
     assert store.count("c") == 6
     assert client.delete("/collections/c/sources/upload:notes").status_code == 204
@@ -2313,48 +2693,6 @@ def test_disabled_source_without_items_still_lists(client):
     db.set_source_enabled(client.app.state.conn, "c", "gone", False)
     sources = client.get("/collections/c/sources").json()
     assert {"source": "gone", "items": 0, "enabled": False} in sources
-
-
-def test_questions_list_and_include_leaked(client):
-    add_collection(client)
-    rows = jsonl(
-        {
-            "id": "u1",
-            "text": "the tides follow the moon each day",
-            "choices": ["x", "y"],
-            "answer": "A",
-            "gold_ids": ["n1"],
-        },
-        {
-            "id": "u2",
-            "text": "an unrelated question entirely",
-            "choices": ["x", "y"],
-            "answer": "B",
-        },
-    )
-    tides = jsonl({"id": "n1", "text": "so the tides follow the moon each day we saw"})
-    import_items(client, body=tides)
-    up = upload(client, rows, kind="questions").json()
-    r = do_import(client, up, "qs", kind="questions", confirm=True)
-    assert "leaked" not in wait(client, r.json()["job_id"])["result"]
-    conn = client.app.state.conn
-    assert all("leaked" not in q.meta for q in db.get_questions(conn, "c"))
-    page = client.get("/collections/c/questions").json()
-    assert page["total"] == 3 and page["leaked"] == 1 and page["include_leaked"] is False
-    row = next(q for q in page["questions"] if q["id"] == "u1")
-    assert row["leaked"] is True and row["source"] == "upload:qs" and row["has_gold"] is True
-    assert row["has_solution"] is False
-    other = next(q for q in page["questions"] if q["id"] == "u2")
-    assert other["has_gold"] is False and other["leaked"] is False
-    only = client.get("/collections/c/questions", params={"leaked": True}).json()
-    assert [q["id"] for q in only["questions"]] == ["u1"]
-    paged = client.get("/collections/c/questions", params={"limit": 1, "offset": 1}).json()
-    assert len(paged["questions"]) == 1 and paged["total"] == 3
-    assert client.get("/collections/c").json()["questions"] == 2
-    r = client.patch("/collections/c/questions/leaked", json={"include": True})
-    assert r.json() == {"include_leaked": True}
-    detail = client.get("/collections/c").json()
-    assert detail["questions"] == 3 and detail["leaked"] == 1 and detail["include_leaked"]
 
 
 def test_collection_reports_fields_and_measurable(client):
@@ -2397,10 +2735,11 @@ def test_documents_over_20_items_estimate_first(tmp_path):
 
 
 def import_questions_only(client):
+    """Imports one question into store c's eval set (named c), on the eval set's page."""
     rows = jsonl({"id": "uq", "text": "do tides follow?", "choices": ["yes", "no"], "answer": "A"})
-    up = upload(client, rows, kind="questions").json()
-    r = do_import(client, up, "qs", kind="questions", confirm=True)
-    assert wait(client, r.json()["job_id"])["status"] == "done"
+    up = client.post("/eval-sets/c/uploads", params={"filename": "qs.jsonl"}, content=rows).json()
+    body = {"upload_id": up["upload_id"], "mapping": up["preview"]["mapping"], "source_name": "qs"}
+    assert client.post("/eval-sets/c/imports", json=body).status_code == 200
 
 
 def test_a_question_import_adds_no_source_row(client):
@@ -2443,17 +2782,6 @@ def test_preview_warns_when_ids_would_move_from_another_source(client):
     assert warning in other
 
 
-def test_preview_warns_when_question_ids_would_move_from_another_source(client):
-    add_collection(client)
-    import_questions_only(client)
-    rows = jsonl({"id": "uq", "text": "do tides follow?", "choices": ["yes", "no"], "answer": "A"})
-    up = upload(client, rows, kind="questions").json()
-    shown = do_import(client, up, "elsewhere", kind="questions").json()["preview"]
-    assert (
-        "1 question already belongs to upload:qs and would move to this source" in shown["problems"]
-    )
-
-
 def test_documents_are_refused_while_an_import_or_backfill_is_queued_or_running(client):
     add_collection(client)
     conn = client.app.state.conn
@@ -2490,6 +2818,15 @@ def test_deleting_a_collection_removes_its_uploads(client):
 
 
 # -- /ai settings ---------------------------------------------------------------
+
+
+def test_ai_reports_resolved_roles(client):
+    ai = client.app.state.ai
+    body = client.get("/ai").json()
+    assert set(body["resolved"]) == {"default", "answer", "summary", "keywords", "query", "rewrite"}
+    assert body["resolved"] == {role: ai.ready(role) for role in body["resolved"]}
+    ai.set_role("default", None)
+    assert client.get("/ai").json()["resolved"]["rewrite"] is False
 
 
 def test_ai_settings_round_trip(client):
@@ -2698,6 +3035,148 @@ def test_resume_checks_the_runs_own_model(tmp_path):
         assert r.status_code == 202, r.text
 
 
+def free_disabled_model(client, *roles: str) -> None:
+    """A $0 model entered by hand and switched off, set for the roles: priced at nothing,
+    it still cannot be called."""
+    ai = client.app.state.ai
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "llama", price_in=0, price_out=0)
+    ai.update_model("gw", "llama", enabled=False)
+    for role in roles:
+        ai.set_role(role, "gw/llama")
+
+
+def test_zero_priced_disabled_summary_model_is_refused(tmp_path):
+    with make_client(tmp_path) as client:
+        scibench_source(client)
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        client.app.state.worker.stop()
+        free_disabled_model(client, "summary", "keywords")  # keywords: s proposes nothing
+        conn = client.app.state.conn
+
+        def refused(r) -> None:
+            assert r.status_code == 503, r.text
+            assert "'summary'" in r.json()["detail"]
+
+        up = upload(client, name="s").json()
+        assert up["estimate"]["est_usd"] == 0 and up["estimate"]["calls"] > 0
+        refused(do_import(client, up, name="s", confirm=True))
+        two = [{"id": f"t{i}", "text": f"tide note {i}"} for i in range(2)]
+        refused(client.post("/collections/s/documents", json={"items": two}))
+        many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+        refused(client.post("/collections/s/documents", json={"items": many}))
+        refused(client.post("/collections/s/documents", json={"items": many, "confirm": True}))
+        body = {"name": "x", "recipe": "paper_2024", "build": {"added_text": "summary"}}
+        for confirm in (False, True):
+            refused(client.post("/collections/p/copy", json={**body, "confirm": confirm}))
+        assert client.get("/collections/s").json()["count"] == 0
+        assert client.get("/collections/x").status_code == 404
+        assert db.list_jobs(conn, limit=db.ALL) == [] and ledger_purposes(client) == []
+
+
+def test_zero_priced_disabled_keywords_model_is_refused(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, reply=building) as client:
+        scibench_source(client)
+        client.post("/collections", json=WORKED)
+        client.app.state.worker.stop()
+        free_disabled_model(client, "keywords")
+
+        def refused(r) -> None:
+            assert r.status_code == 503, r.text
+            assert "'keywords'" in r.json()["detail"]
+
+        refused(client.post("/collections/w/load", json={"dataset": "scibench"}))
+        refused(client.post("/collections/w/documents", json={"items": ITEMS}))
+        for confirm in (False, True):
+            body = {"name": "x", "recipe": "worked_examples", "confirm": confirm}
+            refused(client.post("/collections/p/copy", json=body))
+        assert db.list_jobs(client.app.state.conn, limit=db.ALL) == []
+
+
+def test_cached_summaries_need_no_summary_model(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client, summarize=True, lists=False)
+        scibench_source(client)
+        body = {"name": "x", "recipe": "paper_2024", "build": {"added_text": "summary"}}
+        job_id = client.post("/collections/p/copy", json={**body, "confirm": True}).json()["job_id"]
+        assert wait(client, job_id)["status"] == "done"
+        import_items(client)  # the notes' summaries are made, and cached
+        client.app.state.worker.stop()
+        app = client.app.state
+        # A second copy of p's items into a summarising store, stopped before it ran: its
+        # summaries are the ones the first copy made.
+        again = app.loader.copy_spec(app.retriever.spec("p"), "y", "paper_2024", body["build"])
+        assert again.summarize
+        stopped = app.loader.start_copy("p", again)
+        db.update_job(app.conn, stopped, status="interrupted")
+        r = client.post(f"/jobs/{stopped}/resume")
+        assert r.status_code == 200 and r.json()["estimate"]["calls"] == 0
+        client.app.state.ai.update_connection("anthropic", api_key=None)  # no model can run
+        same = NOTES.replace(b'"n', b'"again-n')  # the same texts under new ids
+        up = upload(client, body=same, filename="again.jsonl").json()
+        assert up["estimate"]["calls"] == 0 and up["estimate"]["new"] == 3
+        r = do_import(client, up, "again", confirm=True)
+        assert r.status_code == 202, r.text
+        r = client.post(f"/jobs/{stopped}/resume", json={"confirm": True})
+        assert r.status_code == 202, r.text
+
+
+def test_add_now_checks_summary_model(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        two = [{"id": f"t{i}", "text": f"tide note {i}"} for i in range(2)]
+        r = client.post("/collections/s/documents", json={"items": two})
+        assert r.status_code == 200 and r.json()["estimate"]["calls"] == 2
+        r = client.post("/collections/s/documents", json={"items": two, "confirm": True})
+        assert r.status_code == 503 and "'summary'" in r.json()["detail"]
+        assert client.get("/collections/s").json()["count"] == 0
+        assert ledger_purposes(client) == []
+
+
+def test_load_and_documents_refuse_changed_price(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    changed = "the price changed since you saw it: check it again"
+    with make_client(tmp_path, reply=PROPOSING) as client:
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
+        client.app.state.worker.stop()
+        conn = client.app.state.conn
+        seen = client.post("/collections/m/load", json={"dataset": "musique"}).json()["estimate"]
+        assert seen["calls"] == 1 and seen["est_usd"] > 0  # the proposal
+        load = {"dataset": "musique", "confirm": True}
+        for stale in ({"calls": 0}, {"calls": 0, "est_usd": seen["est_usd"]}):
+            r = client.post("/collections/m/load", json={**load, **stale})
+            assert r.status_code == 409 and r.json()["detail"] == changed
+        r = client.post("/collections/m/load", json={**load, "est_usd": seen["est_usd"] / 2})
+        assert r.status_code == 409 and r.json()["detail"] == changed
+        two = [{"id": f"t{i}", "text": f"tide note {i}"} for i in range(2)]
+        many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+        # A summary each; queued, the proposal too (a sync add makes no lists: decision H).
+        for items, calls in ((two, 2), (many, 22)):
+            shown = client.post("/collections/s/documents", json={"items": items}).json()
+            assert shown["estimate"]["calls"] == calls
+            r = client.post(
+                "/collections/s/documents", json={"items": items, "confirm": True, "calls": 1}
+            )
+            assert r.status_code == 409 and r.json()["detail"] == changed
+        assert db.list_jobs(conn, limit=db.ALL) == [] and ledger_purposes(client) == []
+        assert client.get("/collections/s").json()["count"] == 0
+        assert list((client.app.state.settings.home / "uploads").glob("*")) == []
+        # What was shown still holds: accepted. Without calls or est_usd: as before.
+        held = {"calls": 1, "est_usd": seen["est_usd"]}
+        r = client.post("/collections/m/load", json={**load, **held})
+        assert r.status_code == 202, r.text
+        priced = client.post("/collections/s/documents", json={"items": two}).json()["estimate"]
+        r = client.post(
+            "/collections/s/documents",
+            json={"items": two, "confirm": True, "calls": 2, "est_usd": priced["est_usd"]},
+        )
+        assert r.status_code == 200 and r.json() == {"added": 2}
+        r = client.post("/collections/s/documents", json={"items": many, "confirm": True})
+        assert r.status_code == 202 and set(r.json()) == {"job_id"}
+
+
 def test_build_without_keywords_model_is_refused_before_spending(tmp_path, monkeypatch):
     three_items(monkeypatch)
     with make_client(tmp_path, api_key=None) as client:
@@ -2741,7 +3220,6 @@ def test_worked_documents_are_built_in_the_request(tmp_path):
         assert r.status_code == 200 and estimate["est_usd"] > 0 and ledger_purposes(client) == []
         r = client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True})
         assert r.status_code == 200 and r.json()["added"] == 3
-        assert client.get("/collections/w").json()["profile"] == {"rates": 3}
         hits = client.app.state.store.get("w", [i["id"] for i in ITEMS])
         assert all(h.tags == ["rates"] and h.abstracted for h in hits)
         assert ledger_purposes(client) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3
@@ -2836,7 +3314,9 @@ def test_copy_estimate_then_build(tmp_path):
         )
         assert w["search"]["example"] == "abstracted"
         assert w["count"] == p["count"] and w["questions"] == p["questions"]
-        assert w["vocabulary_version"] and w["profile"] == {"kinematics": w["count"]}
+        assert w["vocabulary_version"]
+        tagged = [h for batch in client.app.state.store.scroll("w") for h in batch]
+        assert len(tagged) == w["count"] and all(h.tags == ["kinematics"] for h in tagged)
         conn, store = client.app.state.conn, client.app.state.store
         assert sorted(store.ids("w")) == sorted(store.ids("p"))
         assert db.default_eval_set(conn, "w") == "p" and db.get_questions(conn, "w") == []
@@ -3040,6 +3520,33 @@ def test_a_stopped_copy_resumes_in_place_and_prices_only_what_is_left(tmp_path):
         assert r.status_code == 409 and r.json()["detail"] == "a done copy cannot be resumed"
 
 
+def test_resuming_a_stopped_copy_refuses_a_changed_price(tmp_path):
+    with make_client(tmp_path, reply=building) as client:
+        scibench_source(client)
+        conn = client.app.state.conn
+        client.app.state.worker.stop()
+        body = {"name": "w", "recipe": "worked_examples", "confirm": True}
+        job_id = client.post("/collections/p/copy", json=body).json()["job_id"]
+        db.update_job(conn, job_id, status="interrupted")
+        seen = client.post(f"/jobs/{job_id}/resume", json={"confirm": False}).json()["estimate"]
+        r = client.post(f"/jobs/{job_id}/resume", json=stale(seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert db.get_job(conn, job_id)["status"] == "interrupted"
+        shown = {"confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
+        assert client.post(f"/jobs/{job_id}/resume", json=shown).status_code == 202
+
+
+def test_copy_refuses_a_changed_price(client):
+    add_collection(client, summarize=True, name="s")
+    body = {"name": "x", "recipe": "paper_2024"}
+    seen = client.post("/collections/s/copy", json=body).json()["estimate"]
+    stale_body = {**body, "confirm": True, "calls": seen["calls"] + 1, "est_usd": seen["est_usd"]}
+    r = client.post("/collections/s/copy", json=stale_body)
+    assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+    assert client.get("/collections/x").status_code == 404
+    assert client.post("/collections/s/copy", json={**body, "confirm": True}).status_code == 202
+
+
 # -- eval sets -------------------------------------------------------------------
 
 MCQ = {"id": "a", "text": "which one?", "choices": ["x", "y"], "gold_answers": ["A"]}
@@ -3137,11 +3644,7 @@ def test_eval_set_import_runs_in_the_request(client, monkeypatch):
     again = client.post("/eval-sets/e/imports", json=body).json()
     assert again["unchanged"] == 3 and again["new"] == 0
     # a store of the same name does not see the upload
-    r = client.post(
-        "/collections/e/imports",
-        json={**body, "kind": "questions"},
-    )
-    assert r.status_code == 404
+    assert client.post("/collections/e/imports", json=body).status_code == 404
 
 
 def test_deleting_an_eval_set_deletes_its_runs_and_a_store_keeps_its_sets(client):
@@ -3169,33 +3672,6 @@ def test_deleting_an_eval_set_is_refused_while_its_run_is_queued(client):
     run = db.create_job(conn, "eval", "c", {"eval_set": "c"})
     assert client.delete("/eval-sets/c", params={"confirm": True}).status_code == 409
     assert db.get_job(conn, run) is not None and db.get_eval_set(conn, "c") is not None
-
-
-def test_store_question_routes_use_the_default_eval_set(client):
-    add_collection(client, questions=False)
-    conn = client.app.state.conn
-    assert client.get("/collections/c").json()["eval_set"] is None
-    assert client.get("/collections/c").json()["questions"] == 0
-    rows = jsonl({"id": "u1", "text": "do tides follow?", "choices": ["y", "n"], "answer": "A"})
-    up = upload(client, rows, kind="questions").json()
-    r = do_import(client, up, "qs", kind="questions", confirm=True)
-    assert wait(client, r.json()["job_id"])["status"] == "done"
-    assert db.default_eval_set(conn, "c") == "c"
-    assert [q.id for q in db.get_questions(conn, "c")] == ["u1"]
-    assert client.get("/eval-sets/c").json()["qa_type"] == "mcq"
-    page = client.get("/collections/c/questions").json()
-    assert [q["id"] for q in page["questions"]] == ["u1"]
-    client.post("/eval-sets", json={"name": "other", "qa_type": "mcq"})
-    db.set_default_eval_set(conn, "c", "other")
-    put_questions(client, "other", [MCQ])
-    assert [q["id"] for q in client.get("/collections/c/questions").json()["questions"]] == ["a"]
-    detail = client.get("/collections/c").json()
-    assert detail["eval_set"] == "other" and detail["questions"] == 1
-    r = client.patch("/collections/c/questions/leaked", json={"include": True})
-    assert r.json() == {"include_leaked": True}
-    assert (
-        db.get_include_leaked(conn, "other") is True and db.get_include_leaked(conn, "c") is False
-    )
 
 
 def test_eval_refuses_an_eval_set_of_another_qa_type(client):
@@ -3259,16 +3735,9 @@ def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
     add_collection(client)
     tides = jsonl({"id": "n1", "text": "so the tides follow the moon each day we saw"})
     import_items(client, body=tides)
-    rows = jsonl(
-        {
-            "id": "u1",
-            "text": "the tides follow the moon each day",
-            "choices": ["x", "y"],
-            "answer": "A",
-        }
-    )
-    up = upload(client, rows, kind="questions").json()
-    wait(client, do_import(client, up, "qs", kind="questions", confirm=True).json()["job_id"])
+    meta = {"source": "upload:qs"}  # as the eval set's import stamps it
+    u1 = Question("u1", "the tides follow the moon each day", ["x", "y"], ["A"], [], meta)
+    db.save_questions(client.app.state.conn, "c", [u1])
     store, scans = client.app.state.store, []
     scroll = store.scroll
 
@@ -3279,7 +3748,6 @@ def test_the_store_page_scans_for_leaked_questions_once_per_change(client):
     store.scroll = counted
     assert client.get("/collections/c").json()["leaked"] == 1
     assert client.get("/collections/c").json()["leaked"] == 1
-    assert client.get("/collections/c/questions").json()["leaked"] == 1
     assert len(scans) == 1
     import_items(
         client, body=jsonl({"id": "n2", "text": "glaciers carve valleys"}), source_name="more"
@@ -3355,17 +3823,14 @@ def test_patch_sets_and_clears_the_store_default_eval_set(client):
     assert client.get("/collections/c").json()["eval_set"] == "c"
 
 
-def test_patch_is_refused_while_a_load_or_question_import_is_queued(client):
+def test_patch_is_refused_while_a_load_is_queued(client):
     add_collection(client)
     client.post("/eval-sets", json={"name": "e", "qa_type": "mcq"})
     client.app.state.worker.stop()
     conn = client.app.state.conn
-    job = db.create_job(conn, "import", "c", {"kind": "questions"})
-    r = client.patch("/collections/c", json={"eval_set": "e"})
-    assert r.status_code == 409 and "under way on 'c'" in r.json()["detail"]
-    db.request_cancel(conn, job)
     db.create_job(conn, "load", "c", {"dataset": "scienceqa"})
-    assert client.patch("/collections/c", json={"eval_set": "e"}).status_code == 409
+    r = client.patch("/collections/c", json={"eval_set": "e"})
+    assert r.status_code == 409 and r.json()["detail"] == "a load is under way on 'c'; wait"
     assert db.default_eval_set(conn, "c") == "c"
 
 
@@ -3399,21 +3864,6 @@ def test_load_is_refused_before_anything_when_the_default_set_is_another_type(cl
     conn = client.app.state.conn
     assert db.list_jobs(conn, kind="load") == []
     assert db.default_eval_set(conn, "c") == "s" and db.get_eval_set(conn, "c") is None
-
-
-def test_a_question_import_is_refused_when_the_default_set_is_another_type(client):
-    science_default(client)
-    rows = jsonl({"id": "u1", "text": "do tides follow?", "choices": ["y", "n"], "answer": "A"})
-    up = upload(client, rows, kind="questions").json()
-    for confirm in (False, True):
-        r = do_import(client, up, "qs", kind="questions", confirm=confirm)
-        assert r.status_code == 409
-        assert r.json()["detail"] == "eval set 's' is science; store 'c' is mcq"
-    conn = client.app.state.conn
-    assert db.list_jobs(conn, kind="import") == []
-    assert db.default_eval_set(conn, "c") == "s" and db.get_eval_set(conn, "c") is None
-    items = do_import(client, upload(client).json(), "notes", confirm=False)
-    assert items.status_code == 200  # items do not go to the eval set
 
 
 def test_an_empty_question_id_is_refused(client):
@@ -4391,7 +4841,7 @@ def test_documents_upload_takes_md_and_txt_only(client, tmp_path):
         assert r.json()["preview"]["ready"] and r.json()["preview"]["usable"] == 1
     questions = jsonl({"text": "where is some text", "gold_ids": "x"})
     r = upload(client, questions, filename="set.jsonl", kind="questions")  # items only
-    assert r.status_code == 200, r.text
+    assert r.status_code == 422, r.text
     add_collection(client, name="m", lists=False, questions=False)
     assert upload(client, filename="notes.jsonl", name="m").status_code == 200  # other types
 
@@ -4657,6 +5107,40 @@ def test_a_tag_build_stopped_after_its_vocabulary_resumes_with_no_keywords_model
         assert all(h.tags for h in passages(client)) and keyword_tags(client)["state"] == "built"
 
 
+def test_zero_priced_tag_build_that_calls_needs_its_model(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        client.app.state.worker.stop()
+        free_disabled_model(client, "keywords")  # $0, off: today estimate == 0 skips need_ai
+        r = add_tags(client, True)
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]
+        assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
+
+
+def test_cached_tag_build_resume_needs_no_model(tmp_path):
+    # Passes on today's code too ($0 skips need_ai): it pins that the calls rule does not
+    # over-refuse.
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        ai, builder = client.app.state.ai, client.app.state.builder
+        free_disabled_model(client, "keywords")
+        ai.update_model("gw", "llama", enabled=True)  # at $0 on gw/llama: replies cache under it
+
+        def stop(spec, terms):  # after induction's reply is cached, before the vocabulary
+            raise RuntimeError("stopped before the vocabulary")
+
+        builder.save_vocabulary = stop  # builder.py:334, the build's call after induction
+        job_id = add_tags(client, True).json()["job_id"]
+        assert wait(client, job_id)["status"] == "failed"
+        del builder.save_vocabulary
+        ai.update_model("gw", "llama", enabled=False)
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
+        assert r.status_code == 200 and r.json()["estimate"]["calls"] == 0, r.text
+        r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+        assert r.status_code == 202, r.text
+        assert wait(client, job_id)["status"] == "done"
+
+
 def test_only_the_newest_tag_build_resumes(client):
     documents_with_passages(client)
     conn = client.app.state.conn
@@ -4673,6 +5157,21 @@ def test_only_the_newest_tag_build_resumes(client):
     assert client.post(f"/jobs/{newer}/resume", json={"confirm": False}).status_code == 200
 
 
+def test_resuming_a_stopped_tag_build_refuses_a_changed_price(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        conn = client.app.state.conn
+        client.app.state.worker.stop()
+        job_id = db.create_job(conn, "tag_build", "c", {})
+        db.update_job(conn, job_id, status="interrupted")
+        seen = client.post(f"/jobs/{job_id}/resume", json={"confirm": False}).json()["estimate"]
+        r = client.post(f"/jobs/{job_id}/resume", json=stale(seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert db.get_job(conn, job_id)["status"] == "interrupted"
+        shown = {"confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
+        assert client.post(f"/jobs/{job_id}/resume", json=shown).status_code == 202
+
+
 def test_a_tag_build_with_no_usable_terms_goes_back_to_none(tmp_path):
     with make_client(tmp_path, reply=lambda p: '{"terms": []}') as client:
         documents_with_passages(client)
@@ -4684,6 +5183,73 @@ def test_a_tag_build_with_no_usable_terms_goes_back_to_none(tmp_path):
         assert keyword_tags(client) == {"state": "none"}
         assert add_tags(client, False).status_code == 200  # Add keyword tags can be tried again
         assert add_tags(client, True).status_code == 202
+
+
+def test_tag_build_and_proposal_refuse_a_changed_price(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)  # store c, Documents
+        seen = add_tags(client, False).json()["estimate"]
+        r = client.post("/collections/c/keyword-tags", json=stale(seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
+        add_collection(client, lists=False, name="p")  # no lists: a proposal prices
+        seen = client.post("/collections/p/keyword-lists/propose", json={}).json()["estimate"]
+        r = client.post("/collections/p/keyword-lists/propose", json=stale(seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert ledger_purposes(client) == []
+
+
+def test_stale_confirm_with_the_model_off_is_409(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        tags_seen = add_tags(client, False).json()["estimate"]
+        job = stopped_eval_on(client, "r")  # a second store, so c stays a Documents store
+        resume_seen = client.post(f"/jobs/{job}/resume", json={"confirm": False}).json()["estimate"]
+        add_collection(client, lists=False, name="p")  # no lists: a proposal prices
+        propose = "/collections/p/keyword-lists/propose"
+        propose_seen = client.post(propose, json={}).json()["estimate"]
+        free_disabled_model(client, "keywords", "answer")  # off: a fresh confirm would be 503
+        r = client.post("/collections/c/keyword-tags", json=stale(tags_seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        r = client.post(f"/jobs/{job}/resume", json=stale(resume_seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        r = client.post(propose, json=stale(propose_seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert ledger_purposes(client) == []
+
+
+def test_stale_confirm_with_the_model_off_is_409_too(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Ten days [1].") as client:
+        add_collection(client, summarize=True, name="s")
+        # Summaries made by another model: a copy that spends, so it needs the model.
+        copy = {"name": "x", "recipe": "paper_2024", "build": {"added_text": "summary"}}
+        copy_seen = client.post("/collections/s/copy", json=copy).json()["estimate"]
+        stored_worked(client)
+        terms, vocabulary = ["enzymes", "markets"], "/collections/w/vocabulary"
+        vocab_seen = client.put(vocabulary, json={"terms": terms}).json()["estimate"]
+        ids = answer_store(client)
+        answer_seen = ask_answer(client, ids[:2]).json()["estimate"]
+        client.app.state.worker.stop()  # a confirm let through would queue, not run
+        # Off: a fresh confirm would be 503.
+        free_disabled_model(client, "summary", "keywords", "answer")
+        r = client.post("/collections/s/copy", json={**copy, **stale(copy_seen)})
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        r = client.put(vocabulary, json={"terms": terms, **stale(vocab_seen)})
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        r = ask_answer(client, ids[:2], **stale(answer_seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+
+
+def test_confirmed_proposal_with_an_unpriced_model_is_503(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client, lists=False, name="p")
+        ai = client.app.state.ai
+        ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+        ai.add_model("gw", "nop", price_in=None, price_out=None)  # unpriced
+        ai.set_role("keywords", "gw/nop")
+        shown = {"confirm": True, "calls": 1, "est_usd": 0.0}
+        r = client.post("/collections/p/keyword-lists/propose", json=shown)
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]
 
 
 def test_add_documents_waits_for_a_tag_build(client):
@@ -4988,7 +5554,7 @@ def test_creating_a_linked_set_checks_the_store(client):
     db.create_job(client.app.state.conn, "load", "h", {"dataset": "scienceqa"})
     r = client.post("/eval-sets", json={**body, "store": "h"})
     assert r.status_code == 409
-    assert r.json()["detail"] == "a load or question import is under way on 'h'; wait"
+    assert r.json()["detail"] == "a load is under way on 'h'; wait"
     assert db.get_eval_set(client.app.state.conn, "x") is None
 
 
@@ -5560,6 +6126,16 @@ def test_reference_answer_with_no_answer_model(tmp_path):
         assert client.get("/eval-sets/cq").json()["answer_available"] is False
 
 
+def test_reference_answer_refuses_a_changed_price(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Ten days [1].") as client:
+        ids = answer_store(client)  # store c and Documents set cq
+        seen = ask_answer(client, ids[:2]).json()["estimate"]
+        r = ask_answer(client, ids[:2], **stale(seen))
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED
+        assert ledger_purposes(client) == []
+        assert ask_answer(client, ids[:2], True).status_code == 200
+
+
 def test_reference_answer_refuses_what_it_cannot_answer(client):
     ids = answer_store(client)
     assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
@@ -5580,7 +6156,7 @@ def test_reference_answer_refuses_what_it_cannot_answer(client):
     r = ask_answer(client, ["gone"], True)
     assert (r.status_code, r.json()["detail"]) == (
         422,
-        "mark at least one passage y that is in c first",
+        "mark at least one passage Right that is in c first",
     )
     assert seen == []
 

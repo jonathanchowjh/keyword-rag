@@ -126,6 +126,8 @@ def test_qa_types_and_catalog_shape():
         "type_recipes",
         "answer_pair",
         "chat_methods",
+        "setup_labels",
+        "roles",
     }
     says = c["metric_says_by_type"]["table"]
     assert "part marks" not in says["em"] and "part marks" in says["f1"]  # exact is exact
@@ -137,3 +139,11 @@ def test_catalog_lists_chat_methods_without_hybrid_rerank():
     chat_methods = catalog()["chat_methods"]
     assert "hybrid_rerank" not in chat_methods and "iterative" not in chat_methods
     assert all(m in METHODS for m in chat_methods)
+
+
+def test_catalog_serves_setup_and_role_labels():
+    got = catalog()
+    assert got["setup_labels"]["dense_model"] == "Embedding model"
+    assert got["setup_labels"]["chat_search"] == "Chat's search"
+    assert got["roles"]["keywords"] == "Keyword lists and tags"
+    assert got["roles"]["rewrite"] == "Follow-up rewriting"

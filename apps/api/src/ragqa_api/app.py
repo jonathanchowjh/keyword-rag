@@ -38,27 +38,24 @@ from aiconnect.ai import (
 from aiconnect.presets import PRESETS
 from ragqa_core import db, imports, search_defaults
 from ragqa_core.builder import Builder, builds
-from ragqa_core.catalog import catalog
+from ragqa_core.catalog import ROLE_LABELS, catalog
 from ragqa_core.chats import AlreadyAnswered, Chats, UnknownChat
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import (
     EvalSetMismatch,
     Evaluator,
-    answer_hits,
-    answer_tokens,
+    answer_parts,
     measurable,
     no_ai,
-    read_answer,
+    read_reply,
+    retrieval_depth,
     runnable,
 )
 from ragqa_core.imports import FIELDS, SOURCE_NAME, TooLarge
 from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
-from ragqa_core.loader import Loader, sample_items
+from ragqa_core.loader import QUESTION_IMPORT_GONE, Loader, roles_needed, sample_items
 from ragqa_core.models import Models
-from ragqa_core.prompts import (
-    CHAT_TURNS,
-    answer_prompt,
-)
+from ragqa_core.prompts import CHAT_TURNS
 from ragqa_core.recipes import search_settings
 from ragqa_core.retriever import (
     METHOD_NAMES,
@@ -157,7 +154,7 @@ class PoolRequest(BaseModel):
 
 
 class ReferenceAnswerRequest(BaseModel):
-    """The AI's answer to a labelled question from the passages marked y: priced without
+    """The AI's answer to a labelled question from the passages marked Right: priced without
     `confirm`, asked with it."""
 
     model_config = ConfigDict(extra="forbid")
@@ -165,6 +162,9 @@ class ReferenceAnswerRequest(BaseModel):
     question: str = Field(min_length=1)
     passages: list[str] = Field(min_length=1, max_length=MAX_EVIDENCE)
     confirm: bool = False
+    # What the caller was shown: on confirm, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class QuestionIn(BaseModel):
@@ -247,11 +247,14 @@ class ItemIn(BaseModel):
 class Documents(BaseModel):
     items: list[ItemIn]
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class ImportRequest(BaseModel):
     upload_id: str
-    kind: Literal["items", "questions"]
+    kind: Literal["items"] = "items"
     mapping: dict[str, str | None] | None = None
     source_name: str
     confirm: bool = False
@@ -264,14 +267,13 @@ class SourceSwitch(BaseModel):
     enabled: bool
 
 
-class LeakedSwitch(BaseModel):
-    include: bool
-
-
 class LoadRequest(BaseModel):
     dataset: str
     limit: int | None = None
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class CopyRequest(BaseModel):
@@ -279,10 +281,16 @@ class CopyRequest(BaseModel):
     recipe: str
     build: dict | None = None  # overrides the recipe's build settings in part
     confirm: bool = False
+    # What the caller was shown: on confirm, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class ProposeRequest(BaseModel):
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class Lists(BaseModel):
@@ -294,6 +302,10 @@ class Lists(BaseModel):
 class Vocabulary(BaseModel):
     terms: list[str]
     confirm: bool = False
+    # What the caller was shown: on confirm of a priced retag, other calls or a higher
+    # price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class QueryRequest(BaseModel):
@@ -406,15 +418,24 @@ class EvalRequest(BaseModel):
     rerank_model: str | None = None  # hybrid_rerank: None takes the Settings model
     judge: bool = False  # Judge answers: a Documents run's answers graded by the answer model
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class ResumeRequest(BaseModel):
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class KeywordTagsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirm: bool = False
+    # What the caller was shown: given, other calls or a higher price are refused.
+    calls: int | None = None
+    est_usd: float | None = None
 
 
 class NewConnection(BaseModel):
@@ -503,16 +524,26 @@ def check_mapping(kind: str, mapping: dict | None) -> None:
         raise HTTPException(422, f"unknown fields {unknown}; known: {list(FIELDS[kind])}")
 
 
+PRICE_CHANGED = "the price changed since you saw it: check it again"
+
+
 def price_changed(estimate: dict, calls: int | None, est_usd: float | None) -> bool:
     """Whether the estimate differs from what the caller was shown: other calls, or a price
-    that rose or can no longer be priced. A lower price is no reason to refuse."""
+    that rose or can no longer be priced. A lower price is no reason to refuse. A caller
+    that sent calls but no price saw none: a price above nothing now is a change. One that
+    sent neither asked for no check."""
     if calls is not None and estimate["calls"] != calls:
         return True
     if est_usd is None:
-        return False
+        return calls is not None and (estimate["est_usd"] or 0) > 0
     if estimate["est_usd"] is None:
         return estimate["calls"] > 0
     return estimate["est_usd"] > est_usd + 1e-9
+
+
+def check_shown_price(estimate: dict, calls: int | None, est_usd: float | None) -> None:
+    if price_changed(estimate, calls, est_usd):
+        raise HTTPException(409, PRICE_CHANGED)
 
 
 def body_chunks(request: Request):
@@ -561,7 +592,7 @@ async def lifespan(app: FastAPI):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
-    app = FastAPI(title="rag-qa", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="keyword-rag", version="0.1.0", lifespan=lifespan)
     state = app.state
     state.settings = settings
     state.conn = db.connect(settings.home / "ragqa.db")
@@ -700,23 +731,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         spec: CollectionSpec,
         path: Path,
         filename: str,
-        kind: str,
         mapping: dict | None,
         source: str,
     ) -> dict:
         """The preview; a file that cannot be read is removed along with its upload."""
-        known = set(state.store.ids(spec.name)) if kind == "questions" else None
 
         def owner_of(ids: list[str]) -> dict[str, str | None]:
-            if kind == "items":
-                return state.store.sources_of(spec.name, ids)
-            default = db.default_eval_set(state.conn, spec.name) or spec.name
-            asked = {q.id: q.meta.get("source") for q in db.get_questions(state.conn, default)}
-            return {i: asked[i] for i in ids if i in asked}
+            return state.store.sources_of(spec.name, ids)
 
         try:
             return imports.preview(
-                path, filename, kind, spec.qa_type, mapping, known, source, owner_of
+                path, filename, "items", spec.qa_type, mapping, None, source, owner_of
             )
         except ValueError:
             shutil.rmtree(path.parent, ignore_errors=True)
@@ -727,13 +752,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         loader's estimate counts it. Recorded in the job's setup: the job proposes only then."""
         return state.ai.ready("keywords") and state.loader.makes_lists(spec)
 
-    def estimate_upload(spec: CollectionSpec, upload_id: str, kind: str, shown: dict, source: str):
+    def estimate_upload(spec: CollectionSpec, upload_id: str, shown: dict, source: str):
         """What importing would do; None until the mapping is complete."""
         if not shown["ready"]:
             return None
         setup = {
             "upload_id": upload_id,
-            "kind": kind,
+            "kind": "items",
             "mapping": shown["mapping"],
             "source": source,
         }
@@ -777,7 +802,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections", status_code=201)
     def create_collection(body: NewCollection) -> dict:
         if db.get_collection(state.conn, body.name):
-            raise HTTPException(409, f"collection '{body.name}' already exists")
+            raise HTTPException(409, f"store '{body.name}' already exists")
         found = db.get_eval_set(state.conn, body.name)
         if found and found["qa_type"] != body.qa_type:  # it would be the store's default
             raise type_clash(body.name, found["qa_type"], body.name, body.qa_type)
@@ -828,6 +853,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "chat_method": search_defaults.chat_method(db.get_chat_method(state.conn, name)),
             "chat_k": db.get_chat_k(state.conn, name),
             "chat_settings": state.chats.store_in_force(name),
+            # The search a chat uses, as a run names it: a Documents store is scored on it.
+            "chat_search": search_defaults.store_search(state.conn, name),
             "state": busy,
             "progress": job["progress"] if job and job["status"] == "running" else None,
             "job": job,
@@ -867,9 +894,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if found["qa_type"] != spec.qa_type:
                     raise type_clash(body.eval_set, found["qa_type"], name, spec.qa_type)
             if store_is_loading(name):
-                raise HTTPException(
-                    409, f"a load or question import is under way on '{name}'; wait"
-                )
+                raise HTTPException(409, f"a load is under way on '{name}'; wait")
             db.set_default_eval_set(state.conn, name, body.eval_set)
         if "chat_method" in sent:
             db.set_chat_method(state.conn, name, body.chat_method)
@@ -922,13 +947,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def add_now(spec: CollectionSpec, body: Documents):
         items = [Item(**i.model_dump()) for i in body.items]
         todo, _ = state.indexer.changed(spec, items, "hand")
-        estimate = state.indexer.estimate_add_usd(spec, items, "hand")
-        build_usd = state.builder.estimate_build_usd(spec, todo)
-        estimate = None if estimate is None or build_usd is None else estimate + build_usd
-        if estimate != 0 and not body.confirm:  # None: no model to price it, so not free
-            return JSONResponse({"estimate": {"est_usd": estimate, "items": len(items)}}, 200)
-        if builds(spec) and estimate != 0:  # before adding: a refused build adds nothing
-            need_ai("keywords")
+        usd, summary_calls = state.indexer.plan_summaries(todo) if spec.summarize else (0.0, 0)
+        # Decision H (2026-11-09): a sync add makes no keyword lists; the queued path does.
+        build_usd, keyword_calls = state.builder.plan_build(spec, todo)
+        estimate = {
+            "est_usd": None if usd is None or build_usd is None else usd + build_usd,
+            "items": len(items),
+            "calls": summary_calls + keyword_calls,
+            "summary_calls": summary_calls,
+            "keyword_calls": keyword_calls,
+        }
+        if estimate["est_usd"] != 0 and not body.confirm:  # None: not priced, so not free
+            return JSONResponse({"estimate": estimate}, 200)
+        check_shown_price(estimate, body.calls, body.est_usd)
+        for role in roles_needed(spec, estimate):  # before adding: a refusal adds nothing
+            need_ai(role)
         state.indexer.add(spec, items, "hand")
         state.builder.build(spec, todo)
         return JSONResponse({"added": len(items)}, 200)
@@ -942,14 +975,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         queued = False
         try:  # the upload is the job's input: without a job it goes, whatever stopped it
             estimate = state.loader.estimate_import(spec, setup)
-            # Summaries and the build can be unpaid-for (a proposal is priced only when it
-            # can be made); a collection has one or the other, never both.
-            role = "keywords" if builds(spec) else "summary"
-            ready = not (spec.summarize or builds(spec)) or state.ai.ready(role)
-            if estimate["est_usd"] != 0 and (not body.confirm or not ready):
-                if body.confirm:
-                    raise NoConnection(role)
+            if estimate["est_usd"] != 0 and not body.confirm:  # None: not priced, so not free
                 return JSONResponse({"estimate": estimate}, 200)
+            check_shown_price(estimate, body.calls, body.est_usd)
+            for role in roles_needed(spec, estimate):
+                need_ai(role)
             setup["propose"] = proposes(spec)
             with not_adding(spec.name):
                 job_id = db.create_job(state.conn, "import", spec.name, setup)
@@ -964,7 +994,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name: str,
         request: Request,
         filename: str,
-        kind: Literal["items", "questions"],
+        kind: Literal["items"] = "items",
         accept: Literal["text"] | None = None,
     ):
         """The raw file as the body; answers with a preview under a guessed mapping.
@@ -974,7 +1004,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "only .txt and .md files can be added here")
         # Each file becomes passages: a zip, a table or json lines is not a Documents file.
         is_text = Path(filename).suffix.lower() in TEXT_SUFFIXES
-        if kind == "items" and spec.qa_type == "documents" and not is_text:
+        if spec.qa_type == "documents" and not is_text:
             raise HTTPException(422, DOCUMENTS_ONLY)
         length = request.headers.get("content-length", "")
         if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
@@ -983,9 +1013,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path, _ = open_upload(name, upload_id)
         source_name = imports.source_name(filename)
         source = "upload:" + source_name
-        shown = preview_upload(spec, path, filename, kind, None, source)
+        shown = preview_upload(spec, path, filename, None, source)
         try:
-            estimate = estimate_upload(spec, upload_id, kind, shown, source)
+            estimate = estimate_upload(spec, upload_id, shown, source)
         except Exception:  # the caller never learns the upload's id: nothing could reuse it
             shutil.rmtree(path.parent, ignore_errors=True)
             raise
@@ -1000,19 +1030,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/collections/{name}/imports", status_code=202)
     def start_import(name: str, body: ImportRequest):
         spec = state.retriever.spec(name)
-        if body.kind == "questions":
-            check_default_set(spec)
         path, meta = open_upload(name, body.upload_id)
         if not SOURCE_NAME.match(body.source_name):
             raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
-        check_mapping(body.kind, body.mapping)
+        check_mapping("items", body.mapping)
         source = "upload:" + body.source_name
-        shown = preview_upload(spec, path, meta["filename"], body.kind, body.mapping, source)
-        estimate = estimate_upload(spec, body.upload_id, body.kind, shown, source)
+        shown = preview_upload(spec, path, meta["filename"], body.mapping, source)
+        estimate = estimate_upload(spec, body.upload_id, shown, source)
         if not body.confirm:
             return JSONResponse({"preview": shown, "estimate": estimate}, 200)
-        if estimate is not None and price_changed(estimate, body.calls, body.est_usd):
-            raise HTTPException(409, "the price changed since you saw it: check it again")
+        if estimate is not None:
+            check_shown_price(estimate, body.calls, body.est_usd)
         if estimate is None:
             why = (
                 f"map these fields first: {shown['missing']}"
@@ -1020,15 +1048,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else "no usable rows"
             )
             raise HTTPException(422, why)
-        if estimate["est_usd"] != 0 and spec.summarize:  # None: no model to price it
-            need_ai("summary")
-        if estimate["est_usd"] != 0 and builds(spec):
-            need_ai("keywords")
-        if body.kind == "questions":
-            state.loader.questions_set(spec)  # a clash of types is refused before queueing
+        for role in roles_needed(spec, estimate):
+            need_ai(role)
         setup = {
             "upload_id": body.upload_id,
-            "kind": body.kind,
+            "kind": "items",
             "mapping": shown["mapping"],
             "source": source,
             "propose": proposes(spec),
@@ -1083,39 +1107,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.evaluator.forget(name)  # a re-import of as many items must scan again
         return Response(status_code=204)
 
-    @app.get("/collections/{name}/questions")
-    def list_questions(
-        name: str, leaked: bool | None = None, limit: int = 50, offset: int = 0
-    ) -> dict:
-        spec = state.retriever.spec(name)
-        eval_set = state.loader.questions_set(spec)
-        everything = db.get_questions(state.conn, eval_set)
-        inside = leaked_ids(spec, eval_set)
-        shown = [q for q in everything if leaked is None or (q.id in inside) == leaked]
-        page = shown[max(offset, 0) : max(offset, 0) + max(limit, 0)]
-        return {
-            "total": len(shown),
-            "leaked": len(inside),
-            "include_leaked": db.get_include_leaked(state.conn, eval_set),
-            "questions": [
-                {
-                    "id": q.id,
-                    "text": q.text,
-                    "source": q.meta.get("source"),
-                    "leaked": q.id in inside,
-                    "has_gold": bool(q.gold_ids),
-                    "has_solution": bool(q.meta.get("solution")),
-                }
-                for q in page
-            ],
-        }
-
-    @app.patch("/collections/{name}/questions/leaked")
-    def switch_leaked(name: str, body: LeakedSwitch) -> dict:
-        spec = state.retriever.spec(name)
-        db.set_include_leaked(state.conn, state.loader.questions_set(spec), body.include)
-        return {"include_leaked": body.include}
-
     # -- eval sets -------------------------------------------------------------
 
     def known_set(name: str) -> dict:
@@ -1132,18 +1123,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
 
     def store_is_loading(store: str) -> bool:
-        """Whether a load or a question import is queued or running on the store: it writes
-        to the store's default eval set."""
-        for status in ("queued", "running"):
-            for job in db.list_jobs(state.conn, collection=store, status=status, limit=db.ALL):
-                if job["kind"] == "load" or (
-                    job["kind"] == "import" and job["setup"].get("kind") == "questions"
-                ):
-                    return True
-        return False
+        """Whether a load is queued or running on the store: it writes to the store's
+        default eval set."""
+        return any(
+            job["kind"] == "load"
+            for status in ("queued", "running")
+            for job in db.list_jobs(state.conn, collection=store, status=status, limit=db.ALL)
+        )
 
     def set_is_loading(name: str) -> bool:
-        """Whether a load or a question import is queued or running on a store whose default
+        """Whether a load is queued or running on a store whose default
         is this set: it would write to the set while it is saved."""
         stores = [c.name for c in db.list_collections(state.conn)]
         return any(
@@ -1152,9 +1141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def not_loading(name: str) -> None:
         if set_is_loading(name):
-            raise HTTPException(
-                409, f"a load or question import is under way on a store of '{name}'"
-            )
+            raise HTTPException(409, f"a load is under way on a store of '{name}'")
 
     @app.get("/eval-sets", response_model=None)
     def list_eval_sets(request: Request):
@@ -1185,9 +1172,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if body.store is not None:
                     first = db.default_eval_set(state.conn, body.store) is None
                     if first and store_is_loading(body.store):
-                        raise HTTPException(
-                            409, f"a load or question import is under way on '{body.store}'; wait"
-                        )
+                        raise HTTPException(409, f"a load is under way on '{body.store}'; wait")
                 db.create_eval_set(state.conn, body.name, body.qa_type, body.store)
                 if first and body.store is not None:
                     db.set_default_eval_set(state.conn, body.store, body.name)
@@ -1286,6 +1271,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         question = body.question.strip()
         if not question:
             raise HTTPException(422, "a question needs some text")
+        if body.confirm and (body.calls is not None or body.est_usd is not None):
+            priced = state.chats.reference_answer(row["store"], question, body.passages, False)
+            check_shown_price(priced["estimate"], body.calls, body.est_usd)
         return state.chats.reference_answer(row["store"], question, body.passages, body.confirm)
 
     @app.put("/eval-sets/{name}/questions")
@@ -1419,19 +1407,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 409,
                 f"dataset {body.dataset} is {DATASETS[body.dataset]};"
-                f" collection '{name}' is {spec.qa_type}",
+                f" store '{name}' is {spec.qa_type}",
             )
-        if spec.summarize:
-            need_ai("summary")
         # What the loader spends on: summaries, a proposal when there are no lists, and
         # the build steps. Whether the build spends depends on the items (and on the Hub), so
-        # a load that builds is priced even when confirmed.
+        # a load that builds is priced even when confirmed, as is one that says what it saw.
+        priced = builds(spec) or body.calls is not None or body.est_usd is not None
+        if not priced:  # before the dataset is read
+            for role in roles_needed(spec, None):
+                need_ai(role)
         propose = proposes(spec)
         setup = {"dataset": body.dataset, "limit": body.limit, "propose": propose}
-        if builds(spec) or ((spec.summarize or propose) and not body.confirm):
+        if priced or ((spec.summarize or propose) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
-            if builds(spec) and estimate["est_usd"] != 0:  # None: no model to price it
-                need_ai("keywords")
+            check_shown_price(estimate, body.calls, body.est_usd)  # before any 503
+            for role in roles_needed(spec, estimate):
+                need_ai(role)
             spends = spec.summarize or propose or estimate["est_usd"] != 0
             if spends and not body.confirm:
                 return JSONResponse({"estimate": estimate}, 200)
@@ -1449,18 +1440,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collection is made and a queued copy job adds and builds its items."""
         source = state.retriever.spec(name)
         if db.get_collection(state.conn, body.name):
-            raise HTTPException(409, f"collection '{body.name}' already exists")
+            raise HTTPException(409, f"store '{body.name}' already exists")
         found = db.get_eval_set(state.conn, body.name)
         if found and found["qa_type"] != source.qa_type:  # one name, one question type
             raise type_clash(body.name, found["qa_type"], body.name, source.qa_type)
         target = state.loader.copy_spec(source, body.name, body.recipe, body.build)
         # A job on the source could change the items while the copy reads them.
         refuse_busy(name)
-        if target.summarize:
-            need_ai("summary")
         estimate = state.loader.estimate_copy(name, target)
-        if builds(target) and estimate["est_usd"] != 0:  # None: no model to price it
-            need_ai("keywords")
+        if body.confirm:
+            check_shown_price(estimate, body.calls, body.est_usd)
+        for role in roles_needed(target, estimate):
+            need_ai(role)
         if not body.confirm:
             return JSONResponse({"estimate": estimate}, 200)
         with not_adding(name):  # the copy reads the source's items
@@ -1501,18 +1492,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, NO_KEYWORDS_MODEL)
             if not (body and body.confirm):
                 return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
-            if estimate != 0:  # all cached: the build sends nothing
+            check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
+            if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
                 need_ai("keywords")
             return {"job_id": db.create_job(state.conn, "tag_build", name, {})}
 
     @app.post("/collections/{name}/keyword-lists/propose")
     def propose(name: str, body: ProposeRequest | None = None):
         spec = state.retriever.spec(name)
-        need_ai("keywords")
-        sample = sample_items(state.store, name, tuple(db.disabled_sources(state.conn, name)))
+        skip = tuple(db.disabled_sources(state.conn, name))
         if not (body and body.confirm):
+            need_ai("keywords")  # before the sample: no model, no scroll of the store
+            sample = sample_items(state.store, name, skip)
             estimate, calls = state.indexer.plan_propose(spec, sample)
             return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
+        sample = sample_items(state.store, name, skip)
+        if body.calls is not None or body.est_usd is not None:
+            try:
+                estimate, calls = state.indexer.plan_propose(spec, sample)
+            except (UnknownPrice, UnknownModel):  # no model can price it: today's 503
+                raise NoConnection("keywords") from None
+            check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
+        need_ai("keywords")
         return asdict(state.indexer.propose_lists(spec, sample))
 
     @app.get("/collections/{name}/keyword-lists")
@@ -1587,14 +1588,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         terms = clean_terms(body.terms)
         if not terms:
             raise ValueError("the vocabulary is empty")
-        if build.tagging == "ai":
-            need_ai("keywords")
-        if not body.confirm:
+        if not body.confirm or build.tagging == "ai":  # an estimate, or an AI-tagging retag
             items = state.builder.stored_items(name)
-            estimate, calls = state.builder.plan_tag(spec, terms, items)
-            return JSONResponse(
-                {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
-            )
+            try:
+                estimate, calls = state.builder.plan_tag(spec, terms, items)
+            except (UnknownPrice, UnknownModel):  # no model can price it: today's 503
+                raise NoConnection("keywords") from None
+            if body.confirm:
+                check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
+            if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
+                need_ai("keywords")
+            if not body.confirm:
+                return JSONResponse(
+                    {"estimate": {"est_usd": estimate, "items": len(items), "calls": calls}}, 200
+                )
         with not_adding(name):
             version = state.builder.save_vocabulary(spec, terms)
             job_id = db.create_job(state.conn, "retag", name, {"version": version})
@@ -1694,35 +1701,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if "keyword_rag" in methods and search.query_tags == "oracle":
             raise ValueError("oracle tags need a question's gold")  # eval only
         skip = tuple(db.disabled_sources(state.conn, body.collection))
+        # Answered as a run answers: a Documents store's over Settings' evidence size.
+        size = int(defaults["evidence_size"])
+        q = Question(
+            id="lab", text=body.question, choices=body.choices or [], gold_answers=[], gold_ids=[]
+        )
+        # An answer on a Documents store reads at least the evidence size, so retrieve that many.
+        reads = size if spec.qa_type == "documents" and body.answer else 0
+        depth = retrieval_depth(spec.qa_type, q, body.k, reads)
         results = {}
         for method in methods:
 
-            def answer(hits: list[Hit]) -> dict:
-                program = search.program and not body.choices
-                system, user = answer_prompt(
-                    spec.qa_type,
-                    body.question,
-                    body.choices,
-                    answer_hits(spec.qa_type, hits, search.example),
-                    search.example,
-                    search.program,
-                )
+            def answer(hits: list[Hit], retrieves: bool = method != "question_only") -> dict:
+                system, user, tokens, program = answer_parts(spec, q, hits, search, retrieves, size)
                 done = state.ai.complete(
                     user,
                     role="answer",
                     system=system,
                     model=body.model,
-                    max_tokens=answer_tokens(spec.qa_type, program),
+                    max_tokens=tokens,
                     purpose="query",
                 )
-                text, prog = read_answer(spec.qa_type, done.text, bool(body.choices), program)
+                text, prog = read_reply(spec, done.text, bool(q.choices), program)
                 return {"answer": text, "program": prog}
 
             results[method] = run_method(
                 spec,
                 body.question,
                 method,
-                body.k,
+                depth,
                 rrf_k,
                 search,
                 skip,
@@ -1800,6 +1807,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not body.confirm:  # spec §7.3: an eval without confirm only estimates
             return JSONResponse({"estimate": estimate}, 200)
+        check_shown_price(estimate, body.calls, body.est_usd)
         need_models(estimate, body.model)
         if "keyword_rag" in body.methods:
             state.retriever.vocabulary(spec)  # refused here, not after the other methods spent
@@ -1902,11 +1910,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Without confirm, what resuming would cost (spec §5.4); with it, requeued."""
         row = db.get_job(state.conn, job_id)
         if row is not None and row["kind"] == "copy":
-            return resume_copy(row, body is not None and body.confirm)
+            return resume_copy(row, body)
         if row is not None and row["kind"] == "reembed":
             return resume_reembed(row)
         if row is not None and row["kind"] == "tag_build":
-            return resume_tag_build(row, body is not None and body.confirm)
+            return resume_tag_build(row, body)
+        if row is not None and row["kind"] == "import" and row["setup"].get("kind") == "questions":
+            raise HTTPException(409, QUESTION_IMPORT_GONE)
         try:
             refusal = state.evaluator.resume_refusal(job_id)
         except KeyError:
@@ -1916,12 +1926,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body is None or not body.confirm:
             return JSONResponse({"estimate": state.evaluator.estimate_resume(job_id)}, 200)
         estimate = state.evaluator.estimate_resume(job_id)
+        check_shown_price(estimate, body.calls, body.est_usd)
         need_models(estimate, job(job_id)["setup"]["model"])
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
             raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": job_id}
 
-    def resume_copy(row: dict, confirm: bool):
+    def resume_copy(row: dict, body: ResumeRequest | None):
         """A stopped copy runs again in place: adding skips the items it added, and the
         build finishes what it left unbuilt, so only the rest is priced."""
         if row["status"] not in db.JOBS_RESUMABLE:
@@ -1931,18 +1942,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.retriever.spec(source)  # 404 when the source is gone
         refuse_busy(source)
         estimate = state.loader.estimate_copy(source, target)
-        if target.summarize and estimate["est_usd"] != 0:
-            need_ai("summary")
-        if builds(target) and estimate["est_usd"] != 0:
-            need_ai("keywords")
-        if not confirm:
+        if body and body.confirm:
+            check_shown_price(estimate, body.calls, body.est_usd)
+        for role in roles_needed(target, estimate):
+            need_ai(role)
+        if not (body and body.confirm):
             return JSONResponse({"estimate": estimate}, 200)
         with not_adding(source):
             if not db.requeue(state.conn, row["id"]):  # moved since the check
                 raise HTTPException(409, "the job is no longer resumable")
         return {"job_id": row["id"]}
 
-    def resume_tag_build(row: dict, confirm: bool):
+    def resume_tag_build(row: dict, body: ResumeRequest | None):
         """A stopped Add keyword tags runs again in place: the build finishes what it left
         unbuilt (the vocabulary when none is in force, the passages without tags), so only
         that is priced."""
@@ -1960,9 +1971,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             estimate, calls = state.builder.plan_tag_build(spec)
             if estimate is None:
                 raise HTTPException(409, NO_KEYWORDS_MODEL)
-            if not confirm:
+            if not (body and body.confirm):
                 return JSONResponse({"estimate": {"est_usd": estimate, "calls": calls}}, 200)
-            if estimate != 0:
+            check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
+            if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
                 need_ai("keywords")
             if not db.requeue(state.conn, row["id"]):  # moved since the check
                 raise HTTPException(409, "the job is no longer resumable")
@@ -2031,6 +2043,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "roles": state.ai.roles(),
             "default_from_env": state.ai.env_default,
             "known_roles": KNOWN_ROLES,
+            "resolved": {role: state.ai.ready(role) for role in ROLE_LABELS},
             "budget": {
                 "cap_usd": state.ai.cap_usd,
                 "spent_usd": state.ai.month_spend(),

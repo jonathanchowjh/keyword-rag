@@ -1,5 +1,7 @@
-"""Plain data shared by every module. No logic lives here."""
+"""Plain data shared by every module, and `slug`, the rule that turns a name into a valid one."""
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -8,6 +10,16 @@ QaType = Literal["documents", "science", "mcq", "multihop", "table"]
 EXAMPLE_TYPES: tuple[QaType, ...] = ("mcq", "science")
 FACETS = ("topic", "method", "common")
 CorpusType = Literal["worked", "reference"]
+
+
+def unknown_store(name: str) -> str:
+    return f"no store named {name!r}"
+
+
+def slug(name: str) -> str:
+    """A name a store or eval set may carry: ASCII letters folded, other runs become '-'."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9_-]+", "-", plain.lower()).strip("-")[:64] or "store"
 
 
 @dataclass
@@ -62,7 +74,6 @@ class CollectionSpec:
     build: BuildSettings | None = None
     search: SearchSettings | None = None
     vocabulary_version: str | None = None
-    profile: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

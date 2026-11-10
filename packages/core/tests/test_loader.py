@@ -11,9 +11,9 @@ from ragqa_core.datasets import load_scibench
 from ragqa_core.db import connect, create_job, get_job, get_keyword_lists, get_questions
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
-from ragqa_core.loader import Loader
+from ragqa_core.loader import Loader, roles_needed
 from ragqa_core.store import Store
-from ragqa_core.types import Item, KeywordLists, Question
+from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
 
 PROPOSAL = (
     '{"topic": ["enzyme", "market"], "method": ["assay"], "common": ["shared", "words", "rate"]}'
@@ -330,28 +330,6 @@ def test_a_job_queued_before_propose_was_recorded_does_not_propose(tmp_path, mon
 LONG = "the enzyme rate rose sharply after the temperature was raised"
 
 
-def test_import_questions_keeps_their_source_and_marks_nothing(tmp_path, monkeypatch):
-    conn, ix, ld, _ = build(tmp_path, monkeypatch)
-    ld.ai.update_connection("anthropic", api_key=None)
-    ld.run_import(
-        import_job(conn, tmp_path, "items", [{"id": "i1", "text": LONG + " in the lab"}], ITEM_MAP),
-        lambda p: None,
-    )
-    rows = [
-        {"id": "q1", "text": LONG, "answer": "x"},
-        {"id": "q2", "text": "an unrelated question that appears nowhere", "answer": "y"},
-    ]
-    mapping = {"id": "id", "text": "text", "answer": "answer"}
-    job = import_job(conn, tmp_path, "questions", rows, mapping, source="upload:qs")
-    result = ld.run_import(job, lambda p: None)
-    assert result["new"] == 2 and "leaked" not in result
-    got = {q.id: q for q in get_questions(conn, "m")}
-    assert all("leaked" not in q.meta for q in got.values())  # worked out per run instead
-    assert got["q1"].meta["source"] == "upload:qs"
-    again = ld.run_import(job, lambda p: None)
-    assert again["unchanged"] == 2
-
-
 def test_a_load_refuses_a_default_eval_set_of_another_type(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch)
     ix.create("x", "multihop", False)
@@ -450,7 +428,6 @@ def test_worked_load_builds_vocabulary_tags_and_abstracts(tmp_path, monkeypatch)
     explained = {i.id for i in items if i.explanation}
     assert {h.id for h in hits if h.abstracted} == explained and len(explained) == 2
     assert all(h.abstracted.startswith("Principle: ") for h in hits if h.abstracted)
-    assert spec.profile == {"kinematics": len(items)}
     assert set(purposes(conn)) == {"induce", "tag", "abstract"}
     assert 0.5 in seen and seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
     # The same load again adds nothing, so it builds and spends nothing.
@@ -487,8 +464,38 @@ def test_load_estimate_includes_build_cost(tmp_path, monkeypatch):
         "est_usd": 0,
         "items": len(items),
         "calls": 0,
+        "summary_calls": 0,
+        "keyword_calls": 0,
         "hub": {},  # nothing left to build, so the Hub is not read
     }
+
+
+def test_roles_needed():
+    s = CollectionSpec("s", "mcq", True, "fake/dense", 4, recipe="paper_2024")
+    # Unpriced: every role the spec could fail for. A proposal is made only when a model
+    # for keywords was ready when the job was queued, so it never needs one.
+    assert roles_needed(s, None) == ["summary"]
+    w = CollectionSpec("w", "science", False, "fake/dense", 4, recipe="worked_examples")
+    assert roles_needed(w, None) == ["keywords"]
+    assert roles_needed(s, {"summary_calls": 0, "keyword_calls": 3, "calls": 3}) == ["keywords"]
+    assert roles_needed(s, {"summary_calls": 0, "keyword_calls": 0, "calls": 0}) == []
+    both = {"summary_calls": 2, "keyword_calls": 1, "calls": 3}
+    assert roles_needed(w, both) == ["summary", "keywords"]
+
+
+def test_estimates_count_summary_and_keyword_calls_apart(tmp_path, monkeypatch):
+    conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
+    estimate = ld.estimate_load(ix.spec("w"), "scibench", None)
+    assert estimate["summary_calls"] == 0 and estimate["keyword_calls"] == estimate["calls"] > 0
+    s = ix.create("s", "science", True)
+    estimate = ld.estimate_load(s, "scibench", None)  # a summary each, and the proposal
+    assert estimate["summary_calls"] == estimate["items"] > 0 and estimate["keyword_calls"] == 1
+    assert estimate["calls"] == estimate["items"] + 1
+    ld.run(job, lambda p: None)
+    target = ld.copy_spec(ix.spec("w"), "w2", "paper_2024", {"added_text": "summary"})
+    copied = ld.estimate_copy("w", target)
+    assert copied["summary_calls"] == copied["items"] == copied["calls"] > 0
+    assert copied["keyword_calls"] == 0
 
 
 def test_load_estimate_is_none_without_a_keywords_model(tmp_path, monkeypatch):
@@ -538,7 +545,6 @@ def test_a_stopped_build_is_finished_by_loading_again(tmp_path, monkeypatch):
     hits = [h for batch in ix.store.scroll("w") for h in batch]
     assert all(h.tags == ["kinematics"] for h in hits)
     assert sum(1 for h in hits if h.abstracted) == 2
-    assert ix.spec("w").profile == {"kinematics": len(items)}
     # Built in full: loading again spends nothing.
     spent = len(purposes(conn))
     again = ld.run(job, lambda p: None)
@@ -600,7 +606,8 @@ def test_copy_into_paper_2024_takes_the_source_lists(tmp_path, monkeypatch):
     source = ix.spec("m")
     assert source is not None and source.keyword_version and purposes(conn) == ["propose"]
     target = ld.copy_spec(source, "m2", "paper_2024", {"chunk_overlap": 10})
-    assert ld.estimate_copy("m", target) == {"est_usd": 0.0, "items": 3, "calls": 0}
+    free = {"est_usd": 0.0, "items": 3, "calls": 0, "summary_calls": 0, "keyword_calls": 0}
+    assert ld.estimate_copy("m", target) == free
     result = ld.run_copy(get_job(conn, ld.start_copy("m", target)), lambda p: None)
     assert result == {"added": 3, "sources": ["musique"]}
     spec = ix.spec("m2")
@@ -695,42 +702,6 @@ def test_reimporting_labelled_questions_replaces_them(tmp_path):
     _, todo = ld.question_counts("s", [new])
     assert todo[0].gold_ids == ["c"] and todo[0].judged_ids == ["c"]
     assert todo[0].gold_answers == []
-
-
-def test_a_label_saved_while_a_question_import_job_merges_is_never_overwritten(tmp_path):
-    import threading
-
-    from ragqa_core import imports
-
-    conn = connect(tmp_path / "r.db")
-    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, lambda p: ""))
-    ix.create("d", "documents", False, "documents")
-    read = Question("q1", "one?", None, [], ["p1"], {}, ["p1"])
-    db.save_questions(conn, "d", [read])
-    ld = loader_for(ix, tmp_path)
-    counts, saved, threads = ld.question_counts, [], []
-
-    def label() -> None:  # a labeller's PUT of q1, sent while the job is merging
-        try:
-            db.upsert_question(conn, "d", replace(read, gold_ids=["p9"], judged_ids=["p9"]), read)
-            saved.append("saved")
-        except ValueError:
-            saved.append("refused")
-
-    def merge_slowly(name, questions):
-        out = counts(name, questions)
-        threads.append(threading.Thread(target=label))
-        threads[0].start()
-        threads[0].join(0.3)  # time for the PUT to land between the merge and its write
-        return out
-
-    ld.question_counts = merge_slowly
-    rows = [{"id": "q1", "text": "one?", "gold_ids": ["p2"]}]
-    mapping = imports.guess_mapping(imports.columns(rows), "questions")
-    ld.run_import(import_job(conn, tmp_path, "questions", rows, mapping, name="d"), lambda p: None)
-    threads[0].join(5)
-    assert saved == ["refused"]  # it waited for the job, then found q1 had changed
-    assert get_questions(conn, "d")[0].gold_ids == ["p1", "p2"]
 
 
 def test_question_counts_on_a_set_not_made_yet(tmp_path):

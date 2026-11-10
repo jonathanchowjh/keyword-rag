@@ -44,8 +44,8 @@ from ragqa_core.retriever import (
     UnknownCollection,
     available_methods,
 )
-from ragqa_core.search_defaults import RECOMMENDED
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings
+from ragqa_core.search_defaults import RECOMMENDED, STORE_FIELDS, inherited
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings, unknown_store
 
 # What a store's step or an answer may raise and still leave a saved attempt: it becomes
 # the decision's or the attempt's `error`.
@@ -53,7 +53,6 @@ CHAT_ERRORS = PER_METHOD_ERRORS + (UnknownPrice, UnknownModel)
 NEW_TITLE = "New chat"
 TITLE_CHARS = 60
 CHAT_FIELDS = ("evidence_size", "rerank", "rewrite")  # the chat's own; null: Settings
-STORE_FIELDS = ("method", "candidates")  # per store; null: the store's own
 UPDATE_FIELDS = ("title", "stores", *CHAT_FIELDS)
 RERANK_LOADING = "reranker still loading: merged by rank"
 RERANK_UNAVAILABLE = "reranker unavailable: merged by rank"
@@ -88,13 +87,6 @@ def known(fields, allowed: tuple[str, ...], what: str) -> None:
     unknown = [f for f in fields if f not in allowed]
     if unknown:
         raise ValueError(f"unknown {what} {unknown}; known: {list(allowed)}")
-
-
-def inherited(levels: dict[str, object]) -> dict[str, Any]:
-    """The first level, highest first, that holds a value, as {"value", "from"}. The last
-    level, the recommended value, always holds one."""
-    source = next((s for s, v in levels.items() if v is not None), "recommended")
-    return {"value": levels[source], "from": source}
 
 
 def chat_search(spec: CollectionSpec) -> SearchSettings:
@@ -152,6 +144,7 @@ def evidence_of(merged: list[tuple[str, Hit, int, float, float | None]]) -> list
             "n": numbers[i],
             "id": hit.id,
             "text": hit.text[:CHAT_PASSAGE_CHARS],
+            "file": hit.meta.get("file"),
             "source": hit.meta.get("source"),
             "part": hit.meta.get("part"),
             "parts": hit.meta.get("parts"),
@@ -227,23 +220,7 @@ class Chats:
     def store_in_force(self, store: str, chosen: dict | None = None) -> dict[str, Any]:
         """The store's method and candidates, each with the level it comes from. `chosen`
         holds the chat's values for the store."""
-        chosen = chosen or {}
-        saved = search_defaults.saved(self.conn)
-        own = {
-            "method": search_defaults.chat_method(db.get_chat_method(self.conn, store)),
-            "candidates": db.get_chat_k(self.conn, store),
-        }
-        return {
-            f: inherited(
-                {
-                    "chat": chosen.get(f),
-                    "store": own[f],
-                    "settings": saved[f],
-                    "recommended": RECOMMENDED[f],
-                }
-            )
-            for f in STORE_FIELDS
-        }
+        return search_defaults.store_in_force(self.conn, store, chosen)
 
     def update(self, chat_id: str, changes: dict[str, object]) -> dict:
         """Only stores being added must exist, so a list naming a deleted store still saves.
@@ -579,7 +556,7 @@ class Chats:
         pool missed come back under `labelled`; those the store no longer holds, `missing`."""
         spec = db.get_collection(self.conn, store)
         if spec is None:
-            raise UnknownCollection(f"no collection named '{store}'")
+            raise UnknownCollection(unknown_store(store))
         settings: dict[str, Any] = search_defaults.in_force(self.conn)
         rrf_k = int(settings["rrf_k"])
         reranker = str(settings["rerank_model"] or self.retriever.models.rerank_model)
@@ -635,16 +612,16 @@ class Chats:
         """The labelling answer's prompt: chat's, over the store's held passages among
         `passage_ids`, each once in the order sent, with no history."""
         if db.get_collection(self.conn, store) is None:
-            raise UnknownCollection(f"no collection named '{store}'")
+            raise UnknownCollection(unknown_store(store))
         hits = self.retriever.store.get(store, list(dict.fromkeys(passage_ids)))
         if not hits:
-            raise ValueError(f"mark at least one passage y that is in {store} first")
+            raise ValueError(f"mark at least one passage Right that is in {store} first")
         return chat_prompt(question, [], hits)
 
     def reference_answer(
         self, store: str, question: str, passage_ids: list[str], confirm: bool
     ) -> dict:
-        """The AI's answer to a labelled question from its y passages, one `complete`, cached.
+        """The AI's answer to a labelled question from its Right passages, one `complete`, cached.
         Without `confirm`, only its estimate: {"estimate": {"est_usd", "calls"}} (est_usd None
         when no answer model is set up). Nothing is stored."""
         system, user = self.reference_prompt(store, question, passage_ids)
@@ -782,8 +759,9 @@ class Chats:
         out["usd"] = spent["usd"]
         if out["answer"] is not None:
             by_n = {e["n"]: e for e in evidence}
-            out["citations"] = [
-                {k: by_n[c][k] for k in ("n", "id", "text", "source", "part", "parts", "store")}
+            keys = ("n", "id", "text", "file", "source", "part", "parts", "store")
+            out["citations"] = [  # .get: evidence saved before it named its file has none
+                {k: by_n[c].get(k) for k in keys}
                 for c in cited_numbers(out["answer"], len(evidence))
             ]
         return out

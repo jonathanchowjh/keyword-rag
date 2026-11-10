@@ -63,6 +63,61 @@ export function catalog() {
   return catalogPromise;
 }
 
+// A source as people read it: "upload:leave" is "leave (uploaded)", "hand" is "added by hand".
+export function sourceLabel(source) {
+  if (source === "hand") return "added by hand";
+  if (typeof source === "string" && source.startsWith("upload:")) return `${source.slice(7)} (uploaded)`;
+  return source;
+}
+
+// A retrieved passage's text. Up to `limit` characters it is shown whole; longer, its first
+// `limit` characters sit in a summary and the rest opens from it. `meta` is HTML for a small
+// line above. `key` names the toggle (data-expand) so a page can keep it open across redraws,
+// and `open` says whether it is open now.
+export function passageHtml(text, { limit = 300, meta = "", key = null, open = false } = {}) {
+  const line = meta ? `<div class="small">${meta}</div>` : "";
+  if (text.length <= limit) return `${line}<div>${esc(text)}</div>`;
+  const toggle = key ? ` data-expand="${esc(key)}"` : "";
+  return `${line}<details class="evidence"${toggle}${open ? " open" : ""}><summary>${esc(text.slice(0, limit))}…</summary><div class="full">${esc(text)}</div></details>`;
+}
+
+// "file · part 2 of 3" for a passage's meta, falling back to its id, with the id as its title.
+// Part only when the file has more than one.
+export function whereHtml({ id, file, part, parts }) {
+  const label = file ? `${file}${parts > 1 ? ` · part ${part} of ${parts}` : ""}` : id;
+  return `<span title="${esc(id)}">${esc(label)}</span>`;
+}
+
+// A name a store or eval set may carry; the same rule as ragqa_core.types.slug.
+export function slug(name) {
+  const plain = String(name).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+  return plain.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "store";
+}
+
+// The Name field of a create form (#f-name), with what is allowed and, while the entry is
+// refused, a button that fills in the suggestion. Call watchName() once the html is in the page.
+export function nameField(value = "") {
+  return `<label>Name<input id="f-name" autocomplete="off" pattern="[A-Za-z0-9_-]{1,64}" value="${esc(value)}"></label>
+    <p class="muted">Letters, digits, - or _; no spaces <button type="button" id="f-use" class="secondary" hidden></button></p>`;
+}
+
+export function watchName() {
+  const input = $("f-name");
+  const use = $("f-use");
+  const show = () => {
+    const bad = input.value.trim() !== "" && !/^[A-Za-z0-9_-]{1,64}$/.test(input.value.trim());
+    use.hidden = !bad;
+    if (bad) use.textContent = `Use ${slug(input.value.trim())}`;
+  };
+  input.addEventListener("input", show);
+  use.addEventListener("click", () => {
+    input.value = slug(input.value.trim());
+    show();
+    input.focus();
+  });
+  show();
+}
+
 export function esc(s) {
   const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   return String(s ?? "").replace(/[&<>"']/g, (c) => map[c]);
@@ -70,7 +125,7 @@ export function esc(s) {
 
 // -- formatting -----------------------------------------------------------------
 
-const NONE = "–"; // shown for a missing or invalid value
+export const NONE = "–"; // shown for a missing or invalid value
 
 export function pct(x) {
   return Number.isFinite(x) ? `${Math.round(x * 100)}%` : NONE;
@@ -224,9 +279,40 @@ export function verdictText(answer, qaType, labels = known) {
   return `${word}: ${verdictRest(answer, qaType, labels)}${notes}`;
 }
 
+// A score and its likely range: "72% (64–80)", whole and unsigned; "–" when missing.
+export function scoreRange(mean, lo, hi) {
+  if (!Number.isFinite(mean)) return NONE;
+  const range = Number.isFinite(lo) && Number.isFinite(hi) ? ` (${Math.round(lo)}–${Math.round(hi)})` : "";
+  return `${Math.round(mean)}%${range}`;
+}
+
+// A Documents store's answer: the score of the search its chats use, and what weakens it.
+// A score most of whose top 10 was never judged is withheld.
+export function scoreLine(answer, labels = known) {
+  const label = methodLabel(answer.method, labels);
+  if (answer.unreliable) {
+    return `No score yet: most of the top 10 from ${label} were never judged. Label more of its passages.`;
+  }
+  const notes = [];
+  if (answer.before_rerank) notes.push("measured before reranking");
+  if (answer.n < 10) notes.push(`only ${plural(answer.n, "question")}: label more for a firmer score`);
+  if (answer.newer_without > 0) notes.push(`the newest run didn't include ${label}`);
+  if (answer.unfinished_newer) notes.push(`the last run of ${label} didn't finish`);
+  const line = `${metricLabel("ndcg@10", "documents", labels)}: ${scoreRange(answer.mean, answer.lo, answer.hi)} for ${
+    label}, the search your chats use, on ${plural(answer.n, "question")}`;
+  return [line, ...notes].join(" · ");
+}
+
+// A Documents store with no score for its chats' search: run it, or why it can't run here.
+export function noScoreLine(method, why, labels = known) {
+  const label = methodLabel(method, labels);
+  return why ? `No score yet: ${label} can't run on this store (${why})` : `No score yet: run ${label} to get one`;
+}
+
 // "<b>Yes</b>: Keywords per list +6 pts (2–10) answered correctly vs Hybrid · free score, …"
 export function verdictHtml(answer, qaType, labels = known) {
   if (!answer) return '<span class="muted">No answer yet</span>';
+  if (answer.kind === "score") return esc(scoreLine(answer, labels));
   const notes = verdictNotes(answer).map((n) => ` · ${n}`).join("");
   return `${wordHtml(answer)}: ${esc(verdictRest(answer, qaType, labels))}${
     notes ? `<span class="muted">${esc(notes)}</span>` : ""}`;
@@ -329,7 +415,7 @@ export async function askResume(box, jobId, done, current = () => true) {
     if (!current()) return;
     confirmSpend(box, estimate, async () => {
       try {
-        await api(path, { method: "POST", body: { confirm: true } });
+        await api(path, { method: "POST", body: { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
         box.innerHTML = "";
         refreshSpend();
         await done();
@@ -343,11 +429,11 @@ export async function askResume(box, jobId, done, current = () => true) {
   }
 }
 
-// Asks inline before deleting: the question, then "Yes, …" or "Keep it". Deleting goes to `gone`.
+// Asks inline before deleting: the question, then "Yes, …" or "Cancel". Deleting goes to `gone`.
 export function askDelete(box, { question, yes, path, gone }) {
   box.innerHTML = `<p>${esc(question)}</p><div class="actions">
     <button type="button" class="danger" data-yes>${esc(yes)}</button>
-    <button type="button" class="secondary" data-keep>Keep it</button></div>`;
+    <button type="button" class="secondary" data-keep>Cancel</button></div>`;
   box.querySelector("[data-keep]").addEventListener("click", () => (box.innerHTML = ""));
   box.querySelector("[data-yes]").addEventListener("click", async () => {
     try {
@@ -367,20 +453,47 @@ function link(href, label, cls, active, key) {
   return `<a href="${href}" class="${cls}${active === key ? " active" : ""}">${label}</a>`;
 }
 
-function sideHtml(active, names) {
+const THEMES = ["system", "light", "dark"];
+const THEME_LABEL = { system: "System", light: "Light", dark: "Dark" };
+
+// The saved choice; a throwing store reads as System. theme.js reads the same key.
+function savedTheme() {
+  try {
+    const t = localStorage.getItem("theme");
+    return t === "light" || t === "dark" ? t : "system";
+  } catch (e) {
+    return "system";
+  }
+}
+
+function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(savedTheme()) + 1) % THEMES.length];
+  try {
+    if (next === "system") localStorage.removeItem("theme");
+    else localStorage.setItem("theme", next);
+  } catch (e) {}
+  if (next === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = next;
+}
+
+function sideHtml(active, names, sets) {
   const stores = names
     .map((n) => link(`/c/${encodeURIComponent(n)}`, esc(n), "sub", active, `c/${n}`))
     .join("");
-  return `<div class="brand">rag-qa</div><div class="tag">keyword RAG test bench</div>
+  const evalSets = sets
+    .map((n) => link(`/e/${encodeURIComponent(n)}`, esc(n), "sub", active, `e/${n}`))
+    .join("");
+  return `<div class="brand">keyword-rag</div><div class="tag">RAG bench and chat for your docs</div>
     ${link("/", "Stores", "", active, "collections")}${stores}
     ${link("/chat", "Chat", "", active, "chat")}
-    ${link("/eval-sets", "Eval sets", "", active, "eval-sets")}
+    ${link("/eval-sets", "Eval sets", "", active, "eval-sets")}${evalSets}
     ${link("/lab", "Lab", "", active, "lab")}
     ${link("/settings", "Settings", "", active, "settings")}
     <div class="group">BEHIND THE NUMBERS</div>
     ${link("/worker", 'Worker <span id="worker-dot" class="dot" role="img" aria-label="state not known yet"></span>', "", active, "worker")}
     <a id="worker-problem" class="problem" href="/worker"></a>
     <a href="/docs">API docs</a>
+    <button type="button" class="theme" id="theme">Theme: ${THEME_LABEL[savedTheme()]}</button>
     <div class="spend" id="spend"></div>`;
 }
 
@@ -434,12 +547,19 @@ function refreshDot() {
 }
 
 // Renders the sidebar into <aside id="side">. `active` is "collections" (the stores), "eval-sets",
-// "chat", "lab", "settings", "worker", or "c/<name>" for a store's page.
+// "chat", "lab", "settings", "worker", "c/<name>" for a store's page, or "e/<name>" for an eval set's.
 export function shell(active) {
   const side = document.getElementById("side");
   let names = [];
+  let sets = [];
+  side.addEventListener("click", (e) => {
+    if (!e.target.closest("#theme")) return;
+    cycleTheme();
+    draw();
+    document.getElementById("theme").focus(); // the redraw replaced the button: keep the keyboard on it
+  });
   const draw = () => {
-    side.innerHTML = sideHtml(active, names);
+    side.innerHTML = sideHtml(active, names, sets);
     refreshSpend();
     refreshDot();
   };
@@ -447,6 +567,12 @@ export function shell(active) {
   api("/collections")
     .then((list) => {
       names = list.map((c) => c.name);
+      draw();
+    })
+    .catch(() => {});
+  api("/eval-sets")
+    .then((list) => {
+      sets = list.map((s) => s.name);
       draw();
     })
     .catch(() => {});
@@ -465,29 +591,33 @@ export function shell(active) {
 // A Documents store's items (`qaType` "documents") are .md and .txt files of passages: the
 // preview shows the passages, with no column mapping to pick, and the guessed one is sent.
 class ImportBox {
-  constructor(el, { uploadPath, importPath, kind, qaType, noun = "item", done }) {
+  constructor(el, { uploadPath, importPath, kind, qaType, typeLabel, noun = "item", done, next }) {
     this.el = el;
     this.noun = noun;
     this.uploadPath = uploadPath;
     this.importPath = importPath;
     this.kind = kind;
     this.done = done;
+    this.next = next; // () => html appended to a finished import's line, or undefined
     this.passages = kind === "items" && qaType === "documents";
     this.guessed = {}; // the preview's own mapping, sent when there are no selects
     this.uploadId = null; // the upload being previewed, or null
+    this.batch = null; // several files being previewed (a Documents store), or null
     this.ticket = 0; // the newest preview request, so an older answer is ignored
     this.own = (what) => el.querySelector(`#imp-${kind}-${what}`);
     const accept = this.passages ? ".md,.txt" : ".jsonl,.json,.csv,.tsv,.txt,.md,.zip";
-    const hint = kind === "questions" && qaType ? `<p class="muted">Questions for a ${esc(qaType)} eval set.</p>` : "";
+    const hint = kind === "questions" && qaType ? `<p class="muted">Questions to add to this eval set (${esc(typeLabel ?? qaType)}).</p>` : "";
     el.innerHTML = `<div class="card form">${hint}
-      <label>File<input type="file" id="imp-${kind}-file" accept="${accept}"></label>
+      <label>File<input type="file" id="imp-${kind}-file" accept="${accept}"${this.passages ? " multiple" : ""}></label>
       <label>Source name<input id="imp-${kind}-source" maxlength="64"></label>
-      <div class="row"><button type="button" id="imp-${kind}-go">Upload</button>
+      <div class="row"><button type="button" id="imp-${kind}-go">Preview</button>
         <span id="imp-${kind}-msg" class="err" role="status"></span></div>
       <div id="imp-${kind}-preview"></div></div>`;
     this.own("file").addEventListener("change", (e) => {
-      const file = e.target.files[0];
+      // Several files: each is its own source, named by its upload.
+      this.own("source").closest("label").hidden = e.target.files.length > 1;
       this.uploadId = null; // the old preview belongs to the old file
+      this.batch = null;
       this.ticket++; // and no answer still on its way may paint it back
       this.own("preview").innerHTML = "";
       this.own("msg").textContent = "";
@@ -505,13 +635,15 @@ class ImportBox {
   }
 
   async upload() {
-    const file = this.own("file").files[0];
+    const files = [...this.own("file").files];
+    const file = files[0];
     const msg = this.own("msg");
     msg.textContent = "";
     if (!file) {
       msg.textContent = "Pick a file first.";
       return;
     }
+    if (files.length > 1) return this.previewMany(files);
     try {
       const path = `${this.uploadPath}?filename=${encodeURIComponent(file.name)}&kind=${this.kind}`;
       const got = await upload(path, file);
@@ -678,6 +810,125 @@ class ImportBox {
     await this.done?.();
   }
 
+  // Several files (a Documents store): each is previewed in turn, then priced and imported as one.
+  async previewMany(files) {
+    const ticket = ++this.ticket;
+    this.uploadId = null;
+    this.batch = null;
+    this.own("preview").innerHTML = "";
+    const entries = [];
+    for (const file of files) {
+      const path = `${this.uploadPath}?filename=${encodeURIComponent(file.name)}&kind=${this.kind}`;
+      try {
+        entries.push({ name: file.name, up: await upload(path, file) });
+      } catch (e) {
+        entries.push({ name: file.name, error: e.message }); // wrong type, too big, unreadable
+      }
+      if (ticket !== this.ticket) return; // a new file took the box over
+    }
+    this.showMany(entries);
+  }
+
+  // The files' previews in one summary line and a line each, with one Import for them all. Each
+  // file's own price is drawn on a store as it stands, so with several the sum errs high.
+  showMany(entries, before = "") {
+    this.batch = entries;
+    const ready = entries.filter((f) => f.up?.estimate);
+    const adds = (f) => Number(f.up?.estimate?.new ?? 0) + Number(f.up?.estimate?.updated ?? 0);
+    const added = ready.reduce((n, f) => n + adds(f), 0);
+    const removed = ready.reduce((n, f) => n + Number(f.up.estimate.removed ?? 0), 0);
+    const unpriced = ready.find((f) => f.up.estimate.est_usd === null && f.up.estimate.calls > 0);
+    const total = usd(ready.reduce((n, f) => n + Number(f.up.estimate.est_usd ?? 0), 0));
+    const price = unpriced ? UNPRICED : ready.length > 1 ? `at most ${total}` : total;
+    const gone = removed > 0 ? `, ${count(removed)} to remove` : "";
+    const each = entries
+      .map((f) => `<li>${esc(f.error ? `${f.name}: ${f.error}` : `${f.name}: ${plural(adds(f), this.noun)}`)}</li>`)
+      .join("");
+    const why = unpriced ? `<span class="err">${esc(`Can't price ${unpriced.name}: set up a model in Settings`)}</span>` : "";
+    const summary = ready.length
+      ? `<p>${esc(`${plural(ready.length, "file")}: ${plural(added, this.noun)} to add${gone} · ${price}`)}</p>`
+      : "";
+    const foot = ready.length
+      ? `<div class="row"><button type="button" id="imp-${this.kind}-import" ${unpriced ? "disabled" : ""}>${esc(
+          unpriced ? "Import" : `Import (${price})`)}</button>${why}</div>`
+      : "";
+    this.own("preview").innerHTML = `${before}${summary}<ul>${each}</ul>${foot}`;
+    this.own("import")?.addEventListener("click", () => this.importMany());
+  }
+
+  // Imports the files in order, each after the one before is in. The first sends the calls and
+  // price it was shown; a later one only its price, since an earlier file can change its calls
+  // (the server then refuses only a price that rose). A refusal stops there: the files not yet
+  // in are priced again, for the next click.
+  async importMany() {
+    this.own("import").disabled = true;
+    const ticket = this.ticket;
+    const todo = this.batch.filter((f) => f.up?.estimate);
+    this.batch = null; // the click takes the files over
+    const line = (html) => {
+      if (ticket === this.ticket) this.own("preview").innerHTML = html;
+    };
+    const sum = { new: 0, updated: 0, unchanged: 0, removed: 0 };
+    const sofar = () => (sum.new + sum.updated + sum.unchanged + sum.removed > 0
+      ? this.doneHtml({ status: "done", result: sum }) : "");
+    // The store's page shows what is in, as the single-file import does after its job.
+    const settled = async () => {
+      refreshSpend();
+      await this.done?.();
+    };
+    for (const [i, f] of todo.entries()) {
+      const { calls, est_usd } = f.up.estimate;
+      const shown = i === 0 ? { calls, est_usd } : { est_usd };
+      let got;
+      try {
+        got = await api(this.importPath, { method: "POST", body: { ...manyBody(f.up, true), ...shown } });
+      } catch (e) {
+        if (ticket !== this.ticket) return;
+        this.own("msg").textContent = e.status === 409 ? `The price of ${f.name} changed: check it again` : e.message;
+        await this.repriceMany(todo.slice(i), ticket, sofar());
+        if (sofar()) await settled(); // the files before this one are in
+        return;
+      }
+      let job;
+      try {
+        job = await followJob(got.job_id, (j) => line(j.status === "queued"
+          ? "<p>Waiting for the store's other job…</p>"
+          : `<p>${esc(`Adding ${f.name}… ${Math.round((j.progress ?? 0) * 100)}%`)}</p>`));
+      } catch (e) {
+        line(sofar() + `<p class="err">${esc(e.message)}</p>`);
+        if (sofar()) await settled();
+        return;
+      }
+      if (job.status !== "done") {
+        line(sofar() + this.doneHtml(job));
+        await settled(); // a stopped job may have added some, as the single-file import allows
+        return;
+      }
+      for (const key of Object.keys(sum)) sum[key] += Number(job.result?.[key] ?? 0);
+    }
+    line(sofar());
+    if (ticket === this.ticket) {
+      this.own("file").value = ""; // else a new file took over
+      this.own("source").closest("label").hidden = false;
+    }
+    await settled();
+  }
+
+  // The files not yet imported, priced again on the store as it now is.
+  async repriceMany(entries, ticket, before) {
+    const priced = [];
+    for (const f of entries) {
+      try {
+        const got = await api(this.importPath, { method: "POST", body: manyBody(f.up, false) });
+        priced.push({ name: f.name, up: { ...f.up, ...got } });
+      } catch (e) {
+        priced.push({ name: f.name, error: e.message });
+      }
+      if (ticket !== this.ticket) return;
+    }
+    this.showMany(priced, before);
+  }
+
   // What a finished import job did, in a line.
   doneHtml(job) {
     if (job.status !== "done") {
@@ -690,8 +941,14 @@ class ImportBox {
     const already = kept > 0 ? ` ${count(kept)} already in the store.` : "";
     const removed = Number(r.removed ?? 0);
     const gone = removed > 0 ? ` ${plural(removed, "old " + this.noun)} removed.` : "";
-    return `<p class="ok">${esc(`Added ${plural(added, this.noun)}.${already}${gone}`)}</p>`;
+    const next = this.next ? ` Next: ${this.next()}` : "";
+    return `<p class="ok">${esc(`Added ${plural(added, this.noun)}.${already}${gone}`)}${next}</p>`;
   }
+}
+
+// One of several files' import, under the upload's own mapping and source name.
+function manyBody(up, confirm) {
+  return { upload_id: up.upload_id, kind: "items", mapping: up.preview.mapping, source_name: up.source_name, confirm };
 }
 
 export function importBox(el, options) {

@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- Changed: Settings' Remove is now Delete connection…, and asks before it deletes a connection with its key and models.
+- Changed (breaking): POST /query with answer on a Documents store retrieves at least Settings' evidence size of passages (8 by default, not k's 5), as a run does; results[m].hits grows to match.
+- Added: optional calls and est_usd on POST /collections/{n}/copy, PUT /collections/{n}/vocabulary and POST /eval-sets/{n}/answer; a price that changed since it was shown is refused with 409.
+- Changed (breaking): Add keyword tags and resuming one refuse with 503 a $0 build that still makes AI calls (a disabled $0 model); PUT /collections/{n}/vocabulary needs the keywords model only when the retag makes AI calls, so a fully cached one, or one of a store with nothing to tag, no longer needs it.
+- Added: optional calls and est_usd on POST /jobs/{id}/resume, /collections/{n}/keyword-lists/propose and /collections/{n}/keyword-tags; a price that changed since it was shown is refused with 409, and the pages send the price they showed.
+- Added: optional calls and est_usd on POST /eval; a run whose price changed since it was shown is refused with 409, and the run form and Re-run send the price they showed.
+- Added: a Theme button in the sidebar (System, Light, Dark), remembered in this browser.
+- Changed: POST /query on a Documents store uses the run's answer prompt and reply reading, over at most Settings' evidence size of the hits shown.
+- Changed: a queued or stopped question-import job now fails pointing to its eval set's page, and resuming one is refused (409).
+- Changed: a copy, import or load whose summaries are all cached no longer needs a summary model.
+- Added: file on each citation of a chat's answer.
+- Changed (breaking): a confirm that saw no price is refused (409) once the step can be priced.
+- Changed (breaking): a step priced at $0 that still makes AI calls (a disabled or keyless $0 model) is now refused with 503 instead of queued to fail; a sync add of 20 documents or fewer now checks for a summary model.
+- Added: optional calls and est_usd on POST /collections/{n}/load and /documents; a price that changed since it was shown is refused with 409.
+- Changed: Start opens the new run, and the sidebar lists the eval sets.
+- Changed: Cancel always means don't; stopping a run is Stop run, and stopping a job is Stop job.
+- Changed: Chat with this store reopens the chat it made for that store.
+- Added: resolved in GET /ai, whether each job has a usable model.
+- Added: a Copy button on each curl line of a chat's Use from your app box, which says where the login comes from.
+- Changed: a run's question list opens on the reference method.
+- Added: file on each passage of a chat's evidence.
+- Changed: the 422 for an answer with no marked passage says "Right" instead of "y".
+- Changed: labelling buttons read Right/Wrong.
+- Changed: New run is disabled until an eval set of the store's type exists.
+- Changed: Upload is now Preview; a Documents store takes several files at once.
+- Changed: error text says "store" instead of "collection".
+- Added: setup_labels and roles in GET /catalog.
+- Changed: a refused store or eval-set name says what is allowed and suggests one.
+- Changed: the Stores page leads with your own documents; the benchmarks are under Try a built-in benchmark.
+- Changed: compose.yaml pins name: rag-qa, so the folder name no longer picks the volumes. If you ran a
+  plain docker compose up from a keyword-rag folder, your data is in keyword-rag_* volumes: run with
+  -p keyword-rag to reach it.
+- Changed (breaking): a Documents store's answer, and its runs' answer_summary, reference
+  and gaps, are scored on the search its chats use: answer is {kind: "score", …}, frozen
+  in the run's setup as chat_search. Pair answers gain kind: "pair".
+- Added: chat_search in GET /collections/{n}.
+- Changed: Documents runs tick the chat's search and three free methods, not the controls, and rerank the pool chat reranks.
+- Changed: the Stores, store and run pages show a Documents store's score, not the keyword verdict.
+- Removed (breaking): `GET /collections/{n}/questions`, `PATCH
+  /collections/{n}/questions/leaked`, and question imports into a store
+  (`kind=questions` is now 422); import questions on the eval set.
+- Removed (breaking): `profile` from the store replies (`GET /collections`, `GET` and
+  `POST /collections/{n}`).
 - A run's estimate prices a batched part at its worst case, `max(n × batched,
   50 × full)`, so it is never below what the run spends; a 51–100 call part can show
   up to about twice its likely cost.

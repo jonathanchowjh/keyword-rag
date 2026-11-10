@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from aiconnect.ai import Cancelled
-from ragqa_core import db
+from ragqa_core import db, search_defaults
 from ragqa_core.builder import Builder
 from ragqa_core.datasets import DEV_SLICE, dev_slice
 from ragqa_core.db import (
@@ -2300,26 +2300,25 @@ def test_a_documents_resume_answers_from_the_passages_it_priced(tmp_path):
 
 def test_a_store_answer_skips_an_unjudged_documents_answer_run(tmp_path):
     conn, ev = documents_env(tmp_path, [D1, D2])
-    ev.retriever.indexer.set_lists(ev.retriever.spec("d"), LISTS)  # kw_individual can run
-    answered = ev.queue("d", "full", ["kw_individual", "hybrid"], True, None)
+    answered = ev.queue("d", "full", ["hybrid_rerank", "vector"], True, None)
     ev.run(answered)
-    free = ev.queue("d", "full", ["kw_individual", "hybrid"], False, None)
+    free = ev.queue("d", "full", ["hybrid_rerank", "vector"], False, None)
     ev.run(free)
     assert {get_job(conn, j)["status"] for j in (answered, free)} == {"done"}
     a = ev.collection_answer("d")
     assert a["run_id"] == free and a["answered"] is False and a["runs"] == 2
+    assert a["kind"] == "score"
 
 
 def test_a_store_answer_takes_the_newest_documents_run_judged_or_not(tmp_path):
     conn, ev = documents_env(tmp_path, [J1, J2])
     fake_replies(ev.ai, judging)
-    ev.retriever.indexer.set_lists(ev.retriever.spec("d"), LISTS)  # kw_individual can run
-    judged = ev.queue("d", "full", ["kw_individual", "hybrid"], True, None, judge=True)
+    judged = ev.queue("d", "full", ["hybrid_rerank", "vector"], True, None, judge=True)
     ev.run(judged)
     a = ev.collection_answer("d")
-    assert a["run_id"] == judged and a["answered"] is False  # its verdict is nDCG@10
-    assert a["metric"] == "ndcg@10"
-    free = ev.queue("d", "full", ["kw_individual", "hybrid"], False, None)
+    assert a["run_id"] == judged and a["answered"] is False  # its score is nDCG@10
+    assert a["kind"] == "score" and a["metric"] == "ndcg@10"
+    free = ev.queue("d", "full", ["hybrid_rerank", "vector"], False, None)
     ev.run(free)
     assert {get_job(conn, j)["status"] for j in (judged, free)} == {"done"}
     a = ev.collection_answer("d")
@@ -2329,17 +2328,135 @@ def test_a_store_answer_takes_the_newest_documents_run_judged_or_not(tmp_path):
 def test_a_store_answer_passes_over_a_judged_run_that_measured_no_ndcg(tmp_path):
     conn, ev = documents_env(tmp_path, [J1])
     fake_replies(ev.ai, judging)
-    ev.retriever.indexer.set_lists(ev.retriever.spec("d"), LISTS)
-    free = ev.queue("d", "full", ["kw_individual", "hybrid"], False, None)
+    free = ev.queue("d", "full", ["hybrid_rerank", "vector"], False, None)
     ev.run(free)
     stored = db.get_questions(conn, "d")[0]
     db.upsert_question(conn, "d", replace(stored, gold_ids=["gone"]), stored)
-    judged = ev.queue("d", "full", ["kw_individual", "hybrid"], True, None, judge=True)
+    judged = ev.queue("d", "full", ["hybrid_rerank", "vector"], True, None, judge=True)
     ev.run(judged)
     assert {get_job(conn, j)["status"] for j in (judged, free)} == {"done"}
     assert ev.summary(judged, None)["answer"] is None  # the store holds no right passage
     a = ev.collection_answer("d")
     assert a["run_id"] == free and a["answered"] is False
+    assert a["newer_without"] == 0  # the judged run has the method; it measured nothing
+
+
+# -- A Documents store's answer: the score of the search its chats use -------------------
+
+
+def documents_runs(tmp_path, *methods: list[str], asked=(D1, D2)):
+    """A Documents store and a done free run of each list of methods, oldest first."""
+    conn, ev = documents_env(tmp_path, list(asked))
+    jobs = []
+    for m in methods:
+        jobs.append(ev.queue("d", "full", m, False, None))
+        ev.run(jobs[-1])
+        assert get_job(conn, jobs[-1])["status"] == "done"
+    return conn, ev, jobs
+
+
+def test_documents_answer_is_chat_search_score(tmp_path):
+    conn, ev, (run,) = documents_runs(tmp_path, ["hybrid_rerank", "vector"])
+    a = ev.collection_answer("d")
+    assert a["kind"] == "score" and a["method"] == "hybrid_rerank" and a["newer_without"] == 0
+    assert a["run_id"] == run and a["answered"] is False and a["runs"] == 1
+    assert a["n"] == 2 and a["metric"] == "ndcg@10" and a["before_rerank"] is False
+    assert a["proxy_trusted"] is None and a["unreliable"] is False
+    assert a["unfinished_newer"] is False
+    assert {"at", "scale", "since", "switch", "mean", "lo", "hi"} <= set(a)
+    later = ev.queue("d", "full", ["hybrid_rerank"], False, None)
+    db.request_cancel(conn, later)  # queued, so cancelled at once
+    assert ev.collection_answer("d")["unfinished_newer"] is True
+    other = ev.queue("d", "full", ["vector"], False, None)
+    db.request_cancel(conn, other)  # lacks the method: not counted
+    assert ev.collection_answer("d")["unfinished_newer"] is True
+
+
+def test_documents_score_uses_older_run_with_the_method(tmp_path):
+    _, ev, (older, _) = documents_runs(tmp_path, ["hybrid_rerank", "vector"], ["vector"])
+    a = ev.collection_answer("d")
+    assert a["run_id"] == older and a["method"] == "hybrid_rerank"
+    assert ev.collection_answer("d")["newer_without"] == 1
+
+
+def test_documents_score_follows_settings_method(tmp_path):
+    conn, ev, _ = documents_runs(tmp_path, ["hybrid_rerank", "hybrid"])
+    search_defaults.save(conn, {"method": "vector"})
+    assert ev.collection_answer("d") is None
+
+
+def test_documents_run_keeps_frozen_method(tmp_path):
+    conn, ev, (run_id,) = documents_runs(tmp_path, ["hybrid_rerank", "hybrid", "vector"])
+    frozen = get_job(conn, run_id)["setup"]["chat_search"]
+    assert frozen == {
+        "method": "hybrid",
+        "rerank": True,
+        "run_method": "hybrid_rerank",
+        "before_rerank": False,
+    }
+    search_defaults.save(conn, {"method": "vector"})
+    assert ev.summary(run_id, None)["answer"]["method"] == "hybrid_rerank"
+    table = ev.table(run_id)
+    assert table["reference"] == "hybrid_rerank" and table["answer"]["kind"] == "score"
+    assert {g["method"] for g in table["gaps"]} == {"hybrid", "vector"}
+    assert ev.summary(run_id, None, "vector")["answer"]["method"] == "vector"
+
+
+def test_a_documents_run_without_a_frozen_choice_falls_back(tmp_path):
+    conn, ev, (run_id,) = documents_runs(tmp_path, ["hybrid", "vector"])
+    setup = get_job(conn, run_id)["setup"]
+    del setup["chat_search"]  # a run from before the choice was recorded
+    db.set_job_setup(conn, run_id, setup)
+    assert ev.summary(run_id, None)["answer"]["method"] == "hybrid"  # no hybrid_rerank ran
+    search_defaults.save(conn, {"method": "vector"})
+    assert ev.summary(run_id, None)["answer"]["method"] == "vector"  # the current choice
+
+
+def test_a_documents_run_without_the_chat_search_or_hybrid_has_no_score(tmp_path):
+    _, ev, (job,) = documents_runs(tmp_path, ["keyword"])
+    t = ev.table(job)
+    # The reference is the search the chats use, which this run lacks: no gaps.
+    assert t["answer"] is None and t["reference"] == "hybrid_rerank" and t["gaps"] == []
+    assert ev.summary(job, None)["answer"] is None
+
+
+def test_a_documents_run_falls_back_to_hybrid_only_for_hybrid_chats(tmp_path):
+    conn, ev = documents_env(tmp_path, [D1, D2])
+    search_defaults.save(conn, {"method": "vector"})
+    job = ev.queue("d", "full", ["hybrid"], False, None)
+    ev.run(job)
+    assert get_job(conn, job)["status"] == "done"
+    # The chats use Vector search, which this run lacks: Hybrid is no stand-in for it.
+    t = ev.table(job)
+    assert t["answer"] is None and t["reference"] == "vector" and t["gaps"] == []
+    assert ev.summary(job, None)["answer"] is None
+
+
+def overwrite_rows(conn, job, rows: dict[str, tuple[int, float]], n: int = 5) -> None:
+    """Each method's rows for q1..qn: `unjudged` never-judged hits in its top 10, one score."""
+    for method, (unjudged, value) in rows.items():
+        for i in range(1, n + 1):
+            row = {"hit_ids": unjudged_hits(unjudged), "retrieval": {"ndcg@10": value}}
+            db.upsert_run_item(conn, job, method, f"q{i}", row, complete=True)
+
+
+def test_documents_score_withheld_when_unjudged(tmp_path):
+    asked = [Question(f"q{n}", "alpha beta", None, [], ["p1"], {}, JUDGED) for n in range(1, 6)]
+    conn, ev, (job,) = documents_runs(tmp_path, ["hybrid_rerank", "vector"], asked=asked)
+    overwrite_rows(conn, job, {"hybrid_rerank": (7, 0.1), "vector": (0, 0.9)})
+    assert ev.summary(job, None)["answer"]["switch"]["method"] == "vector"  # the run says it
+    a = ev.collection_answer("d")
+    assert a["unreliable"] is True and a["switch"] is None
+    # The switch's own score unreliable: no switch, though the score itself stands.
+    overwrite_rows(conn, job, {"hybrid_rerank": (0, 0.1), "vector": (7, 0.9)})
+    a = ev.collection_answer("d")
+    assert a["unreliable"] is False and a["switch"] is None and a["mean"] == pytest.approx(10)
+
+
+def test_mcq_answer_keeps_the_pair(env):
+    _, ev = env
+    ev.run(ev.queue("c", "dev", ["hybrid", "kw_individual"], False, None))
+    assert ev.collection_answer("c")["kind"] == "pair"
 
 
 # -- Judge answers ----------------------------------------------------------------------
@@ -2708,3 +2825,74 @@ def test_a_judge_only_resume_keeps_the_answers_it_paid_for(tmp_path, unanswered)
         paid = 0.0 if unanswered and q.id == "d2" else stored[q.id]["usd"]
         assert row["usd"] == pytest.approx(paid + verdicts[q.id].usd)
         assert verdicts[q.id].usd > 0
+
+
+def test_every_recorded_setup_key_has_a_label(env):
+    from ragqa_core.catalog import SETUP_LABELS
+
+    conn, ev = env
+    job = ev.queue("c", "dev", ["hybrid", "hybrid_rerank"], False, None)
+    ev.run(job)
+    recorded = set(get_job(conn, job)["setup"])
+    # keys only an answered, judged or Documents run adds
+    recorded |= {"evidence_size", "judge", "answer_judge_model", "chat_search", "rerank_model"}
+    assert recorded <= set(SETUP_LABELS), recorded - set(SETUP_LABELS)
+
+
+def record_answers(ev) -> tuple[list[tuple[str, list[str], int]], list[tuple[str, str, list]]]:
+    """Every answer call from here on as (system, prompts, max_tokens), and every retrieval
+    as (method, question text, hits); both go through."""
+    calls, found = [], []
+    complete_many, retrieve = ev.ai.complete_many, ev.retriever.retrieve
+
+    def recording(prompts, **kw):
+        if kw["purpose"] == "answer":
+            calls.append((kw.get("system", ""), list(prompts), kw["max_tokens"]))
+        return complete_many(prompts, **kw)
+
+    def retrieving(collection, question, method, *args, **kw):
+        hits = retrieve(collection, question, method, *args, **kw)
+        found.append((method, question, hits))
+        return hits
+
+    ev.ai.complete_many = recording
+    ev.retriever.retrieve = retrieving
+    return calls, found
+
+
+def test_answer_parts_match_the_run(env, tmp_path):
+    """A run's answer call for each question is the run prompt over the hits it is shown,
+    with the type's reply size, byte for byte, and answer_parts gives that same call: a
+    Documents store's, retrieving or not, and an mcq one's."""
+    from ragqa_core.evaluator import answer_hits, answer_parts, answer_tokens, run_prompt
+    from ragqa_core.prompts import CHAT_TOKENS
+
+    doc_conn, doc_ev = documents_env(tmp_path, [D1, D2])
+    search_defaults.save(doc_conn, {"evidence_size": 3})
+    doc_job = doc_ev.queue("d", "full", ["hybrid", "question_only"], True, None)
+    mcq_conn, mcq_ev = env
+    mcq_job = create_job(mcq_conn, "eval", "c", setup_for(["hybrid"], answer=True))
+    cases = [
+        (doc_ev, doc_job, "d", ["hybrid", "question_only"], [D1, D2], 3),
+        (mcq_ev, mcq_job, "c", ["hybrid"], QUESTIONS, None),
+    ]
+    for ev, job, name, methods, questions, size in cases:
+        calls, found = record_answers(ev)
+        ev.run(job)
+        assert get_job(ev.conn, job)["status"] == "done"
+        spec = ev.retriever.spec(name)
+        search = spec.search or SearchSettings()
+        by_text = {q.text: q for q in questions}
+        assert len(calls) == len(methods)
+        for method, (system, prompts, max_tokens) in zip(methods, calls, strict=True):
+            asked = [(by_text[text], hits) for m, text, hits in found if m == method]
+            assert len(asked) == len(prompts) > 0
+            for (q, hits), user in zip(asked, prompts, strict=True):
+                retrieves = method != "question_only"
+                shown = answer_hits(spec.qa_type, hits, search.example, size)
+                expected = run_prompt(spec.qa_type, q, shown, search, retrieves)
+                assert spec.qa_type == "documents" or q.choices  # a choice is never a program
+                tokens = CHAT_TOKENS if spec.qa_type == "documents" else answer_tokens("mcq", False)
+                assert (system, user, max_tokens) == (*expected, tokens)
+                parts = answer_parts(spec, q, hits, search, retrieves=retrieves, evidence_size=size)
+                assert parts == (*expected, tokens, False)

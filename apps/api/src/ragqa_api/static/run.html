@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Run</title>
+<title>keyword-rag · Run</title>
 <link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 </head>
 <body>
@@ -16,7 +17,9 @@
   <p id="note" class="muted"></p>
   <div id="best"></div>
   <details id="scores-box"><summary>Each method's own score</summary><div id="scores" class="scroll"></div></details>
-  <details><summary>Can the free score be trusted here?</summary><div id="proxy"></div></details>
+  <details id="proxy-box"><summary>Can the free score be trusted here?</summary>
+    <p class="muted">The free score is measured without the AI answering, so it costs nothing; this checks it against the answered score.</p>
+    <div id="proxy"></div></details>
   <details><summary>Every pair compared</summary><div id="pairs" class="scroll"></div></details>
   <details id="questions-box"><summary>Questions</summary>
     <div class="row">

@@ -14,7 +14,15 @@ from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
 from ragqa_core.recipes import build_for, corpus_type_for, default_search, recipes_for
 from ragqa_core.store import CHUNK, SPARSE, Store, chunks_of, item_hash, rebuild_of
-from ragqa_core.types import FACETS, BuildSettings, CollectionSpec, Item, KeywordLists, QaType
+from ragqa_core.types import (
+    FACETS,
+    BuildSettings,
+    CollectionSpec,
+    Item,
+    KeywordLists,
+    QaType,
+    unknown_store,
+)
 
 NAME = db.NAME
 BATCH = 64
@@ -81,7 +89,7 @@ class Indexer:
         """A new collection's spec, not yet saved: the recipe's build, or the one given, and
         the dense model given, or the one new stores take."""
         if not NAME.match(name):
-            raise ValueError(f"collection name {name!r} must match {NAME.pattern}")
+            raise ValueError(db.refused_name(name, "a store name"))
         if name.endswith(("__rebuild", "__chunks")):  # the names of a store's search data
             raise ValueError(
                 "store names may not end in __rebuild or __chunks;"
@@ -282,7 +290,7 @@ class Indexer:
         spec = self.spec(name)
         lists = db.get_keyword_lists(self.conn, name, version)
         if spec is None or lists is None:
-            raise ValueError(f"no keyword lists {version!r} for collection '{name}'")
+            raise ValueError(f"no keyword lists {version!r} for store '{name}'")
         total, done = self.store.count(name), 0
         for hits in self.store.scroll(name):
             keywords, vectors = self.keywords_for(
@@ -374,7 +382,7 @@ class Indexer:
         resumes it after a stop."""
         spec = self.spec(name)
         if spec is None:
-            raise ValueError(f"no collection '{name}'")
+            raise ValueError(unknown_store(name))
         if not switching:
             self._rebuild(spec, model, progress)
             on_switch()
@@ -490,11 +498,11 @@ class Indexer:
             dim = self.models.dense_dim(spec.dense_model)
         except ValueError:
             raise ModelMismatch(
-                f"collection '{spec.name}' was built with {spec.dense_model},"
+                f"store '{spec.name}' was built with {spec.dense_model},"
                 " which this service can't load"
             ) from None
         if dim != spec.dense_dim:
             raise ModelMismatch(
-                f"collection '{spec.name}' was built with {spec.dense_model}"
+                f"store '{spec.name}' was built with {spec.dense_model}"
                 f" at {spec.dense_dim} dimensions; {spec.dense_model} gives {dim}"
             )

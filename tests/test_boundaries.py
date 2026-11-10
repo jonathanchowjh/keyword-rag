@@ -210,3 +210,8 @@ def test_routing_bars_and_profiles_are_gone():
         if hasattr(db, name):
             problems.append(f"db.{name} still exists")
     assert not problems, "\n".join(problems)
+
+
+def test_compose_pins_project_name():
+    c = (ROOT / "compose.yaml").read_text()  # no PyYAML dependency: check the top-level key by text
+    assert "\nname: rag-qa\n" in c

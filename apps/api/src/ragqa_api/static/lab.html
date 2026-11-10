@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Lab</title>
+<title>keyword-rag · Lab</title>
 <link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 <style>
   form { display:grid; gap:10px; margin:0 0 16px; max-width:900px; }
@@ -29,7 +30,7 @@
   <form id="form">
     <div class="row">
       <label>Store <select id="collection" required></select></label>
-      <label title="How many items each method retrieves; runs use 5">Items per method (k) <input id="k" type="number" value="5" min="1" max="20" style="width:70px"></label>
+      <label title="How many items each method retrieves; runs use 5, and a Documents answer reads at least Settings' evidence size">Items per method (k) <input id="k" type="number" value="5" min="1" max="20" style="width:70px"></label>
       <label title="When methods merge their rankings, a higher value lets lower-ranked items count for more; 60 is the usual">Merge constant (rrf_k) <input id="rrfk" type="number" value="60" min="0" style="width:80px"></label>
     </div>
     <label>Question <textarea id="question" required></textarea></label>

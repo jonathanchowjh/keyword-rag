@@ -1,4 +1,4 @@
-import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, passageHtml, refreshSpend, shell, usd } from "/static/ui.js";
 
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
@@ -48,7 +48,7 @@ function hitCard(hit) {
     ? `<div class="muted" data-channels>found by ${esc(hit.channels.join(", "))}</div>` : "";
   const gold = hit.answer ? `<span class="muted">example answer ${esc(hit.answer)}</span>` : "";
   return `<div class="hit"><div class="id"><span>${esc(hit.id)}</span><span>score ${hit.score.toFixed(2)}</span></div>
-    <div>${esc(hit.text.slice(0, 300))}${hit.text.length > 300 ? "…" : ""}</div>
+    ${passageHtml(hit.text)}
     <div>${chips}</div>${found}${gold}</div>`;
 }
 

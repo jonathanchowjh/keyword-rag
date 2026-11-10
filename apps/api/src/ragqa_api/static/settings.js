@@ -1,4 +1,4 @@
-import { $, api, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, askDelete, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
 
 shell("settings");
 $("head").innerHTML = head({
@@ -49,8 +49,9 @@ function connectionHtml(c) {
     <div class="actions" style="margin:0">
       ${manual ? "" : `<button type="button" class="secondary" data-act="test">Test</button>
       <button type="button" class="secondary" data-act="fetch">Fetch models</button>`}
-      ${c.from_env.length ? "" : '<button type="button" class="danger" data-act="remove">Remove</button>'}
+      ${c.from_env.length ? "" : '<button type="button" class="secondary" data-act="remove">Delete connection…</button>'}
       <span class="result" role="status">${notes[c.id] ?? ""}</span></div>
+    <div class="ask"></div>
   </div>`;
 }
 
@@ -73,10 +74,6 @@ const ACTIONS = {
     const { added } = await api(connPath(id) + "/models/fetch", { method: "POST" });
     notes[id] = `<span class="muted">${added.length} new model${added.length === 1 ? "" : "s"}</span>`;
   },
-  async remove(id) {
-    await api(connPath(id), { method: "DELETE" });
-    delete notes[id];
-  },
   async key(id, box) {
     const input = box.querySelector("[name=key]");
     if (!input.value) return;
@@ -90,6 +87,16 @@ $("connections").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-act]");
   if (!button) return;
   const box = button.closest("[data-connection]");
+  const c = ai.connections.find((x) => x.id === box.dataset.connection);
+  if (button.dataset.act === "remove") {
+    askDelete(box.querySelector(".ask"), {
+      question: `Delete connection ${c.label} (${c.id}), with its key and models? This cannot be undone.`,
+      yes: `Yes, delete ${c.label}`,
+      path: connPath(c.id),
+      gone: "/settings",
+    });
+    return;
+  }
   act(() => ACTIONS[button.dataset.act](box.dataset.connection, box));
 });
 
@@ -166,7 +173,7 @@ function modelHtml(m) {
     <label><input type="checkbox" name="enabled" ${m.enabled ? "checked" : ""}> Enabled</label>
     <label title="USD per million tokens">Price <select name="price">${options}</select></label>
     <span data-hand ${choice === HAND ? "" : "hidden"}>${priceBox("price_in", m.price_in)}${priceBox("price_out", m.price_out)}</span>
-    <button type="button" class="secondary" data-save>Save</button>
+    <button type="button" class="secondary" data-save>Save prices</button>
     ${note}</div>`;
 }
 
@@ -251,7 +258,7 @@ function drawRoles() {
       const first = role === "default" ? "none chosen" : "same as default";
       const locked = role === "default" && ai.default_from_env;
       const note = [JOB_NOTE[role], locked ? ENV : ""].filter(Boolean).join("; ");
-      return `<label>${esc(role)} <select data-role="${esc(role)}"${locked ? " disabled" : ""}><option value="">${first}</option>
+      return `<label>${esc(cat?.roles?.[role] ?? role)} <select data-role="${esc(role)}"${locked ? " disabled" : ""}><option value="">${first}</option>
         ${unusableOption(ai.roles[role])}${modelOptions(ai.models, ai.roles[role])}</select>
         ${note ? `<span class="muted">${esc(note)}</span>` : ""}</label>`;
     })
@@ -344,10 +351,10 @@ function searchHtml() {
       ${recommended(rec.rerank_model ?? "the service's reranker")}</label>
     <label>Rerank up to <input type="number" name="rerank_pool" ${range("rerank_pool")} value="${esc(f.rerank_pool)}">
       <span class="muted">passages per message</span>${recommended(rec.rerank_pool)}</label>
-    ${check("rewrite", "Rewrite follow-ups", '<span class="muted">(needs a rewrite model)</span>')}
+    ${check("rewrite", "Rewrite follow-ups", `<span class="muted" data-rewrite-note${ai?.resolved.rewrite ? " hidden" : ""}>(needs a rewrite model)</span>`)}
     ${number("follow_up_turns", "Previous messages joined, without rewrite")}
     ${number("rrf_k", "RRF k", '<span class="muted">(rerank off, and inside hybrid)</span>')}
-    <div class="row"><button type="submit" id="search-go">Save</button>
+    <div class="row"><button type="submit" id="search-go">Save search defaults</button>
       <button type="button" id="search-reset" class="secondary">Reset to recommended</button></div>`;
 }
 
@@ -406,7 +413,8 @@ async function loadSearch() {
 
 async function load() {
   const first = ai === null;
-  ai = await api("/ai");
+  [ai, cat] = await Promise.all([api("/ai"), catalog()]);
+  document.querySelector("[data-rewrite-note]")?.toggleAttribute("hidden", ai.resolved.rewrite);
   drawConnections();
   drawModels();
   drawRoles();

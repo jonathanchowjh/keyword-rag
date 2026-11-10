@@ -704,7 +704,7 @@ def preview(
             if known_ids is not None:
                 unknown = sum(1 for q in built for g in q.gold_ids if g not in known_ids)
                 if unknown:
-                    problems.append(f"{unknown} gold ids name no item in this collection")
+                    problems.append(f"{unknown} gold ids name no item in this store")
             if report["no_answer"]:
                 problems.append(f"{report['no_answer']} rows have no answer and will be skipped")
             if report["no_choices"]:

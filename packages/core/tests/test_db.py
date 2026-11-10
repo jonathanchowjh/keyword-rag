@@ -818,7 +818,7 @@ def test_save_questions_on_a_store_name_creates_its_eval_set_and_refuses_an_unkn
 
 
 def test_create_eval_set_refuses_a_bad_or_taken_name(conn):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="can't be an eval set name.*for example 'bad-name'"):
         db.create_eval_set(conn, "bad name", "mcq")
     db.create_eval_set(conn, "e", "mcq")
     with pytest.raises(ValueError, match="eval set 'e' already exists"):

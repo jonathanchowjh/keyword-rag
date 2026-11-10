@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Chat</title>
+<title>keyword-rag · Chat</title>
 <link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 <style>
   #chat-page { display:grid; grid-template-columns:220px minmax(0, 1fr); gap:20px; align-items:start; }
@@ -49,7 +50,7 @@
   <div id="head"></div>
   <div id="chat-page">
     <nav id="chats" aria-label="Saved chats">
-      <button id="new" type="button" disabled>New chat</button>
+      <button id="new" type="button" disabled>+ New chat</button>
       <div id="picking"></div>
       <ul id="chat-list"></ul>
       <div id="deleting"></div>
@@ -73,9 +74,11 @@
           <summary>Use from your app</summary>
           <p>Send the next message:</p>
           <pre id="curl-send"></pre>
+          <button type="button" class="secondary" data-copy="curl-send">Copy</button>
           <p>Start a new conversation set up like this one:</p>
           <pre id="curl-copy"></pre>
-          <p class="muted">With a login set, add -u user:password. Add "answer":false to get the passages without an answer, for your own model. The reply's error says when an answer failed; answer is null with passages_only true when no answer was written.</p>
+          <button type="button" class="secondary" data-copy="curl-copy">Copy</button>
+          <p class="muted">With a login set, add -u user:password: the RAGQA_USERNAME and RAGQA_PASSWORD in the server's .env. Add "answer":false to get the passages without an answer, for your own model. The reply's error says when an answer failed; answer is null with passages_only true when no answer was written.</p>
         </details>
       </div>
 

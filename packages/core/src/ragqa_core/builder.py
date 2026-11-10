@@ -1,5 +1,5 @@
 """The build steps of the induced recipes (spec §15): a collection's vocabulary,
-each item's tags from it (the kw_tags vector) with the profile they add up to, and
+each item's tags from it (the kw_tags vector), and
 each worked example's abstracted form (D4). `build` runs them after items are added.
 
 Every prompt here is written from an item's text or explanation only, never its
@@ -7,7 +7,6 @@ meta: ScienceQA's gold skill must not reach the vocabulary (spec §12).
 """
 
 import re
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -217,6 +216,9 @@ class Builder:
                 tags += self.similar(spec.dense_model, terms, part, build.tag_k, cutoff)
                 progress(min(start + BATCH, len(texts)) / len(texts))
             return tags
+        if not texts:  # nothing to send: no model is looked up, so a job with none is done
+            progress(1.0)
+            return []
         # One call for every text, so a large corpus gets the Batch API's discount.
         done = self.ai.complete_many(
             [tag_prompt(terms, t, build.tag_k) for t in texts],
@@ -291,13 +293,12 @@ class Builder:
         items: list[Item],
         progress: Callable[[float], None] = lambda p: None,
     ) -> None:
-        """Tag the items with the vocabulary in force, then refresh the profile."""
+        """Tag the items with the vocabulary in force."""
         self.indexer.check_model(spec)
         terms = db.get_vocabulary(self.conn, spec.name)
         if not terms:
-            raise ValueError(f"collection '{spec.name}' has no vocabulary in force")
+            raise ValueError(f"store '{spec.name}' has no vocabulary in force")
         self._tag(spec, terms, items, progress)
-        self.refresh_profile(spec)
 
     def stored_items(self, name: str) -> list[Item]:
         """Every item the collection stores; none before its first add."""
@@ -313,11 +314,10 @@ class Builder:
         spec = db.get_collection(self.conn, name)
         terms = db.get_vocabulary(self.conn, name, version)
         if spec is None or not terms:
-            raise ValueError(f"no vocabulary {version!r} for collection '{name}'")
+            raise ValueError(f"no vocabulary {version!r} for store '{name}'")
         self.indexer.check_model(spec)  # before any term is embedded by a model it can't load
         self._tag(spec, terms, self.stored_items(name), progress)
         db.set_vocabulary_version(self.conn, name, version)
-        self.refresh_profile(spec)
 
     def apply_outputs(
         self, spec: CollectionSpec, terms: list[str], outputs: dict[str, dict]
@@ -340,7 +340,6 @@ class Builder:
         self.store.set_payloads(spec.name, abstracted)
         # Switched to last, as a retag does: a stop part-way leaves the old one in force.
         db.set_vocabulary_version(self.conn, spec.name, version)
-        self.refresh_profile(spec)
         return {"vocabulary_version": version, "tagged": len(tags), "abstracted": len(abstracted)}
 
     def checked_outputs(
@@ -355,9 +354,7 @@ class Builder:
         ids = {i.id for i in items}
         unknown = sorted(set(outputs) - ids)
         if unknown:
-            raise ValueError(
-                f"{len(unknown)} outputs not in collection '{spec.name}': {unknown[:5]}"
-            )
+            raise ValueError(f"{len(unknown)} outputs not in store '{spec.name}': {unknown[:5]}")
         missing = sorted(ids - set(outputs))
         if missing:
             raise ValueError(f"no output for {len(missing)} items: {missing[:5]}")
@@ -381,15 +378,6 @@ class Builder:
                     raise ValueError(f"item {item_id} has no usable abstracted form")
                 abstracted[item_id] = {"abstracted": text}
         return vocabulary, tags, abstracted
-
-    def refresh_profile(self, spec: CollectionSpec) -> dict[str, int]:
-        """How many items carry each tag, most first, over every item; saved as the
-        collection's profile when its build keeps one."""
-        counts = Counter(t for batch in self.store.scroll(spec.name) for h in batch for t in h.tags)
-        profile = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-        if build_of(spec).profile:
-            db.set_profile(self.conn, spec.name, profile)
-        return profile
 
     def _abstractable(self, spec: CollectionSpec, items: list[Item]) -> list[Item]:
         """The worked examples that have a solution to abstract."""
@@ -504,7 +492,7 @@ class Builder:
         """The build after adding items, for every recipe but paper 2024 (which gets {}),
         over the added items and any stored item an earlier build left unbuilt: induce and
         switch to a vocabulary while there is none, tag, abstract the worked examples when
-        the build does, refresh the profile. An induction with no usable term leaves the
+        the build does. An induction with no usable term leaves the
         items untagged; a vocabulary can be saved later."""
         if not builds(spec):
             return {}
@@ -534,7 +522,6 @@ class Builder:
         if terms:
             self._tag(spec, terms, todo["tag"], step(induces))
         abstracted = self.abstract(spec, todo["abstract"], step(induces + 1)) if abstracts else 0
-        self.refresh_profile(spec)
         progress(1.0)
         fresh = db.get_collection(self.conn, spec.name)
         return {

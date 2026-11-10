@@ -4,6 +4,8 @@
 # credit, so a port open to the network would let anyone spend up to the
 # monthly cap. Qdrant is not published at all; the API reaches it on the
 # compose network.
+name: rag-qa
+
 services:
   api:
     build: .

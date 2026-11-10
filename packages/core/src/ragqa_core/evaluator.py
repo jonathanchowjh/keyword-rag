@@ -161,6 +161,35 @@ def run_prompt(
     return answer_prompt(qa_type, q.text, q.choices, hits, search.example, search.program)
 
 
+def answer_parts(
+    spec: CollectionSpec,
+    question: Question,
+    hits: list[Hit],
+    search: SearchSettings,
+    retrieves: bool = True,
+    evidence_size: int | None = None,
+) -> tuple[str, str, int, bool]:
+    """A question's answer call as a run sends it, (system, user, max_tokens, program): the
+    prompt over the hits it is shown, a Documents answer's cut to `evidence_size` and never a
+    program. Runs and /query both."""
+    documents = spec.qa_type == "documents"
+    shown = answer_hits(spec.qa_type, hits, search.example, evidence_size)
+    system, user = run_prompt(spec.qa_type, question, shown, search, retrieves)
+    program = not documents and search.program and not question.choices
+    tokens = CHAT_TOKENS if documents else answer_tokens(spec.qa_type, program)
+    return system, user, tokens, program
+
+
+def read_reply(
+    spec: CollectionSpec, text: str, has_choices: bool, program: bool
+) -> tuple[str, dict | None]:
+    """An answer reply read as a run reads it: a Documents answer is shown without its [n]
+    markers and has no program; the other types' as read_answer reads them."""
+    if spec.qa_type == "documents":
+        return strip_citations(text), None
+    return read_answer(spec.qa_type, text, has_choices, program)
+
+
 # A method whose top GOLD_DEPTH holds more never-judged passages than this, on average, has
 # a score that may only say its passages were never labelled.
 UNJUDGED_OVER = 3
@@ -833,6 +862,12 @@ class Evaluator:
             "evidence_named": sum(1 for q in asked if q.gold_ids),
             "evidence_held": sum(1 for q in questions if q.gold_ids),
             "evidence_off": sum(1 for q in questions if q.gold_ids and set(q.gold_ids) <= off),
+            # A Documents run is scored on the search its chats use, frozen as it starts.
+            **(
+                {"chat_search": search_defaults.store_search(self.conn, spec.name)}
+                if spec.qa_type == "documents"
+                else {}
+            ),
             **setup,
             # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
             # with any other's. Merging a full recorded set over the defaults gives it back.
@@ -1012,10 +1047,12 @@ class Evaluator:
         # A judged run stopped before judging keeps the answers it stored, and what they cost:
         # only the rows without one are answered.
         pending = [i for i, row in enumerate(rows) if "pred" not in row]
-        prompts = [
-            run_prompt(spec.qa_type, questions[i], shown[i], search, retrieves) for i in pending
+        parts = [
+            answer_parts(spec, q, hits, search, retrieves, size)
+            for q, hits in zip(questions, all_hits, strict=True)
         ]
-        programs = [not documents and search.program and not q.choices for q in questions]
+        prompts = [parts[i][:2] for i in pending]
+        programs = [program for *_, program in parts]
         done = (
             self.ai.complete_many(  # one call per method: its prompts share one system
                 [user for _, user in prompts],
@@ -1035,11 +1072,9 @@ class Evaluator:
             if n % 10 == 0:
                 report(span + (0.99 - span) * n / len(pending))
                 check()
-            if documents:  # unscored ({}), shown without its [n] markers
-                pred, raw, record = strip_citations(completion.text), completion.text, None
-            else:
-                pred, record = read_answer(spec.qa_type, completion.text, bool(q.choices), program)
-                raw = answer_line(completion.text)
+            # A Documents answer is unscored ({}) and keeps its whole reply as its raw.
+            pred, record = read_reply(spec, completion.text, bool(q.choices), program)
+            raw = completion.text if documents else answer_line(completion.text)
             row.update(
                 {
                     "pred": pred,
@@ -1275,11 +1310,45 @@ class Evaluator:
             return len(setup["question_ids"])
         return len({q for per_q in by_method.values() for q in per_q})
 
-    def summary(self, job_id: str, proxy_trusted: bool | None) -> dict | None:
+    def _answer(
+        self,
+        spec: CollectionSpec,
+        setup: dict,
+        per_method: dict[str, dict[str, float]],
+        headline: str,
+        factor: float,
+        method: str | None = None,
+    ) -> tuple[dict | None, str]:
+        """The run's answer and the method its gaps are against. Other types: the declared
+        pair against its reference. Documents: the score of `method`, else of the search
+        the run froze (the store's now for a run from before that), else, when the chats use
+        Hybrid, of hybrid_rerank then hybrid, whichever ran; against the chats' search when
+        none did."""
+        if spec.qa_type != "documents":
+            return verdict.answer(per_method, headline, factor), ANSWER_PAIR[1]
+        if method is not None:
+            chosen: dict = search_defaults.store_search(self.conn, spec.name)
+            scored: str = method
+        else:
+            chosen = setup.get("chat_search") or search_defaults.store_search(self.conn, spec.name)
+            # Hybrid stands in for Hybrid reranked, never for another method.
+            within = ("hybrid_rerank", "hybrid") if chosen["method"] == "hybrid" else ()
+            ran = [m for m in (chosen["run_method"], *within) if per_method.get(m)]
+            if not ran:
+                return None, chosen["run_method"]
+            scored = ran[0]
+        rerank = bool(chosen["rerank"])
+        before = rerank and scored != "hybrid_rerank"
+        return verdict.score(per_method, scored, factor, before, rerank), scored
+
+    def summary(
+        self, job_id: str, proxy_trusted: bool | None, method: str | None = None
+    ) -> dict | None:
         """What a list of runs needs: the headline, its scale and the declared pair's
-        answer, without the per-method intervals, all pairs, best of each or proxy.
-        `proxy_trusted` is the collection's (collection_proxy_trusted), computed once
-        by the caller; it matters only for an unanswered exam run."""
+        answer (a Documents run's score: of `method` when given), without the per-method
+        intervals, all pairs, best of each or proxy. `proxy_trusted` is the collection's
+        (collection_proxy_trusted), computed once by the caller; it matters only for an
+        unanswered exam run."""
         job = db.get_job(self.conn, job_id)
         if job is None:
             return None
@@ -1288,10 +1357,11 @@ class Evaluator:
         by_method, has_answers = self._rows_by_method(job_id)
         trusted = proxy_trusted if spec.qa_type in EXAMPLE_TYPES and not has_answers else None
         headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
+        answer, _ = self._answer(spec, setup, per_method, headline, scaling["factor"], method)
         return {
             "headline": headline,
             "scale": scaling,
-            "answer": verdict.answer(per_method, headline, scaling["factor"]),
+            "answer": answer,
             "proxy_trusted": trusted,
             "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
@@ -1353,7 +1423,7 @@ class Evaluator:
         if spec.qa_type in EXAMPLE_TYPES and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
         headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
-        reference = ANSWER_PAIR[1]
+        answer, reference = self._answer(spec, setup, per_method, headline, scaling["factor"])
         return {
             "setup": setup,
             "status": job["status"],
@@ -1367,18 +1437,13 @@ class Evaluator:
             "scale": scaling,
             "reference": reference,
             "gaps": verdict.gaps(per_method, reference, scaling["factor"]),
-            "answer": verdict.answer(per_method, headline, scaling["factor"]),
+            "answer": answer,
             "best_of_each": verdict.best_of_each(per_method, headline, scaling["factor"]),
             "labels": self._labels(job_id, spec, setup, by_method),
             "answers": self._answers(job_id, spec, setup, by_method),
             "usd_total": self.ai.job_spend(job_id),
             "question_count": self._question_count(setup, by_method),
-            "since": changes_since(
-                setup,
-                spec,
-                db.disabled_sources(self.conn, spec.name),
-                self._eval_set_version(spec, setup),
-            ),
+            "since": self._since(spec, setup),
         }
 
     def _done_evals(self, collection: str) -> list[dict]:
@@ -1393,18 +1458,15 @@ class Evaluator:
     def collection_answer(self, name: str) -> dict | None:
         """The collection's answer: the newest answered run that has the pair, else the
         newest run that has it (spec §7.3: a run lacking the pair gives no answer). A
-        Documents store's is the newest paired run with a verdict, judged or not, and is
-        retrieval only: a Documents headline is always nDCG@10."""
+        Documents store's is the score of the search its chats use (_documents_answer)."""
         spec = self.retriever.spec(name)
+        if spec.qa_type == "documents":
+            return self._documents_answer(spec)
         done = self._done_evals(name)
         paired = [j for j in done if set(ANSWER_PAIR) <= set(j["setup"]["methods"])]
-        if spec.qa_type == "documents":
-            candidates = paired
-        else:
-            answered_runs = [j for j in paired if j["setup"].get("answer")]
-            candidates = (answered_runs or paired)[:1]
-        for job in candidates:
-            answered = spec.qa_type != "documents" and bool(job["setup"].get("answer"))
+        answered_runs = [j for j in paired if j["setup"].get("answer")]
+        for job in (answered_runs or paired)[:1]:
+            answered = bool(job["setup"].get("answer"))
             # Only an unanswered run's headline depends on the collection's proxy check.
             trusted = None if answered else self.collection_proxy_trusted(name, done)
             summary = self.summary(job["id"], trusted)
@@ -1419,13 +1481,64 @@ class Evaluator:
             "runs": len(done),
             "proxy_trusted": summary["proxy_trusted"],
             "scale": summary["scale"],
-            "since": changes_since(
-                job["setup"],
-                spec,
-                db.disabled_sources(self.conn, name),
-                self._eval_set_version(spec, job["setup"]),
-            ),
+            "since": self._since(spec, job["setup"]),
             **summary["answer"],
+        }
+
+    def _since(self, spec: CollectionSpec, setup: dict) -> dict:
+        return changes_since(
+            setup,
+            spec,
+            db.disabled_sources(self.conn, spec.name),
+            self._eval_set_version(spec, setup),
+        )
+
+    def _documents_answer(self, spec: CollectionSpec) -> dict | None:
+        """The score of the search the store's chats use, from the newest done run of its
+        default set that has a score for it; None when none has. A switch is offered only
+        when both scores are reliable: few never-judged passages in their top 10."""
+        method = search_defaults.store_search(self.conn, spec.name)["run_method"]
+        done = self._done_evals(spec.name)
+        without = 0  # newer done runs that lack the method
+        for job in done:
+            if method not in job["setup"]["methods"]:
+                without += 1
+                continue
+            summary = self.summary(job["id"], None, method)
+            if summary is not None and summary["answer"] is not None:
+                break
+        else:
+            return None
+        setup = job["setup"]
+        evals = db.list_jobs(self.conn, kind="eval", collection=spec.name, limit=db.ALL)
+        newer = itertools.takewhile(lambda j: j["id"] != job["id"], evals)
+        unfinished = any(
+            j["status"] in db.JOBS_RESUMABLE
+            and j["setup"].get("eval_set") == setup.get("eval_set")
+            and method in j["setup"].get("methods", [])
+            for j in newer
+        )
+        by_method, _ = self._rows_by_method(job["id"])
+        labels = self._labels(job["id"], spec, setup, by_method) or {"unjudged": {}}
+        flagged = {m for m, u in labels["unjudged"].items() if u["flag"]}
+        answer = summary["answer"]
+        switch = answer["switch"]
+        unreliable = method in flagged
+        if unreliable or (switch and switch["method"] in flagged):
+            switch = None
+        return {
+            **answer,
+            "switch": switch,
+            "run_id": job["id"],
+            "at": job["created_at"],
+            "answered": False,
+            "runs": len(done),
+            "proxy_trusted": None,
+            "scale": summary["scale"],
+            "since": self._since(spec, setup),
+            "newer_without": without,
+            "unfinished_newer": unfinished,
+            "unreliable": unreliable,
         }
 
     def _proxy_for(self, job_id: str) -> dict | None:

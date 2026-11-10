@@ -37,9 +37,18 @@ from ragqa_core.types import (
     QaType,
     Question,
     SearchSettings,
+    slug,
 )
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # a collection's or an eval set's name
+
+
+def refused_name(name: str, what: str) -> str:
+    return (
+        f"{name!r} can't be {what}: use 1–64 letters, digits, - or _ (no spaces),"
+        f" for example {slug(name)!r}"
+    )
+
 
 SCHEMA = """
 create table if not exists collections (
@@ -144,7 +153,7 @@ NEW_COLLECTION_COLUMNS = (
     "build_json",
     "search_json",
     "vocabulary_version",
-    "profile_json",
+    "profile_json",  # unused since 0.2.0; kept so old databases need no migration
     "eval_set",
     "chat_method",
     "chat_k",
@@ -207,13 +216,12 @@ def _migrate_collections(conn: Connection) -> None:
         search = replace(default_search(qa_type, build), program=False)
         conn.execute(
             "update collections set corpus_type = ?, recipe = ?, build_json = ?,"
-            " search_json = ?, profile_json = ? where name = ?",
+            " search_json = ? where name = ?",
             (
                 corpus_type_for(qa_type),
                 "paper_2024",
                 json.dumps(asdict(build)),
                 json.dumps(asdict(search)),
-                "{}",
                 row["name"],
             ),
         )
@@ -352,16 +360,15 @@ def save_collection(conn: Connection, spec: CollectionSpec) -> None:
     conn.execute(
         "insert into collections"
         " (name, qa_type, summarize, dense_model, dense_dim, keyword_version, created_at,"
-        " corpus_type, recipe, build_json, search_json, vocabulary_version, profile_json)"
-        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " corpus_type, recipe, build_json, search_json, vocabulary_version)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " on conflict(name) do update set qa_type = excluded.qa_type,"
         " summarize = excluded.summarize, dense_model = excluded.dense_model,"
         " dense_dim = excluded.dense_dim, keyword_version = excluded.keyword_version,"
         " created_at = excluded.created_at, corpus_type = excluded.corpus_type,"
         " recipe = excluded.recipe, build_json = excluded.build_json,"
         " search_json = excluded.search_json,"
-        " vocabulary_version = excluded.vocabulary_version,"
-        " profile_json = excluded.profile_json",
+        " vocabulary_version = excluded.vocabulary_version",
         (
             spec.name,
             spec.qa_type,
@@ -375,7 +382,6 @@ def save_collection(conn: Connection, spec: CollectionSpec) -> None:
             json.dumps(asdict(build)),
             json.dumps(asdict(search)),
             spec.vocabulary_version,
-            json.dumps(spec.profile),
         ),
     )
 
@@ -409,7 +415,6 @@ def _spec(row: sqlite3.Row) -> CollectionSpec:
         BuildSettings(**json.loads(row["build_json"])),
         SearchSettings(**json.loads(row["search_json"])),
         row["vocabulary_version"],
-        json.loads(row["profile_json"] or "{}"),
     )
 
 
@@ -523,12 +528,6 @@ def set_vocabulary_version(conn: Connection, name: str, version: str) -> None:
     conn.execute("update collections set vocabulary_version = ? where name = ?", (version, name))
 
 
-def set_profile(conn: Connection, name: str, profile: dict[str, int]) -> None:
-    conn.execute(
-        "update collections set profile_json = ? where name = ?", (json.dumps(profile), name)
-    )
-
-
 def get_vocabulary(conn: Connection, name: str, version: str | None = None) -> list[str] | None:
     """A saved version's terms; with no version, the one in force (None when there is none)."""
     if version is None:
@@ -567,7 +566,7 @@ def list_vocabularies(conn: Connection, name: str) -> list[dict]:
 
 def create_eval_set(conn: Connection, name: str, qa_type: QaType, store: str | None = None) -> None:
     if not NAME.match(name):
-        raise ValueError(f"eval set name {name!r} must match {NAME.pattern}")
+        raise ValueError(refused_name(name, "an eval set name"))
     with conn.lock:
         if get_eval_set(conn, name):
             raise ValueError(f"eval set '{name}' already exists")
@@ -597,7 +596,7 @@ def _ensure_for_write(conn: Connection, name: str) -> None:
         return
     spec = get_collection(conn, name)
     if spec is None:
-        raise ValueError(f"no eval set or collection named '{name}'")
+        raise ValueError(f"no eval set or store named '{name}'")
     create_eval_set(conn, name, spec.qa_type)
 
 

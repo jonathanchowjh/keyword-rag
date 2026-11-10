@@ -221,7 +221,7 @@ def test_preview_ready_with_sample_and_problems(tmp_path):
 def test_preview_counts_unknown_gold_ids(tmp_path):
     p = write(tmp_path / "a.csv", "text,answer,gold_ids\nq1,1,i1|i2\nq2,2,i3\n")
     out = imports.preview(p, "a.csv", "questions", "multihop", known_ids={"i1"})
-    assert "2 gold ids name no item in this collection" in out["problems"]
+    assert "2 gold ids name no item in this store" in out["problems"]
 
 
 def test_preview_warns_about_ids_that_belong_to_another_source(tmp_path):

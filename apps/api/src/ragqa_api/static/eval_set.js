@@ -1,5 +1,5 @@
-import { $, api, askDelete, catalog, clock, confirmSpend, count, esc, head, importBox, plural, refreshSpend, shell,
-  short } from "/static/ui.js";
+import { $, api, askDelete, catalog, clock, confirmSpend, count, esc, head, importBox, passageHtml, plural, refreshSpend, shell,
+  short, whereHtml } from "/static/ui.js";
 
 const PAGE_SIZE = 50;
 const VERSIONS_SHOWN = 20; // the newest; Show all versions lists the rest
@@ -16,7 +16,7 @@ let added = 0;
 let allVersions = false; // Show all versions was clicked
 let viewing = null; // the old version shown read-only, { version, questions }; null for none
 
-shell("eval-sets");
+shell(`e/${name}`);
 
 const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
 const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -30,7 +30,7 @@ function headHtml() {
     title: name,
     crumb: [{ label: "Eval sets", href: "/eval-sets" }],
     sub: `${type?.label ?? set.qa_type}: ${plural(set.questions.length, "question")}`,
-    aside: `version ${esc(short(set.version))}`,
+    aside: set.version ? `version ${esc(short(set.version))}` : "",
   });
 }
 
@@ -357,6 +357,7 @@ let open = null; // the question in the panel as read, its conflict check; null 
 let shown = []; // the passages listed: the pool's, then labelled ones it missed, then lost ids
 let found = []; // passages from Search the store not listed above
 let notes = []; // the pool's notes
+const LABEL = { y: "Right", n: "Wrong" }; // a mark as the buttons say it
 let marks = new Map(); // passage id -> "y" or "n"; unmarked is not judged
 let finding = 0; // the latest Find passages, so an older reply is dropped
 let saving = false; // a save is in flight: nothing may change which question the panel holds
@@ -412,7 +413,7 @@ function labelRowHtml(q) {
     : "";
   return `<tr><td>${esc(q.text)}</td><td>${count(q.gold_ids.length)}${gone}</td>
     <td>${q.judged_ids ? count(q.judged_ids.length) : "–"}</td>
-    <td>${label}<button type="button" class="secondary" data-del="${esc(q.id)}" ${busy() ? "disabled" : ""}>Delete</button></td></tr>`;
+    <td>${label}<button type="button" class="secondary" data-del="${esc(q.id)}" ${busy() ? "disabled" : ""}>Delete question…</button></td></tr>`;
 }
 
 function labelTableHtml() {
@@ -444,23 +445,22 @@ function listedIds() {
   return [...ids, ...[...marks.keys()].filter((id) => !ids.includes(id))];
 }
 
-function passageHtml(p) {
+function markHtml(p) {
   const mark = marks.get(p.id);
   const button = (m) => `<button type="button" class="${mark === m ? "" : "secondary"}" data-mark="${m}"
-    aria-pressed="${mark === m}">${m}</button>`;
+    aria-pressed="${mark === m}">${LABEL[m]}</button>`;
   let body = `<code>${esc(p.id)}</code>`; // the store no longer holds it: its id is all there is
   if (p.text !== undefined) {
-    const where = p.file && p.part != null ? `${p.file}, part ${p.part} of ${p.parts}` : (p.file ?? "");
-    body = `<div class="what">${esc(where)}</div><div class="full">${esc(p.text)}</div>`;
+    body = passageHtml(p.text, { meta: whereHtml(p) });
   }
   return `<li data-passage="${esc(p.id)}">${body}<div class="actions">${button("y")}${button("n")}</div></li>`;
 }
 
 function drawPanel() {
   $("lab-notes").innerHTML = notes.map((n) => `<li>${esc(n)}</li>`).join("");
-  $("lab-passages").innerHTML = shown.map(passageHtml).join("");
+  $("lab-passages").innerHTML = shown.map(markHtml).join("");
   $("lab-found").innerHTML = found.length
-    ? `<h3>From your search</h3><ul class="evidence">${found.map(passageHtml).join("")}</ul>`
+    ? `<h3>From your search</h3><ul class="evidence">${found.map(markHtml).join("")}</ul>`
     : "";
   const ids = listedIds();
   const y = ids.filter((id) => marks.get(id) === "y").length;
@@ -499,7 +499,7 @@ function unlessUnsaved(then) {
   discarding = then;
   $("lab-discard").innerHTML = `<p class="warn">${esc("This question has unsaved marks.")}</p>
     <div class="actions"><button type="button" class="danger" id="lab-discard-yes">Discard them</button>
-      <button type="button" class="secondary" id="lab-discard-keep">Keep editing</button></div>`;
+      <button type="button" class="secondary" id="lab-discard-keep">Cancel</button></div>`;
   $("lab-discard").scrollIntoView({ block: "nearest" });
 }
 
@@ -569,10 +569,14 @@ async function searchStore() {
     const result = reply.results.hybrid;
     if (result.error) say("lab-search-msg", result.error);
     const listed = new Set([...shown, ...found].map((p) => p.id));
+    const before = found.length;
     for (const hit of result.hits) {
       if (listed.has(hit.id)) continue;
       const meta = hit.meta ?? {};
       found.push({ id: hit.id, text: hit.text, file: meta.file, part: meta.part, parts: meta.parts });
+    }
+    if (!result.error && found.length === before) {
+      say("lab-search-msg", "Nothing new: every passage the search found is already listed.");
     }
     drawPanel();
   } catch (e) {
@@ -597,7 +601,7 @@ function forgetAnswer() {
   $("lab-ai-confirm").innerHTML = "";
 }
 
-// The AI's answer from the passages marked y: its estimate first, one call only on Start.
+// The AI's answer from the passages marked Right: its estimate first, one call only on Start.
 async function askAnswer() {
   forgetAnswer();
   const mine = asking;
@@ -618,7 +622,8 @@ async function askAnswer() {
       }
       paying = true;
       try {
-        const { answer } = await api(path, { method: "POST", body: { ...body, confirm: true } });
+        const shown = { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd };
+        const { answer } = await api(path, { method: "POST", body: { ...body, ...shown } });
         refreshSpend();
         if (asking === mine) $("lab-ai-confirm").innerHTML = "";
         if (answering === opened) showAnswer(answer); // a mark change keeps it; a question change doesn't
@@ -636,7 +641,7 @@ async function askAnswer() {
 }
 
 function showAnswer(text) {
-  const button = (m) => `<button type="button" class="secondary" data-ai-mark="${m}" aria-pressed="false">${m}</button>`;
+  const button = (m) => `<button type="button" class="secondary" data-ai-mark="${m}" aria-pressed="false">${LABEL[m]}</button>`;
   $("lab-ai-answer").innerHTML = `<p>Is this the right answer?</p><div class="full">${esc(text)}</div>
     <div class="actions">${button("y")}${button("n")}</div>`;
   canSave();
@@ -840,6 +845,7 @@ async function start() {
       importPath: `/eval-sets/${enc}/imports`,
       kind: "questions",
       qaType: set.qa_type,
+      typeLabel: cat.qa_types[set.qa_type]?.label,
       done: () => (dirty ? null : load()), // edits made while it ran are kept; Save then says it moved on
     });
   } catch (e) {

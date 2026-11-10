@@ -1,6 +1,6 @@
 import { $, BUSY, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
-  head, legendHtml, methodLabel, metricLabel, modelOptions, paint, pct, pill, plural, pts, refreshSpend, shell, short, UNPRICED, usd, verdictHtml,
-  importBox, verdictNotes, wordHtml } from "/static/ui.js";
+  head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, UNPRICED, usd, verdictHtml,
+  importBox, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
@@ -14,9 +14,10 @@ const GROUPS = [
   ["keywords", "Keywords"],
 ];
 const CONTROLS = ["random_example", "fixed_example"];
-const NOT_BUILT = "Not built. Keyword tags let keyword_rag search this store: an AI proposes a vocabulary " +
+const notBuilt = () => `Not built. Keyword tags let ${methodLabel("keyword_rag", cat)} search this store: an AI proposes a vocabulary ` +
   "from your passages, then tags each passage by similarity.";
-const TAGS_STOPPED = "Adding keyword tags stopped part-way; keyword_rag waits until every passage is tagged.";
+const tagsStopped = () => `Adding keyword tags stopped part-way; ${methodLabel("keyword_rag", cat)} waits until every passage is tagged.`;
+const noun = () => cat.qa_types[col.qa_type]?.item_noun ?? "item";
 
 const name = decodeURIComponent(location.pathname.split("/")[2] ?? "");
 const enc = encodeURIComponent(name);
@@ -66,7 +67,26 @@ function headHtml() {
   });
 }
 
+// A Documents store: the score of the search its chats use, no gap bar.
+function scoreAnswerHtml() {
+  const a = col.answer;
+  const lead = "<strong>How well does chat find the right passages?</strong>";
+  const foot = '<p class="muted">Chats can choose another method; this scores the store\'s setting.</p>';
+  if (!a) {
+    const m = col.chat_search?.run_method;
+    return `<p class="verdict">${lead}</p><p class="muted">${esc(noScoreLine(m, col.methods_unavailable?.[m], cat))}</p>${foot}`;
+  }
+  const s = a.switch;
+  const switchLine = s && !a.unreliable
+    ? `<p>${esc(`${methodLabel(s.method, cat)} did better: ${pts(s.diff, s.lo, s.hi)}. Picked after the fact, so the gap is likely overstated. To use it, change the store's search method.`)}</p>`
+    : "";
+  return `<p class="verdict">${lead}</p><p>${esc(scoreLine(a, cat))}</p>${switchLine}
+    <p class="muted">From <a href="/c/${enc}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
+      short(a.run_id))}</a> at ${esc(clock(a.at))} · run ${esc(a.runs)} on this store</p>${foot}`;
+}
+
 function answerHtml() {
+  if (documents()) return scoreAnswerHtml();
   const a = col.answer;
   if (!a) return '<p class="muted">No answer yet. Run the keyword methods against Hybrid to get one.</p>';
   const span = gapSpan([a.lo, a.hi, a.diff]);
@@ -84,6 +104,7 @@ function answerHtml() {
 function saidHtml(r) {
   const a = r.answer_summary;
   if (!a || BUSY.has(r.status)) return "–";
+  if (a.kind === "score") return esc(scoreRange(a.mean, a.lo, a.hi));
   const notes = verdictNotes(a).map((n) => ` · ${n}`).join("");
   return `${wordHtml(a)} ${esc(pts(a.diff, a.lo, a.hi))}${notes ? `<span class="muted">${esc(notes)}</span>` : ""}`;
 }
@@ -102,7 +123,7 @@ function runsHtml() {
     })
     .join("");
   return `<table><thead><tr><th>Time</th><th>Methods</th><th>Questions</th><th>Answers</th>
-    <th title="${esc(`The verdict on ${cat.answer_pair.map((m) => methodLabel(m, cat)).join(" against ")}`)}">Said</th><th>Cost</th><th>Status</th></tr></thead>
+    <th title="${esc(documents() ? "The score of the search your chats use" : `The verdict on ${cat.answer_pair.map((m) => methodLabel(m, cat)).join(" against ")}`)}">Said</th><th>Cost</th><th>Status</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
@@ -144,11 +165,13 @@ function setOptions(sets) {
 // A Documents store runs no keyword-list methods. Its answers are off until ticked, and
 // Judge answers needs them.
 function runFormHtml(ai, sets) {
+  // A Documents run ticks the chat's search and the three free ones, and no controls.
+  const ticks = [...new Set([col.chat_search?.run_method, "hybrid", "vector", "keyword"])];
   const groups = GROUPS.filter(([id]) => !(documents() && id === "keywords")).map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
       .map(([mid, m]) => {
-        const on = cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
+        const on = documents() ? ticks.includes(mid) : cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
         const ok = col.methods_available.includes(mid);
         const why = col.methods_unavailable?.[mid];
         const off = why ? ` <span class="muted">${esc(`(${why})`)}</span>` : "";
@@ -197,6 +220,8 @@ function bindRunForm() {
     eval_set: $("rf-set").value || null,
     k: 5,
     rrf_k: 60,
+    // hybrid_rerank reranks the pool chat does: Settings' (up to 60), capped at a run's 50
+    ...(documents() ? { rerank_pool: Math.min(50, defaults?.in_force?.rerank_pool ?? 20) } : {}),
   });
   let estimating = 0; // bumped by each Estimate and each change, so a late estimate draws no Start
   const forget = () => {
@@ -257,11 +282,9 @@ function bindRunForm() {
       if (mine !== estimating) return;
       confirmSpend($("rf-confirm"), estimate, async () => {
         try {
-          await api("/eval", { method: "POST", body: { ...request, confirm: true } });
-          form.hidden = true;
-          forget();
+          const queued = await api("/eval", { method: "POST", body: { ...request, confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
           refreshSpend();
-          await refresh();
+          location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
         } catch (e) {
           $("rf-msg").textContent = e.message;
         }
@@ -336,7 +359,9 @@ function bindLoad() {
       }
       confirmSpend($("ld-confirm"), first.estimate, async () => {
         try {
-          const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, confirm: true } });
+          // What was shown: a price that changed since is refused, to be checked again.
+          const shown = { calls: first.estimate.calls, est_usd: first.estimate.est_usd };
+          const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, ...shown, confirm: true } });
           $("ld-confirm").textContent = `Queued (job ${short(job.job_id)})`;
           refreshSpend();
           await refresh();
@@ -358,17 +383,17 @@ function sourcesHtml() {
   const locked = BUSY_STATES.has(col.state) || col.unlabelled > 0;
   const body = rows
     .map(
-      (r) => `<tr><td>${esc(r.source)}</td><td class="num">${esc(count(r.items))}</td>
-        <td><input type="checkbox" data-source="${esc(r.source)}" aria-label="Use ${esc(r.source)} in retrieval"
+      (r) => `<tr><td>${esc(sourceLabel(r.source))}</td><td class="num">${esc(count(r.items))}</td>
+        <td><input type="checkbox" data-source="${esc(r.source)}" aria-label="Use ${esc(sourceLabel(r.source))} in retrieval"
           ${r.enabled ? "checked" : ""} ${locked ? "disabled" : ""}></td>
-        <td><button type="button" class="secondary" data-delete="${esc(r.source)}">Delete</button></td></tr>`
+        <td><button type="button" class="secondary" data-delete="${esc(r.source)}">Delete source…</button></td></tr>`
     )
     .join("");
   const waiting = col.unlabelled > 0
-    ? `<p class="muted">${esc(plural(col.unlabelled, "item"))} ${col.unlabelled === 1 ? "is" : "are"} still being
+    ? `<p class="muted">${esc(plural(col.unlabelled, noun()))} ${col.unlabelled === 1 ? "is" : "are"} still being
       labelled with their source; switches open when that finishes.</p>`
     : "";
-  return `<table><thead><tr><th>Source</th><th>Items</th><th>Used by retrieval</th><th>Delete</th></tr></thead>
+  return `<table><thead><tr><th>Source</th><th>${esc(noun().replace(/^./, (c) => c.toUpperCase()))}s</th><th>Used by retrieval</th><th>Delete</th></tr></thead>
     <tbody>${body}</tbody></table>${waiting}`;
 }
 
@@ -395,8 +420,8 @@ function bindSources() {
     const source = button.dataset.delete;
     const row = (col.sources ?? []).find((r) => r.source === source);
     askDelete($("sources-confirm"), {
-      question: `Delete source ${source}: its ${count(row?.items ?? 0)} items?`,
-      yes: `Yes, delete ${source}`,
+      question: `Delete source ${sourceLabel(source)}: its ${plural(row?.items ?? 0, noun())}?`,
+      yes: `Yes, delete ${sourceLabel(source)}`,
       path: `/collections/${enc}/sources/${encodeURIComponent(source)}`,
       gone: `/c/${enc}`,
     });
@@ -531,7 +556,7 @@ async function saveLists() {
     listsDirty = false;
     listsVersion = col.keyword_version ?? null; // keep the edits until the rekey switches version
     note(`<span class="ok">Saved as version ${esc(short(saved.version))}: re-keys ${esc(
-      plural(col.count, "item"))}.</span> Job ${esc(short(saved.job_id))} ${pill("queued")}`);
+      plural(col.count, noun()))}.</span> Job ${esc(short(saved.job_id))} ${pill("queued")}`);
     await refresh();
   } catch (e) {
     note(`<span class="err">${esc(e.message)}</span>`);
@@ -547,7 +572,7 @@ async function proposeLists() {
     $("kw-msg").replaceChildren("Proposing costs ", slot);
     confirmSpend(slot, estimate, async () => {
       try {
-        fillLists(await api(path, { method: "POST", body: { confirm: true } }));
+        fillLists(await api(path, { method: "POST", body: { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } }));
         listsDirty = true;
         note("Proposed by the AI. Review them, then Save lists.");
         refreshSpend();
@@ -562,7 +587,7 @@ async function proposeLists() {
 
 function syncLists() {
   paint("lists-history", historyHtml());
-  $("kw-hint").textContent = `Saving re-keys ${plural(col.count, "item")}, free.`;
+  $("kw-hint").textContent = `Saving re-keys ${plural(col.count, noun())}, free.`;
   const version = col.keyword_version ?? null;
   if (version !== listsVersion && !listsDirty) {
     fillLists(col.keyword_lists);
@@ -579,11 +604,11 @@ function tagsHtml() {
   let body;
   if (t.state === "building") body = `<p>${esc(`Adding keyword tags: ${pct(t.progress)}`)}</p>`;
   else if (t.state === "stopped") {
-    body = `<p class="warn">${esc(TAGS_STOPPED)}
+    body = `<p class="warn">${esc(tagsStopped())}
       <button type="button" class="secondary" data-tags-resume="${esc(t.job_id)}">Resume</button></p>`;
   } else if (t.state === "built") body = `<p>${esc(`Built: ${count(t.terms)} terms.`)}</p>`;
   else {
-    body = `<p>${esc(NOT_BUILT)}</p>
+    body = `<p>${esc(notBuilt())}</p>
       <div class="actions"><button type="button" id="tags-add">Add keyword tags</button></div>`;
   }
   return `<h2>Keyword tags</h2>${body}`;
@@ -598,7 +623,7 @@ async function askTags() {
     const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
     confirmSpend(box, estimate, async () => {
       try {
-        await api(path, { method: "POST", body: { confirm: true } });
+        await api(path, { method: "POST", body: { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
         box.innerHTML = "";
         refreshSpend();
         await refresh();
@@ -638,7 +663,7 @@ function embeddingHtml() {
     status = r.switching
       ? `<p data-rebuild>Switching to ${esc(r.model)}…</p>`
       : `<p data-rebuild>Rebuilding with ${esc(r.model)}: ${esc(pct(r.progress))}
-          <button type="button" class="secondary" data-rebuild-cancel ${job}>Cancel</button></p>`;
+          <button type="button" class="secondary" data-rebuild-cancel ${job}>Stop job</button></p>`;
   } else if (r) {
     status = `<p class="warn" data-rebuild>${esc(stoppedLine(r))}
       <button type="button" class="secondary" data-rebuild-resume ${job}>Resume</button></p>`;
@@ -661,7 +686,7 @@ function aboutTime(seconds) {
 function askRebuild(model) {
   const e = defaults.embedders.find((x) => x.name === model);
   const timed = e?.seconds_per_1000 != null && defaults.embed_machine
-    ? `, ${aboutTime((col.count * e.seconds_per_1000) / 1000)} for ${col.count} items on ${defaults.embed_machine}` : "";
+    ? `, ${aboutTime((col.count * e.seconds_per_1000) / 1000)} for ${plural(col.count, noun())} on ${defaults.embed_machine}` : "";
   $("embedding-confirm").innerHTML = `<p>${esc(`Rebuild ${name} with ${model}? Every item is embedded again on this machine: free${timed}. Search keeps using ${col.dense_model} until the rebuild finishes.`)}</p>
     <div class="actions"><button type="button" data-yes>Yes, rebuild</button>
     <button type="button" class="secondary" data-keep>Cancel</button></div>`;
@@ -727,7 +752,7 @@ $("chat-settings").addEventListener("click", async (event) => {
 // -- delete ---------------------------------------------------------------------------
 
 function buildDelete() {
-  $("delete").innerHTML = `<div class="actions"><button type="button" id="del-ask" class="secondary">Delete…</button></div>
+  $("delete").innerHTML = `<div class="actions"><button type="button" id="del-ask" class="secondary">Delete store…</button></div>
     <div id="del-confirm"></div>`;
   $("del-ask").addEventListener("click", () =>
     askDelete($("del-confirm"), {
@@ -759,7 +784,7 @@ async function refresh() {
     sets = everySet.filter((e) => e.qa_type === col.qa_type);
     $("head").innerHTML = headHtml();
     const empty = col.count === 0;
-    const why = empty ? "Add items first: an empty store has nothing to search." : "";
+    const why = empty ? `Add ${noun()}s first: an empty store has nothing to search.` : "";
     $("chat-store").disabled = empty || chatting;
     $("chat-store").title = why;
     $("chat-store-why").textContent = why;
@@ -784,8 +809,9 @@ async function refresh() {
       importPath: `/collections/${enc}/imports`,
       kind: "items",
       qaType: col.qa_type,
-      noun: cat.qa_types[col.qa_type]?.item_noun ?? "item",
+      noun: noun(),
       done: () => refresh(),
+      next: nextStepsHtml,
     });
     syncLists();
     const pick = wanted; // Run against its store on an eval set's page
@@ -797,12 +823,49 @@ async function refresh() {
         $("rf-set").dispatchEvent(new Event("change"));
       }
     }
-    $("new-run").disabled = false; // toggleRunForm reads col
+    // An empty store opens on Import; one with items keeps it after its items.
+    // Moved only when out of place: a move would drop the focus inside the import box.
+    const anchor = empty ? $("sec-answer") : $("benchmark");
+    if ($("sec-import").nextElementSibling !== anchor) anchor.before($("sec-import"));
+    const noSet = sets.length === 0;
+    $("new-run").disabled = noSet; // toggleRunForm reads col
+    $("new-run").title = noSet ? "Create an eval set first" : "";
+    $("new-run-why").innerHTML = noSet ? `<a href="/eval-sets?store=${enc}">Create an eval set first</a>` : "";
   } catch (e) {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }
   timer = setTimeout(refresh, col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS);
+}
+
+// What an import's line points to next: labelling questions, then chatting.
+function nextStepsHtml() {
+  const label = col.eval_set ? `/e/${encodeURIComponent(col.eval_set)}` : `/eval-sets?store=${enc}`;
+  return `<a href="${label}">Label questions</a> · <a href="#" data-chat-store>Chat with this store</a>`;
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-chat-store]")) return;
+  e.preventDefault();
+  $("chat-store").click(); // the same action as the button
+});
+
+// The chat this button made before, if it still exists with exactly this store.
+async function ownChatId() {
+  try {
+    const id = localStorage.getItem("store-chat:" + name);
+    if (!id) return null;
+    const chat = await api("/chats/" + encodeURIComponent(id));
+    return chat.stores.length === 1 && chat.stores[0] === name ? id : null;
+  } catch {
+    return null; // deleted, unreadable, or no storage: make a new one
+  }
+}
+
+async function makeChat() {
+  const made = await api("/chats", { method: "POST", body: { stores: [name] } });
+  try { localStorage.setItem("store-chat:" + name, made.id); } catch { /* no storage: next time makes another */ }
+  return made.id;
 }
 
 $("new-run").addEventListener("click", toggleRunForm);
@@ -811,8 +874,7 @@ $("chat-store").addEventListener("click", async () => {
   $("chat-store").disabled = true;
   $("chat-store-msg").textContent = "";
   try {
-    const made = await api("/chats", { method: "POST", body: { stores: [name] } });
-    location.href = "/chat#" + made.id;
+    location.href = "/chat#" + (await ownChatId() ?? (await makeChat()));
   } catch (e) {
     chatting = false;
     $("chat-store").disabled = false;

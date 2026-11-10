@@ -1,10 +1,12 @@
-"""What a run says: the headline metric, paired gaps, the pre-declared answer and
-the proxy check. Pure functions over per-question values."""
+"""What a run says: the headline metric, paired gaps, the pre-declared answer (a Documents
+store's: the score of the search its chats use) and the proxy check. Pure functions over
+per-question values."""
 
 import math
 
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METHODS
-from ragqa_core.metrics import paired_diff_ci, spearman
+from ragqa_core.metrics import bootstrap_ci, paired_diff_ci, spearman
+from ragqa_core.search_defaults import CHAT_METHODS
 from ragqa_core.types import EXAMPLE_TYPES, QaType
 
 PROXY_TRUST = 0.5
@@ -80,6 +82,7 @@ def _compare(
     diff, lo, hi = paired
     verdict = {"ahead": "yes", "behind": "no", "cant_tell": "cant_tell"}[_state(lo, hi)]
     return {
+        "kind": "pair",
         "candidate": candidate,
         "reference": reference,
         "metric": metric,
@@ -95,6 +98,45 @@ def answer(
 ) -> dict | None:
     """The one pair declared in advance, never the winners of a run."""
     return _compare(per_method, pair[0], pair[1], metric, factor)
+
+
+def switchable(rerank: bool) -> tuple[str, ...]:
+    """The methods a chat can switch to, as a run names them: with rerank on, Hybrid is
+    hybrid_rerank."""
+    if not rerank:
+        return CHAT_METHODS
+    return (*(m for m in CHAT_METHODS if m != "hybrid"), "hybrid_rerank")
+
+
+def score(
+    per_method: PerMethod, method: str, factor: float, before_rerank: bool, rerank: bool
+) -> dict | None:
+    """A Documents store's answer: the absolute nDCG@10 of the search its chats use, and the
+    best chat method clearly ahead of it, if any. None when the method has no values."""
+    values = list(per_method.get(method, {}).values())
+    if not values:
+        return None
+    mean, lo, hi = bootstrap_ci(values)
+    offered = switchable(rerank)
+    switch = next(
+        (
+            {k: g[k] for k in ("method", "diff", "lo", "hi")}
+            for g in gaps(per_method, method, factor)
+            if g["method"] in offered and g["state"] == "ahead"
+        ),
+        None,
+    )
+    return {
+        "kind": "score",
+        "method": method,
+        "metric": "ndcg@10",
+        "mean": mean * factor,
+        "lo": lo * factor,
+        "hi": hi * factor,
+        "n": len(values),
+        "before_rerank": before_rerank,
+        "switch": switch,
+    }
 
 
 def best_of_each(per_method: PerMethod, metric: str, factor: float) -> dict | None:

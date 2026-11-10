@@ -26,7 +26,7 @@ from ragqa_core.prompts import (
     summary_prompt,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings, Skip
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings, Skip, unknown_store
 
 METHOD_NAMES = (
     "question_only",
@@ -156,7 +156,7 @@ class Retriever:
     def spec(self, name: str) -> CollectionSpec:
         spec = db.get_collection(self.conn, name)
         if spec is None:
-            raise UnknownCollection(f"no collection named '{name}'")
+            raise UnknownCollection(unknown_store(name))
         return spec
 
     def retrieve(
@@ -449,7 +449,7 @@ class Retriever:
             )
         lists = db.get_keyword_lists(self.conn, spec.name)
         if lists is None:
-            raise MethodUnavailable(f"keyword lists not set for collection '{spec.name}'")
+            raise MethodUnavailable(f"keyword lists not set for store '{spec.name}'")
         summary = None
         if spec.summarize:
             summary = self.ai.complete(
@@ -468,7 +468,7 @@ class Retriever:
             )
         if db.retag_partly_done(self.conn, spec.name):
             raise MethodUnavailable(
-                f"the vocabulary of collection '{spec.name}' is partly re-tagged; save it again"
+                f"the vocabulary of store '{spec.name}' is partly re-tagged; save it again"
             )
         if db.tag_build_unfinished(self.conn, spec.name):
             raise MethodUnavailable(NEEDS_TAGS)
@@ -477,7 +477,7 @@ class Retriever:
             raise MethodUnavailable(NEEDS_TAGS)
         if not terms:
             raise MethodUnavailable(
-                f"no vocabulary for collection '{spec.name}';"
+                f"no vocabulary for store '{spec.name}';"
                 " build it with the worked examples or reference recipe"
             )
         return terms

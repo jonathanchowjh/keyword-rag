@@ -9,6 +9,7 @@ from ragqa_core.search_defaults import (
     save,
     saved,
     source,
+    store_search,
 )
 
 
@@ -120,3 +121,24 @@ def test_app_settings_are_read_by_prefix_and_null_deletes(conn):
     assert db.get_app_settings(conn, "search.") == {"candidates": 30}
     db.set_app_setting(conn, "search.candidates", None)
     assert db.get_app_settings(conn, "search.") == {}
+
+
+def test_store_search_maps_hybrid_with_rerank(conn):
+    assert store_search(conn, "d") == {
+        "method": "hybrid",
+        "rerank": True,
+        "run_method": "hybrid_rerank",
+        "before_rerank": False,
+    }
+
+
+def test_store_search_other_method_is_before_rerank(conn):
+    search_defaults.save(conn, {"method": "vector"})
+    s = store_search(conn, "d")
+    assert s["run_method"] == "vector" and s["before_rerank"] is True
+
+
+def test_store_search_without_rerank_runs_the_method_itself(conn):
+    search_defaults.save(conn, {"rerank": False})
+    s = store_search(conn, "d")
+    assert s["run_method"] == "hybrid" and s["before_rerank"] is False

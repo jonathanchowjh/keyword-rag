@@ -1,0 +1,5134 @@
+{
+ "paths": {
+  "/ai": {
+   "get": {
+    "operationId": "get_ai_ai_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Ai Ai Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Get Ai"
+   }
+  },
+  "/ai/budget": {
+   "put": {
+    "operationId": "set_budget_ai_budget_put",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/BudgetSet"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Budget Ai Budget Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Budget"
+   }
+  },
+  "/ai/connections": {
+   "post": {
+    "operationId": "add_connection_ai_connections_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewConnection"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Add Connection Ai Connections Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Connection"
+   }
+  },
+  "/ai/connections/{id}": {
+   "delete": {
+    "operationId": "remove_connection_ai_connections__id__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "title": "Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Remove Connection"
+   },
+   "patch": {
+    "operationId": "edit_connection_ai_connections__id__patch",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "title": "Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ConnectionEdit"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Edit Connection Ai Connections  Id  Patch",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Edit Connection"
+   }
+  },
+  "/ai/connections/{id}/models": {
+   "post": {
+    "operationId": "add_model_ai_connections__id__models_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "title": "Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewModel"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Add Model Ai Connections  Id  Models Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Model"
+   }
+  },
+  "/ai/connections/{id}/models/fetch": {
+   "post": {
+    "operationId": "fetch_models_ai_connections__id__models_fetch_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "title": "Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Fetch Models Ai Connections  Id  Models Fetch Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Fetch Models"
+   }
+  },
+  "/ai/connections/{id}/test": {
+   "post": {
+    "operationId": "test_connection_ai_connections__id__test_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "title": "Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Test Connection Ai Connections  Id  Test Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Test Connection"
+   }
+  },
+  "/ai/models/{connection_id}/{model_id}": {
+   "put": {
+    "operationId": "edit_model_ai_models__connection_id___model_id__put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "connection_id",
+      "required": true,
+      "schema": {
+       "title": "Connection Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "model_id",
+      "required": true,
+      "schema": {
+       "title": "Model Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ModelEdit"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Edit Model Ai Models  Connection Id   Model Id  Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Edit Model"
+   }
+  },
+  "/ai/roles/{role}": {
+   "put": {
+    "operationId": "set_role_ai_roles__role__put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "role",
+      "required": true,
+      "schema": {
+       "title": "Role",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RoleSet"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Role Ai Roles  Role  Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Role"
+   }
+  },
+  "/budget": {
+   "get": {
+    "operationId": "budget_budget_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Budget Budget Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Budget"
+   }
+  },
+  "/catalog": {
+   "get": {
+    "operationId": "get_catalog_catalog_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Catalog Catalog Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Get Catalog"
+   }
+  },
+  "/chat": {
+   "post": {
+    "description": "An answer from a store's passages, citing them as [n]. Searched as a chat searches\none store: its method and candidates, then the pool reranked against the question,\nwith Settings' rerank, RRF k, reranker and pool cap. Spends like the Lab: no\nestimate, the cost is in the reply, the budget cap holds.",
+    "operationId": "chat_chat_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ChatRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Chat Chat Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Chat"
+   }
+  },
+  "/chats": {
+   "get": {
+    "operationId": "list_chats_chats_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Chats Chats Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "List Chats"
+   },
+   "post": {
+    "operationId": "create_chat_chats_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewChat"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Create Chat Chats Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Create Chat"
+   }
+  },
+  "/chats/{chat_id}": {
+   "delete": {
+    "operationId": "delete_chat_chats__chat_id__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Chat"
+   },
+   "get": {
+    "operationId": "get_chat_chats__chat_id__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Chat Chats  Chat Id  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Chat"
+   },
+   "patch": {
+    "operationId": "patch_chat_chats__chat_id__patch",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ChatPatch"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Patch Chat Chats  Chat Id  Patch",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Patch Chat"
+   }
+  },
+  "/chats/{chat_id}/messages": {
+   "post": {
+    "operationId": "chat_message_chats__chat_id__messages_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "brief",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Brief",
+       "type": "boolean"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewMessage"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Chat Message Chats  Chat Id  Messages Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Chat Message"
+   }
+  },
+  "/chats/{chat_id}/messages/{n}/attempts": {
+   "post": {
+    "operationId": "chat_attempt_chats__chat_id__messages__n__attempts_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "n",
+      "required": true,
+      "schema": {
+       "title": "N",
+       "type": "integer"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewAttempt"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Chat Attempt Chats  Chat Id  Messages  N  Attempts Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Chat Attempt"
+   }
+  },
+  "/chats/{chat_id}/messages/{n}/attempts/{attempt}/answer": {
+   "post": {
+    "operationId": "chat_answer_chats__chat_id__messages__n__attempts__attempt__answer_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "n",
+      "required": true,
+      "schema": {
+       "title": "N",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "path",
+      "name": "attempt",
+      "required": true,
+      "schema": {
+       "title": "Attempt",
+       "type": "integer"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "anyOf": [
+         {
+          "$ref": "#/components/schemas/AnswerRequest"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "title": "Body"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Chat Answer Chats  Chat Id  Messages  N  Attempts  Attempt  Answer Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Chat Answer"
+   }
+  },
+  "/chats/{chat_id}/stores/{store}/default": {
+   "post": {
+    "operationId": "chat_default_chats__chat_id__stores__store__default_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "chat_id",
+      "required": true,
+      "schema": {
+       "title": "Chat Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "store",
+      "required": true,
+      "schema": {
+       "title": "Store",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Chat Default Chats  Chat Id  Stores  Store  Default Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Chat Default"
+   }
+  },
+  "/collections": {
+   "get": {
+    "description": "Every spec, with the store's default eval set (null for none), as one store's\nGET names it.",
+    "operationId": "list_collections_collections_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Collections Collections Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "List Collections"
+   },
+   "post": {
+    "operationId": "create_collection_collections_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewCollection"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Create Collection Collections Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Create Collection"
+   }
+  },
+  "/collections/{name}": {
+   "delete": {
+    "operationId": "delete_collection_collections__name__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Collection"
+   },
+   "get": {
+    "operationId": "get_collection_collections__name__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Collection Collections  Name  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Collection"
+   },
+   "patch": {
+    "description": "Makes the eval set the store's default, null clearing it, and sets a chat's\nmethod and candidates on the store, null inheriting. Every field is checked before\nany is saved; a field left out stays as it is.",
+    "operationId": "patch_collection_collections__name__patch",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CollectionPatch"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Patch Collection Collections  Name  Patch",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Patch Collection"
+   }
+  },
+  "/collections/{name}/copy": {
+   "post": {
+    "description": "A new collection of this one's items, questions and switched-off sources, built\nunder another recipe. Without confirm, what the copy would spend; with it, the\ncollection is made and a queued copy job adds and builds its items.",
+    "operationId": "copy_collection_collections__name__copy_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CopyRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Copy Collection"
+   }
+  },
+  "/collections/{name}/documents": {
+   "post": {
+    "operationId": "add_documents_collections__name__documents_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Documents"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Documents"
+   }
+  },
+  "/collections/{name}/imports": {
+   "post": {
+    "operationId": "start_import_collections__name__imports_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ImportRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Start Import"
+   }
+  },
+  "/collections/{name}/keyword-lists": {
+   "get": {
+    "description": "Every saved version of the lists, newest first, with a count per list.",
+    "operationId": "list_versions_collections__name__keyword_lists_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Versions Collections  Name  Keyword Lists Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Versions"
+   },
+   "put": {
+    "description": "Saves the lists as a version; a queued rekey job switches to it once every\nitem is re-keyed (spec \u00a75.5).",
+    "operationId": "put_lists_collections__name__keyword_lists_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Lists"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Put Lists Collections  Name  Keyword Lists Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Lists"
+   }
+  },
+  "/collections/{name}/keyword-lists/propose": {
+   "post": {
+    "operationId": "propose_collections__name__keyword_lists_propose_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "anyOf": [
+         {
+          "$ref": "#/components/schemas/ProposeRequest"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "title": "Body"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Propose"
+   }
+  },
+  "/collections/{name}/keyword-lists/{version}": {
+   "get": {
+    "operationId": "get_version_collections__name__keyword_lists__version__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "version",
+      "required": true,
+      "schema": {
+       "title": "Version",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Version Collections  Name  Keyword Lists  Version  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Version"
+   }
+  },
+  "/collections/{name}/keyword-tags": {
+   "post": {
+    "description": "Add keyword tags: a Documents store switches to documents_tagged in place, and a\nqueued tag_build job induces its vocabulary and tags every passage. Without confirm,\nwhat that would spend.",
+    "operationId": "add_keyword_tags_collections__name__keyword_tags_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "anyOf": [
+         {
+          "$ref": "#/components/schemas/KeywordTagsRequest"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "title": "Body"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Keyword Tags"
+   }
+  },
+  "/collections/{name}/load": {
+   "post": {
+    "operationId": "load_collections__name__load_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/LoadRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Load"
+   }
+  },
+  "/collections/{name}/reembed": {
+   "post": {
+    "description": "Queues a rebuild of the store with another embedding model. It is free: every\nitem is embedded again on this machine, so there is nothing to estimate or confirm.",
+    "operationId": "reembed_collections__name__reembed_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ReembedRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Reembed Collections  Name  Reembed Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Reembed"
+   }
+  },
+  "/collections/{name}/search": {
+   "put": {
+    "operationId": "put_search_collections__name__search_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": true,
+        "title": "Body",
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Put Search Collections  Name  Search Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Search"
+   }
+  },
+  "/collections/{name}/sources": {
+   "get": {
+    "operationId": "list_sources_collections__name__sources_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Sources Collections  Name  Sources Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Sources"
+   }
+  },
+  "/collections/{name}/sources/{source}": {
+   "delete": {
+    "operationId": "delete_source_collections__name__sources__source__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "source",
+      "required": true,
+      "schema": {
+       "title": "Source",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Source"
+   },
+   "patch": {
+    "operationId": "switch_source_collections__name__sources__source__patch",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "source",
+      "required": true,
+      "schema": {
+       "title": "Source",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SourceSwitch"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Switch Source Collections  Name  Sources  Source  Patch",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Switch Source"
+   }
+  },
+  "/collections/{name}/uploads": {
+   "post": {
+    "description": "The raw file as the body; answers with a preview under a guessed mapping.\nWith accept=text only a .txt or .md file is taken.",
+    "operationId": "add_upload_collections__name__uploads_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "filename",
+      "required": true,
+      "schema": {
+       "title": "Filename",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "kind",
+      "required": false,
+      "schema": {
+       "const": "items",
+       "default": "items",
+       "title": "Kind",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "accept",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "const": "text",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Accept"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Upload"
+   }
+  },
+  "/collections/{name}/vocabulary": {
+   "get": {
+    "description": "The vocabulary in force and every saved version. This body is the export:\nPUT it back, edited, to import a version (spec \u00a716).",
+    "operationId": "get_vocabulary_collections__name__vocabulary_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Vocabulary Collections  Name  Vocabulary Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Vocabulary"
+   },
+   "put": {
+    "description": "Without confirm, what re-tagging every item would cost; with it, saves the terms\nas a version and a queued retag job switches to it once every item is tagged.",
+    "operationId": "put_vocabulary_collections__name__vocabulary_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Vocabulary"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Vocabulary"
+   }
+  },
+  "/eval": {
+   "get": {
+    "operationId": "list_runs_eval_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "collection",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Collection"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Runs Eval Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Runs"
+   },
+   "post": {
+    "operationId": "evaluate_eval_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EvalRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Evaluate"
+   }
+  },
+  "/eval-sets": {
+   "get": {
+    "operationId": "list_eval_sets_eval_sets_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "List Eval Sets"
+   },
+   "post": {
+    "operationId": "create_eval_set_eval_sets_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewEvalSet"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Create Eval Set Eval Sets Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Create Eval Set"
+   }
+  },
+  "/eval-sets/{name}": {
+   "delete": {
+    "operationId": "delete_eval_set_eval_sets__name__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "confirm",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Confirm",
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Eval Set"
+   },
+   "get": {
+    "operationId": "get_eval_set_eval_sets__name__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "version",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Version"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Eval Set Eval Sets  Name  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Eval Set"
+   },
+   "patch": {
+    "operationId": "patch_eval_set_eval_sets__name__patch",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EvalSetPatch"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Patch Eval Set Eval Sets  Name  Patch",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Patch Eval Set"
+   }
+  },
+  "/eval-sets/{name}/answer": {
+   "post": {
+    "operationId": "eval_set_answer_eval_sets__name__answer_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ReferenceAnswerRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Eval Set Answer Eval Sets  Name  Answer Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Eval Set Answer"
+   }
+  },
+  "/eval-sets/{name}/imports": {
+   "post": {
+    "operationId": "import_eval_set_questions_eval_sets__name__imports_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EvalSetImport"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Import Eval Set Questions Eval Sets  Name  Imports Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Import Eval Set Questions"
+   }
+  },
+  "/eval-sets/{name}/pool": {
+   "post": {
+    "operationId": "eval_set_pool_eval_sets__name__pool_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/PoolRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Eval Set Pool Eval Sets  Name  Pool Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Eval Set Pool"
+   }
+  },
+  "/eval-sets/{name}/questions": {
+   "post": {
+    "operationId": "add_eval_question_eval_sets__name__questions_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewQuestionIn"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Add Eval Question Eval Sets  Name  Questions Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Eval Question"
+   },
+   "put": {
+    "operationId": "put_eval_questions_eval_sets__name__questions_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/QuestionsPut"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Put Eval Questions Eval Sets  Name  Questions Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Eval Questions"
+   }
+  },
+  "/eval-sets/{name}/questions/{question_id}": {
+   "delete": {
+    "operationId": "delete_eval_question_eval_sets__name__questions__question_id__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "question_id",
+      "required": true,
+      "schema": {
+       "title": "Question Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Delete Eval Question Eval Sets  Name  Questions  Question Id  Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Eval Question"
+   },
+   "put": {
+    "operationId": "put_eval_question_eval_sets__name__questions__question_id__put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "question_id",
+      "required": true,
+      "schema": {
+       "title": "Question Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/QuestionPut"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Put Eval Question Eval Sets  Name  Questions  Question Id  Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Eval Question"
+   }
+  },
+  "/eval-sets/{name}/uploads": {
+   "post": {
+    "description": "The raw file as the body, questions only; answers with a preview.",
+    "operationId": "add_eval_set_upload_eval_sets__name__uploads_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "filename",
+      "required": true,
+      "schema": {
+       "title": "Filename",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Add Eval Set Upload"
+   }
+  },
+  "/eval/{job_id}": {
+   "delete": {
+    "operationId": "delete_run_eval__job_id__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Run"
+   },
+   "get": {
+    "operationId": "eval_table_eval__job_id__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Eval Table Eval  Job Id  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Eval Table"
+   }
+  },
+  "/eval/{job_id}/items": {
+   "get": {
+    "operationId": "eval_items_eval__job_id__items_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "method",
+      "required": true,
+      "schema": {
+       "title": "Method",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "wrong",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Wrong",
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Eval Items Eval  Job Id  Items Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Eval Items"
+   }
+  },
+  "/eval/{job_id}/questions": {
+   "get": {
+    "operationId": "eval_questions_eval__job_id__questions_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "disagree",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Disagree",
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Eval Questions Eval  Job Id  Questions Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Eval Questions"
+   }
+  },
+  "/health": {
+   "get": {
+    "operationId": "health_health_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Health Health Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Health"
+   }
+  },
+  "/jobs": {
+   "get": {
+    "operationId": "list_jobs_jobs_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "collection",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Collection"
+      }
+     },
+     {
+      "in": "query",
+      "name": "kind",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Kind"
+      }
+     },
+     {
+      "in": "query",
+      "name": "status",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Status"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 100,
+       "title": "Limit",
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Jobs Jobs Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Jobs"
+   }
+  },
+  "/jobs/{job_id}": {
+   "get": {
+    "operationId": "job_jobs__job_id__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Job Jobs  Job Id  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Job"
+   }
+  },
+  "/jobs/{job_id}/cancel": {
+   "post": {
+    "operationId": "cancel_jobs__job_id__cancel_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Cancel Jobs  Job Id  Cancel Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Cancel"
+   }
+  },
+  "/jobs/{job_id}/resume": {
+   "post": {
+    "description": "Without confirm, what resuming would cost (spec \u00a75.4); with it, requeued.",
+    "operationId": "resume_jobs__job_id__resume_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "job_id",
+      "required": true,
+      "schema": {
+       "title": "Job Id",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "anyOf": [
+         {
+          "$ref": "#/components/schemas/ResumeRequest"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "title": "Body"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Resume"
+   }
+  },
+  "/query": {
+   "post": {
+    "description": "Each method's hits for a question; with no methods or rrf_k, Settings' own.",
+    "operationId": "query_query_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/QueryRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Query Query Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Query"
+   }
+  },
+  "/search-defaults": {
+   "get": {
+    "operationId": "get_search_defaults_search_defaults_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Search Defaults Search Defaults Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Get Search Defaults"
+   },
+   "put": {
+    "operationId": "put_search_defaults_search_defaults_put",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SearchDefaultsIn"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Put Search Defaults Search Defaults Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Put Search Defaults"
+   }
+  },
+  "/status": {
+   "get": {
+    "operationId": "status_status_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Status Status Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Status"
+   }
+  }
+ },
+ "schemas": {
+  "AnswerRequest": {
+   "properties": {
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    }
+   },
+   "title": "AnswerRequest",
+   "type": "object"
+  },
+  "BudgetSet": {
+   "properties": {
+    "cap_usd": {
+     "title": "Cap Usd",
+     "type": "number"
+    }
+   },
+   "required": [
+    "cap_usd"
+   ],
+   "title": "BudgetSet",
+   "type": "object"
+  },
+  "ChatPatch": {
+   "additionalProperties": false,
+   "description": "An absent field changes nothing; null for evidence_size, rewrite or rerank inherits\n(from Settings). A null title or stores, or an unknown field, is refused, not ignored.",
+   "properties": {
+    "evidence_size": {
+     "anyOf": [
+      {
+       "maximum": 20.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Evidence Size"
+    },
+    "rerank": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank"
+    },
+    "rewrite": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rewrite"
+    },
+    "stores": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Stores"
+    },
+    "title": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Title"
+    }
+   },
+   "title": "ChatPatch",
+   "type": "object"
+  },
+  "ChatRequest": {
+   "properties": {
+    "collection": {
+     "title": "Collection",
+     "type": "string"
+    },
+    "k": {
+     "anyOf": [
+      {
+       "maximum": 20.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "K"
+    },
+    "messages": {
+     "items": {
+      "$ref": "#/components/schemas/ChatTurn"
+     },
+     "minItems": 1,
+     "title": "Messages",
+     "type": "array"
+    },
+    "method": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Method"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    }
+   },
+   "required": [
+    "collection",
+    "messages"
+   ],
+   "title": "ChatRequest",
+   "type": "object"
+  },
+  "ChatSettingsIn": {
+   "additionalProperties": false,
+   "description": "The chat's own values a re-run saves; null inherits, an absent field keeps the chat's.",
+   "properties": {
+    "evidence_size": {
+     "anyOf": [
+      {
+       "maximum": 20.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Evidence Size"
+    },
+    "rerank": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank"
+    },
+    "rewrite": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rewrite"
+    }
+   },
+   "title": "ChatSettingsIn",
+   "type": "object"
+  },
+  "ChatTurn": {
+   "properties": {
+    "content": {
+     "title": "Content",
+     "type": "string"
+    },
+    "role": {
+     "enum": [
+      "user",
+      "assistant"
+     ],
+     "title": "Role",
+     "type": "string"
+    }
+   },
+   "required": [
+    "role",
+    "content"
+   ],
+   "title": "ChatTurn",
+   "type": "object"
+  },
+  "CollectionPatch": {
+   "additionalProperties": false,
+   "description": "Only the fields sent change; an unknown field is refused.",
+   "properties": {
+    "chat_k": {
+     "anyOf": [
+      {
+       "maximum": 60.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Chat K"
+    },
+    "chat_method": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Chat Method"
+    },
+    "eval_set": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Eval Set"
+    }
+   },
+   "title": "CollectionPatch",
+   "type": "object"
+  },
+  "ConnectionEdit": {
+   "properties": {
+    "api_key": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Api Key"
+    },
+    "base_url": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Base Url"
+    },
+    "label": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Label"
+    }
+   },
+   "title": "ConnectionEdit",
+   "type": "object"
+  },
+  "CopyRequest": {
+   "properties": {
+    "build": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Build"
+    },
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "recipe": {
+     "title": "Recipe",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "recipe"
+   ],
+   "title": "CopyRequest",
+   "type": "object"
+  },
+  "Documents": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "items": {
+     "items": {
+      "$ref": "#/components/schemas/ItemIn"
+     },
+     "title": "Items",
+     "type": "array"
+    }
+   },
+   "required": [
+    "items"
+   ],
+   "title": "Documents",
+   "type": "object"
+  },
+  "EvalRequest": {
+   "properties": {
+    "answer": {
+     "default": false,
+     "title": "Answer",
+     "type": "boolean"
+    },
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "collection": {
+     "title": "Collection",
+     "type": "string"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "eval_set": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Eval Set"
+    },
+    "judge": {
+     "default": false,
+     "title": "Judge",
+     "type": "boolean"
+    },
+    "k": {
+     "default": 5,
+     "maximum": 50.0,
+     "minimum": 1.0,
+     "title": "K",
+     "type": "integer"
+    },
+    "methods": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Methods",
+     "type": "array"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    },
+    "rerank_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank Model"
+    },
+    "rerank_pool": {
+     "default": 50,
+     "maximum": 50.0,
+     "minimum": 1.0,
+     "title": "Rerank Pool",
+     "type": "integer"
+    },
+    "rrf_k": {
+     "default": 60,
+     "minimum": 0.0,
+     "title": "Rrf K",
+     "type": "integer"
+    },
+    "search": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Search"
+    },
+    "split": {
+     "default": "dev",
+     "enum": [
+      "dev",
+      "full"
+     ],
+     "title": "Split",
+     "type": "string"
+    }
+   },
+   "required": [
+    "collection",
+    "methods"
+   ],
+   "title": "EvalRequest",
+   "type": "object"
+  },
+  "EvalSetImport": {
+   "properties": {
+    "mapping": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Mapping"
+    },
+    "source_name": {
+     "title": "Source Name",
+     "type": "string"
+    },
+    "upload_id": {
+     "title": "Upload Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "upload_id",
+    "source_name"
+   ],
+   "title": "EvalSetImport",
+   "type": "object"
+  },
+  "EvalSetPatch": {
+   "additionalProperties": false,
+   "description": "Only the fields sent change; an unknown field is refused.",
+   "properties": {
+    "include_leaked": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Include Leaked"
+    },
+    "store": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Store"
+    }
+   },
+   "title": "EvalSetPatch",
+   "type": "object"
+  },
+  "HTTPValidationError": {
+   "properties": {
+    "detail": {
+     "items": {
+      "$ref": "#/components/schemas/ValidationError"
+     },
+     "title": "Detail",
+     "type": "array"
+    }
+   },
+   "title": "HTTPValidationError",
+   "type": "object"
+  },
+  "ImportRequest": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "kind": {
+     "const": "items",
+     "default": "items",
+     "title": "Kind",
+     "type": "string"
+    },
+    "mapping": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Mapping"
+    },
+    "source_name": {
+     "title": "Source Name",
+     "type": "string"
+    },
+    "upload_id": {
+     "title": "Upload Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "upload_id",
+    "source_name"
+   ],
+   "title": "ImportRequest",
+   "type": "object"
+  },
+  "ItemIn": {
+   "properties": {
+    "answer": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Answer"
+    },
+    "explanation": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Explanation"
+    },
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "meta": {
+     "additionalProperties": true,
+     "title": "Meta",
+     "type": "object"
+    },
+    "text": {
+     "title": "Text",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "text"
+   ],
+   "title": "ItemIn",
+   "type": "object"
+  },
+  "KeywordTagsRequest": {
+   "additionalProperties": false,
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    }
+   },
+   "title": "KeywordTagsRequest",
+   "type": "object"
+  },
+  "Lists": {
+   "properties": {
+    "common": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Common",
+     "type": "array"
+    },
+    "method": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Method",
+     "type": "array"
+    },
+    "topic": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Topic",
+     "type": "array"
+    }
+   },
+   "required": [
+    "topic",
+    "method",
+    "common"
+   ],
+   "title": "Lists",
+   "type": "object"
+  },
+  "LoadRequest": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "dataset": {
+     "title": "Dataset",
+     "type": "string"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "limit": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Limit"
+    }
+   },
+   "required": [
+    "dataset"
+   ],
+   "title": "LoadRequest",
+   "type": "object"
+  },
+  "ModelEdit": {
+   "properties": {
+    "enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Enabled"
+    },
+    "label": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Label"
+    },
+    "price_in": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Price In"
+    },
+    "price_out": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Price Out"
+    }
+   },
+   "title": "ModelEdit",
+   "type": "object"
+  },
+  "NewAttempt": {
+   "additionalProperties": false,
+   "properties": {
+    "settings": {
+     "$ref": "#/components/schemas/ChatSettingsIn",
+     "default": {}
+    },
+    "stores": {
+     "additionalProperties": {
+      "$ref": "#/components/schemas/StoreSettingsIn"
+     },
+     "default": {},
+     "title": "Stores",
+     "type": "object"
+    }
+   },
+   "title": "NewAttempt",
+   "type": "object"
+  },
+  "NewChat": {
+   "additionalProperties": false,
+   "description": "Stores to chat over, or the id of a chat to copy (from). The route checks that exactly\none is given, so the 422's detail is a plain string.",
+   "properties": {
+    "from": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "From"
+    },
+    "stores": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Stores"
+    },
+    "title": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Title"
+    }
+   },
+   "title": "NewChat",
+   "type": "object"
+  },
+  "NewCollection": {
+   "properties": {
+    "dense_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Dense Model"
+    },
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "qa_type": {
+     "enum": [
+      "documents",
+      "science",
+      "mcq",
+      "multihop",
+      "table"
+     ],
+     "title": "Qa Type",
+     "type": "string"
+    },
+    "recipe": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Recipe"
+    },
+    "summarize": {
+     "default": false,
+     "title": "Summarize",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "name",
+    "qa_type"
+   ],
+   "title": "NewCollection",
+   "type": "object"
+  },
+  "NewConnection": {
+   "properties": {
+    "api_key": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Api Key"
+    },
+    "base_url": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Base Url"
+    },
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "kind": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Kind"
+    },
+    "label": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Label"
+    },
+    "preset": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Preset"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "title": "NewConnection",
+   "type": "object"
+  },
+  "NewEvalSet": {
+   "properties": {
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "qa_type": {
+     "enum": [
+      "documents",
+      "science",
+      "mcq",
+      "multihop",
+      "table"
+     ],
+     "title": "Qa Type",
+     "type": "string"
+    },
+    "store": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Store"
+    }
+   },
+   "required": [
+    "name",
+    "qa_type"
+   ],
+   "title": "NewEvalSet",
+   "type": "object"
+  },
+  "NewMessage": {
+   "additionalProperties": false,
+   "properties": {
+    "answer": {
+     "default": true,
+     "title": "Answer",
+     "type": "boolean"
+    },
+    "content": {
+     "minLength": 1,
+     "title": "Content",
+     "type": "string"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    }
+   },
+   "required": [
+    "content"
+   ],
+   "title": "NewMessage",
+   "type": "object"
+  },
+  "NewModel": {
+   "properties": {
+    "label": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Label"
+    },
+    "model_id": {
+     "title": "Model Id",
+     "type": "string"
+    },
+    "price_in": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": 0.0,
+     "title": "Price In"
+    },
+    "price_out": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": 0.0,
+     "title": "Price Out"
+    }
+   },
+   "required": [
+    "model_id"
+   ],
+   "title": "NewModel",
+   "type": "object"
+  },
+  "NewQuestion": {
+   "additionalProperties": false,
+   "properties": {
+    "choices": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Choices"
+    },
+    "gold_answers": {
+     "default": [],
+     "items": {
+      "type": "string"
+     },
+     "title": "Gold Answers",
+     "type": "array"
+    },
+    "gold_ids": {
+     "default": [],
+     "items": {
+      "type": "string"
+     },
+     "title": "Gold Ids",
+     "type": "array"
+    },
+    "judged_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Judged Ids"
+    },
+    "meta": {
+     "additionalProperties": true,
+     "default": {},
+     "title": "Meta",
+     "type": "object"
+    },
+    "text": {
+     "minLength": 1,
+     "title": "Text",
+     "type": "string"
+    }
+   },
+   "required": [
+    "text"
+   ],
+   "title": "NewQuestion",
+   "type": "object"
+  },
+  "NewQuestionIn": {
+   "additionalProperties": false,
+   "properties": {
+    "question": {
+     "$ref": "#/components/schemas/NewQuestion"
+    }
+   },
+   "required": [
+    "question"
+   ],
+   "title": "NewQuestionIn",
+   "type": "object"
+  },
+  "PoolRequest": {
+   "additionalProperties": false,
+   "description": "Find passages: the question, and the passages already marked on it (`labelled`), so\nthose the pool misses still come back.",
+   "properties": {
+    "labelled": {
+     "default": [],
+     "items": {
+      "type": "string"
+     },
+     "title": "Labelled",
+     "type": "array"
+    },
+    "question": {
+     "minLength": 1,
+     "title": "Question",
+     "type": "string"
+    }
+   },
+   "required": [
+    "question"
+   ],
+   "title": "PoolRequest",
+   "type": "object"
+  },
+  "ProposeRequest": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    }
+   },
+   "title": "ProposeRequest",
+   "type": "object"
+  },
+  "QueryRequest": {
+   "properties": {
+    "answer": {
+     "default": false,
+     "title": "Answer",
+     "type": "boolean"
+    },
+    "choices": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Choices"
+    },
+    "collection": {
+     "title": "Collection",
+     "type": "string"
+    },
+    "k": {
+     "default": 5,
+     "maximum": 50.0,
+     "minimum": 1.0,
+     "title": "K",
+     "type": "integer"
+    },
+    "methods": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Methods"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    },
+    "question": {
+     "title": "Question",
+     "type": "string"
+    },
+    "rrf_k": {
+     "anyOf": [
+      {
+       "minimum": 0.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rrf K"
+    },
+    "search": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Search"
+    }
+   },
+   "required": [
+    "collection",
+    "question"
+   ],
+   "title": "QueryRequest",
+   "type": "object"
+  },
+  "QuestionIn": {
+   "properties": {
+    "choices": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Choices"
+    },
+    "gold_answers": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Gold Answers",
+     "type": "array"
+    },
+    "gold_ids": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Gold Ids",
+     "type": "array"
+    },
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "judged_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Judged Ids"
+    },
+    "meta": {
+     "additionalProperties": true,
+     "title": "Meta",
+     "type": "object"
+    },
+    "text": {
+     "title": "Text",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "text"
+   ],
+   "title": "QuestionIn",
+   "type": "object"
+  },
+  "QuestionPut": {
+   "additionalProperties": false,
+   "description": "One question and the question as read, its conflict check.",
+   "properties": {
+    "base": {
+     "$ref": "#/components/schemas/QuestionIn"
+    },
+    "question": {
+     "$ref": "#/components/schemas/QuestionIn"
+    }
+   },
+   "required": [
+    "question",
+    "base"
+   ],
+   "title": "QuestionPut",
+   "type": "object"
+  },
+  "QuestionsPut": {
+   "properties": {
+    "base_version": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Base Version"
+    },
+    "questions": {
+     "items": {
+      "$ref": "#/components/schemas/QuestionIn"
+     },
+     "title": "Questions",
+     "type": "array"
+    }
+   },
+   "required": [
+    "questions"
+   ],
+   "title": "QuestionsPut",
+   "type": "object"
+  },
+  "ReembedRequest": {
+   "additionalProperties": false,
+   "properties": {
+    "model": {
+     "title": "Model",
+     "type": "string"
+    }
+   },
+   "required": [
+    "model"
+   ],
+   "title": "ReembedRequest",
+   "type": "object"
+  },
+  "ReferenceAnswerRequest": {
+   "additionalProperties": false,
+   "description": "The AI's answer to a labelled question from the passages marked Right: priced without\n`confirm`, asked with it.",
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "passages": {
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 20,
+     "minItems": 1,
+     "title": "Passages",
+     "type": "array"
+    },
+    "question": {
+     "minLength": 1,
+     "title": "Question",
+     "type": "string"
+    }
+   },
+   "required": [
+    "question",
+    "passages"
+   ],
+   "title": "ReferenceAnswerRequest",
+   "type": "object"
+  },
+  "ResumeRequest": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    }
+   },
+   "title": "ResumeRequest",
+   "type": "object"
+  },
+  "RoleSet": {
+   "properties": {
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Model"
+    }
+   },
+   "required": [
+    "model"
+   ],
+   "title": "RoleSet",
+   "type": "object"
+  },
+  "SearchDefaultsIn": {
+   "additionalProperties": false,
+   "description": "A partial change: a field left out keeps its value, null puts it back to recommended.\nStrict, so \"yes\" is not read as true: search_defaults.check says what each field takes.",
+   "properties": {
+    "candidates": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Candidates"
+    },
+    "dense_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Dense Model"
+    },
+    "evidence_size": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Evidence Size"
+    },
+    "follow_up_turns": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Follow Up Turns"
+    },
+    "method": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Method"
+    },
+    "rerank": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank"
+    },
+    "rerank_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank Model"
+    },
+    "rerank_pool": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rerank Pool"
+    },
+    "rewrite": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rewrite"
+    },
+    "rrf_k": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Rrf K"
+    }
+   },
+   "title": "SearchDefaultsIn",
+   "type": "object"
+  },
+  "SourceSwitch": {
+   "properties": {
+    "enabled": {
+     "title": "Enabled",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "enabled"
+   ],
+   "title": "SourceSwitch",
+   "type": "object"
+  },
+  "StoreSettingsIn": {
+   "additionalProperties": false,
+   "description": "A store's values on the chat; null inherits, an absent field keeps the chat's.",
+   "properties": {
+    "candidates": {
+     "anyOf": [
+      {
+       "maximum": 60.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Candidates"
+    },
+    "method": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Method"
+    }
+   },
+   "title": "StoreSettingsIn",
+   "type": "object"
+  },
+  "ValidationError": {
+   "properties": {
+    "ctx": {
+     "title": "Context",
+     "type": "object"
+    },
+    "input": {
+     "title": "Input"
+    },
+    "loc": {
+     "items": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "title": "Location",
+     "type": "array"
+    },
+    "msg": {
+     "title": "Message",
+     "type": "string"
+    },
+    "type": {
+     "title": "Error Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "loc",
+    "msg",
+    "type"
+   ],
+   "title": "ValidationError",
+   "type": "object"
+  },
+  "Vocabulary": {
+   "properties": {
+    "calls": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Calls"
+    },
+    "confirm": {
+     "default": false,
+     "title": "Confirm",
+     "type": "boolean"
+    },
+    "est_usd": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Est Usd"
+    },
+    "terms": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Terms",
+     "type": "array"
+    }
+   },
+   "required": [
+    "terms"
+   ],
+   "title": "Vocabulary",
+   "type": "object"
+  }
+ }
+}

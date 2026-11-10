@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Stores</title>
+<title>keyword-rag · Stores</title>
 <link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 </head>
 <body>
@@ -13,17 +14,21 @@
   <div id="head"></div>
   <div id="start"></div>
   <div id="list"></div>
-  <h2>Add a default store</h2>
-  <p class="muted">A built-in dataset, loaded in one click. Free when a build for it is on the Hub.</p>
-  <div id="defaults"></div>
-  <div id="defaults-confirm"></div><p id="defaults-msg" class="err" role="status"></p>
-  <h2>Or make your own</h2>
+  <h2>Make a store from your documents</h2>
   <div class="actions">
     <button type="button" id="new">+ New store</button>
-    <button type="button" id="setup" class="secondary">Set up the four benchmark stores</button>
   </div>
   <div id="form" hidden></div>
-  <div id="steps"></div>
+  <details id="benchmarks">
+    <summary>Try a built-in benchmark</summary>
+    <p class="muted">A built-in dataset, loaded in one click. Free when a build for it is on the Hub.</p>
+    <div id="defaults"></div>
+    <div id="defaults-confirm"></div><p id="defaults-msg" class="err" role="status"></p>
+    <div class="actions">
+      <button type="button" id="setup" class="secondary">Set up the four benchmark stores</button>
+    </div>
+    <div id="steps"></div>
+  </details>
 </main>
 <script type="module" src="/static/collections.js"></script>
 </body>

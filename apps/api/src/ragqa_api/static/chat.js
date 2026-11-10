@@ -1,6 +1,5 @@
-import { $, UNPRICED, api, catalog, esc, followJob, head, methodLabel, modelOptions, plural, refreshSpend, shell, upload, usd } from "/static/ui.js";
+import { $, UNPRICED, api, catalog, esc, followJob, head, methodLabel, modelOptions, passageHtml, plural, refreshSpend, shell, sourceLabel, upload, usd, whereHtml } from "/static/ui.js";
 
-const PASSAGE = 300; // characters of a source shown before it is expanded
 const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
 const MAX_CANDIDATES = 60; // the most candidates a store may add to the pool, the route's rule
 const PASSAGES_ONLY = "Passages only: no answer model";
@@ -199,22 +198,13 @@ function textHtml(text, cited, at) {
   return out.join("");
 }
 
-// A passage's text: the first PASSAGE characters, the rest behind a toggle whose open state
-// is kept, under `key`, in the turn's `expanded`.
-function passageHtml(text, key, ui) {
-  if (text.length <= PASSAGE) return `<div>${esc(text)}</div>`;
-  const open = ui.expanded.has(key) ? " open" : "";
-  return `<details data-expand="${esc(key)}"${open}><summary>${esc(text.slice(0, PASSAGE))}…</summary><div class="full">${esc(text)}</div></details>`;
-}
-
 // The store's name, marked when it has since been deleted.
 const storeText = (store) => (chat?.deleted_stores.includes(store) ? `${store} · deleted` : store);
 
-// One cited passage, listed under the answer.
+// One cited passage, listed under the answer: its file and part, as its evidence is.
 function sourceHtml(c, at, ui) {
-  const part = c.parts > 1 ? ` · part ${esc(c.part)} of ${esc(c.parts)}` : "";
-  const from = (c.source ? ` · ${esc(c.source)}` : "") + part + (c.store ? ` · ${esc(storeText(c.store))}` : "");
-  return `<li><span class="what">[${Number(c.n)}] ${esc(c.id)}${from}</span>${passageHtml(c.text, `src-${at}-${Number(c.n)}`, ui)}</li>`;
+  const from = (c.source ? ` · ${esc(sourceLabel(c.source))}` : "") + (c.store ? ` · ${esc(storeText(c.store))}` : "");
+  return `<li><span class="what">[${Number(c.n)}] ${whereHtml(c)}${from}</span>${passageHtml(c.text, { key: `src-${at}-${Number(c.n)}`, open: ui.expanded.has(`src-${at}-${Number(c.n)}`) })}</li>`;
 }
 
 const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "");
@@ -225,16 +215,14 @@ const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "")
 function evidenceHtml(e, at, ui) {
   const key = `ev-${at}-${Number(e.n)}`;
   const what = [
-    `[${Number(e.n)}] ${e.id}`,
     e.store && storeText(e.store),
-    e.source,
-    e.parts > 1 ? `part ${e.part} of ${e.parts}` : null,
+    e.source && sourceLabel(e.source),
     e.rank != null ? `rank ${e.rank}${e.store ? ` in ${e.store}` : ""}` : null,
     e.relevance != null ? `rerank ${Number(e.relevance).toFixed(2)}` : null,
   ]
     .filter((x) => x != null && x !== "")
     .join(" · ");
-  return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">${esc(what)}</span>${passageHtml(e.text, key, ui)}</li>`;
+  return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">[${Number(e.n)}] ${whereHtml(e)}${what ? ` · ${esc(what)}` : ""}</span>${passageHtml(e.text, { key, open: ui.expanded.has(key) })}</li>`;
 }
 
 function evidenceListHtml(a, at, ui) {
@@ -600,20 +588,36 @@ function drawList() {
     .map(
       (c) => `<li class="${c.id === openId ? "active" : ""}"><a href="#${esc(c.id)}">${esc(c.title)}
         <span class="stores">${esc(c.stores.join(", "))}</span></a>
-        <button type="button" class="secondary" data-delete="${esc(c.id)}" aria-label="Delete chat ${esc(c.title)}">Delete</button></li>`,
+        <button type="button" class="secondary" data-delete="${esc(c.id)}" aria-label="Delete chat ${esc(c.title)}">Delete chat…</button></li>`,
     )
     .join("");
 }
 
 function chipHtml(store, only) {
   const gone = chat.deleted_stores.includes(store);
-  const what = gone ? " · deleted" : details[store] ? ` · ${plural(details[store].count, "item")}` : "";
+  const what = gone ? " · deleted" : details[store] ? ` · ${plural(details[store].count, cat?.qa_types?.[details[store].qa_type]?.item_noun ?? "item")}` : "";
   return `<span class="chip${gone ? " gone" : ""}" data-store="${esc(store)}">${esc(store)}<span class="muted">${esc(what)}</span>
     <button type="button" data-remove="${esc(store)}" aria-label="Remove ${esc(store)}"${only ? " disabled" : ""}>×</button></span>`;
 }
 
 function drawChips() {
   if (chat) $("chips").innerHTML = chat.stores.map((s) => chipHtml(s, chat.stores.length === 1)).join("");
+}
+
+// A Copy button beside a curl line: Copied for 2 s, or the line selected when the clipboard fails.
+for (const button of document.querySelectorAll("[data-copy]")) {
+  button.addEventListener("click", async () => {
+    const pre = $(button.dataset.copy);
+    try {
+      await navigator.clipboard.writeText(pre.textContent);
+      button.textContent = "Copied";
+    } catch {
+      getSelection().selectAllChildren(pre);
+      button.textContent = "Press Ctrl+C to copy";
+    }
+    clearTimeout(button.timer);
+    button.timer = setTimeout(() => { button.textContent = "Copy"; }, 2000);
+  });
 }
 
 function drawHead() {
@@ -778,7 +782,7 @@ function askDelete(id) {
   const box = $("deleting");
   box.innerHTML = `<p>${esc(`Delete chat ${title.replace(/[?\s]+$/, "")}?`)}</p><div class="actions">
     <button type="button" class="danger" data-yes>Yes, delete</button>
-    <button type="button" class="secondary" data-keep>Keep it</button></div>`;
+    <button type="button" class="secondary" data-keep>Cancel</button></div>`;
   box.querySelector("[data-keep]").addEventListener("click", () => (box.innerHTML = ""));
   box.querySelector("[data-yes]").addEventListener("click", async () => {
     try {

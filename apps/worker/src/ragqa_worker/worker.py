@@ -8,7 +8,7 @@ from ragqa_core.evaluator import Evaluator, ended
 from ragqa_core.indexer import Indexer
 from ragqa_core.loader import Loader
 from ragqa_core.recipes import build_for
-from ragqa_core.types import CollectionSpec
+from ragqa_core.types import CollectionSpec, unknown_store
 
 
 class Worker:
@@ -164,7 +164,7 @@ class Worker:
     def _spec(self, name: str) -> CollectionSpec:
         spec = db.get_collection(self.conn, name)
         if spec is None:
-            raise ValueError(f"unknown collection {name!r}")
+            raise ValueError(unknown_store(name))
         return spec
 
     def _failed(self, e: Exception) -> None:

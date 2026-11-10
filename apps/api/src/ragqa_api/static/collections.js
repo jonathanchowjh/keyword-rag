@@ -1,5 +1,5 @@
-import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, paint, pct, pill, plural,
-  refreshSpend, shell, short, verdictHtml } from "/static/ui.js";
+import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, nameField, paint, pct, pill, plural,
+  noScoreLine, refreshSpend, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
 const BENCHMARKS = [
@@ -18,7 +18,7 @@ const startDone = new Set(); // steps found done: kept for the page's life, not 
 shell("collections");
 $("head").innerHTML = head({
   title: "Stores",
-  sub: "What questions are answered from, and whether keyword retrieval helps on it.",
+  sub: "Each store holds the documents your chats search and your runs test.",
 });
 
 // -- the list ------------------------------------------------------------------
@@ -29,9 +29,14 @@ function rowHtml(c) {
   const counts = `${plural(c.count, noun)}, ${plural(c.questions, "question")}`;
   const a = c.answer;
   const pair = cat.answer_pair.map((m) => methodLabel(m, cat)).join(" and ");
+  const docs = c.qa_type === "documents";
+  const mine = c.chat_search?.run_method;
+  const said = () => (docs ? esc(scoreLine(a, cat)) : `Do keywords help? ${verdictHtml(a, c.qa_type, cat)}`);
   const answer = a
-    ? `<div title="${esc(LEGEND)}">${verdictHtml(a, c.qa_type, cat)}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
+    ? `<div title="${esc(LEGEND)}">${said()}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
         clock(a.at))}${a.answered ? "" : " · retrieval only"}</div>`
+    : docs
+    ? `<span class="muted">${esc(noScoreLine(mine, c.methods_unavailable?.[mine], cat))}</span>`
     : `<span class="muted">No answer yet</span><div class="small">${esc(
         c.runs ? `${plural(c.runs, "run")}, none finished with ${pair}` : `no runs yet: run ${pair} to get one`)}</div>`;
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
@@ -49,9 +54,9 @@ async function refresh() {
     const full = await Promise.all(specs.map((s) => api(`/collections/${encodeURIComponent(s.name)}`)));
     drawDefaults(new Set(specs.map((s) => s.name)));
     const html = full.length
-      ? `<div class="table"><div class="th"><div>Store</div><div>Do keywords help?</div>
+      ? `<div class="table"><div class="th"><div>Store</div><div>Result</div>
           <div>Ready?</div></div>${full.map(rowHtml).join("")}</div>`
-      : '<p class="muted">No stores yet. Create one, or set up the four benchmarks.</p>';
+      : '<p class="muted">No stores yet. Make one from your documents below.</p>';
     if (html !== lastList) {
       $("list").innerHTML = html;
       lastList = html;
@@ -148,7 +153,7 @@ async function showForm() {
     .join("");
   $("form").hidden = false;
   $("form").innerHTML = `<div class="card form">
-    <label>Name<input id="f-name" autocomplete="off"></label>
+    ${nameField()}
     <label>Type<select id="f-type">${types}</select></label>
     <label>Kind<select id="f-recipe"></select></label>
     <p class="muted" data-embedded-with>${esc(embedded)}</p>
@@ -156,6 +161,7 @@ async function showForm() {
     <div class="row"><button type="button" id="f-create">Create</button>
       <button type="button" id="f-cancel" class="secondary">Cancel</button>
       <span id="f-msg" class="err" role="status"></span></div></div>`;
+  watchName();
   showType();
   $("f-type").addEventListener("change", showType);
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));
@@ -224,7 +230,9 @@ async function addDefault(dataset) {
     $("defaults-confirm").replaceChildren(free ? "Free: built from the Hub. " : "", slot);
     confirmSpend(slot, first.estimate, async () => {
       try {
-        const job = await api(path, { method: "POST", body: { dataset, confirm: true } });
+        // What was shown: a price that changed since is refused, to be checked again.
+        const shown = { calls: first.estimate.calls, est_usd: first.estimate.est_usd };
+        const job = await api(path, { method: "POST", body: { dataset, ...shown, confirm: true } });
         $("defaults-confirm").textContent = `Queued (job ${short(job.job_id)})`;
         refreshSpend();
         await refresh();
@@ -287,17 +295,22 @@ async function setup() {
 // queued free are already running and are not posted again.
 function confirmLoads(paying) {
   const sum = (key) => paying.reduce((total, p) => total + Number(p.estimate[key] ?? 0), 0);
+  // One load that can't be priced leaves the total unpriced, never a low sum.
+  const unpriced = paying.some((p) => p.estimate.est_usd == null && Number(p.estimate.calls ?? 0) > 0);
   const names = paying.map((p) => p.b.name).join(", ");
   const li = step(`Loading ${names} costs `);
   const slot = document.createElement("span");
   li.append(slot);
-  confirmSpend(slot, { est_usd: sum("est_usd"), calls: sum("calls") }, async () => {
+  const total = { est_usd: unpriced ? null : sum("est_usd"), calls: sum("calls") };
+  confirmSpend(slot, total, async () => {
     slot.textContent = "starting…";
-    for (const { b } of paying) {
+    for (const { b, estimate } of paying) {
       try {
+        // Each load's own shown price: one that changed since is refused, to be checked again.
+        const shown = { calls: estimate.calls, est_usd: estimate.est_usd };
         const job = await api(`/collections/${b.name}/load`, {
           method: "POST",
-          body: { dataset: b.dataset, confirm: true },
+          body: { dataset: b.dataset, ...shown, confirm: true },
         });
         step(`${b.name}: loading ${b.dataset} (queued, job ${short(job.job_id)})`, "ok");
       } catch (e) {

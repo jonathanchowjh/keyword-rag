@@ -1,6 +1,6 @@
 import { $, BUSY, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
   confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
-  pill, plural, pts, refreshSpend, shell, short, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
+  pill, plural, pts, refreshSpend, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
 // What a hybrid_rerank run recorded before runs recorded its reranker and pool: it used these
@@ -99,7 +99,7 @@ function answersHtml() {
       ? "1 answer not judged: the judge's reply couldn't be read"
       : `${count(unreadable)} answers not judged: the judge's reply couldn't be read`);
   }
-  return `<p class="verdict"><strong>How often are its answers right?</strong></p>${lines.map((n) => `<p>${esc(n)}</p>`).join("")}${partialHtml()}`;
+  return `<p class="verdict"><strong>How often are its answers right?</strong></p>${lines.map((n) => `<p>${esc(n)}</p>`).join("")}`;
 }
 
 // A run that ended early answers from the questions it reached, not the whole set.
@@ -137,7 +137,12 @@ function documentsAnswerHtml() {
     lines.push("This eval set doesn't record which passages were judged, so score reliability can't be checked");
   }
   const wait = busy() ? " The scores appear when the run finishes." : "";
-  return `<p class="verdict">${lead}${wait}</p>${lines.map((n) => `<p class="warn">${esc(n)}</p>`).join("")}${answersHtml()}`;
+  // The score of the search the run froze as the chats' own; none if the run left it out.
+  const mine = run.setup.chat_search?.run_method ?? run.reference;
+  const score = busy() ? "" : `<p>${esc(run.answer?.kind === "score"
+    ? scoreLine(run.answer, cat)
+    : `This run doesn't include ${method(mine)}, the search your chats use.`)}</p>`;
+  return `<p class="verdict">${lead}${wait}</p>${score}${lines.map((n) => `<p class="warn">${esc(n)}</p>`).join("")}${partialHtml()}${answersHtml()}`;
 }
 
 function answerHtml() {
@@ -236,11 +241,7 @@ function leadNote() {
     : "Leading is not winning: the order above is this run's, and the declared pair is the only comparison the answer rests on.";
 }
 
-// A Documents run draws the gaps only when keyword_rag ran: there they show what it adds.
-const gapsShown = () => qaType !== "documents" || run.setup.methods.includes("keyword_rag");
-
 function gapsHtml() {
-  if (!gapsShown()) return unmeasuredHtml();
   if (busy()) return '<p class="muted">The gaps appear when the run finishes.</p>';
   const ref = method(run.reference);
   if (!run.gaps.length) {
@@ -338,18 +339,21 @@ const LEFT_OUT = ["disabled_sources", "evidence_off", "leaked_excluded"];
 function leftOutHtml() {
   const s = run.setup;
   const notes = [];
-  if (s.disabled_sources?.length) notes.push(`Retrieval left out: ${s.disabled_sources.join(", ")}`);
+  if (s.disabled_sources?.length) notes.push(`Retrieval left out: ${s.disabled_sources.map(sourceLabel).join(", ")}`);
   if (s.evidence_off > 0) notes.push(`${plural(s.evidence_off, "question")}${s.evidence_off === 1 ? "'s" : "'"} evidence is switched off`);
   if (s.leaked_excluded > 0) notes.push(`${plural(s.leaked_excluded, "leaked question")} left out`);
   return notes.map((n) => `<p class="warn">${esc(n)}</p>`).join("");
 }
 
+// null, [] and {} say nothing; 0 and false do.
+const isEmpty = (v) => v == null || (typeof v === "object" && Object.keys(v).length === 0);
+
 function setupHtml() {
   const rows = Object.entries(run.setup)
-    .filter(([k]) => !LEFT_OUT.includes(k))
+    .filter(([k, v]) => !LEFT_OUT.includes(k) && !isEmpty(v))
     .map(([k, v]) => {
       const text = k === "question_ids" ? plural(v.length, "question") : show(v);
-      return `<tr><td>${esc(k)}</td><td>${esc(text)}</td></tr>`;
+      return `<tr><td>${esc(cat.setup_labels[k] ?? k)}</td><td>${esc(text)}</td></tr>`;
     })
     .join("");
   return `${leftOutHtml()}<table><tbody>${rows}</tbody></table>`;
@@ -391,12 +395,19 @@ function goldHtml(q) {
     .join(" · ");
 }
 
+// "right" and "wrong" are the evaluator's outcomes; any other value shows as it came.
+function badgeHtml(outcome) {
+  if (outcome === "right") return '<span class="badge ok">Right</span>';
+  if (outcome === "wrong") return '<span class="badge bad">Wrong</span>';
+  return `<span class="badge">${esc(outcome)}</span>`;
+}
+
 function questionHtml(q, picked) {
   const outcome = q.methods[picked]?.outcome;
-  const mark = outcome ? `${outcome} ` : "";
+  const mark = outcome ? `${badgeHtml(outcome)} ` : "";
   const choices = (q.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
   const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m], q.judged_ids));
-  return `<details><summary>${esc(mark)}${esc(q.question ?? q.question_id)}</summary>
+  return `<details><summary>${mark}${esc(q.question ?? q.question_id)}</summary>
     ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
     <p>Gold: ${goldHtml(q)}</p>
     <div class="sides">${columns.join("")}</div></details>`;
@@ -443,6 +454,8 @@ function fillMethodPicker() {
   $("q-method").innerHTML = run.setup.methods
     .map((m) => `<option value="${esc(m)}">${esc(method(m))}</option>`)
     .join("");
+  const first = run.setup.methods.find((m) => !isControl(m));
+  $("q-method").value = run.setup.methods.includes(run.reference) ? run.reference : (first ?? run.setup.methods[0]);
 }
 
 // -- actions ------------------------------------------------------------------------------------
@@ -451,7 +464,7 @@ function actionsHtml() {
   const s = run.status;
   const buttons = [];
   if (BUSY.has(s)) {
-    buttons.push('<button type="button" id="act-cancel">Cancel</button>');
+    buttons.push('<button type="button" id="act-cancel">Stop run</button>');
   } else {
     if (RESUMABLE.has(s) && resumeProbe?.refusal) {
       buttons.push(`<span class="warn" id="act-refusal">${esc(resumeProbe.refusal)}</span>`);
@@ -460,7 +473,7 @@ function actionsHtml() {
     }
     // Re-run and Delete wait for the run to stop: deleting a queued or running run is refused.
     buttons.push('<button type="button" id="act-rerun" class="secondary">Re-run</button>');
-    buttons.push('<button type="button" id="act-delete" class="secondary">Delete…</button>');
+    buttons.push('<button type="button" id="act-delete" class="secondary">Delete run…</button>');
   }
   return `<div class="actions">${buttons.join("")}</div>
     <div id="act-confirm"></div><p id="act-msg" class="err" role="status"></p>`;
@@ -500,7 +513,7 @@ async function rerun() {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
     confirmSpend($("act-confirm"), estimate, async () => {
       try {
-        const queued = await api("/eval", { method: "POST", body: { ...request, confirm: true } });
+        const queued = await api("/eval", { method: "POST", body: { ...request, confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
         refreshSpend();
         location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
       } catch (e) {
@@ -545,7 +558,10 @@ async function refresh() {
     if (qaType === null) {
       qaType = (await api(`/collections/${encodeURIComponent(run.setup.collection)}`)).qa_type;
       // A Documents run's scores are its answer, so they start open.
-      if (qaType === "documents") $("scores-box").open = true;
+      if (qaType === "documents") {
+        $("scores-box").open = true;
+        $("proxy-box").hidden = true; // the free score is how a keyword store is judged
+      }
     }
     if (run.status !== probedStatus) resumeProbe = null;
     if (RESUMABLE.has(run.status) && resumeProbe === null) {
@@ -555,7 +571,7 @@ async function refresh() {
     $("head").innerHTML = headHtml();
     paint("answer", answerHtml());
     paint("gaps", gapsHtml());
-    $("note").textContent = run.gaps.length && !busy() && gapsShown() ? leadNote() : "";
+    $("note").textContent = run.gaps.length && !busy() ? leadNote() : "";
     paint("best", bestHtml());
     paint("scores", scoresHtml());
     paint("proxy", proxyHtml());

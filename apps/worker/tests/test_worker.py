@@ -388,7 +388,8 @@ def test_worker_runs_retag(env):
     assert job["progress"] == 1.0 and job["result"] == {"version": version}
     after = db.get_collection(conn, "w")
     assert after is not None and after.vocabulary_version == version
-    assert sum(after.profile.values()) == 3 * len(ITEMS)  # the AI's reply is unusable: top 3
+    tagged = [h for batch in w.indexer.store.scroll("w") for h in batch]
+    assert sum(len(h.tags) for h in tagged) == 3 * len(ITEMS)  # the AI's reply is unusable: top 3
 
 
 def test_worker_runs_copy(env):

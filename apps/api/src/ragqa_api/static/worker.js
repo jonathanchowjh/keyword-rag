@@ -58,7 +58,7 @@ function runningHtml(job, batches) {
     .join("");
   const cancel = job.cancel_requested
     ? '<span class="muted">cancelling…</span>'
-    : `<button type="button" class="secondary" data-cancel="${esc(job.id)}">Cancel</button>`;
+    : `<button type="button" class="secondary" data-cancel="${esc(job.id)}">Stop job</button>`;
   return `<div class="card" data-running-job><strong>${named(job)}</strong>
     ${esc(pct(job.progress))} ${cancel}${waiting}
     <ul class="muted">${log}</ul></div>`;
@@ -69,7 +69,7 @@ function queuedHtml(queue) {
   const rows = queue
     .map((j) => `<tr data-queued-job="${esc(j.id)}"><td>${named(j)}</td>
       <td>${esc(clock(j.created_at))}</td><td><button type="button" class="secondary"
-      data-cancel="${esc(j.id)}">Cancel</button></td></tr>`)
+      data-cancel="${esc(j.id)}">Stop job</button></td></tr>`)
     .join("");
   return `<table><thead><tr><th>Job</th><th>Queued at</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }

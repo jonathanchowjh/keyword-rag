@@ -212,7 +212,7 @@ def test_non_kw_hits_have_no_matched(tmp_path):
 
 def test_kw_method_without_lists_is_unavailable(tmp_path):
     r, _ = build(tmp_path, lists=False)
-    with pytest.raises(MethodUnavailable, match="keyword lists not set for collection 'c'"):
+    with pytest.raises(MethodUnavailable, match="keyword lists not set for store 'c'"):
         r.retrieve("c", "x", "kw_rrf")
 
 
@@ -540,9 +540,7 @@ def test_worked_meaning_channel_uses_item_vectors(tmp_path):
 
 def test_keyword_rag_without_vocabulary_is_unavailable(tmp_path):
     r, _ = build(tmp_path, vocabulary=False)
-    message = (
-        "no vocabulary for collection 'c'; build it with the worked examples or reference recipe"
-    )
+    message = "no vocabulary for store 'c'; build it with the worked examples or reference recipe"
     with pytest.raises(MethodUnavailable, match=message):
         r.retrieve("c", "enzyme", "keyword_rag")
     with pytest.raises(MethodUnavailable, match=message):

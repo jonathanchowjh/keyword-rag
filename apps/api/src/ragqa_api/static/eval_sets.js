@@ -1,4 +1,4 @@
-import { $, api, catalog, clock, esc, head, plural, shell, short } from "/static/ui.js";
+import { $, api, catalog, clock, esc, head, nameField, plural, shell, short, watchName } from "/static/ui.js";
 
 let cat = null;
 let linked = null; // the store the open form's set is made for (Create one on a store page), or null
@@ -56,7 +56,7 @@ async function showForm(store = null) {
     : `<label id="f-store-wrap" hidden>Store to label against<select id="f-store">${pick}</select></label>`;
   $("form").hidden = false;
   $("form").innerHTML = `<div class="card form">
-    <label>Name<input id="f-name" autocomplete="off" value="${esc(store ?? "")}"></label>
+    ${nameField(store ?? "")}
     <label>Type<select id="f-type"${own ? " disabled" : ""}>${types}</select></label>
     ${link}
     <div class="row"><button type="button" id="f-create">Create</button>
@@ -65,6 +65,7 @@ async function showForm(store = null) {
   const showPick = () => {
     if ($("f-store-wrap")) $("f-store-wrap").hidden = $("f-type").value !== "documents";
   };
+  watchName();
   showPick();
   $("f-type").addEventListener("change", showPick);
   $("f-cancel").addEventListener("click", () => ($("form").hidden = true));

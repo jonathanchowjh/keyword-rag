@@ -1,5 +1,4 @@
 import json
-from collections import Counter
 from dataclasses import replace
 
 import pytest
@@ -216,7 +215,6 @@ def test_tagging_describes_text_when_no_explanation(env):
         "a": ["volcano lava"],
         "b": ["enzyme kinetics"],
     }
-    assert db.get_collection(builder.conn, "w").profile == {"enzyme kinetics": 1, "volcano lava": 1}
 
 
 def stored(builder: Builder, spec) -> None:
@@ -224,7 +222,7 @@ def stored(builder: Builder, spec) -> None:
     builder.indexer.add(spec, [Item(f"i{n}", t) for n, t in enumerate(texts)], "x")
 
 
-def test_retag_switches_version_and_profile(env):
+def test_retag_switches_version(env):
     builder, spec, prompts, _ = env
     spec = with_build(builder, spec, tagging="similarity", tag_k=1)
     stored(builder, spec)
@@ -241,8 +239,6 @@ def test_retag_switches_version_and_profile(env):
         "i2": ["volcano lava"],
         "i3": ["enzyme kinetics"],
     }
-    assert after.profile == dict(Counter(t for h in hits for t in h.tags))
-    assert list(after.profile) == ["enzyme kinetics", "stock market", "volcano lava"]
     found = builder.store.search("w", "kw_tags", builder.models.embed(["stock market"])[0], 1)
     assert found[0].id == "i1"
     assert seen and seen[-1] == 1.0 and seen == sorted(seen)
@@ -283,20 +279,6 @@ def test_retag_failure_keeps_old_version(env):
     assert embedded == [] and db.get_collection(builder.conn, "w").vocabulary_version == old
     with pytest.raises(ValueError, match="nope"):
         builder.retag("w", "nope", lambda p: None)
-
-
-def test_refresh_profile_saves_only_when_the_build_keeps_one(env):
-    builder, spec, *_ = env
-    spec = with_build(builder, spec, tagging="similarity", tag_k=1)
-    stored(builder, spec)
-    builder.retag("w", builder.save_vocabulary(spec, TERMS), lambda p: None)
-    counts = {"enzyme kinetics": 2, "stock market": 1, "volcano lava": 1}
-    db.set_profile(builder.conn, "w", {})
-    no_profile = replace(spec, build=replace(spec.build, profile=False))
-    assert builder.refresh_profile(no_profile) == counts
-    assert db.get_collection(builder.conn, "w").profile == {}
-    assert builder.refresh_profile(spec) == counts
-    assert db.get_collection(builder.conn, "w").profile == counts
 
 
 SECRET = {"skill": "SECRET-SKILL", "topic": "SECRET-TOPIC", "lecture": "SECRET-LECTURE"}
@@ -406,14 +388,12 @@ def test_build_induces_switches_then_tags_and_abstracts(env):
     assert result == {"vocabulary_version": version, "tagged": 3, "abstracted": 3}
     assert purposes(builder.conn) == ["induce"] + ["tag"] * 3 + ["abstract"] * 3
     assert all(h.tags == ["kinematics"] for h in builder.store.get("w", ["i0", "i1", "i2"]))
-    assert db.get_collection(builder.conn, "w").profile == {"kinematics": 3}
     assert seen and seen[-1] == 1.0 and seen == sorted(seen)
     # With a vocabulary in force, the next build only tags and abstracts.
     more = [Item("j0", "problem j asks for a speed", "1", "solution j uses energy")]
     builder.indexer.add(spec, more, "x")
     assert builder.build(spec, more, lambda p: None)["vocabulary_version"] == version
     assert purposes(builder.conn).count("induce") == 1
-    assert db.get_collection(builder.conn, "w").profile == {"kinematics": 4}
 
 
 def test_build_with_no_usable_terms_keeps_the_items_untagged(env):
@@ -499,7 +479,6 @@ def test_authored_outputs_build_the_collection_with_no_ai_call(env):
         "Method: 1. Find the rate for one unit. 2. Multiply by the quantity asked.\n"
         "Answer: 10 m/s"
     )
-    assert fresh.profile == {"unitary method": 3, "relative speed": 2}
     # Nothing is left to build, so a later load of the same items needs no model.
     assert not any(builder.unbuilt(spec, []).values()) and builder.build_calls(spec, []) == 0
 
@@ -510,7 +489,7 @@ def test_authored_outputs_build_the_collection_with_no_ai_call(env):
         (lambda o: o["i0"].update(tags=["pigeonhole principle"]), "outside the vocabulary"),
         (lambda o: o["i0"].update(tags=[]), "without tags"),
         (lambda o: o.pop("i2"), "no output for"),
-        (lambda o: o.update(nope=dict(o["i0"])), "not in collection"),
+        (lambda o: o.update(nope=dict(o["i0"])), "not in store"),
         (lambda o: o["i1"].update(method=""), "no usable abstracted form"),
     ],
 )

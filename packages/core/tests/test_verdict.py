@@ -1,6 +1,16 @@
 import pytest
 
-from ragqa_core.verdict import answer, best_of_each, gaps, headline_metric, proxy, scale
+from ragqa_core.search_defaults import CHAT_METHODS
+from ragqa_core.verdict import (
+    answer,
+    best_of_each,
+    gaps,
+    headline_metric,
+    proxy,
+    scale,
+    score,
+    switchable,
+)
 
 SAME = {f"q{n}": 0.5 for n in range(40)}
 
@@ -142,3 +152,41 @@ def test_headline_is_ndcg_when_only_gold_ids_measure_the_example():
 def test_headline_for_science_follows_mcq():
     assert headline_metric("science", True, None, set()) == "accuracy"
     assert headline_metric("science", False, None, {"same_skill@1"}) == "same_skill@1"
+
+
+def test_score_is_absolute_with_switch_only_when_ahead():
+    # Hybrid and the control are further ahead and come first: only the filter picks vector.
+    pm = {
+        "hybrid_rerank": {"q1": 0.5, "q2": 0.5, "q3": 0.5},
+        "hybrid": {"q1": 1.0, "q2": 1.0, "q3": 1.0},
+        "random_example": {"q1": 1.0, "q2": 1.0, "q3": 1.0},
+        "vector": {"q1": 0.9, "q2": 0.9, "q3": 0.9},
+    }
+    s = score(pm, "hybrid_rerank", 100, False, True)
+    assert s is not None
+    assert s["kind"] == "score" and s["mean"] == 50 and s["n"] == 3
+    assert s["metric"] == "ndcg@10" and s["method"] == "hybrid_rerank"
+    assert s["before_rerank"] is False
+    assert s["switch"]["method"] == "vector"  # hybrid isn't offered with rerank on; controls never
+    assert set(s["switch"]) == {"method", "diff", "lo", "hi"}
+    assert score(pm, "keyword", 100, False, True) is None
+
+
+def test_score_offers_no_switch_unless_one_is_ahead():
+    pm = {"hybrid": {"q1": 1.0, "q2": 1.0}, "vector": {"q1": 0.5, "q2": 0.5}}
+    s = score(pm, "hybrid", 100, False, False)
+    assert s is not None and s["switch"] is None and s["lo"] <= s["mean"] <= s["hi"]
+    assert score({"hybrid": {}}, "hybrid", 100, False, False) is None
+
+
+def test_switchable_swaps_hybrid_for_hybrid_rerank_when_rerank_is_on():
+    assert switchable(False) == CHAT_METHODS
+    on = switchable(True)
+    assert "hybrid" not in on and "hybrid_rerank" in on
+    assert set(on) == set(CHAT_METHODS) - {"hybrid"} | {"hybrid_rerank"}
+
+
+def test_pair_answers_are_tagged_pair():
+    ref = {f"q{n}": 0.0 for n in range(5)}
+    a = answer({"kw_individual": SAME, "hybrid": ref}, "accuracy", 100)
+    assert a is not None and a["kind"] == "pair"

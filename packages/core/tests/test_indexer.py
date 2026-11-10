@@ -827,3 +827,13 @@ def test_check_model_refuses_while_a_switch_is_unfinished(env):
         ix.check_model(spec)
     db.update_job(conn, job, status="done")
     ix.check_model(spec)
+
+
+def test_a_bad_store_name_says_what_is_allowed_and_suggests_one(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    ix = Indexer(conn, Store(None, None), fake_models(), fake_ai(conn, lambda p: ""))
+    with pytest.raises(ValueError) as e:
+        ix.new_spec("Team Handbook", "mcq", False)
+    assert "can't be a store name" in str(e.value)
+    assert "1–64 letters, digits, - or _ (no spaces)" in str(e.value)
+    assert "for example 'team-handbook'" in str(e.value)

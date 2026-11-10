@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rag-qa · Settings</title>
+<title>keyword-rag · Settings</title>
 <link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 <style>
   .conn { display:grid; gap:8px; }
@@ -30,9 +31,10 @@
   <h2>Connections</h2>
   <div id="connections"></div>
   <form id="add" class="card form">
+    <h3>Add a connection</h3>
     <div class="row">
       <label>Preset <select id="add-preset"></select></label>
-      <label>Id <input id="add-id" required pattern="[a-z0-9][a-z0-9\-]{0,31}" title="Up to 32 lowercase letters, digits and -, not starting with -"></label>
+      <label>Connection id (a short name you choose) <input id="add-id" required pattern="[a-z0-9][a-z0-9\-]{0,31}" title="Up to 32 lowercase letters, digits and -, not starting with -"></label>
       <label>Name <input id="add-label"></label>
     </div>
     <div class="row">
@@ -47,13 +49,13 @@
   <div id="models"></div>
 
   <h2>Jobs</h2>
-  <p class="muted">Which model each job uses. Only enabled, priced models are offered; a job still set to another shows it marked.</p>
+  <p class="muted">Which model each job uses. Only enabled, priced models are offered; a job still set to another shows it marked. Each change is saved at once.</p>
   <div id="roles" class="jobs"></div>
 
   <h2>Budget</h2>
   <form id="budget" class="row">
     <label>Monthly cap, US dollars <input id="cap" type="number" min="0" step="0.01" style="width:9rem"></label>
-    <button id="cap-go">Save</button>
+    <button id="cap-go">Save budget</button>
     <span id="spent" class="muted"></span>
   </form>
 

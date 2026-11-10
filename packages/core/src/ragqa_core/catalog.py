@@ -43,7 +43,7 @@ METHODS: dict[str, dict] = {
         "Keyword-RAG",
         "modern",
         "new",
-        "meaning + word match + match on predicted keywords, with the collection's channel weights",
+        "meaning + word match + match on predicted keywords, with the store's channel weights",
         paid="with_model_tags",
     ),
     "iterative": _method(
@@ -216,6 +216,50 @@ RECIPE_SAYS = {
 RECIPES = {r: {"label": RECIPE_LABELS[r], "says": RECIPE_SAYS[r]} for r in RECIPE_LABELS}
 
 
+# Every key a run's setup can hold (Evaluator.queue and _record_setup), as the run page shows it.
+SETUP_LABELS: dict[str, str] = {
+    "collection": "Store",
+    "split": "Questions used",
+    "methods": "Methods",
+    "answer": "Answers written",
+    "model": "Answer model",
+    "k": "Passages per question",
+    "rrf_k": "Fusion constant (RRF k)",
+    "search": "Search settings",
+    "eval_set": "Eval set",
+    "rerank_pool": "Reranker pool",
+    "rerank_model": "Reranker",
+    "dense_model": "Embedding model",
+    "query_instruction": "Query instruction",
+    "judge_model": "Judge model",
+    "keyword_version": "Keyword lists version",
+    "vocabulary_version": "Vocabulary version",
+    "seed": "Seed",
+    "dataset_filter": "Dataset filter",
+    "question_ids": "Questions asked",
+    "disabled_sources": "Sources left out",
+    "leaked_excluded": "Leaked questions left out",
+    "evidence_named": "Questions naming evidence",
+    "evidence_held": "Questions whose evidence the store holds",
+    "evidence_off": "Questions whose evidence is switched off",
+    "eval_set_version": "Eval set version",
+    "leaked_ids": "Leaked questions",
+    "evidence_size": "Evidence size",
+    "judge": "Judged by the answer model",
+    "answer_judge_model": "Judge model for answers",
+    "chat_search": "Chat's search",
+}
+
+ROLE_LABELS = {
+    "default": "Default model",
+    "answer": "Answers",
+    "summary": "Summaries",
+    "keywords": "Keyword lists and tags",
+    "query": "Query keywords",
+    "rewrite": "Follow-up rewriting",
+}
+
+
 def catalog() -> dict:
     return {
         "methods": METHODS,
@@ -227,4 +271,6 @@ def catalog() -> dict:
         "type_recipes": {t: list(recipes_for(t)) for t in QA_TYPES},
         "answer_pair": list(ANSWER_PAIR),
         "chat_methods": list(CHAT_METHODS),
+        "setup_labels": SETUP_LABELS,
+        "roles": ROLE_LABELS,
     }

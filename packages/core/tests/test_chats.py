@@ -850,12 +850,16 @@ def test_evidence_numbers_match_the_cited_numbers(tmp_path):
     assert [c["n"] for c in one["citations"]] == [1, 3]
     for c in one["citations"]:
         e = by_n[c["n"]]
-        assert (c["id"], c["store"], c["text"], c["source"]) == (
+        assert (c["id"], c["store"], c["text"], c["file"], c["source"]) == (
             e["id"],
             e["store"],
             e["text"],
+            e["file"],
             e["source"],
         )
+    # Evidence saved before it named its file still answers, its citations with no file.
+    old = [{k: v for k, v in e.items() if k != "file"} for e in one["evidence"]]
+    assert [c["file"] for c in chats.answer_from(BOTH, [], old, None)["citations"]] == [None] * 2
     # Evidence is kept in merged order; n follows the prompt's edge order (1, 3, 5, …, 4, 2).
     assert [e["n"] for e in one["evidence"]][:3] == [1, SIZE, 2]
 
@@ -1230,7 +1234,7 @@ def test_reference_prompt_is_chats_prompt_over_the_y_passages(tmp_path):
     hits = chats.retriever.store.get("a", [p2, p1])
     assert [h.id for h in hits] == [p2, p1]
     assert got == chat_prompt("what?", [], hits)
-    with pytest.raises(ValueError, match="mark at least one passage y that is in a first"):
+    with pytest.raises(ValueError, match="mark at least one passage Right that is in a first"):
         chats.reference_prompt("a", "what?", ["gone"])
     with pytest.raises(UnknownCollection):
         chats.reference_prompt("nope", "what?", [p1])
@@ -1288,3 +1292,16 @@ def test_a_cached_rewrite_alone_is_not_marked(tmp_path):
     assert two["pipeline"]["search_from"] == "rewrite"
     assert len(chat_prompts(prompts)) == before + 1 and two["answer"]
     assert two["pipeline"]["answer_cached"] is False
+
+
+def test_store_in_force_matches_search_defaults(tmp_path):
+    chats, _ = build(tmp_path)
+    db.set_chat_k(chats.conn, "a", 7)
+    search_defaults.save(chats.conn, {"method": "vector"})
+    chosen = {"method": "keyword"}
+    for picked in (None, chosen):
+        assert chats.store_in_force("a", picked) == search_defaults.store_in_force(
+            chats.conn, "a", picked
+        )
+    assert chats.store_in_force("a", chosen)["method"] == {"value": "keyword", "from": "chat"}
+    assert chats.store_in_force("a")["candidates"] == {"value": 7, "from": "store"}

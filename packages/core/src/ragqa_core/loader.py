@@ -16,10 +16,13 @@ from ragqa_core.hub import Hub
 from ragqa_core.indexer import Indexer
 from ragqa_core.recipes import build_for, build_settings
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, Question
+from ragqa_core.types import CollectionSpec, Item, Question, unknown_store
 
 PROPOSE_SAMPLE = 40
 UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
+QUESTION_IMPORT_GONE = (
+    "question imports into a store were removed in 0.2.0; import the file on its eval set's page"
+)
 
 
 def limited(
@@ -89,6 +92,19 @@ def keep_labels(old: Question, new: Question) -> Question:
     return db.judged_with_gold(merged)
 
 
+def roles_needed(spec: CollectionSpec, estimate: dict | None) -> list[str]:
+    """The AI roles a step on the store would call, so each must have a usable model before
+    it is queued. Priced, the estimate's calls say it: a cached or free-to-skip step sends
+    none, and a $0 model that is off still counts. Unpriced (None), every role the spec could
+    fail for: its summaries, and the build steps when it builds. A proposal needs none: it is
+    made only when a model for keywords was ready when the job was queued."""
+    if estimate is None:
+        roles = ["summary"] if spec.summarize else []
+        return roles + (["keywords"] if builds(spec) else [])
+    roles = ["summary"] if estimate["summary_calls"] > 0 else []
+    return roles + (["keywords"] if estimate["keyword_calls"] > 0 else [])
+
+
 class Loader:
     def __init__(
         self,
@@ -115,7 +131,7 @@ class Loader:
         conn, name = self.conn, job["collection"]
         spec = self.indexer.spec(name)
         if spec is None:
-            raise ValueError(f"unknown collection {name!r}")
+            raise ValueError(unknown_store(name))
 
         eval_set = self.questions_set(spec)  # a type clash fails here, before anything is added
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
@@ -266,27 +282,30 @@ class Loader:
         """`built`: a published build will be applied, so the build steps cost nothing."""
         todo, _ = self.indexer.changed(spec, items, source)
         # calls: what would be sent, so a cached summary, proposal or build step is none.
-        estimate, calls = self.indexer.plan_summaries(todo) if spec.summarize else (0.0, 0)
+        estimate, summary_calls = self.indexer.plan_summaries(todo) if spec.summarize else (0.0, 0)
+        keyword_calls = 0
         if self.ai.ready("keywords") and self.makes_lists(spec):
             propose, propose_calls = self.indexer.plan_propose(spec, propose_sample(items))
             estimate = None if estimate is None else estimate + propose
-            calls += propose_calls
+            keyword_calls += propose_calls
         if not built:
             build_usd, build_calls = self.builder.plan_build(spec, todo)
             estimate = None if estimate is None or build_usd is None else estimate + build_usd
-            calls += build_calls
-        return {"est_usd": estimate, "items": len(items), "calls": calls}
+            keyword_calls += build_calls
+        return {
+            "est_usd": estimate,
+            "items": len(items),
+            "calls": summary_calls + keyword_calls,
+            "summary_calls": summary_calls,
+            "keyword_calls": keyword_calls,
+        }
 
     def _read_upload(self, spec: CollectionSpec, setup: dict) -> tuple[list, int, set[str]]:
         """What the upload yields under the setup's mapping, how many rows that leaves out,
         and the text files it was read from (none for a table or JSON file)."""
         path, meta = imports.open_upload(self.home, spec.name, setup["upload_id"])
         fmt, rows, _ = imports.read_rows(path, meta["filename"])
-        if setup["kind"] == "items":
-            built, _ = imports.build_items(rows, setup["mapping"])
-        else:
-            built, _ = imports.build_questions(rows, setup["mapping"], spec.qa_type)
-            built = [replace(q, meta={**q.meta, "source": setup["source"]}) for q in built]
+        built, _ = imports.build_items(rows, setup["mapping"])
         files = imports.text_files(rows) if fmt in ("text", "zip") else set()
         return built, len(rows) - len(built), files
 
@@ -353,11 +372,6 @@ class Loader:
 
     def estimate_import(self, spec: CollectionSpec, setup: dict) -> dict:
         built, skipped, files = self._read_upload(spec, setup)
-        if setup["kind"] == "questions":
-            counts, _ = self.question_counts(
-                db.default_eval_set(self.conn, spec.name) or spec.name, built
-            )
-            return {"est_usd": 0.0, "calls": 0, **counts, "skipped": skipped, "removed": 0}
         _, counts = self.indexer.changed(spec, built, setup["source"])
         stale = self.stale_chunks(spec.name, setup["source"], files, {i.id for i in built})
         return {
@@ -368,28 +382,23 @@ class Loader:
         }
 
     def run_import(self, job: dict, progress: Callable[[float], None]) -> dict:
-        """Import the job's upload as items (indexed under the source) or as questions."""
-        conn, name, setup = self.conn, job["collection"], job["setup"]
+        """Import the job's upload as items, indexed under the source."""
+        name, setup = job["collection"], job["setup"]
+        if setup["kind"] == "questions":
+            raise ValueError(QUESTION_IMPORT_GONE)
         spec = self.indexer.spec(name)
         if spec is None:
-            raise ValueError(f"unknown collection {name!r}")
+            raise ValueError(unknown_store(name))
         built, skipped, files = self._read_upload(spec, setup)
-        lists_source, build_result = None, {}
-        if setup["kind"] == "items":
-            propose = bool(setup.get("propose", False))
-            lists_source, build_result, counts = self._add(
-                spec, built, setup["source"], progress, propose=propose
-            )
-            # After the add, so an import that fails removes nothing.
-            written = {i.id for i in built}
-            counts["removed"] = self.drop_stale_chunks(name, setup["source"], files, written)
-            if files:
-                self.set_chunk_meta(name, setup["source"], built)
-        else:
-            eval_set = self.questions_set(spec)
-            with conn.lock:  # no labeller's save between reading the set and writing it
-                counts, todo = self.question_counts(eval_set, built)
-                db.save_questions(conn, eval_set, todo)
+        propose = bool(setup.get("propose", False))
+        lists_source, build_result, counts = self._add(
+            spec, built, setup["source"], progress, propose=propose
+        )
+        # After the add, so an import that fails removes nothing.
+        written = {i.id for i in built}
+        counts["removed"] = self.drop_stale_chunks(name, setup["source"], files, written)
+        if files:
+            self.set_chunk_meta(name, setup["source"], built)
         progress(1.0)
         return {
             **counts,
@@ -419,7 +428,13 @@ class Loader:
         estimate, calls = self.indexer.plan_summaries(items) if target.summarize else (0.0, 0)
         build_usd, build_calls = self.builder.plan_build(target, items)
         estimate = None if estimate is None or build_usd is None else estimate + build_usd
-        return {"est_usd": estimate, "items": len(items), "calls": calls + build_calls}
+        return {
+            "est_usd": estimate,
+            "items": len(items),
+            "calls": calls + build_calls,
+            "summary_calls": calls,
+            "keyword_calls": build_calls,
+        }
 
     def start_copy(self, source: str, target: CollectionSpec) -> str:
         """Make the target with the source's eval set, switched-off sources, and queue the
@@ -447,7 +462,7 @@ class Loader:
         conn, name, source = self.conn, job["collection"], job["setup"]["source"]
         spec = self.indexer.spec(name)
         if spec is None or self.indexer.spec(source) is None:
-            raise ValueError(f"cannot copy {source!r} into {name!r}: no such collection")
+            raise ValueError(f"cannot copy {source!r} into {name!r}: no such store")
         lists = db.get_keyword_lists(conn, source)
         if build_of(spec).vocabulary == "lists" and lists is not None:
             db.set_keyword_version(conn, name, self.indexer.save_lists(spec, lists))

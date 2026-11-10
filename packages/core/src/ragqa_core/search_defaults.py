@@ -6,7 +6,7 @@ app_settings keys `search.<field>`.
 """
 
 import functools
-from typing import Literal
+from typing import Any, Literal
 
 from ragqa_core import db
 from ragqa_core.connection import Connection
@@ -38,6 +38,7 @@ CHAT_METHODS = (
     "kw_rrf",
     "kw_hybrid",
 )
+STORE_FIELDS = ("method", "candidates")  # per store; null: the store's own
 MAX_EVIDENCE = 20
 MAX_CANDIDATES = 60  # the pool cap is never above 60
 MAX_FOLLOW_UP = 10
@@ -151,3 +152,47 @@ def save(conn: Connection, changes: dict[str, object | None]) -> None:
     with conn.lock:
         for field, value in changes.items():
             db.set_app_setting(conn, PREFIX + field, value)
+
+
+def inherited(levels: dict[str, object]) -> dict[str, Any]:
+    """The first level, highest first, that holds a value, as {"value", "from"}. The last
+    level, the recommended value, always holds one."""
+    source = next((s for s, v in levels.items() if v is not None), "recommended")
+    return {"value": levels[source], "from": source}
+
+
+def store_in_force(conn: Connection, store: str, chosen: dict | None = None) -> dict[str, Any]:
+    """The store's method and candidates, each with the level it comes from. `chosen`
+    holds the chat's values for the store."""
+    chosen = chosen or {}
+    values = saved(conn)
+    own = {
+        "method": chat_method(db.get_chat_method(conn, store)),
+        "candidates": db.get_chat_k(conn, store),
+    }
+    return {
+        f: inherited(
+            {
+                "chat": chosen.get(f),
+                "store": own[f],
+                "settings": values[f],
+                "recommended": RECOMMENDED[f],
+            }
+        )
+        for f in STORE_FIELDS
+    }
+
+
+def store_search(conn: Connection, store: str) -> dict[str, Any]:
+    """The search a chat on the store uses, as a run names it: Hybrid reranked is the run's
+    hybrid_rerank; any other method with rerank on is scored before its rerank step.
+    A chat's own overrides are not reflected."""
+    method = store_in_force(conn, store)["method"]["value"]
+    rerank = bool(in_force(conn)["rerank"])
+    run_method = "hybrid_rerank" if method == "hybrid" and rerank else method
+    return {
+        "method": method,
+        "rerank": rerank,
+        "run_method": run_method,
+        "before_rerank": rerank and run_method != "hybrid_rerank",
+    }
