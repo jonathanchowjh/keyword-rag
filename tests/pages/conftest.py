@@ -11,38 +11,10 @@ import uvicorn
 
 from ragqa_api.app import create_app
 from ragqa_core import db, search_defaults
-from ragqa_core.fakes import fake_embeddings, fake_replies
+from ragqa_core.fakes import ITEMS, LISTS, fake_embeddings, fake_replies, until
 from ragqa_core.settings import load_settings
 from ragqa_core.types import Question
 
-ITEMS = [
-    {
-        "id": "enzyme-item",
-        "text": "enzyme kinetics rate experiment",
-        "answer": "A",
-        "explanation": "Rates rise.",
-        "meta": {"skill": "enzymes"},
-    },
-    {
-        "id": "market-item",
-        "text": "stock market price demand",
-        "answer": "B",
-        "explanation": "Prices fall.",
-        "meta": {"skill": "markets"},
-    },
-    {
-        "id": "volcano-item",
-        "text": "volcano magma lava pressure",
-        "answer": "C",
-        "explanation": "Magma rises.",
-        "meta": {"skill": "volcanoes"},
-    },
-]
-LISTS = {
-    "topic": ["enzyme", "market", "volcano", "optics"],
-    "method": ["experiment", "survey", "sampling"],
-    "common": ["rate", "price", "lava", "light"],
-}
 TOPICS = ["enzyme", "market", "volcano"]
 
 
@@ -103,13 +75,11 @@ def free_port() -> int:
 
 
 def wait_job(url: str, job_id: str, seconds: float = 30) -> dict:
-    deadline = time.time() + seconds
-    while time.time() < deadline:
+    def finished():
         job = httpx.get(f"{url}/jobs/{job_id}").json()
-        if job["status"] not in ("queued", "running"):
-            return job
-        time.sleep(0.05)
-    raise AssertionError(f"job {job_id} did not finish")
+        return job if job["status"] not in ("queued", "running") else None
+
+    return until(finished, seconds, 0.05, f"job {job_id} finishing")
 
 
 def questions(n: int = 40) -> list[Question]:
@@ -126,7 +96,7 @@ def questions(n: int = 40) -> list[Question]:
     ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def seeded(tmp_path_factory):
     """Collection `c` (mcq, 3 items, lists, 40 questions) with one answered run, done."""
     home = tmp_path_factory.mktemp("home")

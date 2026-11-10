@@ -6,6 +6,7 @@ here calls an AI provider or downloads a model.
 
 import hashlib
 import re
+import time
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +21,51 @@ from ragqa_core.hub import Hub
 from ragqa_core.models import Models, normalise
 
 WORD = re.compile(r"[a-z0-9]+")
+
+ITEMS = [
+    {
+        "id": "enzyme-item",
+        "text": "enzyme kinetics rate experiment",
+        "answer": "A",
+        "explanation": "Rates rise.",
+        "meta": {"skill": "enzymes"},
+    },
+    {
+        "id": "market-item",
+        "text": "stock market price demand",
+        "answer": "B",
+        "explanation": "Prices fall.",
+        "meta": {"skill": "markets"},
+    },
+    {
+        "id": "volcano-item",
+        "text": "volcano magma lava pressure",
+        "answer": "C",
+        "explanation": "Magma rises.",
+        "meta": {"skill": "volcanoes"},
+    },
+]
+LISTS = {
+    "topic": ["enzyme", "market", "volcano", "optics"],
+    "method": ["experiment", "survey", "sampling"],
+    "common": ["rate", "price", "lava", "light"],
+}
+
+
+def until[T](
+    check: Callable[[], T | None], seconds: float = 10, step: float = 0.02, what: str = "condition"
+) -> T:
+    """Calls `check` until it returns something truthy, and returns that. Waits with
+    time.sleep, so `check` must touch no Playwright object: sync Playwright delivers route
+    and event callbacks only during a Playwright call."""
+    deadline = time.monotonic() + seconds
+    while True:
+        got = check()
+        if got:
+            return got
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{what} did not happen in {seconds}s")
+        time.sleep(step)
 
 
 def fake_models(dim: int = 256, dims: dict[str, int] | None = None) -> Models:

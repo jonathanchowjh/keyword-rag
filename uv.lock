@@ -13,7 +13,7 @@ members = [
 
 [[package]]
 name = "aiconnect"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/aiconnect" }
 dependencies = [
     { name = "anthropic" },
@@ -832,7 +832,7 @@ wheels = [
 
 [[package]]
 name = "ragqa"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -867,7 +867,7 @@ dev = [
 
 [[package]]
 name = "ragqa-api"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "fastapi" },
@@ -886,7 +886,7 @@ requires-dist = [
 
 [[package]]
 name = "ragqa-core"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "aiconnect" },
@@ -903,7 +903,7 @@ requires-dist = [
     { name = "aiconnect", editable = "packages/aiconnect" },
     { name = "fastembed", specifier = "==0.9.*" },
     { name = "httpx", specifier = "==0.28.*" },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", specifier = "==1.33.*" },
     { name = "numpy", specifier = "==2.5.*" },
     { name = "pyarrow", specifier = "==26.*" },
     { name = "qdrant-client", specifier = "==1.20.*" },
@@ -911,7 +911,7 @@ requires-dist = [
 
 [[package]]
 name = "ragqa-worker"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "ragqa-core" },

@@ -7,8 +7,8 @@
 # which it can only learn by asking. Everything done here therefore happens
 # while an idle `git-receive-pack` session is held open.
 #
-# In pg-ops, where this hook comes from, it once ran the integration suite
-# and a Docker image build inline, about fifteen minutes, and every push failed: the remote dropped
+# This hook once ran the integration suite and a Docker image build inline,
+# about fifteen minutes, and every push failed: the remote dropped
 # the idle session, and git died writing the pack to a closed pipe with exit
 # 141 and no output whatsoever — not even `Enumerating objects`. It looked
 # like a broken pipe bug anywhere but here. `--no-verify` was the only way to

@@ -3,8 +3,8 @@ model what its cache does not hold stops (`stopped_replies`) and its prompts wai
 them out, reply to each, read the replies back, then resume the run or load again: the
 job finds them cached. Run it where the database is, inside the api container:
 
-    docker compose -p rag-qa exec api python -m ragqa_core.replies export OUT.jsonl [--job ID]
-    docker compose -p rag-qa exec api python -m ragqa_core.replies import REPLIES.jsonl
+    docker compose exec api python -m ragqa_core.replies export OUT.jsonl [--job ID]
+    docker compose exec api python -m ragqa_core.replies import REPLIES.jsonl
 
 OUT.jsonl has one prompt a line: {"key", "model", "purpose", "job_id", "max_tokens",
 "system", "prompt"}. REPLIES.jsonl has {"key", "reply"} a line, for any of them. A reply is

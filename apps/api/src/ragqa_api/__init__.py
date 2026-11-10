@@ -1,1 +1,1 @@
-"""rag-qa HTTP API."""
+"""keyword-rag HTTP API."""

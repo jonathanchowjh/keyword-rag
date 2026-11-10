@@ -2,7 +2,7 @@
 
 Run it inside the service, which has the model cache and no uv or scripts/:
 
-    docker compose -p rag-qa exec -T api python - < scripts/time_embed.py
+    docker compose exec -T api python - < scripts/time_embed.py
 
 Models are argv, else MODELS. For each it prints the load time (a first run downloads
 the model into the cache), the time to embed 1,000 passages of 1,500 characters in

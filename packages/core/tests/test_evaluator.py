@@ -2367,11 +2367,11 @@ def test_documents_answer_is_chat_search_score(tmp_path):
     assert a["proxy_trusted"] is None and a["unreliable"] is False
     assert a["unfinished_newer"] is False
     assert {"at", "scale", "since", "switch", "mean", "lo", "hi"} <= set(a)
-    later = ev.queue("d", "full", ["hybrid_rerank"], False, None)
-    db.request_cancel(conn, later)  # queued, so cancelled at once
-    assert ev.collection_answer("d")["unfinished_newer"] is True
     other = ev.queue("d", "full", ["vector"], False, None)
     db.request_cancel(conn, other)  # lacks the method: not counted
+    assert ev.collection_answer("d")["unfinished_newer"] is False
+    later = ev.queue("d", "full", ["hybrid_rerank"], False, None)
+    db.request_cancel(conn, later)  # queued, so cancelled at once
     assert ev.collection_answer("d")["unfinished_newer"] is True
 
 

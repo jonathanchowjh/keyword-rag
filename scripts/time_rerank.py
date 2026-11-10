@@ -2,7 +2,7 @@
 
 Run it inside the service, which has the model cache and no uv or scripts/:
 
-    docker compose -p rag-qa exec -T api python - < scripts/time_rerank.py
+    docker compose exec -T api python - < scripts/time_rerank.py
 
 It times the configured reranker: the service's own (RAGQA_RERANK_MODEL, else the
 default), not one picked under Settings. It prints the median of 3 calls per (batch,

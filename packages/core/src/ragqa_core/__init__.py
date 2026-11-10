@@ -1,1 +1,1 @@
-"""rag-qa core: retrieval, keywords, cost control and evaluation. No HTTP."""
+"""keyword-rag core: retrieval, keywords, cost control and evaluation. No HTTP."""

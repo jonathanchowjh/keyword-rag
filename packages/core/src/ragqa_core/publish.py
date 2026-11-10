@@ -2,7 +2,7 @@
 to the Hub, so a load of the same dataset, limit and recipe applies it with no AI call.
 The owner runs it inside the api container, where the database and Qdrant are:
 
-    docker compose -p rag-qa exec -e HF_TOKEN api python -m ragqa_core.publish \\
+    docker compose exec -e HF_TOKEN api python -m ragqa_core.publish \\
         COLLECTION --authored-by "WHO" [--vocabulary VOCABULARY.json] [--publish]
 
 It is a dry run unless --publish: the files are written under --out and nothing is sent.

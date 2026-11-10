@@ -9,7 +9,7 @@ import pytest
 
 from ragqa_core import imports, text_split
 from ragqa_core.imports import question_problem
-from ragqa_core.types import NotFound, Question
+from ragqa_core.types import NotFound, QaType, Question
 
 
 def write(path: Path, content: str | bytes) -> Path:
@@ -384,9 +384,9 @@ def test_question_problem():
     assert question_problem(replace(ok, text="  "), "mcq") == "no text"
     assert question_problem(replace(ok, id=""), "mcq") == "no id"
     assert question_problem(replace(ok, id=" "), "mcq") == "no id"
-    assert "choices" in question_problem(replace(ok, choices=["x"]), "mcq")
-    assert "choices" in question_problem(replace(ok, choices=None), "mcq")
-    assert "answer" in question_problem(replace(ok, gold_answers=["Z"]), "mcq")
+    assert "choices" in str(question_problem(replace(ok, choices=["x"]), "mcq"))
+    assert "choices" in str(question_problem(replace(ok, choices=None), "mcq"))
+    assert "answer" in str(question_problem(replace(ok, gold_answers=["Z"]), "mcq"))
     # Unmeasured answers are fine for every type.
     assert question_problem(replace(ok, gold_answers=[]), "mcq") is None
     plain = Question("b", "how warm?", None, [], [], {})
@@ -712,7 +712,7 @@ def test_a_documents_eval_set_imports_gold_ids_without_answers(tmp_path):
 
 
 def test_questions_import_reads_judged_ids():
-    def built(rows, qa_type="documents"):
+    def built(rows, qa_type: QaType = "documents"):
         mapping = imports.guess_mapping(imports.columns(rows), "questions")
         return imports.build_questions(rows, mapping, qa_type)[0]
 

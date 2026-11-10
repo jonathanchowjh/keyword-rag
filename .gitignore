@@ -17,3 +17,6 @@ docs/
 # Course slides and notes: named on their own so they stay out even if the
 # docs/ rule above changes.
 docs/CS472/
+
+# The RAGQA_HOME CONTRIBUTING.md documents for running the API outside Docker.
+.ragqa-dev/

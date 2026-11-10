@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# The slow half of verification: the integration suite against a real Qdrant
-# and real models, the page tests in a real browser, then the image smoke test. .githooks/pre-push refuses any
-# commit this has not passed.
+# The slow half of verification: the commit checks first (lint, format, types,
+# unit tests), then the integration suite against a real Qdrant and real models,
+# the page tests in a real browser, and the image smoke test. .githooks/pre-push
+# refuses any commit this has not passed.
 #
-# WHY A SCRIPT AND NOT THE HOOK (learned in pg-ops). `git push` opens the
+# WHY A SCRIPT AND NOT THE HOOK (learned the hard way). `git push` opens the
 # connection to the remote BEFORE running pre-push, so a hook's work happens
 # while an idle receive-pack session is held open. Long enough and the remote
 # drops it, and git dies writing the pack: exit 141, no output. Doing the work
@@ -21,8 +22,23 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+# THE COMMIT CHECKS RUN FIRST, before anything touches Docker: lint, format,
+# types and the unit suite live in .githooks/pre-commit, so those rules have
+# one home and a receipt cannot bless a commit made with --no-verify.
+echo "gate: the commit checks"
+sh .githooks/pre-commit
+
+# STOP ONLY WHAT THIS RUN STARTED. A dev Qdrant that was already up stays up;
+# one started here comes down on any exit, including a failing later stage.
+# The trap is set before `up` so a Qdrant that never turns ready is removed
+# too. It does not change the gate's exit status.
 echo "gate: integration tests against a real Qdrant"
-./scripts/dev-qdrant.sh up
+if ./scripts/dev-qdrant.sh status; then
+  echo "gate: dev Qdrant was already running; leaving it up"
+else
+  trap './scripts/dev-qdrant.sh down' EXIT
+  ./scripts/dev-qdrant.sh up
+fi
 RAGQA_TEST_QDRANT_URL=$(./scripts/dev-qdrant.sh url) uv run pytest -m integration -q
 
 echo "gate: page smoke test in a real browser"

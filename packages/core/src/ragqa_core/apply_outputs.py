@@ -2,7 +2,7 @@
 a collection with no AI call. The owner runs it inside the api container, where the
 database and Qdrant are:
 
-    docker compose -p rag-qa exec api python -m ragqa_core.apply_outputs \\
+    docker compose exec api python -m ragqa_core.apply_outputs \\
         COLLECTION VOCABULARY.json OUTPUTS.jsonl
 
 VOCABULARY.json is {"terms": [{"term": ..., "definition": ...}, ...]}. OUTPUTS.jsonl has one

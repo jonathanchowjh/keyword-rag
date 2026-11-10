@@ -1,6 +1,6 @@
 [project]
 name = "ragqa"
-version = "0.1.0"
+version = "0.2.0"
 description = "A QA-focused RAG microservice and test bench for keyword vectorisation."
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
@@ -38,6 +38,8 @@ markers = [
 ]
 testpaths = ["tests", "packages/aiconnect/tests", "packages/core/tests", "apps/api/tests", "apps/worker/tests"]
 addopts = "--import-mode=importlib"
+# api_helpers.py and page_helpers.py sit beside their conftest.py; importlib mode does not put test directories on sys.path.
+pythonpath = ["apps/api/tests", "tests/pages"]
 
 [tool.ruff]
 line-length = 100
@@ -48,9 +50,92 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["packages/aiconnect/src", "packages/core/src", "apps/api/src", "apps/worker/src"]
+include = [
+    "packages/aiconnect/src", "packages/core/src", "apps/api/src", "apps/worker/src",
+    "tests",
+    "packages/aiconnect/tests",
+    "packages/core/tests",
+    "apps/api/tests",
+    "apps/worker/tests",
+]
 venvPath = "."
 venv = ".venv"
+
+# The five test roots relax six rules, and only there; src keeps every rule.
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+# page_helpers.py is imported by name (pytest pythonpath).
+extraPaths = ["tests/pages"]
+# A None from a lookup in a test is a failing test; asserting it away first would add lines that test nothing.
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+# Same reason, and hand-written fakes stand in for real types.
+reportArgumentType = false
+# Tests override methods on instances and read client.app.state: the project's test-seam rule.
+# Relaxing it also hides unknown import symbols (`from api_helpers import nope`); pytest
+# still fails such an import at collection.
+reportAttributeAccessIssue = false
+reportFunctionMemberAccess = false
+
+[[tool.pyright.executionEnvironments]]
+root = "packages/aiconnect/tests"
+# A None from a lookup in a test is a failing test; asserting it away first would add lines that test nothing.
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+# Same reason, and hand-written fakes stand in for real types.
+reportArgumentType = false
+# Tests override methods on instances and read client.app.state: the project's test-seam rule.
+# Relaxing it also hides unknown import symbols (`from api_helpers import nope`); pytest
+# still fails such an import at collection.
+reportAttributeAccessIssue = false
+reportFunctionMemberAccess = false
+
+[[tool.pyright.executionEnvironments]]
+root = "packages/core/tests"
+# A None from a lookup in a test is a failing test; asserting it away first would add lines that test nothing.
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+# Same reason, and hand-written fakes stand in for real types.
+reportArgumentType = false
+# Tests override methods on instances and read client.app.state: the project's test-seam rule.
+# Relaxing it also hides unknown import symbols (`from api_helpers import nope`); pytest
+# still fails such an import at collection.
+reportAttributeAccessIssue = false
+reportFunctionMemberAccess = false
+
+[[tool.pyright.executionEnvironments]]
+root = "apps/api/tests"
+# api_helpers.py is imported by name (pytest pythonpath).
+extraPaths = ["apps/api/tests"]
+# A None from a lookup in a test is a failing test; asserting it away first would add lines that test nothing.
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+# Same reason, and hand-written fakes stand in for real types.
+reportArgumentType = false
+# Tests override methods on instances and read client.app.state: the project's test-seam rule.
+# Relaxing it also hides unknown import symbols (`from api_helpers import nope`); pytest
+# still fails such an import at collection.
+reportAttributeAccessIssue = false
+reportFunctionMemberAccess = false
+
+[[tool.pyright.executionEnvironments]]
+root = "apps/worker/tests"
+# A None from a lookup in a test is a failing test; asserting it away first would add lines that test nothing.
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalIterable = false
+# Same reason, and hand-written fakes stand in for real types.
+reportArgumentType = false
+# Tests override methods on instances and read client.app.state: the project's test-seam rule.
+# Relaxing it also hides unknown import symbols (`from api_helpers import nope`); pytest
+# still fails such an import at collection.
+reportAttributeAccessIssue = false
+reportFunctionMemberAccess = false
 
 [tool.ruff.lint.isort]
 known-first-party = ["aiconnect", "ragqa_core", "ragqa_api", "ragqa_worker"]

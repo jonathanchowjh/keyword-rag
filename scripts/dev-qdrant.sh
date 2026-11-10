@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 #
-# Local dev Qdrant for rag-qa: a throwaway container the integration tests and
+# Local dev Qdrant for keyword-rag: a throwaway container the integration tests and
 # a locally-run API can point at. Not for production.
 #
 #   ./scripts/dev-qdrant.sh up      # start (idempotent)
 #   ./scripts/dev-qdrant.sh down    # stop and remove
 #   ./scripts/dev-qdrant.sh url     # print the URL
+#   ./scripts/dev-qdrant.sh status  # exit 0 if running, 1 if not
+#   ./scripts/dev-qdrant.sh image   # print the image (compose.yaml's pin)
 #
 # Override defaults via env: RAGQA_DEV_QDRANT_PORT, RAGQA_DEV_QDRANT_IMAGE.
 set -euo pipefail
 
 NAME="ragqa-dev-qdrant"
-IMAGE="${RAGQA_DEV_QDRANT_IMAGE:-qdrant/qdrant:v1.20.0}"
+# The image is pinned once, in compose.yaml: the qdrant service under
+# `services:` (the file also has a `qdrant:` volume, which has no image).
+compose_image() {
+  awk '
+    /^[^ #]/ { in_services = ($0 == "services:"); in_qdrant = 0 }
+    in_services && /^  [a-z]/ { in_qdrant = ($0 == "  qdrant:") }
+    in_qdrant && /^    image:/ { print $2; exit }
+  ' "$(dirname "$0")/../compose.yaml"
+}
+IMAGE="${RAGQA_DEV_QDRANT_IMAGE:-$(compose_image)}"
 PORT="${RAGQA_DEV_QDRANT_PORT:-56333}"
 URL="http://localhost:${PORT}"
 
@@ -49,5 +60,7 @@ case "${1:-}" in
   up) up ;;
   down) down ;;
   url) echo "$URL" ;;
-  *) echo "usage: $0 up|down|url" >&2; exit 2 ;;
+  image) echo "$IMAGE" ;;
+  status) need_docker; is_running ;;
+  *) echo "usage: $0 up|down|url|status|image" >&2; exit 2 ;;
 esac

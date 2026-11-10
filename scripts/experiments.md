@@ -6,8 +6,8 @@ research report's plan (`docs/reports/RAG processing improvements since 2024.md`
 kept locally). The user runs them; nothing here is run for you.
 
 ```sh
-python scripts/experiments.py [--api http://localhost:8080] estimate x1 bright_aops
-python scripts/experiments.py run x1 bright_aops --confirm
+python scripts/experiments.py [--api http://localhost:8080] estimate x1 aops
+python scripts/experiments.py run x1 aops --confirm
 python scripts/experiments.py report JOB_ID [JOB_ID ...]
 ```
 
@@ -283,7 +283,7 @@ hundred questions are inside the noise; trust the CI column, not the mean.
 a local model, no AI. The first run downloads the model into the `ragqa` volume.
 
 ```sh
-docker compose -p rag-qa exec -T api python - < scripts/time_rerank.py
+docker compose exec -T api python - < scripts/time_rerank.py
 ```
 
 It reranks 20, 40 and 60 English passages of 1,500 characters against one question, in
@@ -308,7 +308,7 @@ reranker or the machine.
 ### Smaller rerankers
 
 The same script, with `RAGQA_RERANK_MODEL=<name>`
-(`docker compose -p rag-qa exec -T -e RAGQA_RERANK_MODEL=<name> api python - < scripts/time_rerank.py`),
+(`docker compose exec -T -e RAGQA_RERANK_MODEL=<name> api python - < scripts/time_rerank.py`),
 on 1,500-character passages; the times are at the batch the script picked, and the
 cap is the largest pool at or under 2 s. fastembed lists each model's size but no
 maximum length; the lengths below come from its descriptions.
@@ -328,7 +328,7 @@ Passages cut to 600 characters made bge about 3.5 to 4.5 times faster (4.1 s for
 at batch 16, against 18.3 s at 1,500 in the paired rerun), still over 2 s.
 
 **The machine was busy** (host load average 16 to 27 on 12 cores, other projects'
-containers using CPU; no rag-qa job running), so the times are rough: identical bge
+containers using CPU; no keyword-rag job running), so the times are rough: identical bge
 runs differed by up to about 1.6 times (11.1 s and 18.3 s for 20 passages). The three
 models that fit 20 passages are close to the 2 s line (1.5 to 1.9 s), and a quieter or
 busier machine could move them across it.
@@ -347,7 +347,7 @@ service. It is free: local models, no AI. The first run downloads bge-base and Q
 `ragqa` volume. Qwen takes minutes, and the machine runs hot meanwhile.
 
 ```sh
-docker compose -p rag-qa exec -T api python - < scripts/time_embed.py
+docker compose exec -T api python - < scripts/time_embed.py
 ```
 
 Name models as arguments to time others. For each model it times the load, then one pass over

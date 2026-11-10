@@ -25,6 +25,7 @@ from ragqa_core.types import (
     Hit,
     Item,
     KeywordLists,
+    QaType,
     SearchSettings,
     UnknownCollection,
 )
@@ -79,7 +80,7 @@ def build(
     lists=True,
     reply=lambda p: "A summary.",
     vocabulary=True,
-    qa_type="mcq",
+    qa_type: QaType = "mcq",
     recipe="paper_2024",
 ):
     conn = connect(tmp_path / "r.db")

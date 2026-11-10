@@ -1,7 +1,7 @@
 [project]
 name = "ragqa-core"
-version = "0.1.0"
-description = "Retrieval, keyword vectorisation and evaluation for rag-qa."
+version = "0.2.0"
+description = "Retrieval, keyword vectorisation and evaluation for keyword-rag."
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiconnect",
@@ -9,7 +9,7 @@ dependencies = [
   "qdrant-client==1.20.*",
   "numpy==2.5.*",
   "pyarrow==26.*",
-  "huggingface-hub",
+  "huggingface-hub==1.33.*",
   "httpx==0.28.*",
 ]
 

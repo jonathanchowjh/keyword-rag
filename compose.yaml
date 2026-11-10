@@ -1,7 +1,7 @@
 # The service and its vector store. `docker compose up` is the whole start.
 #
-# The API is published on 127.0.0.1 only: it has endpoints that spend Claude
-# credit, so a port open to the network would let anyone spend up to the
+# The API is published on 127.0.0.1 only: it has endpoints that spend on your AI
+# provider's account, so a port open to the network would let anyone spend up to the
 # monthly cap. Qdrant is not published at all; the API reaches it on the
 # compose network.
 name: rag-qa
