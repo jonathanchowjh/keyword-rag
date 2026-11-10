@@ -19,10 +19,10 @@ from ragqa_core.indexer import BATCH, Indexer
 from ragqa_core.keywords import keyword_string
 from ragqa_core.models import Models
 from ragqa_core.prompts import abstract_prompt, induce_prompt, parse_json, tag_prompt
-from ragqa_core.recipes import build_for
+from ragqa_core.recipes import build_for, build_of
 from ragqa_core.settings import load_settings
 from ragqa_core.store import Store
-from ragqa_core.types import BuildSettings, CollectionSpec, Hit, Item
+from ragqa_core.types import CollectionSpec, Hit, Item
 from ragqa_core.vocabulary import (
     MAX_TERM_CHARS,
     MAX_TERMS,
@@ -42,10 +42,6 @@ CUTOFF_MOST = 10  # a cut-off keeps at most this many tags
 # errs high, never low.
 GUESSED_TERMS = [f"guessed term {n} ".ljust(MAX_TERM_CHARS, "x") for n in range(MAX_TERMS)]
 ABSTRACTED = re.compile(r"Principle: (.*?)\nMethod: (.*)\nAnswer: (.*)", re.S)
-
-
-def build_of(spec: CollectionSpec) -> BuildSettings:
-    return spec.build or build_for("paper_2024", spec.summarize)
 
 
 def builds(spec: CollectionSpec) -> bool:
@@ -123,12 +119,6 @@ class Builder:
             induce_prompt(texts[start : start + INDUCE_BATCH], spec.corpus_type)
             for start in range(0, len(texts), INDUCE_BATCH)
         ]
-
-    def estimate_induce_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
-        """Raises NoConnection("keywords") when no model can price it."""
-        return self.ai.estimate_many(
-            self._induce_prompts(spec, items), INDUCE_TOKENS, role="keywords"
-        )
 
     def induce(
         self,
@@ -235,16 +225,12 @@ class Builder:
         progress(1.0)
         return tags
 
-    def estimate_tag_usd(self, spec: CollectionSpec, terms: list[str], items: list[Item]) -> float:
-        """0 unless the build tags with the AI. Raises NoConnection("keywords") when no
-        model can price it."""
-        return self.plan_tag(spec, terms, items)[0]
-
     def plan_tag(
         self, spec: CollectionSpec, terms: list[str], items: list[Item]
     ) -> tuple[float, int]:
         """What tagging the items would spend, and how many calls it would send (the cache
-        misses): none unless the build tags with the AI. Raises as estimate_tag_usd does."""
+        misses): none unless the build tags with the AI. Raises NoConnection("keywords") when
+        no model can price it."""
         build = build_of(spec)
         if build.tagging != "ai":
             return 0.0, 0
@@ -391,12 +377,6 @@ class Builder:
             for i in self._abstractable(spec, items)
         ]
 
-    def estimate_abstract_usd(self, spec: CollectionSpec, items: list[Item]) -> float:
-        """Raises NoConnection("keywords") when no model can price it."""
-        return self.ai.estimate_many(
-            self._abstract_prompts(spec, items), ABSTRACT_TOKENS, role="keywords"
-        )
-
     def abstract(
         self,
         spec: CollectionSpec,
@@ -443,14 +423,9 @@ class Builder:
             "abstract": self._abstractable(spec, unabstracted) if build_of(spec).abstracted else [],
         }
 
-    def estimate_build_usd(self, spec: CollectionSpec, items: list[Item]) -> float | None:
-        """What `build` would spend after adding the items: induction while the collection
-        has no vocabulary, then tagging and abstraction of what is not yet built. None when
-        no model for keywords can price it: adding is then refused, as it is for summaries."""
-        return self.plan_build(spec, items)[0]
-
     def plan_build(self, spec: CollectionSpec, items: list[Item]) -> tuple[float | None, int]:
-        """What `build` would spend after adding the items, as estimate_build_usd, and how
+        """What `build` would spend after adding the items (induction while the collection
+        has no vocabulary, then tagging and abstraction of what is not yet built), and how
         many calls it would send: the cache misses, one complete_many per step. A step with
         nothing to send is free. With no model for keywords to price a step that sends: None,
         and build_calls (cached or not)."""

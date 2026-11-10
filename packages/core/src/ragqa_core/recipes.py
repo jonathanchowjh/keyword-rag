@@ -3,7 +3,14 @@
 import math
 from dataclasses import fields, replace
 
-from ragqa_core.types import BuildSettings, CorpusType, QaType, SearchSettings
+from ragqa_core.types import (
+    EXAMPLE_TYPES,
+    BuildSettings,
+    CollectionSpec,
+    CorpusType,
+    QaType,
+    SearchSettings,
+)
 
 RECIPES: dict[str, BuildSettings] = {
     "worked_examples": BuildSettings(
@@ -56,13 +63,6 @@ RECIPES["documents"] = BuildSettings(
 )
 RECIPES["documents_tagged"] = replace(RECIPES["documents"])
 
-RECIPE_LABELS: dict[str, str] = {
-    "worked_examples": "worked examples",
-    "reference": "reference",
-    "paper_2024": "paper 2024",
-    "documents": "documents",
-    "documents_tagged": "documents with keyword tags",
-}
 DOCUMENTS_RECIPES = ("documents", "documents_tagged")
 
 CHANNELS = ("meaning", "words", "keywords")
@@ -88,7 +88,7 @@ def recipes_for(qa_type: QaType) -> tuple[str, ...]:
 
 
 def corpus_type_for(qa_type: QaType) -> CorpusType:
-    return "worked" if qa_type in ("science", "mcq") else "reference"
+    return "worked" if qa_type in EXAMPLE_TYPES else "reference"
 
 
 def build_for(recipe: str, summarize: bool = False) -> BuildSettings:
@@ -98,6 +98,10 @@ def build_for(recipe: str, summarize: bool = False) -> BuildSettings:
     if recipe == "paper_2024":
         build.added_text = "summary" if summarize else "none"
     return build
+
+
+def build_of(spec: CollectionSpec) -> BuildSettings:
+    return spec.build or build_for("paper_2024", spec.summarize)
 
 
 def default_search(qa_type: QaType, build: BuildSettings) -> SearchSettings:
@@ -137,6 +141,12 @@ def search_settings(base: SearchSettings, override: dict | None) -> SearchSettin
     if not isinstance(program, bool):
         raise ValueError("program must be true or false")
     return SearchSettings(weights, query_tags, example, program)
+
+
+def resolve_search(spec: CollectionSpec, override: dict | None) -> SearchSettings:
+    """The store's search settings with a partial override merged in. A spec with none (an
+    in-memory test spec) starts from SearchSettings(), not default_search."""
+    return search_settings(spec.search or SearchSettings(), override)
 
 
 def _whole_number(value: object) -> bool:

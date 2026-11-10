@@ -160,8 +160,13 @@ def test_summary_vector_only_when_summarize(env):
 
 def test_estimate_is_zero_without_summarize(env):
     *_, ix, _ = env
-    assert ix.estimate_add_usd(ix.create("c", "mcq", False), ITEMS, "x") == 0.0
-    assert ix.estimate_add_usd(ix.create("s", "mcq", True), ITEMS, "x") > 0.0
+    plain, summarising = ix.create("c", "mcq", False), ix.create("s", "mcq", True)
+    assert plain.summarize is False and ix.plan_summaries([])[0] == 0.0
+    assert (
+        ix.plan_summaries(ix.changed(summarising, ITEMS, "x")[0])[0]
+        if summarising.summarize
+        else 0.0
+    ) > 0.0
 
 
 def small_env(tmp_path):
@@ -444,8 +449,9 @@ def test_estimate_add_prices_only_changed(env):
     *_, ix, _ = env
     spec = ix.create("c", "mcq", True)
     ix.add(spec, ITEMS, "x")
-    assert ix.estimate_add_usd(spec, ITEMS, "x") == 0.0
-    assert ix.estimate_add_usd(spec, [Item("1", "edited", "A"), *ITEMS[1:]], "x") > 0.0
+    edited = [Item("1", "edited", "A"), *ITEMS[1:]]
+    assert (ix.plan_summaries(ix.changed(spec, ITEMS, "x")[0])[0] if spec.summarize else 0.0) == 0.0
+    assert (ix.plan_summaries(ix.changed(spec, edited, "x")[0])[0] if spec.summarize else 0.0) > 0.0
 
 
 def test_add_sets_source_on_items_and_chunks(env):

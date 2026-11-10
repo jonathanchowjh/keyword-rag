@@ -4,11 +4,12 @@ from aiconnect.ai import AI, Cancelled
 from ragqa_core import db
 from ragqa_core.builder import Builder
 from ragqa_core.connection import Connection
-from ragqa_core.evaluator import Evaluator, ended
+from ragqa_core.evaluator import Evaluator
 from ragqa_core.indexer import Indexer
+from ragqa_core.jobs import ended
 from ragqa_core.loader import Loader
 from ragqa_core.recipes import build_for
-from ragqa_core.types import CollectionSpec, unknown_store
+from ragqa_core.types import CollectionSpec, NotFound, UnknownCollection, unknown_store
 
 
 class Worker:
@@ -75,7 +76,7 @@ class Worker:
                 log("started")
                 job = db.get_job(conn, job_id)
                 if job is None:
-                    raise KeyError(job_id)
+                    raise NotFound(f"no job {job_id}")
                 self._dispatch(job, check, progress)
             except Exception as e:
                 try:
@@ -107,8 +108,7 @@ class Worker:
         elif kind == "import":
             result = self.loader.run_import(job, progress)
             # An import can delete stale chunks and so leave the count as it was.
-            self.evaluator.forget(job["collection"])
-            self.evaluator.retriever.forget(job["collection"])
+            self.evaluator.forget_store(job["collection"])
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "copy":
             result = self.loader.run_copy(job, progress)
@@ -138,8 +138,7 @@ class Worker:
 
             switching = setup.get("switching", False)
             result = self.indexer.reembed(name, setup["model"], progress, switching, on_switch)
-            self.evaluator.forget(name)
-            self.evaluator.retriever.forget(name)
+            self.evaluator.forget_store(name)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "tag_build":
             result = self._tag_build(job["collection"], progress)
@@ -164,7 +163,7 @@ class Worker:
     def _spec(self, name: str) -> CollectionSpec:
         spec = db.get_collection(self.conn, name)
         if spec is None:
-            raise ValueError(unknown_store(name))
+            raise UnknownCollection(unknown_store(name))
         return spec
 
     def _failed(self, e: Exception) -> None:

@@ -1,6 +1,6 @@
-import { $, BUSY, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
+import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, UNPRICED, usd, verdictHtml,
-  importBox, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
+  importBox, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
@@ -13,7 +13,6 @@ const GROUPS = [
   ["modern", "Modern"],
   ["keywords", "Keywords"],
 ];
-const CONTROLS = ["random_example", "fixed_example"];
 const notBuilt = () => `Not built. Keyword tags let ${methodLabel("keyword_rag", cat)} search this store: an AI proposes a vocabulary ` +
   "from your passages, then tags each passage by similarity.";
 const tagsStopped = () => `Adding keyword tags stopped part-way; ${methodLabel("keyword_rag", cat)} waits until every passage is tagged.`;
@@ -103,7 +102,7 @@ function answerHtml() {
 // What a finished run said about the declared pair: "Yes +6 pts (2–10)", or "–" without it.
 function saidHtml(r) {
   const a = r.answer_summary;
-  if (!a || BUSY.has(r.status)) return "–";
+  if (!a || BUSY.has(r.status)) return NONE;
   if (a.kind === "score") return esc(scoreRange(a.mean, a.lo, a.hi));
   const notes = verdictNotes(a).map((n) => ` · ${n}`).join("");
   return `${wordHtml(a)} ${esc(pts(a.diff, a.lo, a.hi))}${notes ? `<span class="muted">${esc(notes)}</span>` : ""}`;
@@ -171,7 +170,7 @@ function runFormHtml(ai, sets) {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
       .map(([mid, m]) => {
-        const on = documents() ? ticks.includes(mid) : cat.answer_pair.includes(mid) || CONTROLS.includes(mid);
+        const on = documents() ? ticks.includes(mid) : cat.answer_pair.includes(mid) || cat.controls.includes(mid);
         const ok = col.methods_available.includes(mid);
         const why = col.methods_unavailable?.[mid];
         const off = why ? ` <span class="muted">${esc(`(${why})`)}</span>` : "";
@@ -253,7 +252,7 @@ function bindRunForm() {
       if (mine !== counting) return;
       if ($("rf-references")) $("rf-references").innerHTML = "";
       if (!keep) {
-        labels("–", "–"); // not the last set's counts
+        labels(NONE, NONE); // not the last set's counts
         $("rf-measure").innerHTML = "";
       }
       $("rf-msg").textContent = e.message;
@@ -766,9 +765,7 @@ function buildDelete() {
 
 // -- refresh ----------------------------------------------------------------------------
 
-let timer = null;
 async function refresh() {
-  clearTimeout(timer);
   try {
     cat = await catalog();
     let loads, everySet;
@@ -835,7 +832,6 @@ async function refresh() {
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }
-  timer = setTimeout(refresh, col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS);
 }
 
 // What an import's line points to next: labelling questions, then chatting.
@@ -892,4 +888,5 @@ buildLists();
 buildDelete();
 bindSources();
 bindAsked();
-refresh();
+// The first wait follows the first refresh, so a busy store is polled fast from the start.
+refresh().then(() => poll(refresh, () => (col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS)));

@@ -89,6 +89,11 @@ def supported_embedders() -> dict[str, dict]:
     }
 
 
+def reranker_in_force(settings: dict, service: str) -> str:
+    """The reranker a search uses: the saved one, else the service's (Models.rerank_model)."""
+    return str(settings["rerank_model"] or service)
+
+
 def check(field: str, value: object) -> None:
     """Raises ValueError unless `value` may be saved for `field`; None always may."""
     if field not in RECOMMENDED:

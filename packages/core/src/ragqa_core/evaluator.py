@@ -10,13 +10,10 @@ from typing import Any, Literal
 from aiconnect.ai import (
     AI,
     BATCH_THRESHOLD,
-    AwaitingReplies,
-    BudgetExceeded,
-    Cancelled,
     NoConnection,
 )
-from ragqa_core import db, imports, search_defaults, verdict
-from ragqa_core.builder import TAG_TOKENS, build_of
+from ragqa_core import db, imports, jobs, search_defaults, verdict
+from ragqa_core.builder import TAG_TOKENS
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METRICS
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import DEV_SEED, FILTER_NOTES, dev_slice
@@ -52,9 +49,26 @@ from ragqa_core.prompts import (
     strip_citations,
     summary_prompt,
 )
-from ragqa_core.recipes import search_settings
-from ragqa_core.retriever import HOP_TOKENS, KEYWORD_METHODS, MAX_HOPS, POOL, Retriever
-from ragqa_core.types import EXAMPLE_TYPES, CollectionSpec, Hit, QaType, Question, SearchSettings
+from ragqa_core.recipes import build_of, resolve_search
+from ragqa_core.retriever import (
+    DEFAULT_K,
+    DEFAULT_RRF_K,
+    HOP_TOKENS,
+    KEYWORD_METHODS,
+    MAX_HOPS,
+    POOL,
+    Retriever,
+    is_paid,
+)
+from ragqa_core.types import (
+    EXAMPLE_TYPES,
+    CollectionSpec,
+    Hit,
+    NotFound,
+    QaType,
+    Question,
+    SearchSettings,
+)
 
 # What worked collections whose questions name relevant items (BRIGHT) gain, measured
 # GOLD_DEPTH deep: how high the relevant examples rank, and how many of them come first.
@@ -322,6 +336,80 @@ def changes_since(
     return {"untracked": False, "changes": changes}
 
 
+def run_headline(
+    spec: CollectionSpec,
+    by_method: dict[str, dict[str, dict]],
+    has_answers: bool,
+    trusted: bool | None,
+) -> tuple[str, dict, dict[str, dict[str, float]]]:
+    """The headline metric, its scale, and each method's per-question values of it."""
+    names = RETRIEVAL_METRICS[spec.qa_type] + (ANSWER_METRICS[spec.qa_type] if has_answers else ())
+    measurable = {
+        m
+        for m in names
+        if m in METRICS and any(metric_values(q.values(), m) for q in by_method.values())
+    }
+    headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
+    per_method = {
+        method: metric_by_question(per_q, headline) for method, per_q in by_method.items()
+    }
+    random = list(per_method.get("random_example", {}).values())
+    return headline, verdict.scale(headline, avg(random) if random else None), per_method
+
+
+def question_count(setup: dict, by_method: dict[str, dict[str, dict]]) -> int:
+    if "question_ids" in setup:
+        return len(setup["question_ids"])
+    return len({q for per_q in by_method.values() for q in per_q})
+
+
+# A run estimate's part: (calls, avg prompt chars, output tokens, batched?, role, model).
+EstimatePart = tuple[int, float, int, bool, str, str | None]
+
+
+def summary_parts(
+    spec: CollectionSpec, n_by_method: dict[str, int], sample: list[Question]
+) -> list[EstimatePart]:
+    """The query summaries of a store that summarises: one per question a keyword method asks."""
+    parts: list[EstimatePart] = []
+    summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
+    if spec.summarize and summaries:
+        chars = avg(len(summary_prompt(q.text)) for q in sample)
+        parts.append((summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, "query", None))
+    return parts
+
+
+def hop_parts(n_by_method: dict[str, int], sample: list[Question]) -> list[EstimatePart]:
+    """Iterative's hops: MAX_HOPS single real-time calls per question."""
+    hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
+    return [
+        (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, "query", None)
+        for m, n in n_by_method.items()
+        if m == "iterative"
+    ]
+
+
+def judge_parts(
+    judged: dict[str, int],
+    known_judges: dict[str, list[str]],
+    judge_sample: list[Question],
+    model: str | None,
+) -> list[EstimatePart]:
+    """The verdicts of each method whose judge prompts are not known, priced at the
+    longest answer."""
+    verdicts = {m: n for m, n in judged.items() if n and m not in known_judges}
+    if not verdicts:
+        return []
+    longest = "x" * CHAT_TOKENS * 4  # an answer as long as its tokens allow
+    judge_chars = avg(
+        sum(map(len, judge_prompt(q.text, q.gold_answers, longest))) for q in judge_sample
+    )
+    return [
+        (n, judge_chars, JUDGE_TOKENS, n > BATCH_THRESHOLD, "answer", model)
+        for n in verdicts.values()
+    ]
+
+
 class Evaluator:
     def __init__(self, conn: Connection, retriever: Retriever, models: Models, ai: AI) -> None:
         self.conn = conn
@@ -383,6 +471,12 @@ class Evaluator:
         copied first: a request thread may add a scan meanwhile."""
         for key in [k for k in list(self._leaked) if k[0] == name]:
             self._leaked.pop(key, None)
+
+    def forget_store(self, name: str) -> None:
+        """Drops every cache of a store that is gone or whose items changed: the retriever's
+        ids, then the leak scans."""
+        self.retriever.forget(name)
+        self.forget(name)
 
     def _questions(self, spec: CollectionSpec, setup: dict) -> list[Question]:
         """What a run that has not recorded its questions asks: its set's, less those leaked
@@ -501,7 +595,7 @@ class Evaluator:
             answer,
             model,
             questions[:ESTIMATE_SAMPLE],
-            search_settings(spec.search or SearchSettings(), search),
+            resolve_search(spec, search),
             evidence_size=size,
             judged={m: len(references) for m in methods} if judge else None,
             judge_sample=references[:ESTIMATE_SAMPLE],
@@ -527,7 +621,7 @@ class Evaluator:
         """What resuming would cost: only the incomplete (method, question) pairs."""
         job = db.get_job(self.conn, job_id)
         if job is None:
-            raise KeyError(job_id)
+            raise NotFound(f"no job {job_id}")
         setup = job["setup"]
         spec = self.retriever.spec(setup["collection"])
         self.retriever.indexer.check_model(spec)
@@ -543,7 +637,7 @@ class Evaluator:
             setup["answer"],
             setup["model"],
             remaining[:ESTIMATE_SAMPLE],
-            self._search(spec, setup),
+            resolve_search(spec, setup.get("search")),
             evidence_size=self._evidence_size(setup) if documents else None,
             exact_answers=self._resume_answers(job_id, spec, setup, todo) if documents else None,
             judged=judged,
@@ -583,7 +677,7 @@ class Evaluator:
         method is covered when every question left has a row with its hits, as it has once
         its retrieval finished; the others are priced from a sample. A row that holds its
         answer (a judged run stopped before judging) is not answered again."""
-        size, search = self._evidence_size(setup), self._search(spec, setup)
+        size, search = self._evidence_size(setup), resolve_search(spec, setup.get("search"))
         out = {}
         for method, questions in todo.items():
             rows = self._retrieved_rows(job_id, method)
@@ -632,8 +726,7 @@ class Evaluator:
         judge_sample: list[Question] | None = None,
         exact_judges: dict[str, list[str]] | None = None,
     ) -> dict:
-        # (calls, avg prompt chars, output tokens, batched?, role, model) — each part
-        # priced the way it is sent: one complete_many per part, batched only
+        # Each part is priced the way it is sent: one complete_many per part, batched only
         # above 50 calls; iterative hops are single real-time calls. Summaries, hops and
         # the AI's query tags run on the query job's model; only answers use the requested one.
         # A method in `exact_answers` has its answer prompts known (a resume's, rebuilt from
@@ -642,25 +735,48 @@ class Evaluator:
         # `exact_judges` has its judge prompts known (a resume's, from its stored answers).
         exact = exact_answers or {}
         known_judges = exact_judges or {}
-        parts: list[tuple[int, float, int, bool, str, str | None]] = []
-        summaries = max((n for m, n in n_by_method.items() if m in KEYWORD_METHODS), default=0)
-        if spec.summarize and summaries:
-            chars = avg(len(summary_prompt(q.text)) for q in sample)
-            parts.append(
-                (summaries, chars, SUMMARY_TOKENS, summaries > BATCH_THRESHOLD, "query", None)
-            )
+        parts = [
+            *summary_parts(spec, n_by_method, sample),
+            *self._query_tag_parts(spec, n_by_method, sample, search),
+            *hop_parts(n_by_method, sample),
+            *self._answer_estimate_parts(
+                spec, n_by_method, answer, model, sample, search, evidence_size, exact
+            ),
+            *judge_parts(judged or {}, known_judges, judge_sample or [], model),
+        ]
+        exact_calls, exact_usd, no_model = self._known_prompt_cost(exact, known_judges, model)
+        return self._estimate_total(parts, exact_calls, exact_usd, no_model)
+
+    def _query_tag_parts(
+        self,
+        spec: CollectionSpec,
+        n_by_method: dict[str, int],
+        sample: list[Question],
+        search: SearchSettings,
+    ) -> list[EstimatePart]:
+        """The AI's query tags: one call per keyword_rag question when the model tags."""
+        parts: list[EstimatePart] = []
         asked = n_by_method.get("keyword_rag", 0) if search.query_tags == "model" else 0
         if asked:
             terms = db.get_vocabulary(self.conn, spec.name) or []
             k = build_of(spec).tag_k
             chars = avg(len(query_tag_prompt(terms, q.text, k, spec.corpus_type)) for q in sample)
             parts.append((asked, chars, TAG_TOKENS, asked > BATCH_THRESHOLD, "query", None))
-        hop_chars = avg(len(hop_prompt(q.text, ["x" * 600] * 4)) for q in sample)
-        parts.extend(
-            (n * MAX_HOPS, hop_chars, HOP_TOKENS, False, "query", None)
-            for m, n in n_by_method.items()
-            if m == "iterative"
-        )
+        return parts
+
+    def _answer_estimate_parts(
+        self,
+        spec: CollectionSpec,
+        n_by_method: dict[str, int],
+        answer: bool,
+        model: str | None,
+        sample: list[Question],
+        search: SearchSettings,
+        evidence_size: int | None,
+        exact: dict[str, tuple[str, list[str]]],
+    ) -> list[EstimatePart]:
+        """The answers of each method whose prompts are not known, sized from the sample."""
+        parts: list[EstimatePart] = []
         if answer and any(n_by_method.values()):
             program = search.program and any(not q.choices for q in sample)
             tokens = answer_tokens(spec.qa_type, program)
@@ -676,18 +792,15 @@ class Evaluator:
                         spec, sample, search, evidence_size, retrieves
                     )
                 parts.append((n, sizes[retrieves], tokens, n > BATCH_THRESHOLD, "answer", model))
-        verdicts = {m: n for m, n in (judged or {}).items() if n and m not in known_judges}
-        if verdicts:
-            longest = "x" * CHAT_TOKENS * 4  # an answer as long as its tokens allow
-            judge_chars = avg(
-                sum(map(len, judge_prompt(q.text, q.gold_answers, longest)))
-                for q in judge_sample or []
-            )
-            parts.extend(
-                (n, judge_chars, JUDGE_TOKENS, n > BATCH_THRESHOLD, "answer", model)
-                for n in verdicts.values()
-            )
-        # The known prompts' cache misses, and their price; None when no model answers.
+        return parts
+
+    def _known_prompt_cost(
+        self,
+        exact: dict[str, tuple[str, list[str]]],
+        known_judges: dict[str, list[str]],
+        model: str | None,
+    ) -> tuple[int, float, bool]:
+        """The known prompts' cache misses, their price, and True when no model answers."""
         known = [(system, prompts, CHAT_TOKENS) for system, prompts in exact.values()]
         known += [(JUDGE_SYSTEM, prompts, JUDGE_TOKENS) for prompts in known_judges.values()]
         exact_calls, exact_usd = 0, 0.0
@@ -703,6 +816,12 @@ class Evaluator:
                 planned, misses, no_model = 0.0, len(prompts), True  # unknown: every one counts
             exact_calls += misses
             exact_usd += planned
+        return exact_calls, exact_usd, no_model
+
+    def _estimate_total(
+        self, parts: list[EstimatePart], exact_calls: int, exact_usd: float, no_model: bool
+    ) -> dict:
+        """The calls, price and roles of the parts and the known prompts together."""
         # Every call the run would make, cached or not, except where the prompts are known:
         # answer prompts depend on what is retrieved, so a new run's cannot be checked against
         # the cache, and the other parts are priced from a sample of the questions. The price
@@ -762,8 +881,8 @@ class Evaluator:
         methods: list[str],
         answer: bool,
         model: str | None,
-        k: int = 5,
-        rrf_k: int = 60,
+        k: int = DEFAULT_K,
+        rrf_k: int = DEFAULT_RRF_K,
         search: dict | None = None,
         eval_set: str | None = None,
         rerank_pool: int = POOL,
@@ -779,7 +898,7 @@ class Evaluator:
         documents = spec.qa_type == "documents"
         if not methods:
             raise ValueError("choose at least one method")
-        search_settings(spec.search or SearchSettings(), search)
+        resolve_search(spec, search)
         if rerank_model not in (None, self.models.rerank_model):
             search_defaults.check("rerank_model", rerank_model)
         name = self._chosen_set(spec, eval_set)
@@ -871,14 +990,10 @@ class Evaluator:
             **setup,
             # THE EFFECTIVE SETTINGS, NOT THE OVERRIDE: every run's table can then be compared
             # with any other's. Merging a full recorded set over the defaults gives it back.
-            "search": asdict(self._search(spec, setup)),
+            "search": asdict(resolve_search(spec, setup.get("search"))),
         }
         db.set_job_setup(self.conn, job_id, setup)
         return setup
-
-    @staticmethod
-    def _search(spec: CollectionSpec, setup: dict) -> SearchSettings:
-        return search_settings(spec.search or SearchSettings(), setup.get("search"))
 
     def _gold_off(
         self, spec: CollectionSpec, questions: list[Question], disabled: list[str]
@@ -919,11 +1034,11 @@ class Evaluator:
     def resume_refusal(self, job_id: str) -> str | None:
         job = db.get_job(self.conn, job_id)
         if job is None:
-            raise KeyError(job_id)
+            raise NotFound(f"no job {job_id}")
         if job["kind"] != "eval":
             return "only evals can be resumed"
-        if job["status"] not in db.JOBS_RESUMABLE:
-            return f"a {job['status']} run cannot be resumed"
+        if refusal := jobs.not_resumable(job):
+            return refusal
         setup = job["setup"]
         return self._version_change(self.retriever.spec(setup["collection"]), setup)
 
@@ -945,11 +1060,14 @@ class Evaluator:
                 setup = self._record_setup(job_id, spec, setup)
             questions = self._run_questions(job_id, spec, setup)
             methods = setup["methods"]
-            paid = [m for m in methods if m in KEYWORD_METHODS and self.retriever.is_paid(spec, m)]
+            paid = [m for m in methods if m in KEYWORD_METHODS and is_paid(spec, m)]
             summarise = {q.id for m in paid for q in self._todo(job_id, m, questions)}
             if summarise:
                 self.retriever.prepare(spec, [q.text for q in questions if q.id in summarise])
-            if "keyword_rag" in methods and self._search(spec, setup).query_tags == "model":
+            if (
+                "keyword_rag" in methods
+                and resolve_search(spec, setup.get("search")).query_tags == "model"
+            ):
                 asked = self._todo(job_id, "keyword_rag", questions)
                 self.retriever.prepare_tags(spec, [q.text for q in asked])
             for n, method in enumerate(methods, start=1):
@@ -963,7 +1081,7 @@ class Evaluator:
                 db.update_job(self.conn, job_id, progress=n / len(methods))
             db.update_job(self.conn, job_id, status="done")
         except Exception as e:  # recorded on the job; the thread must not die silently
-            db.update_job(self.conn, job_id, **ended(e))
+            db.update_job(self.conn, job_id, **jobs.ended(e))
 
     def _run_method(
         self,
@@ -982,7 +1100,7 @@ class Evaluator:
             return
         span = 0.5 if setup["answer"] else 0.99  # the share the retrieval step is worth
         judging = bool(setup.get("judge"))
-        search = self._search(spec, setup)
+        search = resolve_search(spec, setup.get("search"))
         # A Documents answer is chat's reply over the method's top evidence-size hits.
         documents = spec.qa_type == "documents" and setup["answer"]
         size = self._evidence_size(setup) if documents else None
@@ -1042,7 +1160,7 @@ class Evaluator:
                     found[q.id] = (kept[q.id], self._stored_hits(spec, kept[q.id], size))
             rows = [found[q.id][0] for q in questions]
             all_hits = [found[q.id][1] for q in questions]
-        shown = [answer_hits(spec.qa_type, hits, search.example, size) for hits in all_hits]
+        shown = [answer_hits(spec.qa_type, hits, search.example) for hits in all_hits]
         retrieves = method != "question_only"
         # A judged run stopped before judging keeps the answers it stored, and what they cost:
         # only the rows without one are answered.
@@ -1207,29 +1325,6 @@ class Evaluator:
             by_method.setdefault(r["method"], {})[r["question_id"]] = r
         return by_method, any("answer" in r for r in rows)
 
-    def _headline(
-        self,
-        spec: CollectionSpec,
-        by_method: dict[str, dict[str, dict]],
-        has_answers: bool,
-        trusted: bool | None,
-    ) -> tuple[str, dict, dict[str, dict[str, float]]]:
-        """The headline metric, its scale, and each method's per-question values of it."""
-        names = RETRIEVAL_METRICS[spec.qa_type] + (
-            ANSWER_METRICS[spec.qa_type] if has_answers else ()
-        )
-        measurable = {
-            m
-            for m in names
-            if m in METRICS and any(metric_values(q.values(), m) for q in by_method.values())
-        }
-        headline = verdict.headline_metric(spec.qa_type, has_answers, trusted, measurable)
-        per_method = {
-            method: metric_by_question(per_q, headline) for method, per_q in by_method.items()
-        }
-        random = list(per_method.get("random_example", {}).values())
-        return headline, verdict.scale(headline, avg(random) if random else None), per_method
-
     def _labels(
         self,
         job_id: str,
@@ -1305,11 +1400,6 @@ class Evaluator:
             "methods": methods,
         }
 
-    def _question_count(self, setup: dict, by_method: dict[str, dict[str, dict]]) -> int:
-        if "question_ids" in setup:
-            return len(setup["question_ids"])
-        return len({q for per_q in by_method.values() for q in per_q})
-
     def _answer(
         self,
         spec: CollectionSpec,
@@ -1356,7 +1446,7 @@ class Evaluator:
         spec = self.retriever.spec(setup["collection"])
         by_method, has_answers = self._rows_by_method(job_id)
         trusted = proxy_trusted if spec.qa_type in EXAMPLE_TYPES and not has_answers else None
-        headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
+        headline, scaling, per_method = run_headline(spec, by_method, has_answers, trusted)
         answer, _ = self._answer(spec, setup, per_method, headline, scaling["factor"], method)
         return {
             "headline": headline,
@@ -1364,13 +1454,13 @@ class Evaluator:
             "answer": answer,
             "proxy_trusted": trusted,
             "usd_total": self.ai.job_spend(job_id),
-            "question_count": self._question_count(setup, by_method),
+            "question_count": question_count(setup, by_method),
         }
 
     def table(self, job_id: str) -> dict:
         job = db.get_job(self.conn, job_id)
         if job is None:
-            raise KeyError(job_id)
+            raise NotFound(f"no job {job_id}")
         setup = job["setup"]
         spec = self.retriever.spec(setup["collection"])
         by_method, has_answers = self._rows_by_method(job_id)
@@ -1422,7 +1512,7 @@ class Evaluator:
         trusted = None
         if spec.qa_type in EXAMPLE_TYPES and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
-        headline, scaling, per_method = self._headline(spec, by_method, has_answers, trusted)
+        headline, scaling, per_method = run_headline(spec, by_method, has_answers, trusted)
         answer, reference = self._answer(spec, setup, per_method, headline, scaling["factor"])
         return {
             "setup": setup,
@@ -1442,7 +1532,7 @@ class Evaluator:
             "labels": self._labels(job_id, spec, setup, by_method),
             "answers": self._answers(job_id, spec, setup, by_method),
             "usd_total": self.ai.job_spend(job_id),
-            "question_count": self._question_count(setup, by_method),
+            "question_count": question_count(setup, by_method),
             "since": self._since(spec, setup),
         }
 
@@ -1513,7 +1603,7 @@ class Evaluator:
         evals = db.list_jobs(self.conn, kind="eval", collection=spec.name, limit=db.ALL)
         newer = itertools.takewhile(lambda j: j["id"] != job["id"], evals)
         unfinished = any(
-            j["status"] in db.JOBS_RESUMABLE
+            j["status"] in jobs.RESUMABLE
             and j["setup"].get("eval_set") == setup.get("eval_set")
             and method in j["setup"].get("methods", [])
             for j in newer
@@ -1566,7 +1656,7 @@ class Evaluator:
     def items(self, job_id: str, method: str, wrong_only: bool) -> list[dict]:
         job = db.get_job(self.conn, job_id)
         if job is None:
-            raise KeyError(job_id)
+            raise NotFound(f"no job {job_id}")
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary = MISS_METRIC[spec.qa_type]
@@ -1597,7 +1687,7 @@ class Evaluator:
         unjudged Documents run's answers are unscored, so it keeps the retrieval outcome."""
         job = db.get_job(self.conn, job_id)
         if job is None:
-            raise KeyError(job_id)
+            raise NotFound(f"no job {job_id}")
         spec = self.retriever.spec(job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary = MISS_METRIC[spec.qa_type]
@@ -1646,31 +1736,6 @@ def read_answer(
         return pred, None
     printed, record = program_answer(text)
     return printed or pred, record
-
-
-def ended(e: Exception) -> dict:
-    """The status and error a job that raised e ends with: stopped (resumable) when it ran
-    out of budget, a model or replies; cancelled; otherwise failed."""
-    if isinstance(e, Cancelled):
-        return {"status": "cancelled"}
-    if isinstance(e, BudgetExceeded):
-        return {"status": "stopped_budget", "error": str(e)}
-    if isinstance(e, NoConnection):
-        return {"status": "stopped_no_key", "error": no_ai(e.role)}
-    if isinstance(e, AwaitingReplies):
-        return {"status": "stopped_replies", "error": awaiting(e)}
-    return {"status": "failed", "error": repr(e)}
-
-
-def no_ai(role: str) -> str:
-    return f"no AI model is set up for the '{role}' job; choose one on the Settings page"
-
-
-def awaiting(e: AwaitingReplies) -> str:
-    return (
-        f"{e}: export them with `python -m ragqa_core.replies export`, import the replies,"
-        " then resume the run or start the job again; replies already imported stay cached"
-    )
 
 
 def avg(values) -> float:

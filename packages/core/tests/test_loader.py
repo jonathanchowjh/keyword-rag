@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 from aiconnect.ai import Cancelled
-from ragqa_core import db, loader
+from ragqa_core import db, loader, text_split
 from ragqa_core.builder import Builder
 from ragqa_core.datasets import load_scibench
 from ragqa_core.db import connect, create_job, get_job, get_keyword_lists, get_questions
 from ragqa_core.fakes import fake_ai, fake_models
-from ragqa_core.indexer import Indexer
+from ragqa_core.indexer import Indexer, sourced
 from ragqa_core.loader import Loader, roles_needed
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Item, KeywordLists, Question
@@ -449,9 +449,9 @@ def test_paper_2024_load_unchanged(tmp_path, monkeypatch):
 def test_load_estimate_includes_build_cost(tmp_path, monkeypatch):
     conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
     spec = ix.spec("w")
-    items = ix.sourced(scibench_items(tmp_path), "scibench")
+    items = sourced(scibench_items(tmp_path), "scibench")
     estimate = ld.estimate_load(spec, "scibench", None)
-    build_usd = ld.builder.estimate_build_usd(spec, items)
+    build_usd = ld.builder.plan_build(spec, items)[0]
     assert build_usd and estimate["est_usd"] == pytest.approx(build_usd)
     # One induction batch, a tag per item, an abstract per explained item.
     assert estimate["calls"] == ld.builder.build_calls(spec, items) == 1 + len(items) + 2
@@ -662,15 +662,15 @@ def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
 
 
 def test_chunk_of_reads_old_and_new_ids():
-    assert loader.chunk_of("a.md#3") == "a.md"
-    assert loader.chunk_of("a.md#0123456789ab") == "a.md"
-    assert loader.chunk_of("a.md#0123456789ab-2") == "a.md"
-    assert loader.chunk_of("a.md#b.md#0123456789ab") == "a.md#b.md"
-    assert loader.chunk_of("a.md#notes") is None
-    assert loader.chunk_of("a.md#0123456789AB") is None
-    assert loader.chunk_of("a.md#0123456789ab-") is None
-    assert loader.chunk_of("a.md#٣") is None  # an Arabic-Indic digit is not a part number
-    assert loader.chunk_of("a.md") is None
+    assert text_split.chunk_of("a.md#3") == "a.md"
+    assert text_split.chunk_of("a.md#0123456789ab") == "a.md"
+    assert text_split.chunk_of("a.md#0123456789ab-2") == "a.md"
+    assert text_split.chunk_of("a.md#b.md#0123456789ab") == "a.md#b.md"
+    assert text_split.chunk_of("a.md#notes") is None
+    assert text_split.chunk_of("a.md#0123456789AB") is None
+    assert text_split.chunk_of("a.md#0123456789ab-") is None
+    assert text_split.chunk_of("a.md#٣") is None  # an Arabic-Indic digit is not a part number
+    assert text_split.chunk_of("a.md") is None
 
 
 def stored_labelled(tmp_path, qa_type):

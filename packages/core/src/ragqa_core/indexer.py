@@ -12,7 +12,7 @@ from ragqa_core.datasets import source_for
 from ragqa_core.keywords import assign, keyword_string, list_version, pick_all
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
-from ragqa_core.recipes import build_for, corpus_type_for, default_search, recipes_for
+from ragqa_core.recipes import build_for, build_of, corpus_type_for, default_search, recipes_for
 from ragqa_core.store import CHUNK, SPARSE, Store, chunks_of, item_hash, rebuild_of
 from ragqa_core.types import (
     FACETS,
@@ -21,6 +21,7 @@ from ragqa_core.types import (
     Item,
     KeywordLists,
     QaType,
+    UnknownCollection,
     unknown_store,
 )
 
@@ -50,7 +51,7 @@ def chunk(text: str, words: int = 100, overlap: int = 25) -> list[str]:
 def embed_text(spec: CollectionSpec, item: Item) -> str:
     """The text that is embedded for an item (dense vector and chunks); stored text is unchanged."""
     title = item.meta.get("title")
-    build = spec.build or build_for("paper_2024", spec.summarize)
+    build = build_of(spec)
     if build.added_text == "title_prefix" and isinstance(title, str) and title.strip():
         return f"{title.strip()}: {item.text}"
     return item.text
@@ -62,6 +63,10 @@ def dedupe(words: list[str]) -> list[str]:
 
 def _as_list(value: object) -> list:
     return value if isinstance(value, list) else []
+
+
+def sourced(items: list[Item], source: str) -> list[Item]:
+    return [replace(i, meta={**i.meta, "source": source}) for i in items]
 
 
 class Indexer:
@@ -135,28 +140,16 @@ class Indexer:
     def spec(self, name: str) -> CollectionSpec | None:
         return db.get_collection(self.conn, name)
 
-    def sourced(self, items: list[Item], source: str) -> list[Item]:
-        return [replace(i, meta={**i.meta, "source": source}) for i in items]
-
     def changed(
         self, spec: CollectionSpec, items: list[Item], source: str
     ) -> tuple[list[Item], dict[str, int]]:
         """The sourced items whose stored hash differs, with new/updated/unchanged counts."""
-        items = self.sourced(items, source)
+        items = sourced(items, source)
         stored = self.store.hashes(spec.name, [i.id for i in items])
         todo = [i for i in items if stored.get(i.id) != item_hash(i)]
         new = sum(1 for i in todo if i.id not in stored)
         counts = {"new": new, "updated": len(todo) - new, "unchanged": len(items) - len(todo)}
         return todo, counts
-
-    def estimate_add_usd(
-        self, spec: CollectionSpec, items: list[Item], source: str
-    ) -> float | None:
-        """None when the summary job has no model to price it with; adding is then refused."""
-        if not spec.summarize:
-            return 0.0
-        todo, _ = self.changed(spec, items, source)
-        return self.plan_summaries(todo)[0]
 
     def plan_summaries(self, items: list[Item]) -> tuple[float | None, int]:
         """What summarizing the items would spend, and how many calls it would send (the
@@ -175,7 +168,7 @@ class Indexer:
         progress: Callable[[float], None] = lambda p: None,
     ) -> dict[str, int]:
         self.check_model(spec)
-        build = spec.build or build_for("paper_2024", spec.summarize)
+        build = build_of(spec)
         items, counts = self.changed(spec, items, source)
         if not items:
             progress(1.0)
@@ -382,7 +375,7 @@ class Indexer:
         resumes it after a stop."""
         spec = self.spec(name)
         if spec is None:
-            raise ValueError(unknown_store(name))
+            raise UnknownCollection(unknown_store(name))
         if not switching:
             self._rebuild(spec, model, progress)
             on_switch()

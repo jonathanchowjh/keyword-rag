@@ -15,12 +15,19 @@ from ragqa_core.retriever import (
     METHOD_NAMES,
     MethodUnavailable,
     Retriever,
-    UnknownCollection,
     available_methods,
+    is_paid,
     rrf,
 )
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, Item, KeywordLists, SearchSettings
+from ragqa_core.types import (
+    CollectionSpec,
+    Hit,
+    Item,
+    KeywordLists,
+    SearchSettings,
+    UnknownCollection,
+)
 
 DOMAINS = {
     "enzyme": (
@@ -274,9 +281,9 @@ def test_is_paid(tmp_path):
     r, _ = build(tmp_path)
     plain = CollectionSpec("c", "mcq", False, "fake/dense", 256)
     summarizing = CollectionSpec("s", "mcq", True, "fake/dense", 256)
-    assert r.is_paid(summarizing, "kw_all") and r.is_paid(summarizing, "kw_hybrid")
-    assert not r.is_paid(plain, "kw_all")
-    assert r.is_paid(plain, "iterative") and not r.is_paid(summarizing, "hybrid")
+    assert is_paid(summarizing, "kw_all") and is_paid(summarizing, "kw_hybrid")
+    assert not is_paid(plain, "kw_all")
+    assert is_paid(plain, "iterative") and not is_paid(summarizing, "hybrid")
 
 
 def test_retrieve_embeds_the_question_with_the_stores_model(tmp_path):
@@ -584,7 +591,7 @@ def test_keyword_rag_answers_after_a_retag_stopped_before_writing(tmp_path):
 def test_keyword_rag_is_not_paid(tmp_path):
     r, _ = build(tmp_path)
     summarizing = CollectionSpec("s", "mcq", True, "fake/dense", 256)
-    assert not r.is_paid(summarizing, "keyword_rag")
+    assert not is_paid(summarizing, "keyword_rag")
 
 
 def test_hybrid_rerank_reranks_only_its_pool(tmp_path):

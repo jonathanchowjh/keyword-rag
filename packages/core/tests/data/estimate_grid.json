@@ -1,0 +1,2540 @@
+{
+ "new/documents-over-100/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.074613,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/judged/free": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/judged/none": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/judged/priced": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.092213,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/hybrid+keyword_rag/answer/free": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": 0.003992999999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/answer/none": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/answer/priced": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": 0.078606,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/judged/free": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": 0.003992999999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/judged/none": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/judged/priced": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": 0.096206,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/retrieval/free": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": 0.003992999999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/retrieval/none": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": 0.003992999999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": 0.003992999999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/hybrid/answer/free": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/answer/none": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/answer/priced": {
+  "calls": 110,
+  "dev_questions": 110,
+  "est_usd": 0.0373065,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/judged/free": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/judged/none": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/judged/priced": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.0461065,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/iterative/answer/free": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.071445,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/answer/none": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/answer/priced": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.1087515,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/judged/free": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": 0.071445,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/judged/none": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/judged/priced": {
+  "calls": 550,
+  "dev_questions": 110,
+  "est_usd": 0.11755149999999999,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents-over-100/iterative/retrieval/free": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": 0.071445,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/iterative/retrieval/none": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": 0.071445,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/iterative/retrieval/priced": {
+  "calls": 330,
+  "dev_questions": 110,
+  "est_usd": 0.071445,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/answer/free": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/answer/none": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/answer/priced": {
+  "calls": 220,
+  "dev_questions": 110,
+  "est_usd": 0.074404,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/judged/free": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/judged/none": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": null,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/judged/priced": {
+  "calls": 440,
+  "dev_questions": 110,
+  "est_usd": 0.092004,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "evidence_size": 8,
+  "questions": 110,
+  "references": 110,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents-over-100/kw_individual+question_only/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/kw_individual+question_only/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents-over-100/kw_individual+question_only/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 110,
+  "est_usd": 0.0,
+  "evidence_held": 110,
+  "evidence_named": 110,
+  "questions": 110,
+  "references": 110,
+  "roles": []
+ },
+ "new/documents/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": 0.005428,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/judged/free": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/judged/none": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/judged/priced": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.006068,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/hybrid+keyword_rag/answer/free": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.00029039999999999996,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/answer/none": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/answer/priced": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.005718399999999999,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/judged/free": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": 0.00029039999999999996,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/judged/none": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/judged/priced": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": 0.006358399999999999,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/retrieval/free": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": 0.00029039999999999996,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/retrieval/none": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": 0.00029039999999999996,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": 0.00029039999999999996,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/hybrid/answer/free": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/answer/none": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/answer/priced": {
+  "calls": 4,
+  "dev_questions": 4,
+  "est_usd": 0.002714,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/judged/free": {
+  "calls": 6,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/judged/none": {
+  "calls": 6,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/judged/priced": {
+  "calls": 6,
+  "dev_questions": 4,
+  "est_usd": 0.003034,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/iterative/answer/free": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": 0.002598,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/answer/none": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/answer/priced": {
+  "calls": 16,
+  "dev_questions": 4,
+  "est_usd": 0.005312,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/judged/free": {
+  "calls": 18,
+  "dev_questions": 4,
+  "est_usd": 0.002598,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/judged/none": {
+  "calls": 18,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/judged/priced": {
+  "calls": 18,
+  "dev_questions": 4,
+  "est_usd": 0.005632,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/documents/iterative/retrieval/free": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.002598,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/iterative/retrieval/none": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.002598,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/iterative/retrieval/priced": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.002598,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/documents/kw_individual+question_only/answer/free": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/answer/none": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/answer/priced": {
+  "calls": 8,
+  "dev_questions": 4,
+  "est_usd": 0.005412,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/judged/free": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/judged/none": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": null,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/judged/priced": {
+  "calls": 12,
+  "dev_questions": 4,
+  "est_usd": 0.006052,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "evidence_size": 8,
+  "questions": 4,
+  "references": 2,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/documents/kw_individual+question_only/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/kw_individual+question_only/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/documents/kw_individual+question_only/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 4,
+  "est_usd": 0.0,
+  "evidence_held": 4,
+  "evidence_named": 4,
+  "questions": 4,
+  "references": 2,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 130,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 130,
+  "dev_questions": 65,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 130,
+  "dev_questions": 65,
+  "est_usd": 0.026899999999999997,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/answer/free": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/answer/none": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/answer/priced": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.030534999999999996,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/retrieval/free": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/retrieval/none": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/hybrid/answer/free": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid/answer/none": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid/answer/priced": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.013449999999999998,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 65,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": []
+ },
+ "new/mcq-over-50/iterative/answer/free": {
+  "calls": 260,
+  "dev_questions": 65,
+  "est_usd": 0.0422175,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/iterative/answer/none": {
+  "calls": 260,
+  "dev_questions": 65,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/iterative/answer/priced": {
+  "calls": 260,
+  "dev_questions": 65,
+  "est_usd": 0.055667499999999995,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/iterative/retrieval/free": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.0422175,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/iterative/retrieval/none": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.0422175,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/iterative/retrieval/priced": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.0422175,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/answer/free": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.004145,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/answer/none": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/answer/priced": {
+  "calls": 195,
+  "dev_questions": 65,
+  "est_usd": 0.031044999999999996,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/retrieval/free": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.004145,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/retrieval/none": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.004145,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-over-50/kw_individual+question_only/retrieval/priced": {
+  "calls": 65,
+  "dev_questions": 65,
+  "est_usd": 0.004145,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 65,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0026899999999999997,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/answer/free": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/answer/none": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/answer/priced": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0030535,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/retrieval/free": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/retrieval/none": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0003635,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/hybrid/answer/free": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid/answer/none": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid/answer/priced": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0013449999999999998,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq-summarised/iterative/answer/free": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/iterative/answer/none": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/iterative/answer/priced": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": 0.004592499999999999,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/iterative/retrieval/free": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/iterative/retrieval/none": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/iterative/retrieval/priced": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/answer/free": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.00041450000000000005,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/answer/none": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/answer/priced": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0031044999999999996,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/retrieval/free": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00041450000000000005,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/retrieval/none": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00041450000000000005,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq-summarised/kw_individual+question_only/retrieval/priced": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00041450000000000005,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0026899999999999997,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/hybrid+keyword_rag/answer/free": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.00037150000000000003,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag/answer/none": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag/answer/priced": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0030614999999999996,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag/retrieval/free": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00037150000000000003,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag/retrieval/none": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00037150000000000003,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.00037150000000000003,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/hybrid/answer/free": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid/answer/none": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid/answer/priced": {
+  "calls": 5,
+  "dev_questions": 5,
+  "est_usd": 0.0013449999999999998,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/iterative/answer/free": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/iterative/answer/none": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/iterative/answer/priced": {
+  "calls": 20,
+  "dev_questions": 5,
+  "est_usd": 0.004592499999999999,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/mcq/iterative/retrieval/free": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/iterative/retrieval/none": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/iterative/retrieval/priced": {
+  "calls": 15,
+  "dev_questions": 5,
+  "est_usd": 0.0032475,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/mcq/kw_individual+question_only/answer/free": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/kw_individual+question_only/answer/none": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/kw_individual+question_only/answer/priced": {
+  "calls": 10,
+  "dev_questions": 5,
+  "est_usd": 0.0026899999999999997,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/mcq/kw_individual+question_only/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/kw_individual+question_only/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/mcq/kw_individual+question_only/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 5,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 5,
+  "roles": []
+ },
+ "new/science/hybrid+keyword_rag-similarity/answer/free": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag-similarity/answer/none": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag-similarity/answer/priced": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": 0.0059196000000000006,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag-similarity/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/hybrid+keyword_rag-similarity/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/hybrid+keyword_rag-similarity/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/hybrid+keyword_rag/answer/free": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": 0.00021810000000000002,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag/answer/none": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag/answer/priced": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": 0.0061377,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/hybrid+keyword_rag/retrieval/free": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": 0.00021810000000000002,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/hybrid+keyword_rag/retrieval/none": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": 0.00021810000000000002,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/hybrid+keyword_rag/retrieval/priced": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": 0.00021810000000000002,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/hybrid/answer/free": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid/answer/none": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid/answer/priced": {
+  "calls": 3,
+  "dev_questions": 3,
+  "est_usd": 0.0029598000000000003,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/hybrid/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/hybrid/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/hybrid/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/iterative/answer/free": {
+  "calls": 12,
+  "dev_questions": 3,
+  "est_usd": 0.0019485000000000001,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/iterative/answer/none": {
+  "calls": 12,
+  "dev_questions": 3,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/iterative/answer/priced": {
+  "calls": 12,
+  "dev_questions": 3,
+  "est_usd": 0.004908300000000001,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query",
+   "answer"
+  ]
+ },
+ "new/science/iterative/retrieval/free": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": 0.0019485000000000001,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/iterative/retrieval/none": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": 0.0019485000000000001,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/iterative/retrieval/priced": {
+  "calls": 9,
+  "dev_questions": 3,
+  "est_usd": 0.0019485000000000001,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "query"
+  ]
+ },
+ "new/science/kw_individual+question_only/answer/free": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/kw_individual+question_only/answer/none": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": null,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/kw_individual+question_only/answer/priced": {
+  "calls": 6,
+  "dev_questions": 3,
+  "est_usd": 0.0059196000000000006,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "new/science/kw_individual+question_only/retrieval/free": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/kw_individual+question_only/retrieval/none": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "new/science/kw_individual+question_only/retrieval/priced": {
+  "calls": 0,
+  "dev_questions": 3,
+  "est_usd": 0.0,
+  "evidence_held": 0,
+  "evidence_named": 0,
+  "questions": 3,
+  "roles": []
+ },
+ "resume/documents-judging/free": {
+  "calls": 8,
+  "est_usd": 0.0,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents-judging/none": {
+  "calls": 8,
+  "est_usd": null,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents-judging/priced": {
+  "calls": 8,
+  "est_usd": 0.0030884,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents-known-only/free": {
+  "calls": 4,
+  "est_usd": 0.0,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents-known-only/none": {
+  "calls": 4,
+  "est_usd": null,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents-known-only/priced": {
+  "calls": 4,
+  "est_usd": 0.0027141,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents/free": {
+  "calls": 8,
+  "est_usd": 0.0,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents/none": {
+  "calls": 8,
+  "est_usd": null,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/documents/priced": {
+  "calls": 8,
+  "est_usd": 0.0054281,
+  "questions": 4,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/mcq/free": {
+  "calls": 3,
+  "est_usd": 0.0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/mcq/none": {
+  "calls": 3,
+  "est_usd": null,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/mcq/priced": {
+  "calls": 3,
+  "est_usd": 0.000807,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/science/free": {
+  "calls": 3,
+  "est_usd": 0.0,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/science/none": {
+  "calls": 3,
+  "est_usd": null,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ },
+ "resume/science/priced": {
+  "calls": 3,
+  "est_usd": 0.0029598000000000003,
+  "questions": 3,
+  "roles": [
+   "answer"
+  ]
+ }
+}

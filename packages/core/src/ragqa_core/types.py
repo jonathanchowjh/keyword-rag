@@ -1,4 +1,5 @@
-"""Plain data shared by every module, and `slug`, the rule that turns a name into a valid one."""
+"""Plain data shared by every module, the errors core raises for a missing or taken name,
+and `slug`, the rule that turns a name into a valid one."""
 
 import re
 import unicodedata
@@ -10,6 +11,18 @@ QaType = Literal["documents", "science", "mcq", "multihop", "table"]
 EXAMPLE_TYPES: tuple[QaType, ...] = ("mcq", "science")
 FACETS = ("topic", "method", "common")
 CorpusType = Literal["worked", "reference"]
+
+
+class NotFound(Exception):
+    """What was asked for is not there; the message says what. The API answers 404."""
+
+
+class AlreadyExists(Exception):
+    """The name is taken; the message says which. The API answers 409."""
+
+
+class UnknownCollection(Exception):
+    pass
 
 
 def unknown_store(name: str) -> str:

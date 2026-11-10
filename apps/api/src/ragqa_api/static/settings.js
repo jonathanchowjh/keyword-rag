@@ -1,4 +1,4 @@
-import { $, api, askDelete, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, askDelete, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, say, shell, usd } from "/static/ui.js";
 
 shell("settings");
 $("head").innerHTML = head({
@@ -15,15 +15,13 @@ const notes = {}; // connection id -> what its last button said, kept across red
 const modelPath = (m) => `/ai/models/${encodeURIComponent(m.connection_id)}/${m.model_id.split("/").map(encodeURIComponent).join("/")}`;
 const connPath = (id) => `/ai/connections/${encodeURIComponent(id)}`;
 
-const say = (text) => ($("msg").textContent = text);
-
 // Runs one change, then redraws from the server; a refusal shows its reason.
 async function act(change) {
-  say("");
+  say($("msg"), "");
   try {
     await change();
   } catch (e) {
-    say(e.message);
+    say($("msg"), e.message);
   }
   await load();
 }
@@ -46,7 +44,7 @@ function connectionHtml(c) {
     <div class="top"><strong>${esc(c.label)}</strong><code>${esc(c.kind)}</code>${where}
       ${status}</div>
     ${keyBox}
-    <div class="actions" style="margin:0">
+    <div class="actions flush">
       ${manual ? "" : `<button type="button" class="secondary" data-act="test">Test</button>
       <button type="button" class="secondary" data-act="fetch">Fetch models</button>`}
       ${c.from_env.length ? "" : '<button type="button" class="secondary" data-act="remove">Delete connection…</button>'}
@@ -129,7 +127,12 @@ $("add").addEventListener("submit", (event) => {
   const body = { preset: $("add-preset").value, id: $("add-id").value.trim(), label: $("add-label").value.trim() || undefined,
     base_url: $("add-url").value.trim() || undefined, api_key: $("add-key").value || undefined };
   act(async () => {
-    await api("/ai/connections", { method: "POST", body });
+    $("add-go").disabled = true; // until the POST settles, so a second click adds nothing twice
+    try {
+      await api("/ai/connections", { method: "POST", body });
+    } finally {
+      $("add-go").disabled = false;
+    }
     $("add-id").value = "";
     $("add-key").value = "";
   });
@@ -143,17 +146,17 @@ const priceBox = (name, value) =>
 
 // The price choices, in USD per million tokens: $0, the list prices, none, or typed by hand.
 const HAND = "hand";
-const NONE = "none";
+const NO_PRICE = "none";
 const priceKey = (i, o) => `${i}/${o}`;
 function priceOptions() {
   const listed = (ai.prices || []).map((p) => ({ value: priceKey(p.price_in, p.price_out),
     label: `${p.label} rates: $${p.price_in} in, $${p.price_out} out` }));
   return [{ value: priceKey(0, 0), label: "$0 (free)" }, ...listed,
-    { value: NONE, label: "No price (can't be used)" }, { value: HAND, label: "Enter by hand…" }];
+    { value: NO_PRICE, label: "No price (can't be used)" }, { value: HAND, label: "Enter by hand…" }];
 }
 
 function priceChoice(m) {
-  if (m.price_in == null || m.price_out == null) return NONE;
+  if (m.price_in == null || m.price_out == null) return NO_PRICE;
   const key = priceKey(m.price_in, m.price_out);
   return priceOptions().some((o) => o.value === key) ? key : HAND;
 }
@@ -183,7 +186,7 @@ function drawModels() {
       const rows = ai.models.filter((m) => m.connection_id === c.id).map(modelHtml).join("");
       return `<div class="card" data-connection="${esc(c.id)}"><strong>${esc(c.label)}</strong>
         ${rows || '<p class="muted">No models. Fetch the list, or add one by id.</p>'}
-        <div class="row" style="margin-top:8px"><label>Add a model by id <input name="new-id"></label>
+        <div class="row add-model"><label>Add a model by id <input name="new-id"></label>
           <button type="button" class="secondary" data-add>Add model</button></div></div>`;
     })
     .join("");
@@ -197,13 +200,13 @@ async function saveRow(row) {
     return v === "" ? null : Number(v);
   };
   const choice = row.querySelector("[name=price]").value;
-  const [chosenIn, chosenOut] = choice === NONE ? [null, null] : choice.split("/").map(Number);
+  const [chosenIn, chosenOut] = choice === NO_PRICE ? [null, null] : choice.split("/").map(Number);
   const typed = choice === HAND;
   const body = { enabled: row.querySelector("[name=enabled]").checked,
     price_in: typed ? number("price_in") : chosenIn, price_out: typed ? number("price_out") : chosenOut };
-  say("");
+  say($("msg"), "");
   if (typed && (body.price_in === null || body.price_out === null)) {
-    say("Give both prices, or choose one from the list.");
+    say($("msg"), "Give both prices, or choose one from the list.");
     return;
   }
   try {
@@ -212,7 +215,7 @@ async function saveRow(row) {
     row.outerHTML = modelHtml(ai.models.find((m) => m.ref === row.dataset.model));
     drawRoles();
   } catch (e) {
-    say(e.message);
+    say($("msg"), e.message);
   }
 }
 
@@ -351,7 +354,7 @@ function searchHtml() {
       ${recommended(rec.rerank_model ?? "the service's reranker")}</label>
     <label>Rerank up to <input type="number" name="rerank_pool" ${range("rerank_pool")} value="${esc(f.rerank_pool)}">
       <span class="muted">passages per message</span>${recommended(rec.rerank_pool)}</label>
-    ${check("rewrite", "Rewrite follow-ups", `<span class="muted" data-rewrite-note${ai?.resolved.rewrite ? " hidden" : ""}>(needs a rewrite model)</span>`)}
+    ${check("rewrite", "Rewrite follow-ups", `<span class="muted" data-rewrite-note${ai?.resolved?.rewrite ? " hidden" : ""}>(needs a rewrite model)</span>`)}
     ${number("follow_up_turns", "Previous messages joined, without rewrite")}
     ${number("rrf_k", "RRF k", '<span class="muted">(rerank off, and inside hybrid)</span>')}
     <div class="row"><button type="submit" id="search-go">Save search defaults</button>
@@ -413,8 +416,13 @@ async function loadSearch() {
 
 async function load() {
   const first = ai === null;
-  [ai, cat] = await Promise.all([api("/ai"), catalog()]);
-  document.querySelector("[data-rewrite-note]")?.toggleAttribute("hidden", ai.resolved.rewrite);
+  const [aiRead, catRead] = await Promise.allSettled([api("/ai"), catalog()]);
+  if (aiRead.status === "fulfilled") ai = aiRead.value;
+  if (catRead.status === "fulfilled") cat = catRead.value;
+  const failed = [aiRead, catRead].find((r) => r.status === "rejected");
+  if (failed) say($("msg"), failed.reason.message, "err");
+  if (!ai) return; // nothing to draw the sections from
+  document.querySelector("[data-rewrite-note]")?.toggleAttribute("hidden", Boolean(ai?.resolved?.rewrite));
   drawConnections();
   drawModels();
   drawRoles();
@@ -422,5 +430,5 @@ async function load() {
   if (first) drawPresets();
 }
 
-load().catch((e) => say(e.message));
+load().catch((e) => say($("msg"), e.message, "err"));
 loadSearch().catch((e) => ($("search-msg").textContent = e.message));

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ragqa_core import db
 from ragqa_core.builder import make_builder
+from ragqa_core.indexer import ModelMismatch
 from ragqa_core.vocabulary import read_vocabulary
 
 
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         result = builder.apply_outputs(spec, terms, outputs)
-    except ValueError as e:
+    except (ValueError, ModelMismatch) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
     print(json.dumps(result))

@@ -1,5 +1,7 @@
 import json
+import os
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,7 @@ from ragqa_core.db import (
 from ragqa_core.evaluator import EvalSetMismatch, Evaluator, changes_since
 from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
+from ragqa_core.recipes import resolve_search
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Hit, Item, KeywordLists, Question, SearchSettings
@@ -2738,7 +2741,8 @@ def test_answered_runs_of_other_types_are_unchanged(tmp_path, qa_type):
     assert get_job(conn, job)["status"] == "done"
     assert [(p, len(prompts)) for p, prompts, _ in calls] == [("answer", 3)] * 2
     setup = get_job(conn, job)["setup"]
-    search = ev._search(ev.retriever.spec("t"), setup)  # the store's own: science asks programs
+    # the store's own: science asks programs
+    search = resolve_search(ev.retriever.spec("t"), setup.get("search"))
     by_id = {q.id: q for q in db.get_questions(conn, "t")}
     for (_, prompts, _), method in zip(calls, ("vector", "hybrid"), strict=True):
         expected = []
@@ -2896,3 +2900,167 @@ def test_answer_parts_match_the_run(env, tmp_path):
                 assert (system, user, max_tokens) == (*expected, tokens)
                 parts = answer_parts(spec, q, hits, search, retrieves=retrieves, evidence_size=size)
                 assert parts == (*expected, tokens, False)
+
+
+# -- The run estimate over a grid -------------------------------------------------------
+
+ESTIMATE_GRID = Path(__file__).parent / "data" / "estimate_grid.json"
+GRID_METHODS = {
+    "hybrid": (["hybrid"], None),
+    "hybrid+keyword_rag": (["hybrid", "keyword_rag"], {"query_tags": "model"}),
+    "hybrid+keyword_rag-similarity": (["hybrid", "keyword_rag"], {"query_tags": "similarity"}),
+    "iterative": (["iterative"], None),
+    "kw_individual+question_only": (["kw_individual", "question_only"], None),
+}
+GRID_MODELS = ("priced", "free", "none")
+FREE = "anthropic/free"
+# Past the batch crossover: 110 batched calls at half price cost more than 50 at full.
+OVER_100 = [
+    Question(f"r{i:03}", f"alpha beta gamma {i}", None, REF, ["p2", "p3"], {}) for i in range(110)
+]
+
+
+def answer_model(ev: Evaluator, which: str, priced: str) -> None:
+    """The answer job's model: `priced`, a $0 one, or none. The query job keeps `priced`."""
+    if which == "none":
+        ev.ai.set_role("query", priced)
+        ev.ai.set_role("answer", None)
+        ev.ai.set_role("default", None)
+        return
+    ev.ai.set_role("default", priced)
+    ev.ai.set_role("query", None)
+    ev.ai.set_role("answer", FREE if which == "free" else None)
+
+
+def stop_after(conn, job: str, method: str):
+    """A run check that cancels once `method`'s rows are all complete."""
+
+    def check():
+        rows = run_items(conn, job, method)
+        if rows and all(r["complete"] for r in rows):
+            raise Cancelled()
+
+    return check
+
+
+def stopped_runs(tmp_path) -> dict[str, tuple[Evaluator, str]]:
+    """One stopped answering run per type, a Documents run whose remaining work is only
+    known prompts, and a judged Documents run stopped while judging (its first method's
+    answers stored), by name."""
+    from aiconnect.ai import BudgetExceeded
+
+    runs = {}
+    for qa_type in ("mcq", "science"):
+        (tmp_path / f"{qa_type}-stopped").mkdir()
+        conn, ev = typed_env(tmp_path / f"{qa_type}-stopped", qa_type)
+        job = ev.queue("t", "full", ["hybrid", "vector"], True, None)
+        ev.run(job, check=stop_after(conn, job, "hybrid"))
+        assert get_job(conn, job)["status"] == "cancelled"
+        runs[qa_type] = (ev, job)
+    (tmp_path / "documents-stopped").mkdir()
+    conn, ev = documents_env(tmp_path / "documents-stopped", [J1, J2, J3, J4])
+    job = ev.queue("d", "full", ["vector", "hybrid"], True, None)
+
+    def over_budget(prompts, **kw):
+        raise BudgetExceeded("cap")
+
+    ev.ai.complete_many = over_budget
+    ev.run(job)
+    del ev.ai.complete_many
+    assert get_job(conn, job)["status"] == "stopped_budget"
+    runs["documents"] = (ev, job)
+    (tmp_path / "documents-known-only").mkdir()
+    conn, ev = documents_env(tmp_path / "documents-known-only", [J1, J2, J3, J4])
+    # question_only's prompts show no passages, so none of hybrid's is cached by them.
+    job = ev.queue("d", "full", ["question_only", "hybrid"], True, None)
+    complete_many, sent = ev.ai.complete_many, []
+
+    def second_over_budget(prompts, **kw):  # question_only's answers, then the cap at hybrid's
+        sent.append(1)
+        if len(sent) > 1:
+            raise BudgetExceeded("cap")
+        return complete_many(prompts, **kw)
+
+    ev.ai.complete_many = second_over_budget
+    ev.run(job)
+    del ev.ai.complete_many
+    assert get_job(conn, job)["status"] == "stopped_budget"
+    assert all(r["complete"] for r in run_items(conn, job, "question_only"))
+    hybrid = run_items(conn, job, "hybrid")
+    assert len(hybrid) == 4 and all("hit_ids" in r and "pred" not in r for r in hybrid)
+    runs["documents-known-only"] = (ev, job)
+    (tmp_path / "documents-judging").mkdir()
+    conn, ev = documents_env(tmp_path / "documents-judging", [J1, J2, J3, J4])
+    fake_replies(ev.ai, judging)
+    job = ev.queue("d", "full", ["vector", "hybrid"], True, None, judge=True)
+    complete_many = ev.ai.complete_many
+
+    def stop_at_judging(prompts, **kw):
+        if kw["purpose"] == "judge":
+            raise BudgetExceeded("cap")
+        return complete_many(prompts, **kw)
+
+    ev.ai.complete_many = stop_at_judging
+    ev.run(job)
+    del ev.ai.complete_many
+    assert get_job(conn, job)["status"] == "stopped_budget"
+    assert all("pred" in r for r in run_items(conn, job, "vector"))
+    runs["documents-judging"] = (ev, job)
+    return runs
+
+
+def test_estimate_parts_grid_is_unchanged(env, tmp_path):
+    """Every estimate over a grid of stores, methods, answering, judging and answer models,
+    and every resume estimate of a stopped run, as estimate_grid.json holds them.
+    RAGQA_WRITE_ESTIMATE_GRID=1 rewrites the file first; never set it in CI."""
+    conn, ev = env
+    priced = ev.ai.role_model("default")
+    assert priced is not None
+    with_vocabulary(ev, TOPICS)
+    ix = ev.retriever.indexer
+    for name, questions in (("s", QUESTIONS), ("b", QUESTIONS + _questions(0, 60))):
+        spec = ix.create(name, "mcq", True)  # summarises
+        ix.add(spec, ITEMS, "x")
+        ix.set_lists(spec, LISTS)
+        save_questions(conn, name, questions)
+    (tmp_path / "science").mkdir()
+    (tmp_path / "documents").mkdir()
+    (tmp_path / "documents-over-100").mkdir()
+    stores = [
+        ("mcq", ev, "c"),
+        ("mcq-summarised", ev, "s"),
+        ("mcq-over-50", ev, "b"),
+        ("science", typed_env(tmp_path / "science", "science")[1], "t"),
+        ("documents", documents_env(tmp_path / "documents", [J1, J2, J3, J4])[1], "d"),
+        ("documents-over-100", documents_env(tmp_path / "documents-over-100", OVER_100)[1], "d"),
+    ]
+    runs = stopped_runs(tmp_path)
+    evaluators = {id(e): e for _, e, _ in stores} | {id(e): e for e, _ in runs.values()}
+    for each in evaluators.values():
+        each.ai.add_model("anthropic", "free", price_in=0.0, price_out=0.0)
+    got = {}
+    for name, store_ev, store in stores:
+        combos = [("retrieval", False, False), ("answer", True, False)]
+        if name.startswith("documents"):
+            combos.append(("judged", True, True))
+        for which in GRID_MODELS:
+            answer_model(store_ev, which, priced)
+            for methods_name, (methods, search) in GRID_METHODS.items():
+                for combo, answer, judge in combos:
+                    got[f"new/{name}/{methods_name}/{combo}/{which}"] = store_ev.estimate(
+                        store, "full", methods, answer, None, search=search, judge=judge
+                    )
+    for name, (run_ev, job) in runs.items():
+        setup = get_job(run_ev.conn, job)["setup"]
+        assert setup["model"] == priced
+        for which in GRID_MODELS:
+            answer_model(run_ev, which, priced)
+            model = {"priced": priced, "free": FREE, "none": None}[which]
+            # A judged run's answer model judges too, as queue records it.
+            judges = {"answer_judge_model": model} if "answer_judge_model" in setup else {}
+            db.set_job_setup(run_ev.conn, job, {**setup, "model": model, **judges})
+            got[f"resume/{name}/{which}"] = run_ev.estimate_resume(job)
+    text = json.dumps(got, indent=1, sort_keys=True)
+    if os.environ.get("RAGQA_WRITE_ESTIMATE_GRID") == "1":
+        ESTIMATE_GRID.write_text(text + "\n")
+    assert json.loads(ESTIMATE_GRID.read_text()) == json.loads(text)

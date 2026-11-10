@@ -28,12 +28,15 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ragqa_core import jobs
 from ragqa_core.connection import Connection
-from ragqa_core.recipes import build_for, corpus_type_for, default_search
+from ragqa_core.recipes import build_for, build_of, corpus_type_for, default_search
 from ragqa_core.types import (
+    AlreadyExists,
     BuildSettings,
     CollectionSpec,
     KeywordLists,
+    NotFound,
     QaType,
     Question,
     SearchSettings,
@@ -41,6 +44,7 @@ from ragqa_core.types import (
 )
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # a collection's or an eval set's name
+GONE_QUESTION = "This question was deleted since you opened it"
 
 
 def refused_name(name: str, what: str) -> str:
@@ -68,6 +72,8 @@ create table if not exists disabled_sources (
     collection text not null, source text not null, primary key (collection, source)
 );
 create table if not exists questions (
+  -- questions.collection holds the eval set's name; a set links to its store by
+  -- collections.eval_set, eval_sets.store and a same-name fallback
   collection text not null, id text not null, json text not null,
   primary key (collection, id)
 );
@@ -157,7 +163,7 @@ NEW_COLLECTION_COLUMNS = (
     "eval_set",
     "chat_method",
     "chat_k",
-)  # old databases keep the two columns, unused
+)
 
 
 ROUTING_DROPPED = "schema.routing_dropped"  # app_settings key: this database is current
@@ -355,7 +361,7 @@ def _pin_old_runs(conn: Connection, name: str) -> None:
 
 
 def save_collection(conn: Connection, spec: CollectionSpec) -> None:
-    build = spec.build or build_for("paper_2024", spec.summarize)
+    build = build_of(spec)
     search = spec.search or default_search(spec.qa_type, build)
     conn.execute(
         "insert into collections"
@@ -569,7 +575,7 @@ def create_eval_set(conn: Connection, name: str, qa_type: QaType, store: str | N
         raise ValueError(refused_name(name, "an eval set name"))
     with conn.lock:
         if get_eval_set(conn, name):
-            raise ValueError(f"eval set '{name}' already exists")
+            raise AlreadyExists(f"eval set '{name}' already exists")
         conn.execute(
             "insert into eval_sets (name, qa_type, created_at, store) values (?, ?, ?, ?)",
             (name, qa_type, now(), store),
@@ -770,13 +776,13 @@ def add_question(conn: Connection, name: str, q: Question) -> tuple[str, str]:
 
 
 def upsert_question(conn: Connection, name: str, q: Question, base: Question) -> str:
-    """Replaces one stored question; refuses when it is gone (KeyError) or differs from `base`,
+    """Replaces one stored question; refuses when it is gone (NotFound) or differs from `base`,
     the question as the caller read it (ValueError)."""
 
     def write() -> None:
         stored = _stored_question(conn, name, q.id)
         if stored is None:
-            raise KeyError(q.id)
+            raise NotFound(GONE_QUESTION)
         if asdict(stored) != asdict(base):
             raise ValueError("This question was changed by someone else since you opened it")
         conn.execute(
@@ -790,7 +796,7 @@ def upsert_question(conn: Connection, name: str, q: Question, base: Question) ->
 def delete_question(conn: Connection, name: str, question_id: str) -> str:
     def write() -> None:
         if _stored_question(conn, name, question_id) is None:
-            raise KeyError(question_id)
+            raise NotFound(GONE_QUESTION)
         conn.execute("delete from questions where collection = ? and id = ?", (name, question_id))
 
     return _in_transaction(conn, name, write)
@@ -807,7 +813,7 @@ def get_questions(conn: Connection, name: str, version: str | None = None) -> li
         )
     )
     if row is None:
-        raise KeyError(version)
+        raise NotFound(f"That version of '{name}' doesn't exist")
     return [Question(**q) for q in json.loads(row["questions_json"])]
 
 
@@ -965,24 +971,14 @@ def newest_jobs(conn: Connection) -> list[dict]:
     return [_job(r) for r in rows]
 
 
-JOBS_RESUMABLE = (
-    "interrupted",
-    "cancelled",
-    "stopped_budget",
-    "stopped_no_key",
-    "stopped_replies",
-    "failed",
-)
-
-
 def requeue(conn: Connection, job_id: str) -> bool:
     """Queues a resumable job again; False when it was not resumable (already moved)."""
-    marks = ", ".join("?" * len(JOBS_RESUMABLE))
+    marks = ", ".join("?" * len(jobs.RESUMABLE))
     with conn.lock:  # no other statement between the update and changes()
         conn.execute(
             "update jobs set status = 'queued', cancel_requested = 0, error = null,"
             f" updated_at = ? where id = ? and status in ({marks})",
-            (now(), job_id, *JOBS_RESUMABLE),
+            (now(), job_id, *jobs.RESUMABLE),
         )
         return conn.changes() > 0
 

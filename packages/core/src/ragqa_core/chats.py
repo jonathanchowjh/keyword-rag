@@ -25,7 +25,7 @@ from typing import Any
 from aiconnect.ai import AI, NoConnection, UnknownModel, UnknownPrice
 from ragqa_core import catalog, db, search_defaults
 from ragqa_core.connection import Connection
-from ragqa_core.evaluator import no_ai
+from ragqa_core.jobs import no_ai
 from ragqa_core.prompts import (
     CHAT_PASSAGE_CHARS,
     CHAT_TOKENS,
@@ -41,11 +41,11 @@ from ragqa_core.retriever import (
     PER_METHOD_ERRORS,
     MethodUnavailable,
     Retriever,
-    UnknownCollection,
-    available_methods,
+    is_paid,
+    method_reasons,
 )
 from ragqa_core.search_defaults import RECOMMENDED, STORE_FIELDS, inherited
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings, unknown_store
+from ragqa_core.types import CollectionSpec, Hit, SearchSettings, UnknownCollection
 
 # What a store's step or an answer may raise and still leave a saved attempt: it becomes
 # the decision's or the attempt's `error`.
@@ -70,6 +70,14 @@ POOL_MODEL_TAGS = (
 
 class AlreadyAnswered(Exception):
     """An attempt that already has an answer; it is not answered twice."""
+
+
+NEEDS_AI = "needs AI"  # why_not's reason when no AI resolves for a method that calls it
+
+
+class NeedsAI(Exception):
+    """A method set on a chat that would call AI when none resolves: no model, not the
+    store, is what is missing."""
 
 
 class UnknownChat(KeyError):
@@ -377,7 +385,7 @@ class Chats:
             stores = dict(chat["settings"].get("stores") or {})
             chosen = stores.get(store) or {}
             method = chosen.get("method")
-            why = self._reasons(spec)[method] if method is not None else None
+            why = method_reasons(self.conn, spec)[method] if method is not None else None
             if why:  # saved on the store, it would fail every chat that inherits it
                 raise MethodUnavailable(f"{method} {why} on '{store}'")
             if any(chosen.get(f) is not None for f in STORE_FIELDS):
@@ -554,22 +562,20 @@ class Chats:
         round-robin order, with a note. keyword_rag whose tags would be the AI's is left out
         with a note, AI or none; so is a method whose search fails. `labelled` passages the
         pool missed come back under `labelled`; those the store no longer holds, `missing`."""
-        spec = db.get_collection(self.conn, store)
-        if spec is None:
-            raise UnknownCollection(unknown_store(store))
+        spec = self.retriever.spec(store)
         settings: dict[str, Any] = search_defaults.in_force(self.conn)
         rrf_k = int(settings["rrf_k"])
-        reranker = str(settings["rerank_model"] or self.retriever.models.rerank_model)
+        reranker = search_defaults.reranker_in_force(settings, self.retriever.models.rerank_model)
         notes: list[str] = []
         lists: dict[str, list[Hit]] = {}
-        reasons = self._reasons(spec)
+        reasons = method_reasons(self.conn, spec)
         search = chat_search(spec)  # searched as checked: a settings change mid-pool can't spend
         for method in POOL_METHODS:
             ready = reasons[method] is None
             if method == "keyword_rag" and ready and search.query_tags == "model":
                 notes.append(POOL_MODEL_TAGS)  # checked first: why_not would say "needs AI"
                 continue
-            if self.why_not(spec, method) is not None or self.retriever.is_paid(spec, method):
+            if self.why_not(spec, method) is not None or is_paid(spec, method):
                 continue
             try:
                 hits, _ = self._retrieve(spec, question, method, POOL_DEPTH, rrf_k, search)
@@ -611,8 +617,7 @@ class Chats:
     ) -> tuple[str, str]:
         """The labelling answer's prompt: chat's, over the store's held passages among
         `passage_ids`, each once in the order sent, with no history."""
-        if db.get_collection(self.conn, store) is None:
-            raise UnknownCollection(unknown_store(store))
+        self.retriever.spec(store)
         hits = self.retriever.store.get(store, list(dict.fromkeys(passage_ids)))
         if not hits:
             raise ValueError(f"mark at least one passage Right that is in {store} first")
@@ -797,8 +802,8 @@ class Chats:
 
     def _changed(self, chat: dict, settings: dict, stores: dict[str, dict]) -> dict:
         """The chat's settings with `settings` and `stores` saved over them, every value
-        checked first. A method the store can't run, or that needs AI when none resolves,
-        is MethodUnavailable."""
+        checked first. A method the store can't run is MethodUnavailable; one that needs AI
+        when none resolves is NeedsAI."""
         known(settings, CHAT_FIELDS, "chat settings")
         for field, value in settings.items():
             search_defaults.check(field, value)
@@ -812,7 +817,8 @@ class Chats:
             method = values.get("method")
             why = self.why_not(spec, method) if method is not None else None
             if why:
-                raise MethodUnavailable(f"{method} {why} on '{store}'")
+                refusal = NeedsAI if why == NEEDS_AI else MethodUnavailable
+                raise refusal(f"{method} {why} on '{store}'")
         chosen = dict(chat["settings"].get("stores") or {})
         for store, values in stores.items():
             chosen[store] = {**dict.fromkeys(STORE_FIELDS), **chosen.get(store, {}), **values}
@@ -822,11 +828,11 @@ class Chats:
         """Why the chat can't run `method` on the store, or None when it can: what
         available_methods says, else "needs AI" for a method that would call AI (a paid one,
         or keyword_rag picking its tags by AI) when no AI resolves."""
-        why = self._reasons(spec)[method]
-        paid = self.retriever.is_paid(spec, method)
+        why = method_reasons(self.conn, spec)[method]
+        paid = is_paid(spec, method)
         paid = paid or (method == "keyword_rag" and chat_search(spec).query_tags == "model")
         if why is None and paid and not self._resolves("query"):
-            why = "needs AI"
+            why = NEEDS_AI
         return why
 
     def _resolves(self, role: str) -> bool:
@@ -846,17 +852,15 @@ class Chats:
         }
         for field in ("follow_up_turns", "rrf_k", "rerank_pool"):
             out[field] = settings[field]
-        out["rerank_model"] = settings["rerank_model"] or self.retriever.models.rerank_model
+        out["rerank_model"] = search_defaults.reranker_in_force(
+            settings, self.retriever.models.rerank_model
+        )
         out["rewrite_available"] = self._resolves("rewrite")
         out["answer_available"] = self._resolves("answer")
         chosen = own.get("stores") or {}
         live = [s for s in chat["stores"] if db.get_collection(self.conn, s) is not None]
         out["stores"] = {s: self.store_in_force(s, chosen.get(s)) for s in live}
         return out
-
-    def _reasons(self, spec: CollectionSpec) -> dict[str, str | None]:
-        has_lists = db.get_keyword_lists(self.conn, spec.name) is not None
-        return available_methods(spec, has_lists, db.tag_build_unfinished(self.conn, spec.name))
 
     def _chat(self, chat_id: str) -> dict:
         chat = db.get_chat(self.conn, chat_id)

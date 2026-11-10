@@ -1,7 +1,7 @@
 """Plain-language names for methods, metrics and QA types (spec §7.1, §7.2, §8.4).
 Served by GET /catalog so the API and every page agree."""
 
-from ragqa_core.recipes import RECIPE_LABELS, recipes_for
+from ragqa_core.recipes import recipes_for
 from ragqa_core.search_defaults import CHAT_METHODS
 from ragqa_core.types import QaType
 
@@ -205,6 +205,13 @@ QA_TYPES: dict[QaType, dict] = {
 }
 
 
+RECIPE_LABELS: dict[str, str] = {
+    "worked_examples": "worked examples",
+    "reference": "reference",
+    "paper_2024": "paper 2024",
+    "documents": "documents",
+    "documents_tagged": "documents with keyword tags",
+}
 RECIPE_SAYS = {
     "worked_examples": "Whole items, tagged by AI on how they are solved, with abstracted examples",
     "reference": "About 100-word chunks, title prefix, tagged by similarity, with a classifier",
@@ -270,6 +277,7 @@ def catalog() -> dict:
         "recipes": RECIPES,
         "type_recipes": {t: list(recipes_for(t)) for t in QA_TYPES},
         "answer_pair": list(ANSWER_PAIR),
+        "controls": list(CONTROLS),
         "chat_methods": list(CHAT_METHODS),
         "setup_labels": SETUP_LABELS,
         "roles": ROLE_LABELS,

@@ -17,7 +17,7 @@ NAMED_CHOICE = re.compile(
 SUMMARY_TOKENS = 120
 CHAT_TOKENS = 1024
 CHAT_TURNS = 6  # the history a chat reply sees
-CHAT_PASSAGE_CHARS = 1500  # imports.CHUNK_CHARS: a text upload's chunk is never cut
+CHAT_PASSAGE_CHARS = 1500  # text_split.CHUNK_CHARS: a text upload's chunk is never cut
 REWRITE_TOKENS = 200
 # n, or a range n-m with a hyphen or en dash. ASCII digits only, as JavaScript's \d, and at
 # most 4 of them, so a long run can't make int() raise after the paid call.

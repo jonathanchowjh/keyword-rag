@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Changed (breaking): these request bodies refuse unknown fields with 422: POST /collections, /eval-sets, /eval-sets/{n}/imports, /collections/{n}/documents, /collections/{n}/imports, /collections/{n}/load, /collections/{n}/copy, /collections/{n}/keyword-lists/propose, /query, /chat, /eval, /jobs/{id}/resume, /ai/connections and /ai/connections/{id}/models, and /chats/{id}/messages/{n}/attempts/{a}/answer; PUT /eval-sets/{n}/questions, /eval-sets/{n}/questions/{id} (inside question and base), /collections/{n}/keyword-lists, /collections/{n}/vocabulary, /ai/models/{c}/{m}, /ai/roles/{role} and /ai/budget; PATCH /collections/{n}/sources/{s} and /ai/connections/{id}. A misspelt field no longer passes silently.
+- Changed (breaking): POST /collections/{n}/keyword-tags and resuming a tag build answer 503, not 409, when no keywords model can price it (same text).
+- Changed (breaking): POST /chat answers 503, not 409, when the method needs an AI model that isn't set up (same text).
+- Changed (breaking): POST /chats/{id}/messages/{n}/attempts answers 503, not 409, when a store's method it sets needs an AI model that isn't set up (same text).
+- Changed (breaking): POST /eval-sets/{n}/pool and /answer on an eval set that isn't Documents answer 409, not 422 (same text).
+- Changed: an unconfirmed POST /collections/{n}/load with a stale calls or est_usd returns the fresh estimate instead of 409 (and, with a needed model switched off, 503 instead of 409, since the model check runs first); a free one queues, as any free unconfirmed load does.
+- Added: file on each passage of the brief chat reply.
+- Changed: the sidebar asks for the month's spend and the worker's state once on page load, not up to three times; Settings draws what loaded when one of its reads fails; Copy is announced to screen readers; importing several files clears the last message and stops when the file choice changes.
+- Changed: a missing value always shows as –.
+- Changed: pages stop polling while their tab is hidden, and refresh as soon as it is shown again.
+- Changed: a Create button is disabled while it saves.
+- Added: controls in GET /catalog.
+- Changed (breaking): aiconnect's AI.split(ref) is now the module function aiconnect.ai.split_ref(ref); it never read the instance.
+- Changed: a job whose store was deleted fails with UnknownCollection("no store named 'x'") in its error, instead of ValueError("no store named 'x'").
+- Changed (breaking): an unexpected KeyError inside a route is now a 500 instead of a 404; not-found and already-exists replies keep their status and text.
+- Changed (breaking): on a run whose eval-set version is gone, GET /eval/{id} (a Documents run), POST /jobs/{id}/resume (a resumable run) and GET /collections/{n} (a Documents store scored by that run) answer 404 instead of 500, and /eval/{id}/items and /eval/{id}/questions say "That version of '<set>' doesn't exist" instead of "no job <id>".
+- Changed: a job whose upload or eval-set version is gone fails with NotFound("…") in its error instead of KeyError('…').
+- Changed: python -m ragqa_core.apply_outputs refuses a store built with another embedding model with "refused: …" and exit code 2, instead of a traceback.
 - Changed: Settings' Remove is now Delete connection…, and asks before it deletes a connection with its key and models.
 - Changed (breaking): POST /query with answer on a Documents store retrieves at least Settings' evidence size of passages (8 by default, not k's 5), as a run does; results[m].hits grows to match.
 - Added: optional calls and est_usd on POST /collections/{n}/copy, PUT /collections/{n}/vocabulary and POST /eval-sets/{n}/answer; a price that changed since it was shown is refused with 409.

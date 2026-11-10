@@ -1,5 +1,5 @@
 import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, nameField, paint, pct, pill, plural,
-  noScoreLine, refreshSpend, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
+  noScoreLine, poll, refreshSpend, say, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
 const BENCHMARKS = [
@@ -184,16 +184,19 @@ function showType() {
     .join("");
 }
 
+// Create stays off while its POST is out, so a second click makes nothing twice.
 async function create() {
   const name = $("f-name").value.trim();
+  $("f-create").disabled = true;
   try {
     await api("/collections", {
       method: "POST",
       body: { name, qa_type: $("f-type").value, summarize: $("f-sum").checked, recipe: $("f-recipe").value },
     });
-    location.href = "/c/" + encodeURIComponent(name);
+    location.href = "/c/" + encodeURIComponent(name); // leaves the page: Create stays off
   } catch (e) {
-    $("f-msg").textContent = e.message;
+    $("f-create").disabled = false;
+    say($("f-msg"), e.message);
   }
 }
 
@@ -323,7 +326,11 @@ function confirmLoads(paying) {
   });
 }
 
+// Back from the page Create opened: the browser may restore this one with Create still off.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted && $("f-create")) $("f-create").disabled = false;
+});
 $("new").addEventListener("click", showForm);
 $("setup").addEventListener("click", setup);
 refresh();
-setInterval(refresh, REFRESH_MS);
+poll(refresh, REFRESH_MS);

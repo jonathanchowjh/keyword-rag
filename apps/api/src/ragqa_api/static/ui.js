@@ -11,6 +11,48 @@ export const RESUMABLE = new Set(["interrupted", "cancelled", "stopped_budget", 
 
 export const $ = (id) => document.getElementById(id);
 
+// Says `text` in a message element, styled `cls` when given ("err", "ok", …).
+export function say(el, text, cls) {
+  el.textContent = text;
+  if (cls !== undefined) el.className = cls;
+}
+
+// Runs `fn` again and again, waiting `ms` (a number, or a function giving one) before each
+// run. A hidden tab sends nothing: the wait then lasts until the tab is shown, and `fn` runs
+// at once. Returns stop().
+export function poll(fn, ms) {
+  let stopped = false;
+  let timer = null;
+  let resting = false; // waiting for the tab to be shown
+  const wait = () => {
+    if (!stopped) timer = setTimeout(run, typeof ms === "function" ? ms() : ms);
+  };
+  const run = async () => {
+    if (stopped) return;
+    if (document.hidden) {
+      resting = true;
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      wait();
+    }
+  };
+  const shown = () => {
+    if (document.hidden || !resting) return;
+    resting = false;
+    run();
+  };
+  document.addEventListener("visibilitychange", shown);
+  wait();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+    document.removeEventListener("visibilitychange", shown);
+  };
+}
+
 const painted = {}; // element id -> html last drawn, so a refresh never rebuilds what has not changed
 
 // Draws html into the element with this id unless it is already there; true when it drew.
@@ -97,7 +139,7 @@ export function slug(name) {
 // The Name field of a create form (#f-name), with what is allowed and, while the entry is
 // refused, a button that fills in the suggestion. Call watchName() once the html is in the page.
 export function nameField(value = "") {
-  return `<label>Name<input id="f-name" autocomplete="off" pattern="[A-Za-z0-9_-]{1,64}" value="${esc(value)}"></label>
+  return `<label>Name<input id="f-name" autocomplete="off" pattern="[A-Za-z0-9_\\-]{1,64}" value="${esc(value)}"></label>
     <p class="muted">Letters, digits, - or _; no spaces <button type="button" id="f-use" class="secondary" hidden></button></p>`;
 }
 
@@ -269,14 +311,6 @@ export function verdictRest(answer, qaType, labels = known) {
   const ref = methodLabel(answer.reference, labels);
   const metric = metricLabel(answer.metric, qaType, labels).toLowerCase();
   return `${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
-}
-
-// The verdict as plain text: "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid".
-export function verdictText(answer, qaType, labels = known) {
-  if (!answer) return "No answer yet";
-  const word = WORDS[answer.verdict] ?? WORDS.cant_tell;
-  const notes = verdictNotes(answer).map((n) => ` · ${n}`).join("");
-  return `${word}: ${verdictRest(answer, qaType, labels)}${notes}`;
 }
 
 // A score and its likely range: "72% (64–80)", whole and unsigned; "–" when missing.
@@ -558,28 +592,20 @@ export function shell(active) {
     draw();
     document.getElementById("theme").focus(); // the redraw replaced the button: keep the keyboard on it
   });
+  // A redraw fetches nothing: the spend line and the worker dot it replaces are carried over.
   const draw = () => {
+    const kept = ["spend", "worker-dot", "worker-problem"].map((id) => document.getElementById(id));
     side.innerHTML = sideHtml(active, names, sets);
-    refreshSpend();
-    refreshDot();
+    for (const old of kept) if (old) document.getElementById(old.id)?.replaceWith(old);
   };
   draw();
-  api("/collections")
-    .then((list) => {
-      names = list.map((c) => c.name);
-      draw();
-    })
-    .catch(() => {});
-  api("/eval-sets")
-    .then((list) => {
-      sets = list.map((s) => s.name);
-      draw();
-    })
-    .catch(() => {});
-  setInterval(() => {
-    refreshSpend();
-    refreshDot();
-  }, POLL_MS);
+  refreshSpend();
+  refreshDot();
+  Promise.allSettled([
+    api("/collections").then((list) => (names = list.map((c) => c.name))),
+    api("/eval-sets").then((list) => (sets = list.map((s) => s.name))),
+  ]).then(draw);
+  poll(() => Promise.all([refreshSpend(), refreshDot()]), POLL_MS);
 }
 
 // -- importing a file ----------------------------------------------------------------------------
@@ -620,7 +646,7 @@ class ImportBox {
       this.batch = null;
       this.ticket++; // and no answer still on its way may paint it back
       this.own("preview").innerHTML = "";
-      this.own("msg").textContent = "";
+      say(this.own("msg"), "");
       this.own("source").value = ""; // the upload names it, the route's rule
     });
     this.own("go").addEventListener("click", () => this.upload());
@@ -638,9 +664,9 @@ class ImportBox {
     const files = [...this.own("file").files];
     const file = files[0];
     const msg = this.own("msg");
-    msg.textContent = "";
+    say(msg, "");
     if (!file) {
-      msg.textContent = "Pick a file first.";
+      say(msg, "Pick a file first.");
       return;
     }
     if (files.length > 1) return this.previewMany(files);
@@ -657,7 +683,7 @@ class ImportBox {
     } catch (e) {
       this.uploadId = null;
       this.own("preview").innerHTML = "";
-      msg.textContent = e.message;
+      say(msg, e.message);
     }
   }
 
@@ -678,13 +704,13 @@ class ImportBox {
   async previewAgain() {
     const msg = this.own("msg");
     const ticket = ++this.ticket;
-    msg.textContent = "";
+    say(msg, "");
     this.own("import")?.setAttribute("disabled", ""); // until the fresh estimate is in
     try {
       const got = await api(this.importPath, { method: "POST", body: this.body(false) });
       if (ticket === this.ticket) this.show(got.preview, got.estimate);
     } catch (e) {
-      if (ticket === this.ticket) msg.textContent = e.message;
+      if (ticket === this.ticket) say(msg, e.message);
     }
   }
 
@@ -744,7 +770,7 @@ class ImportBox {
 
   async start(estimate) {
     const msg = this.own("msg");
-    msg.textContent = "";
+    say(msg, "");
     if (this.kind === "items") return this.queueItems(estimate);
     const queue = async () => {
       try {
@@ -756,7 +782,7 @@ class ImportBox {
         refreshSpend();
         await this.done?.();
       } catch (e) {
-        msg.textContent = e.message;
+        say(msg, e.message);
       }
     };
     // An unpriced (null) estimate is not free: it is shown and confirmed, like a priced one.
@@ -789,7 +815,7 @@ class ImportBox {
         if (same && e.status !== 409) button.disabled = false;
         else this.previewAgain();
       }
-      this.own("msg").textContent = e.message;
+      say(this.own("msg"), e.message);
       return;
     }
     const line = (html) => {
@@ -862,6 +888,7 @@ class ImportBox {
   // in are priced again, for the next click.
   async importMany() {
     this.own("import").disabled = true;
+    say(this.own("msg"), ""); // the last round's message is not this one's
     const ticket = this.ticket;
     const todo = this.batch.filter((f) => f.up?.estimate);
     this.batch = null; // the click takes the files over
@@ -877,14 +904,21 @@ class ImportBox {
       await this.done?.();
     };
     for (const [i, f] of todo.entries()) {
+      if (ticket !== this.ticket) { // a new file choice took the box over: send no more
+        if (sofar()) await settled(); // the files before this one are in
+        return;
+      }
       const { calls, est_usd } = f.up.estimate;
       const shown = i === 0 ? { calls, est_usd } : { est_usd };
       let got;
       try {
         got = await api(this.importPath, { method: "POST", body: { ...manyBody(f.up, true), ...shown } });
       } catch (e) {
-        if (ticket !== this.ticket) return;
-        this.own("msg").textContent = e.status === 409 ? `The price of ${f.name} changed: check it again` : e.message;
+        if (ticket !== this.ticket) {
+          if (sofar()) await settled();
+          return;
+        }
+        say(this.own("msg"), e.status === 409 ? `The price of ${f.name} changed: check it again` : e.message);
         await this.repriceMany(todo.slice(i), ticket, sofar());
         if (sofar()) await settled(); // the files before this one are in
         return;
@@ -947,7 +981,7 @@ class ImportBox {
 }
 
 // One of several files' import, under the upload's own mapping and source name.
-function manyBody(up, confirm) {
+export function manyBody(up, confirm) {
   return { upload_id: up.upload_id, kind: "items", mapping: up.preview.mapping, source_name: up.source_name, confirm };
 }
 

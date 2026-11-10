@@ -140,6 +140,11 @@ def provider_errors(connection: dict) -> Iterator[None]:
         raise ProviderError(f"{connection['id']}: {message}") from None
 
 
+def split_ref(ref: str) -> tuple[str, str]:
+    connection_id, _, model_id = ref.partition("/")
+    return connection_id, model_id
+
+
 class AI:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +225,7 @@ class AI:
             raise Conflict(f"connection {id} is set by the environment")
         with self.lock:
             for role, ref in self.roles().items():
-                if ref and self.split(ref)[0] == id:
+                if ref and split_ref(ref)[0] == id:
                     raise Conflict(f"connection {id} is used by {role}")
             if self.batch_pending(id):
                 raise Conflict(f"connection {id} has a batch still pending")
@@ -384,13 +389,9 @@ class AI:
             for r in self.sql("select * from ai_models order by rowid")
         ]
 
-    def split(self, ref: str) -> tuple[str, str]:
-        connection_id, _, model_id = ref.partition("/")
-        return connection_id, model_id
-
     def resolve(self, model: str) -> tuple[str, str]:
         """(connection id, model id) for a ref, or for a bare id that one enabled model has."""
-        connection_id, model_id = self.split(model)
+        connection_id, model_id = split_ref(model)
         if self.sql(
             "select 1 from ai_models where connection_id = ? and model_id = ?",
             (connection_id, model_id),
@@ -747,10 +748,10 @@ class AI:
         if empty:
             raise ValueError(f"{len(empty)} replies are empty: {empty[:3]}")
         for model in {waiting[k]["model"] for k in replies}:
-            self.need_rates(*self.split(model))
+            self.need_rates(*split_ref(model))
         for key, text in replies.items():
             row = waiting[key]
-            connection_id, model_id = self.split(row["model"])
+            connection_id, model_id = split_ref(row["model"])
             self._record(
                 key,
                 connection_id,

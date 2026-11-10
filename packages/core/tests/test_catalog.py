@@ -125,6 +125,7 @@ def test_qa_types_and_catalog_shape():
         "recipes",
         "type_recipes",
         "answer_pair",
+        "controls",
         "chat_methods",
         "setup_labels",
         "roles",

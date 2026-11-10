@@ -1,4 +1,4 @@
-import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, passageHtml, refreshSpend, shell, usd } from "/static/ui.js";
+import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, passageHtml, refreshSpend, say, shell, usd } from "/static/ui.js";
 
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
@@ -15,7 +15,7 @@ async function loadCollections() {
   const list = await api("/collections");
   $("collection").innerHTML = list.map((c) => `<option>${esc(c.name)}</option>`).join("");
   if (list.length) await loadMethods();
-  else $("status").textContent = "No stores yet. Create one from the Stores page.";
+  else say($("status"), "No stores yet. Create one from the Stores page.");
 }
 
 let asking = 0; // bumped by each pick, so only the newest one draws the method list
@@ -88,11 +88,11 @@ $("form").addEventListener("submit", async (event) => {
     model: $("model").value || null,
   };
   $("run").disabled = true;
-  $("status").textContent = "running…";
+  say($("status"), "running…");
   try {
     const r = await api("/query", { method: "POST", body });
     $("results").innerHTML = Object.entries(r.results).map(([m, v]) => column(m, v)).join("");
-    $("status").textContent = "";
+    say($("status"), "");
     refreshSpend();
   } catch (e) {
     $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
@@ -112,4 +112,4 @@ catalog()
   .catch(() => {})
   .then(loadModels)
   .then(loadCollections)
-  .catch((e) => ($("status").textContent = e.message));
+  .catch((e) => say($("status"), e.message));

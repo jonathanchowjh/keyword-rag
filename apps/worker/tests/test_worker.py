@@ -170,6 +170,25 @@ def test_unknown_kind_fails(env):
     assert job["status"] == "failed" and job["error"] == "unknown job kind 'mystery'"
 
 
+def test_job_on_a_deleted_store_names_it(env):
+    w, conn = env
+    w.indexer.create("x", "mcq", False)
+    setups = {
+        "reembed": {"model": "fake/small", "from": "fake/dense"},
+        "load": {"dataset": "x"},
+        "import": {"kind": "items"},
+        "tag_build": {},
+    }
+    jobs = [db.create_job(conn, kind, "x", setup) for kind, setup in setups.items()]
+    conn.execute("delete from collections where name = 'x'")  # its queued jobs are kept
+    while w.run_one() is not None:
+        pass
+    named = "UnknownCollection(\"no store named 'x'\")"
+    for j in jobs:
+        job = get_job(conn, j)
+        assert job["status"] == "failed" and job["error"] == named
+
+
 def test_load_job_runs_loader_and_records_result(env):
     w, conn = env
     j = db.create_job(conn, "load", "c", {"dataset": "x"})

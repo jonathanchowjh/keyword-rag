@@ -7,10 +7,9 @@ from datetime import UTC, datetime
 import pytest
 
 from aiconnect import fakes
-from ragqa_core import db
+from ragqa_core import db, jobs
 from ragqa_core.builder import Builder
 from ragqa_core.db import (
-    JOBS_RESUMABLE,
     claim_next_job_id,
     complete_question_ids,
     connect,
@@ -48,7 +47,14 @@ from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, KeywordLists, Question, SearchSettings
+from ragqa_core.types import (
+    AlreadyExists,
+    CollectionSpec,
+    KeywordLists,
+    NotFound,
+    Question,
+    SearchSettings,
+)
 
 SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
 
@@ -495,7 +501,7 @@ def test_requeue_moves_only_a_resumable_job(conn):
     assert requeue(conn, j) is False  # already queued
     claim_next_job_id(conn)
     assert requeue(conn, j) is False and get_job(conn, j)["status"] == "running"
-    for status in JOBS_RESUMABLE:
+    for status in jobs.RESUMABLE:
         update_job(conn, j, status=status)
         assert requeue(conn, j) is True and get_job(conn, j)["status"] == "queued"
     update_job(conn, j, status="done")
@@ -517,7 +523,7 @@ def test_set_job_setup_and_list_jobs(conn):
 
 
 def test_jobs_resumable_statuses():
-    assert JOBS_RESUMABLE == (
+    assert jobs.RESUMABLE == (
         "interrupted",
         "cancelled",
         "stopped_budget",
@@ -794,7 +800,7 @@ def test_saving_questions_snapshots_a_version_only_when_they_change(conn):
     assert v2 != v1
     assert [q.text for q in get_questions(conn, "e", v1)] == ["one", "two"]
     assert [v["version"] for v in db.eval_set_versions(conn, "e")] == [v2, v1]
-    with pytest.raises(KeyError):
+    with pytest.raises(NotFound):
         get_questions(conn, "e", "nope")
 
 
@@ -821,7 +827,7 @@ def test_create_eval_set_refuses_a_bad_or_taken_name(conn):
     with pytest.raises(ValueError, match="can't be an eval set name.*for example 'bad-name'"):
         db.create_eval_set(conn, "bad name", "mcq")
     db.create_eval_set(conn, "e", "mcq")
-    with pytest.raises(ValueError, match="eval set 'e' already exists"):
+    with pytest.raises(AlreadyExists, match="eval set 'e' already exists"):
         db.create_eval_set(conn, "e", "mcq")
 
 
@@ -1222,7 +1228,7 @@ def test_upsert_question_refuses_a_stale_base(conn):
     db.upsert_question(conn, "e", q2a, q2)
     assert [q.text for q in get_questions(conn, "e")] == ["one a", "two a"]
     db.delete_question(conn, "e", q2.id)
-    with pytest.raises(KeyError):
+    with pytest.raises(NotFound):
         db.upsert_question(conn, "e", q2a, q2a)
 
 
@@ -1250,5 +1256,5 @@ def test_upsert_and_delete_make_a_version_each(conn):
     assert get_questions(conn, "e")[0].judged_ids == ["j"]
     v = db.delete_question(conn, "e", "q0")
     assert v not in seen and get_questions(conn, "e") == []
-    with pytest.raises(KeyError):
+    with pytest.raises(NotFound):
         db.delete_question(conn, "e", "q0")

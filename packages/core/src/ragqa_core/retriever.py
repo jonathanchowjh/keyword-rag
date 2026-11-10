@@ -12,7 +12,7 @@ import numpy as np
 
 from aiconnect.ai import AI, AwaitingReplies, BudgetExceeded, NoConnection, ProviderError
 from ragqa_core import db
-from ragqa_core.builder import TAG_TOKENS, Builder, build_of, picked_terms
+from ragqa_core.builder import TAG_TOKENS, Builder, picked_terms
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, matched
@@ -25,8 +25,16 @@ from ragqa_core.prompts import (
     query_tag_prompt,
     summary_prompt,
 )
+from ragqa_core.recipes import build_of
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings, Skip, unknown_store
+from ragqa_core.types import (
+    CollectionSpec,
+    Hit,
+    SearchSettings,
+    Skip,
+    UnknownCollection,
+    unknown_store,
+)
 
 METHOD_NAMES = (
     "question_only",
@@ -46,16 +54,14 @@ METHOD_NAMES = (
 FIXED_SEED = "fixed_example"
 KEYWORD_METHODS = ("kw_all", "kw_individual", "kw_rrf", "kw_hybrid")
 POOL = 50
+DEFAULT_K = 5  # the hits a retrieval returns when none is asked for
+DEFAULT_RRF_K = 60  # the RRF constant a fusion uses when none is asked for
 NEIGHBOURS = 20  # the units whose tags vote for a question's (the classifier, D6)
 MAX_HOPS = 3
 HOP_TOKENS = 200
 
 
 class MethodUnavailable(Exception):
-    pass
-
-
-class UnknownCollection(Exception):
     pass
 
 
@@ -91,6 +97,20 @@ def available_methods(
         else:
             out[m] = None
     return out
+
+
+def method_reasons(conn: Connection, spec: CollectionSpec) -> dict[str, str | None]:
+    """Why each method can't run on the store, or None: available_methods over what the
+    store holds."""
+    return available_methods(
+        spec,
+        db.get_keyword_lists(conn, spec.name) is not None,
+        db.tag_build_unfinished(conn, spec.name),
+    )
+
+
+def is_paid(spec: CollectionSpec, method: str) -> bool:
+    return method == "iterative" or (method in KEYWORD_METHODS and spec.summarize)
 
 
 def rrf(rankings: list[list[Hit]], k: int, weights: list[float] | None = None) -> list[Hit]:
@@ -164,8 +184,8 @@ class Retriever:
         collection: str,
         question: str,
         method: str,
-        k: int = 5,
-        rrf_k: int = 60,
+        k: int = DEFAULT_K,
+        rrf_k: int = DEFAULT_RRF_K,
         search: SearchSettings | None = None,
         tags: list[str] | None = None,
         exclude: Collection[str] = (),
@@ -190,9 +210,6 @@ class Retriever:
         if method == "hybrid_rerank":
             return self._hybrid_rerank(spec, question, k, rrf_k, skip, pool, rerank_model)
         return self._methods[method](spec, question, k, rrf_k, skip)
-
-    def is_paid(self, spec: CollectionSpec, method: str) -> bool:
-        return method == "iterative" or (method in KEYWORD_METHODS and spec.summarize)
 
     def prepare(self, spec: CollectionSpec, questions: list[str]) -> None:
         if spec.summarize and questions:

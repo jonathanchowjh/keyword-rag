@@ -4,7 +4,13 @@ from dataclasses import replace
 import pytest
 
 from ragqa_core import db
-from ragqa_core.builder import GUESSED_TERMS, INDUCE_BATCH, Builder
+from ragqa_core.builder import (
+    ABSTRACT_TOKENS,
+    GUESSED_TERMS,
+    INDUCE_BATCH,
+    INDUCE_TOKENS,
+    Builder,
+)
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer, ModelMismatch
@@ -87,8 +93,12 @@ def test_induce_skips_unparseable_batches(env):
 
 def test_estimate_induce_prices_every_batch_without_spending(env):
     builder, spec, prompts, _ = env
-    one = builder.estimate_induce_usd(spec, worked(INDUCE_BATCH))
-    two = builder.estimate_induce_usd(spec, worked(INDUCE_BATCH + 1))
+    one = builder.ai.estimate_many(
+        builder._induce_prompts(spec, worked(INDUCE_BATCH)), INDUCE_TOKENS, role="keywords"
+    )
+    two = builder.ai.estimate_many(
+        builder._induce_prompts(spec, worked(INDUCE_BATCH + 1)), INDUCE_TOKENS, role="keywords"
+    )
     assert 0 < one < two and prompts == [] and purposes(builder.conn) == []
 
 
@@ -181,9 +191,9 @@ def test_ai_tagging_falls_back_to_similarity(env):
 
 def test_estimate_tag_prices_only_ai_tagging(env):
     builder, spec, prompts, _ = env
-    assert builder.estimate_tag_usd(spec, TERMS, worked(3)) > 0
+    assert builder.plan_tag(spec, TERMS, worked(3))[0] > 0
     similar = with_build(builder, spec, tagging="similarity")
-    assert builder.estimate_tag_usd(similar, TERMS, worked(3)) == 0
+    assert builder.plan_tag(similar, TERMS, worked(3))[0] == 0
     assert prompts == [] and purposes(builder.conn) == []
 
 
@@ -411,31 +421,44 @@ def test_paper_2024_build_does_nothing(env):
     paper = builder.indexer.create("p", "science", False)
     builder.indexer.add(paper, worked(2), "x")
     assert builder.build(paper, worked(2), lambda p: None) == {}
-    assert builder.estimate_build_usd(paper, worked(2)) == 0
+    assert builder.plan_build(paper, worked(2))[0] == 0
     assert prompts == [] and purposes(builder.conn) == []
 
 
 def test_estimate_build_prices_induction_only_without_a_vocabulary(env):
     builder, spec, prompts, _ = env
     items = worked(3)
-    first = builder.estimate_build_usd(spec, items)
+    first = builder.plan_build(spec, items)[0]
     assert first == pytest.approx(
-        builder.estimate_induce_usd(spec, items)
-        + builder.estimate_tag_usd(spec, GUESSED_TERMS, items)
-        + builder.estimate_abstract_usd(spec, items)
+        builder.ai.estimate_many(
+            builder._induce_prompts(spec, items), INDUCE_TOKENS, role="keywords"
+        )
+        + builder.plan_tag(spec, GUESSED_TERMS, items)[0]
+        + builder.ai.estimate_many(
+            builder._abstract_prompts(spec, items), ABSTRACT_TOKENS, role="keywords"
+        )
     )
     switch_to(builder, spec, ["kinematics"])
-    later = builder.estimate_build_usd(spec, items)
+    later = builder.plan_build(spec, items)[0]
     assert later == pytest.approx(
-        builder.estimate_tag_usd(spec, ["kinematics"], items)
-        + builder.estimate_abstract_usd(spec, items)
+        builder.plan_tag(spec, ["kinematics"], items)[0]
+        + builder.ai.estimate_many(
+            builder._abstract_prompts(spec, items), ABSTRACT_TOKENS, role="keywords"
+        )
     )
     assert 0 < later < first
     assert builder.build_calls(spec, items) == 3 + 3  # tags and abstracts; no induction
-    assert builder.estimate_abstract_usd(spec, worked(3, explained=False)) == 0
+    assert (
+        builder.ai.estimate_many(
+            builder._abstract_prompts(spec, worked(3, explained=False)),
+            ABSTRACT_TOKENS,
+            role="keywords",
+        )
+        == 0
+    )
     assert prompts == [] and purposes(builder.conn) == []
     builder.ai.set_role("default", None)  # no model for keywords: nothing can price it
-    assert builder.estimate_build_usd(spec, items) is None
+    assert builder.plan_build(spec, items)[0] is None
 
 
 def test_guessed_terms_bound_any_induced_vocabulary():
@@ -525,6 +548,27 @@ def test_apply_outputs_command_reads_the_vocabulary_and_outputs_files(env, tmp_p
     monkeypatch.setattr(apply_outputs, "make_builder", lambda: builder)
     assert apply_outputs.main(["w", str(vocabulary), str(outputs)]) == 0
     assert db.get_collection(builder.conn, "w").vocabulary_version is not None
+
+
+def test_apply_outputs_refuses_a_model_mismatch(env, tmp_path, monkeypatch, capsys):
+    from ragqa_core import apply_outputs
+
+    builder, spec, _, _ = env
+    builder.indexer.add(spec, worked(3), "x")
+    vocabulary = tmp_path / "vocabulary.json"
+    vocabulary.write_text(
+        json.dumps({"terms": [{"term": "unitary method", "definition": "scale one unit"}]})
+    )
+    outputs = tmp_path / "outputs.jsonl"
+    outputs.write_text("".join(json.dumps({"id": k, **v}) + "\n" for k, v in authored(3).items()))
+    monkeypatch.setattr(apply_outputs, "make_builder", lambda: builder)
+
+    def mismatch(*a, **k):
+        raise ModelMismatch("built with another embedding model")
+
+    builder.apply_outputs = mismatch
+    assert apply_outputs.main(["w", str(vocabulary), str(outputs)]) == 2
+    assert "refused: built with another embedding model" in capsys.readouterr().err
 
 
 def test_plan_tag_build_prices_the_tagged_build_of_the_stored_passages(tmp_path):

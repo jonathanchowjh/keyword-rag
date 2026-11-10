@@ -11,14 +11,17 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 from starlette.routing import Match, Mount, Route
 
-from ragqa_api.app import PRICE_CHANGED, collection_state, create_app
+from ragqa_api.app import create_app
+from ragqa_api.guards import PRICE_CHANGED
+from ragqa_api.routes.stores import collection_state
 from ragqa_core import db, imports, search_defaults
 from ragqa_core.chats import relevance
-from ragqa_core.evaluator import no_ai
 from ragqa_core.fakes import fake_ai, fake_embeddings, fake_replies
 from ragqa_core.indexer import ModelMismatch
+from ragqa_core.jobs import no_ai
 from ragqa_core.loader import QUESTION_IMPORT_GONE
 from ragqa_core.prompts import CHAT_TOKENS
 from ragqa_core.retriever import METHOD_NAMES
@@ -416,6 +419,24 @@ def test_eval_flow(client):
     )
 
 
+def test_an_incidental_key_error_is_a_500(tmp_path):
+    with make_client(tmp_path) as c:
+        add_collection(c)
+        job = c.post("/eval", json={**EVAL, "confirm": True}).json()["job_id"]
+        wait(c, job)
+        c.app.state.evaluator.items = lambda *a: {}["x"]  # a bug, not a not-found
+        raw = TestClient(c.app, raise_server_exceptions=False)
+        assert raw.get(f"/eval/{job}/items", params={"method": "hybrid"}).status_code == 500
+
+
+def test_a_run_whose_eval_set_version_is_gone_is_a_404(client):
+    add_collection(client)
+    setup = {"collection": "c", "eval_set": "c", "eval_set_version": "gone", "methods": ["hybrid"]}
+    job = db.create_job(client.app.state.conn, "eval", "c", setup)
+    r = client.get(f"/eval/{job}/questions")
+    assert r.status_code == 404 and r.json()["detail"] == "That version of 'c' doesn't exist"
+
+
 def test_errors_say_store(client):
     assert client.get("/collections/nope").json()["detail"] == "no store named 'nope'"
     add_collection(client)
@@ -648,7 +669,12 @@ def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
     with make_client(tmp_path) as client:
         client.post("/collections", json={"name": "s", "qa_type": "multihop", "summarize": True})
         spec = client.app.state.retriever.spec("s")
-        summaries = client.app.state.indexer.estimate_add_usd(spec, items, "hand")
+        indexer = client.app.state.indexer
+        summaries = (
+            indexer.plan_summaries(indexer.changed(spec, items, "hand")[0])[0]
+            if spec.summarize
+            else 0.0
+        )
         r = client.post("/collections/s/load", json={"dataset": "musique"})
         estimate = r.json()["estimate"]
         assert r.status_code == 200 and estimate["est_usd"] > summaries
@@ -717,6 +743,16 @@ def test_vocabulary_export_import_queues_retag(client):
     assert again.status_code == 202 and again.json()["version"] == setup["version"]
 
 
+def test_vocabulary_put_refuses_a_misspelt_field(client):
+    client.app.state.worker.stop()
+    assert client.post("/collections", json=WORKED).status_code == 201
+    exported = client.get("/collections/w/vocabulary").json()
+    body = {**exported, "terms": ["ohm's law"], "confirmed": True}  # not confirm
+    r = client.put("/collections/w/vocabulary", json=body)
+    assert r.status_code == 422 and "confirmed" in r.text
+    assert client.get("/jobs").json() == []
+
+
 def stored_worked(client) -> None:
     """Collection w (worked examples, AI tagging) with ITEMS stored."""
     client.post("/collections", json=WORKED)
@@ -748,6 +784,15 @@ def test_vocabulary_refuses_a_changed_price(client):
     assert db.list_jobs(client.app.state.conn, kind="retag") == []
     r = client.put("/collections/w/vocabulary", json={"terms": terms, "confirm": True})
     assert r.status_code == 202
+
+
+def test_vocabulary_confirm_with_the_shown_price_is_accepted(client):
+    client.app.state.worker.stop()
+    stored_worked(client)
+    terms = ["enzymes", "markets"]
+    seen = client.put("/collections/w/vocabulary", json={"terms": terms}).json()["estimate"]
+    shown = {"terms": terms, "confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
+    assert client.put("/collections/w/vocabulary", json=shown).status_code == 202
 
 
 def test_vocabulary_put_with_ai_tagging_and_no_model_is_503(tmp_path):
@@ -1083,6 +1128,70 @@ def test_every_sample_path_reaches_one_route(tmp_path):
             assert hits == [route], (method, path, hits)
 
 
+README = Path(__file__).parents[3] / "README.md"
+
+
+def readme_curl_commands() -> list[str]:
+    """Each curl command in the README's sh blocks, its continuation lines joined."""
+    blocks = "".join(re.findall(r"```sh\n(.*?)```", README.read_text(), re.S))
+    lines = blocks.replace("\\\n", " ").splitlines()
+    return [line.strip() for line in lines if line.strip().startswith("curl ")]
+
+
+def test_readme_curl_bodies_fit_the_request_models(tmp_path):
+    app = create_app(settings(tmp_path))
+    commands = readme_curl_commands()
+    assert len(commands) == 18
+    checked = 0
+    for command in commands:
+        body = re.search(r" -d '([^']*)'", command)
+        if body is None:  # an upload's raw file, not a JSON body
+            continue
+        method = re.search(r"-X (\w+)", command)
+        url = re.search(r"""["']?(?:\$api|https?://[^/\s"']+)(/[^\s"'?]*)""", command)
+        assert url, command
+        path = re.sub(r"<[^>]*>", "x1", url.group(1))
+        scope = {"type": "http", "path": path, "method": method.group(1) if method else "POST"}
+        (route,) = [r for r in app.routes if r.matches(scope)[0] == Match.FULL]
+        assert isinstance(route, APIRoute) and route.body_field, command
+        sent = json.loads(re.sub(r"<[^>]*>", "x1", body.group(1)))
+        TypeAdapter(route.body_field.field_info.annotation).validate_python(sent)
+        checked += 1
+    assert checked == 16
+
+
+def test_every_request_model_forbids_extra_fields(tmp_path):
+    spec = create_app(settings(tmp_path)).openapi()
+    schemas = spec["components"]["schemas"]
+
+    def refs(schema) -> set[str]:
+        """The components a schema names, through $ref, anyOf and any nesting."""
+        if isinstance(schema, list):
+            return set().union(*map(refs, schema))
+        if not isinstance(schema, dict):
+            return set()
+        named = {schema["$ref"].rsplit("/", 1)[1]} if "$ref" in schema else set()
+        return named.union(*map(refs, schema.values()))
+
+    todo: set[str] = set()
+    for path, ops in spec["paths"].items():
+        for method, op in ops.items():
+            if (method, path) == ("put", "/collections/{name}/search"):
+                continue  # a free dict, checked by search_settings (decision D leaves it)
+            if "requestBody" in op:
+                named = refs(op["requestBody"]["content"]["application/json"]["schema"])
+                assert named, (method, path)  # a body with no model would be unchecked
+                todo |= named
+    models: set[str] = set()
+    while todo:
+        name = todo.pop()
+        models.add(name)
+        todo |= refs(schemas[name]) - models
+    assert {"ChatTurn", "ItemIn", "QuestionIn"} <= models  # nested models count
+    open_ = sorted(m for m in models if schemas[m].get("additionalProperties") is not False)
+    assert open_ == []
+
+
 def test_pages_and_static_come_after_the_api(tmp_path):
     app = create_app(settings(tmp_path))
     docs = {app.openapi_url, app.docs_url, f"{app.docs_url}/oauth2-redirect", app.redoc_url}
@@ -1147,6 +1256,22 @@ def test_eval_sets_path_is_a_page_for_a_browser_and_the_list_for_the_api(client)
     assert api.json() == [] and api.headers["vary"] == "Accept"
 
 
+def test_html_patterns_survive_the_v_flag():
+    """Chrome compiles `pattern` with the v flag, where an unescaped - in a class is a syntax error
+    unless it is a range (a-z): the constraint is dropped with a console error. Python has no v
+    flag, so check that rule. A js template literal halves each double backslash, so undo that."""
+    found = 0
+    for path in [*STATIC.glob("*.html"), *STATIC.glob("*.js")]:
+        for value in re.findall(r'pattern="([^"]*)"', path.read_text()):
+            found += 1
+            if path.suffix == ".js":
+                value = value.replace("\\\\", "\\")
+            for cls in re.findall(r"\[((?:\\.|[^\]\\])*)\]", value):
+                body = re.sub(r"(?:\\.|[^\\-])-(?:\\.|[^\\-])", "", cls)  # ranges are fine
+                assert "-" not in re.sub(r"\\.", "", body), (path.name, value)
+    assert found >= 2
+
+
 def test_static_assets_are_served(client):
     assert client.get("/static/ui.css").status_code == 200
     assert "export" in client.get("/static/ui.js").text
@@ -1157,6 +1282,22 @@ def test_static_is_behind_basic_auth(tmp_path):
     for path in ("/static/ui.js", "/static/ui.css", "/", "/lab"):
         assert c.get(path).status_code == 401
         assert c.get(path, auth=("u", "p")).status_code == 200
+
+
+def test_moved_page_css_is_scoped():
+    css = (STATIC / "ui.css").read_text()
+    sections = re.split(r"/\* (page-[a-z]+) \*/", css)[1:]  # [name, rules, name, rules, ...]
+    assert sections[0::2] == ["page-chat", "page-settings", "page-lab"]
+    for name, rules in zip(sections[0::2], sections[1::2], strict=True):
+        rules = re.sub(r"/\*.*?\*/", "", rules, flags=re.S)
+        selectors = [s for head in re.findall(r"([^{}]+)\{", rules) if head.strip()[0] != "@"
+                     for s in head.split(",")]  # fmt: skip
+        assert selectors, name
+        for selector in selectors:
+            assert selector.strip().startswith(f".{name} "), (name, selector)
+    for path in [*STATIC.glob("*.html"), *STATIC.glob("*.js")]:
+        text = path.read_text()
+        assert "<style" not in text and 'style="' not in text, path.name
 
 
 def test_pages_only_call_public_endpoints():
@@ -1182,7 +1323,6 @@ const out = {
   e: u.pct(0.776), f: u.esc('<a href="x">&</a>'),
   g: u.clock('2026-10-23T14:02:00', new Date('2026-10-23T09:00:00')),
   h: u.clock('2026-10-21T14:02:00', new Date('2026-10-23T09:00:00')),
-  i: u.verdictText(null, {}),
   n: [u.pct(null), u.pct(undefined), u.pct(NaN), u.pct(Infinity), u.pct(0)],
   o: [u.pts(undefined, 1, 2), u.pts(null, 1, 2), u.pts(NaN, 1, 2), u.pts(-2.5, -4, -1)],
   p: [u.clock('garbage'), u.clock(null), u.clock(undefined)],
@@ -1191,7 +1331,7 @@ const out = {
 const labels = {methods: {kw_individual: {label: 'Keywords per list'}, hybrid: {label: 'Hybrid'}},
                 metrics: {accuracy: {label: 'Answered correctly'}, em: {label: 'Exact match'}},
                 metric_labels_by_type: {table: {em: 'Exact answer'}}};
-const ans = (verdict, diff, lo, hi, metric = 'accuracy', qaType = 'mcq') => u.verdictText(
+const ans = (verdict, diff, lo, hi, metric = 'accuracy', qaType = 'mcq') => u.verdictRest(
   {candidate: 'kw_individual', reference: 'hybrid', metric, verdict, diff, lo, hi},
   qaType, labels);
 out.j = ans('yes', 6.2, 1.8, 10.4);
@@ -1229,15 +1369,14 @@ def test_ui_formatting(tmp_path):
     assert got["e"] == "78%"
     assert got["f"] == "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
     assert got["g"] == "14:02" and got["h"] == "21 Oct 14:02"
-    assert got["i"] == "No answer yet"
     assert got["n"] == ["–", "–", "–", "–", "0%"]
     assert got["o"] == ["–", "–", "–", "−3 pts (−4 to −1)"]
     assert got["p"] == ["–", "–", "–"]
     assert got["q"] == ["+3 pts (2–4)", "+5 pts"]
-    assert got["j"] == "Yes: Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
-    assert got["k"].startswith("No: Keywords per list −7 pts")
-    assert got["l"].startswith("Can't tell: Keywords per list +1 pt")
-    assert got["t"] == "Yes: Keywords per list +6 pts (2–10) exact answer vs Hybrid"
+    assert got["j"] == "Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
+    assert got["k"].startswith("Keywords per list −7 pts")
+    assert got["l"].startswith("Keywords per list +1 pt")
+    assert got["t"] == "Keywords per list +6 pts (2–10) exact answer vs Hybrid"
     assert got["u"].endswith("exact match vs Hybrid")  # no label for this type: the plain one
     assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
         "Re-keying",
@@ -1764,6 +1903,10 @@ def test_catalog_lists_every_method(client):
     assert body["answer_pair"] == PAIR and body["qa_types"]["mcq"]["label"]
 
 
+def test_catalog_serves_the_controls(client):
+    assert client.get("/catalog").json()["controls"] == ["random_example", "fixed_example"]
+
+
 def test_collection_detail_has_state_and_answer(client):
     conn = client.app.state.conn
     client.post("/collections", json={"name": "e", "qa_type": "mcq"})
@@ -2122,6 +2265,15 @@ def test_upload_not_ready_has_no_estimate(client):
     add_collection(client)
     body = upload(client, jsonl({"foo": "bar"})).json()
     assert body["preview"]["ready"] is False and body["estimate"] is None
+
+
+def test_unmapped_import_preview_still_estimates_nothing(client):
+    add_collection(client)
+    up = upload(client).json()
+    r = do_import(client, up, mapping={"text": None})
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == {"preview", "estimate"}
+    assert r.json()["preview"]["ready"] is False and r.json()["estimate"] is None
 
 
 def test_upload_over_limit_is_413(client, monkeypatch):
@@ -3177,6 +3329,34 @@ def test_load_and_documents_refuse_changed_price(tmp_path, monkeypatch):
         assert r.status_code == 202 and set(r.json()) == {"job_id"}
 
 
+def test_unconfirmed_load_with_a_stale_price_gets_the_estimate(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, reply=PROPOSING) as client:
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        client.app.state.worker.stop()
+        seen = client.post("/collections/m/load", json={"dataset": "musique"}).json()["estimate"]
+        assert seen["calls"] == 1 and seen["est_usd"] > 0  # the proposal
+        half = seen["est_usd"] / 2
+        for stale in ({"calls": 0}, {"calls": 0, "est_usd": seen["est_usd"]}, {"est_usd": half}):
+            r = client.post("/collections/m/load", json={"dataset": "musique", **stale})
+            assert r.status_code == 200 and r.json() == {"estimate": seen}, (stale, r.text)
+        conn = client.app.state.conn
+        assert db.list_jobs(conn, limit=db.ALL) == [] and ledger_purposes(client) == []
+
+
+def test_unconfirmed_stale_free_load_queues(tmp_path, monkeypatch):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:  # no AI: the load is free
+        client.post("/collections", json={"name": "m", "qa_type": "multihop"})
+        client.app.state.worker.stop()
+        r = client.post(
+            "/collections/m/load", json={"dataset": "musique", "calls": 5, "est_usd": 1}
+        )
+        assert r.status_code == 202 and "estimate" not in r.json(), r.text
+        assert len(db.list_jobs(client.app.state.conn, limit=db.ALL)) == 1
+        assert ledger_purposes(client) == []
+
+
 def test_build_without_keywords_model_is_refused_before_spending(tmp_path, monkeypatch):
     three_items(monkeypatch)
     with make_client(tmp_path, api_key=None) as client:
@@ -3534,6 +3714,14 @@ def test_resuming_a_stopped_copy_refuses_a_changed_price(tmp_path):
         assert db.get_job(conn, job_id)["status"] == "interrupted"
         shown = {"confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
         assert client.post(f"/jobs/{job_id}/resume", json=shown).status_code == 202
+
+
+def test_copy_confirm_with_the_shown_price_is_accepted(client):
+    add_collection(client, summarize=True, name="s")
+    body = {"name": "x", "recipe": "paper_2024"}
+    seen = client.post("/collections/s/copy", json=body).json()["estimate"]
+    shown = {**body, "confirm": True, "calls": seen["calls"], "est_usd": seen["est_usd"]}
+    assert client.post("/collections/s/copy", json=shown).status_code == 202
 
 
 def test_copy_refuses_a_changed_price(client):
@@ -3998,7 +4186,24 @@ def test_post_chat_refuses_a_paid_method_with_no_ai_and_reports_an_unpriced_mode
     assert got.json()["answer"] is None and "unpriced-model" in got.json()["error"]
     ai.set_role("default", None)
     r = client.post("/chat", json=chat_body(method="kw_individual"))
-    assert r.status_code == 409 and "needs AI" in r.json()["detail"]
+    assert r.status_code == 503 and "needs AI" in r.json()["detail"]
+
+
+def test_chat_needs_ai_is_503(client):
+    add_collection(client, summarize=True)  # kw_individual summarises the query: paid
+    add_collection(client, name="bare", lists=False)
+    chat = new_chat(client)
+    assert client.post(f"/chats/{chat['id']}/messages", json={"content": "rate"}).status_code == 200
+    client.app.state.ai.set_role("default", None)  # no AI resolves
+    r = client.post("/chat", json=chat_body(method="kw_individual"))
+    assert (r.status_code, r.json()["detail"]) == (503, "kw_individual needs AI on 'c'")
+    # A method the store can't run is still 409: the store, not the model, is missing it.
+    r = client.post("/chat", json={**chat_body(method="kw_individual"), "collection": "bare"})
+    assert r.status_code == 409 and "needs AI" not in r.json()["detail"]
+    # A chat's own method is refused the same way when a re-run sets it.
+    url = f"/chats/{chat['id']}/messages/1/attempts"
+    r = client.post(url, json={"stores": {"c": {"method": "kw_individual"}}})
+    assert (r.status_code, r.json()["detail"]) == (503, "kw_individual needs AI on 'c'")
 
 
 def chat_spend(client) -> float:
@@ -5018,7 +5223,7 @@ def test_add_keyword_tags_without_ai_is_refused_and_changes_nothing(client):
     client.app.state.ai.set_role("default", None)  # no model for keywords at all
     for confirm in (False, True):
         r = add_tags(client, confirm)
-        assert r.status_code == 409 and r.json()["detail"] == NO_KEYWORDS_MODEL, r.text
+        assert r.status_code == 503 and r.json()["detail"] == NO_KEYWORDS_MODEL, r.text
     spec = db.get_collection(client.app.state.conn, "c")
     assert spec.recipe == "documents" and spec.vocabulary_version is None
     assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
@@ -5252,6 +5457,24 @@ def test_confirmed_proposal_with_an_unpriced_model_is_503(tmp_path):
         assert r.status_code == 503 and "'keywords'" in r.json()["detail"]
 
 
+def test_no_keywords_model_is_503(client):
+    documents_with_passages(client)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    client.app.state.ai.set_role("default", None)  # no model for keywords at all
+    shown = {"confirm": True, "calls": 3, "est_usd": 0.01}  # what a page drew before
+    for body in ({"confirm": False}, {"confirm": True}, shown):
+        r = client.post("/collections/c/keyword-tags", json=body)
+        assert (r.status_code, r.json()["detail"]) == (503, NO_KEYWORDS_MODEL), body
+    job_id = db.create_job(conn, "tag_build", "c", {})
+    db.update_job(conn, job_id, status="interrupted")
+    for body in ({"confirm": False}, {"confirm": True}, shown):
+        r = client.post(f"/jobs/{job_id}/resume", json=body)
+        assert (r.status_code, r.json()["detail"]) == (503, NO_KEYWORDS_MODEL), body
+    assert db.get_job(conn, job_id)["status"] == "interrupted"
+    assert ledger_purposes(client) == []
+
+
 def test_add_documents_waits_for_a_tag_build(client):
     documents_with_passages(client)
     client.app.state.worker.stop()
@@ -5348,7 +5571,7 @@ def test_keyword_tags_state_is_reported(tmp_path):
 # -- chat from your own app --------------------------------------------------------------
 
 BRIEF_KEYS = {"n", "answer", "citations", "passages", "passages_only", "error", "usd"}
-PASSAGE_KEYS = {"n", "store", "id", "text", "source", "part", "parts", "relevance"}
+PASSAGE_KEYS = {"n", "store", "id", "text", "file", "source", "part", "parts", "relevance"}
 
 
 def brief(client, chat_id, content="enzyme rate", **body):
@@ -5420,6 +5643,15 @@ def test_brief_reply_with_answer_false_is_passages_only(client):
     one = brief(client, chat["id"], answer=False)
     assert one["answer"] is None and one["passages_only"] is True and one["error"] is None
     assert one["passages"] and one["usd"] == 0
+
+
+def test_brief_passages_name_their_file(client):
+    documents_with_passages(client)  # store c: x.md's three passages
+    chat = new_chat(client)
+    one = brief(client, chat["id"], content="alpha")
+    assert one["passages"] and all(p["file"] == "x.md" for p in one["passages"])
+    saved = client.get(f"/chats/{chat['id']}").json()["messages"][-1]["attempts"][0]
+    assert [p["file"] for p in one["passages"]] == [e["file"] for e in saved["evidence"]]
 
 
 def test_messages_without_brief_keep_the_full_reply(client):
@@ -6049,7 +6281,7 @@ def test_pool_refuses_without_a_documents_set_and_store(client):
     assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
     assert client.post("/eval-sets", json={"name": "d", "qa_type": "documents"}).status_code == 201
     for name, status, detail in (
-        ("m", 422, "Find passages is for Documents eval sets"),
+        ("m", 409, "Find passages is for Documents eval sets"),
         ("d", 409, "pick a store for this eval set first"),
         ("nope", 404, "no eval set 'nope'"),
     ):
@@ -6136,13 +6368,22 @@ def test_reference_answer_refuses_a_changed_price(tmp_path):
         assert ask_answer(client, ids[:2], True).status_code == 200
 
 
+def test_reference_answer_confirm_with_the_shown_price_is_accepted(tmp_path):
+    with make_client(tmp_path, reply=lambda p: "Ten days [1].") as client:
+        ids = answer_store(client)
+        seen = ask_answer(client, ids[:2]).json()["estimate"]
+        shown = {"calls": seen["calls"], "est_usd": seen["est_usd"]}
+        r = ask_answer(client, ids[:2], True, **shown)
+        assert r.status_code == 200 and r.json()["answer"] == "Ten days.", r.text
+
+
 def test_reference_answer_refuses_what_it_cannot_answer(client):
     ids = answer_store(client)
     assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
     assert client.post("/eval-sets", json={"name": "d", "qa_type": "documents"}).status_code == 201
     seen = record_purposes(client)
     for name, status, detail in (
-        ("m", 422, "The AI's answer is for Documents eval sets"),
+        ("m", 409, "The AI's answer is for Documents eval sets"),
         ("d", 409, "pick a store for this eval set first"),
         ("nope", 404, "no eval set 'nope'"),
     ):
@@ -6159,6 +6400,17 @@ def test_reference_answer_refuses_what_it_cannot_answer(client):
         "mark at least one passage Right that is in c first",
     )
     assert seen == []
+
+
+def test_pool_and_answer_on_another_type_are_409(client):
+    assert client.post("/eval-sets", json={"name": "m", "qa_type": "mcq"}).status_code == 201
+    r = client.post("/eval-sets/m/pool", json={"question": "alpha"})
+    assert (r.status_code, r.json()["detail"]) == (409, "Find passages is for Documents eval sets")
+    for confirm in (False, True):
+        r = ask_answer(client, ["a"], confirm, name="m")
+        detail = "The AI's answer is for Documents eval sets"
+        assert (r.status_code, r.json()["detail"]) == (409, detail), confirm
+    assert ledger_purposes(client) == []
 
 
 def test_get_eval_set_says_whether_an_answer_model_is_connected(client):

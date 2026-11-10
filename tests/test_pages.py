@@ -1954,7 +1954,7 @@ def test_import_questions_on_the_eval_set_page_then_include_leaked(page, seeded,
     expect(page.locator("#imp-questions-preview")).to_contain_text("2 new")
     expect(page.locator("#questions tbody tr")).to_have_count(2)
     expect(page.locator("#fields")).to_contain_text("Worked solutions: 0 of 2")
-    expect(page.locator("#fields")).to_contain_text("Evidence ids: —")
+    expect(page.locator("#fields")).to_contain_text("Evidence ids: –")
     page.get_by_label("Include leaked questions").check()
     expect(page.locator("#leaked-msg")).to_have_text("")
     expect(page.get_by_label("Include leaked questions")).to_be_checked()
@@ -2870,8 +2870,8 @@ def test_keyword_tags_message_goes_when_the_state_changes(page, seeded):
     shown = {"tags": {"state": "none"}}
     route_keyword_tags(page, "dmsg", shown)
     refusal = {"detail": "connect a model for keywords first"}
-    page.route("**/collections/dmsg/keyword-tags", lambda r: r.fulfill(status=409, json=refusal))
-    page.expected = ["409"]  # the refusal is the point
+    page.route("**/collections/dmsg/keyword-tags", lambda r: r.fulfill(status=503, json=refusal))
+    page.expected = ["503"]  # the refusal is the point
     page.clock.install()
     page.goto(seeded.url + "/c/dmsg")
     page.get_by_role("button", name="Add keyword tags").click()
@@ -7531,3 +7531,329 @@ def test_dark_choice_beats_a_light_system(page, seeded):
             assert page.evaluate(bg) == expected
     finally:
         page.evaluate("localStorage.removeItem('theme')")
+
+
+# -- shared page bits: messages, polling and Create (2.07a) ---------------------------------
+
+
+def test_poll_pauses_while_hidden_and_refreshes_on_return(page, seeded):
+    gets = []
+
+    def store_get(r):
+        if r.method == "GET" and r.url.endswith("/collections/ph"):
+            gets.append(r.url)
+
+    def show(hidden):
+        state = "hidden" if hidden else "visible"
+        page.evaluate(
+            """([hidden, state]) => {
+              const own = (key, value) =>
+                Object.defineProperty(document, key, { configurable: true, get: () => value });
+              own("hidden", hidden);
+              own("visibilityState", state);
+              document.dispatchEvent(new Event("visibilitychange"));
+            }""",
+            [hidden, state],
+        )
+
+    with worker_stopped(seeded, "ph"):
+        assert httpx.get(f"{seeded.url}/collections/ph").json()["state"] == "queued"
+        page.on("request", store_get)
+        page.goto(seeded.url + "/c/ph")
+        expect(page.locator("#head")).to_contain_text("ph")
+        page.wait_for_timeout(3500)
+        assert len(gets) >= 2, "a busy store's page polls every 3 s"
+        show(True)
+        page.wait_for_timeout(500)  # a tick that began just before the hide sends its GET now
+        gets.clear()
+        page.wait_for_timeout(7000)
+        assert gets == []
+        with page.expect_request(
+            lambda r: r.method == "GET" and r.url.endswith("/collections/ph"), timeout=1000
+        ):
+            show(False)
+
+
+def test_create_store_is_disabled_while_it_saves(page, seeded):
+    held = []
+
+    def hold(route):
+        if route.request.method != "POST":
+            return route.fallback()
+        held.append(route)
+
+    def next_held():
+        for _ in range(100):
+            if held:
+                return held.pop()
+            page.wait_for_timeout(20)
+        raise AssertionError("the POST never reached the route")
+
+    page.route("**/collections", hold)
+    page.expected = ["409"]
+    page.goto(seeded.url + "/")
+    page.get_by_role("button", name="+ New store").click()
+    page.get_by_label("Name").fill("slowmade")
+    create = page.locator("#f-create")
+    create.click()
+    expect(create).to_be_disabled()
+    next_held().fulfill(status=409, json={"detail": "a store named 'slowmade' already exists"})
+    expect(page.locator("#f-msg")).to_have_text("a store named 'slowmade' already exists")
+    expect(create).to_be_enabled()
+    create.click()
+    expect(create).to_be_disabled()
+    next_held().continue_()
+    expect(page).to_have_url(seeded.url + "/c/slowmade")
+
+
+def test_create_works_again_after_back(page, seeded):
+    page.expected = ["409"]  # each held POST is refused at the end, so the next page is clean
+    held = []  # the POST never answers: the page stays as it was when it left
+    page.route(
+        "**/collections", lambda r: held.append(r) if r.request.method == "POST" else r.fallback()
+    )
+    page.route(
+        "**/eval-sets", lambda r: held.append(r) if r.request.method == "POST" else r.fallback()
+    )
+    for path, button, name in (
+        ("/", "+ New store", "backmade"),
+        ("/eval-sets", "+ New eval set", "backset"),
+    ):
+        page.goto(seeded.url + path)
+        page.get_by_role("button", name=button).click()
+        page.get_by_label("Name").fill(name)
+        create = page.locator("#f-create")
+        create.click()
+        expect(create).to_be_disabled()
+        # Playwright's Chromium runs without the back/forward cache, so a restore is dispatched
+        page.evaluate(
+            "window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))"
+        )
+        expect(create).to_be_enabled()
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(20)
+        held.pop().fulfill(status=409, json={"detail": "held"})  # settled before the next page
+        expect(page.locator("#f-msg")).to_have_text("held")
+
+
+def test_labelling_error_shows_in_its_message(page, seeded):
+    labelling_set(seeded, "lerr")
+    page.expected = ["500"]
+    held = []
+    page.route("**/eval-sets/lerrq/pool", lambda route: held.append(route))
+    page.route("**/query", lambda route: held.append(route))
+
+    def fail_unstyled(msg, detail):
+        """Answers the held request with a 500 once the message has lost its class, so only the
+        error's own say can make it "err" again."""
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(20)
+        page.evaluate(f"document.getElementById('{msg}').className = ''")
+        held.pop().fulfill(status=500, json={"detail": detail})
+
+    page.goto(seeded.url + "/e/lerrq")
+    panel = page.locator("#lab-panel")
+    panel.get_by_label("Question", exact=True).fill("alpha")
+    panel.get_by_role("button", name="Find passages").click()
+    fail_unstyled("lab-find-msg", "the pool broke")
+    expect(page.locator("#lab-find-msg")).to_have_text("the pool broke")
+    expect(page.locator("#lab-find-msg")).to_have_class("err")
+    panel.get_by_label("None of these? Search the store").fill("brine")
+    panel.get_by_role("button", name="Search", exact=True).click()
+    fail_unstyled("lab-search-msg", "the search broke")
+    expect(page.locator("#lab-search-msg")).to_have_text("the search broke")
+    expect(page.locator("#lab-search-msg")).to_have_class("err")
+
+
+LAYOUT_PROPS = [
+    "display", "gap", "white-space", "margin", "padding", "font-size", "border-radius",
+    "width", "min-height", "max-width", "background-color",
+]  # fmt: skip
+
+
+def has_layout(page, selector, **want):
+    """The first element matching `selector` computes to `want` (CSS names, `_` for `-`)."""
+    got = page.locator(selector).first.evaluate(
+        """(el, props) => Object.fromEntries(
+            props.map((p) => [p, getComputedStyle(el).getPropertyValue(p)]))""",
+        LAYOUT_PROPS,
+    )
+    got = {k.replace("-", "_"): v for k, v in got.items()}
+    assert {k: got[k] for k in want} == want, selector
+
+
+def test_settings_form_layout_is_unchanged(page, seeded):
+    # The values were read at b8e36a0, before the page styles moved into ui.css.
+    page.goto(seeded.url + "/settings")
+    expect(page.locator(".conn").first).to_be_visible()
+    has_layout(page, "#add-url", width="352px", display="block", font_size="12px")
+    has_layout(page, "#cap", width="144px", padding="6px 8px", border_radius="6px")
+    has_layout(page, "#add .row", display="flex", gap="12px")
+    has_layout(page, "#roles", display="grid", gap="10px", max_width="900px")
+    has_layout(page, ".conn", display="grid", gap="8px", margin="10px 0px", padding="12px 14px")
+    has_layout(page, ".conn", border_radius="8px", background_color="rgb(246, 246, 248)")
+    has_layout(page, ".conn .top", display="flex", gap="6px 12px", font_size="14px")
+    has_layout(page, ".conn .keyline input", width="256px", font_size="12px")
+    has_layout(page, ".result", font_size="12px", display="block")
+
+    hit = {
+        "id": "i1", "text": "A ball falls.", "score": 0.5, "keywords": {}, "matched": ["drag"],
+        "answer": None, "explanation": None, "meta": {}, "tags": ["drag", "energy"],
+        "channels": ["meaning"],
+    }  # fmt: skip
+    empty = {"hits": [], "answer": None, "usd": 0.0, "error": None, "query_tags": []}
+    results = {"keyword_rag": {**empty, "hits": [hit], "query_tags": ["drag"]}}
+    page.route("**/query", lambda route: route.fulfill(json={"results": results}))
+    page.goto(seeded.url + "/lab")
+    page.locator("#question").fill("how fast does it fall")
+    page.locator("#run").click()
+    expect(page.locator(".hit .chip")).to_have_count(2)
+    has_layout(page, "#form", display="grid", gap="10px", margin="0px 0px 16px", max_width="900px")
+    has_layout(page, "#question", min_height="70px", white_space="pre-wrap", width="900px")
+    has_layout(page, "#choices", min_height="50px")
+    has_layout(page, "#k", width="70px")
+    has_layout(page, "#rrfk", width="80px")
+    has_layout(page, "label:has(#answer)", display="flex", gap="6px", font_size="12px")
+    # The Lab's own chip beats ui.css's `.chip` (inline-flex, 13px, 12px radius).
+    plain = ".hit .chip:not(.on)"
+    has_layout(page, plain, display="inline-block", gap="2px", margin="2px 2px 0px 0px")
+    has_layout(page, plain, padding="1px 6px", font_size="11px", border_radius="10px")
+    has_layout(page, plain, background_color="rgba(0, 0, 0, 0)")
+    has_layout(page, ".hit .chip.on", background_color="rgb(255, 224, 138)", padding="1px 6px")
+    has_layout(page, ".hit", margin="6px 0px", padding="8px", border_radius="6px")
+    page.unroute_all()
+
+    chat_route(
+        page, lambda route: route.fulfill(json=chat_message(route, answer=None, error="boom"))
+    )
+    open_chat(page, seeded)
+    chat_ask(page, "how fast are enzymes?")
+    expect(page.locator("#log .msg.err")).to_be_visible()
+    has_layout(page, "#log .user", white_space="pre-wrap", max_width="85%", padding="10px 12px")
+    has_layout(page, "#log .user", background_color="rgb(246, 246, 248)", border_radius="8px")
+    has_layout(page, "#log .msg.err", white_space="pre-wrap", padding="10px 12px")
+
+    page.goto(seeded.url + "/c/c")  # another page's .err keeps its normal wrapping
+    expect(page.locator("#chat-store-msg")).to_have_count(1)
+    has_layout(page, "#chat-store-msg", white_space="normal", font_size="14px")
+
+
+def test_settings_draws_connections_when_catalog_fails(page, seeded):
+    page.expected = ["500"]
+
+    def with_connection(route):
+        reply = route.fetch().json()
+        mine = {"id": "kept", "label": "Kept", "kind": "manual", "base_url": None, "from_env": []}
+        route.fulfill(json={**reply, "connections": [mine]})
+
+    page.route("**/ai", with_connection)
+    page.route(
+        "**/catalog", lambda route: route.fulfill(status=500, json={"detail": "catalog down"})
+    )
+    page.goto(seeded.url + "/settings")
+    expect(page.locator('#connections [data-connection="kept"]')).to_be_visible()
+    expect(page.locator("#msg")).to_have_text("catalog down")
+
+
+def test_sidebar_asks_for_spend_once_on_load(page, seeded):
+    budgets = []
+    page.on("request", lambda r: budgets.append(r.url) if r.url.endswith("/budget") else None)
+    page.goto(seeded.url + "/worker")
+    expect(page.locator("#spend")).to_contain_text("this month")
+    expect(page.locator('#side a[href="/c/c"]')).to_be_visible()  # only the redraw adds it
+    page.wait_for_timeout(3000)  # past the redraws that /collections and /eval-sets cause
+    assert len(budgets) == 1, budgets
+    expect(page.locator("#spend")).to_contain_text("this month")  # a redraw keeps what was fetched
+
+
+def test_copy_is_announced(page, seeded):
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    open_chat(page, seeded, ("c",))
+    your_app(page)
+    status = page.locator("#chat-head details .sr-only[role=status]")
+    expect(status).to_have_text("")
+    page.locator("#chat-head details button[data-copy]").first.click()
+    expect(status).to_have_text("Copied")
+
+
+def test_copy_is_announced_when_the_clipboard_fails(page, seeded):
+    page.add_init_script("Object.defineProperty(navigator, 'clipboard', {value: undefined})")
+    open_chat(page, seeded, ("c",))
+    your_app(page)
+    page.locator("#chat-head details button[data-copy]").first.click()
+    expect(page.locator("#chat-head details .sr-only[role=status]")).to_have_text(
+        "Press Ctrl+C to copy"
+    )
+
+
+def test_import_many_clears_the_message_and_stops_on_a_new_choice(page, seeded, tmp_path):
+    documents_store(seeded, "manymsg", passages=False)
+    a, b = two_files(tmp_path)
+    confirms, held = [], []
+    changed = "the price changed since you saw it: check it again"
+
+    def route(r):
+        sent = json.loads(r.request.post_data)
+        if sent["confirm"]:
+            confirms.append(sent)
+            if len(confirms) == 2:
+                return r.fulfill(status=409, json={"detail": changed})
+            if len(confirms) == 3:
+                return held.append(r)
+        r.fallback()
+
+    page.route("**/collections/manymsg/imports", route)
+    page.goto(seeded.url + "/c/manymsg")
+    page.expected = ["409"]
+    page.locator("#imp-items-file").set_input_files([str(a), str(b)])
+    page.locator("#imp-items-go").click()
+    button = page.locator("#imp-items-import")
+    expect(button).to_be_enabled()
+    button.click()
+    msg = page.locator("#imp-items-msg")
+    expect(msg).to_have_text("The price of b.md changed: check it again")
+    expect(button).to_be_enabled()
+    button.click()  # b alone now; its message from the last round is gone as it is sent
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert held, "the second Import was never sent"
+    expect(msg).to_have_text("")
+    held[0].fallback()
+    expect(page.locator("#imp-items-preview")).to_have_text(
+        re.compile(r"^Added 2 passages\. Next: ")
+    )
+
+    # a new file choice mid-import: the files not yet sent are never sent
+    documents_store(seeded, "manystop", passages=False)
+    confirms.clear()
+    held.clear()
+
+    def hold_first(r):
+        if json.loads(r.request.post_data)["confirm"]:
+            confirms.append(r)
+            if len(confirms) == 1:
+                return held.append(r)
+        r.fallback()
+
+    page.route("**/collections/manystop/imports", hold_first)
+    page.goto(seeded.url + "/c/manystop")
+    page.locator("#imp-items-file").set_input_files([str(a), str(b)])
+    page.locator("#imp-items-go").click()
+    expect(page.locator("#imp-items-import")).to_be_enabled()
+    page.locator("#imp-items-import").click()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert held, "the first file was never sent"
+    page.locator("#imp-items-file").set_input_files([str(b)])
+    held[0].fallback()
+    # the first file is in and the store page shows it: the loop reached its stop, with b unsent
+    expect(page.locator("#sources tbody tr", has_text="a (uploaded)")).to_be_visible()
+    assert len(confirms) == 1

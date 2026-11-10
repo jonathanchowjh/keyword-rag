@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from ragqa_core import imports
+from ragqa_core import imports, text_split
 from ragqa_core.imports import question_problem
-from ragqa_core.types import Question
+from ragqa_core.types import NotFound, Question
 
 
 def write(path: Path, content: str | bytes) -> Path:
@@ -237,11 +237,6 @@ def test_preview_warns_about_ids_that_belong_to_another_source(tmp_path):
     )
     assert "2 items already belong to upload:old and would move to this source" in out["problems"]
     assert len(out["problems"]) == 1
-    p = write(tmp_path / "b.csv", "id,text,answer\na,one,1\n")
-    out = imports.preview(
-        p, "b.csv", "questions", "science", source="x", owner_of=lambda ids: {"a": "hand"}
-    )
-    assert "1 question already belongs to hand and would move to this source" in out["problems"]
 
 
 def test_leaked_ids():
@@ -364,7 +359,7 @@ def test_upload_ids_cannot_escape(tmp_path):
     assert path.read_bytes() == b"hello"
     assert meta["collection"] == "c" and meta["filename"] == "a.txt" and meta["size"] == 5
     for bad in ("../x", other, "0" * 32, ""):
-        with pytest.raises(KeyError):
+        with pytest.raises(NotFound):
             imports.open_upload(tmp_path, "c", bad)
 
 
@@ -422,27 +417,29 @@ def body(chunk: str) -> str:
 
 def test_chunk_text_packs_paragraphs():
     paras = [sentences(10, w) for w in ("ant", "bee", "cat", "dog")]  # 509 characters each
-    chunks = imports.chunk_text("\n\n".join(paras), "n.txt")
+    chunks = text_split.chunk_text("\n\n".join(paras), "n.txt")
     assert [body(c) for c in chunks] == ["\n\n".join(paras[:2]), "\n\n".join(paras[2:])]
     assert all(c.startswith("n.txt\n\n") for c in chunks)
 
 
 def test_chunk_text_splits_a_long_paragraph_at_a_sentence_end():
     text = sentences(40)  # 2,039 characters, one paragraph
-    chunks = imports.chunk_text(text, "n.txt")
+    chunks = text_split.chunk_text(text, "n.txt")
     assert len(chunks) == 2 and all(body(c).endswith(".") for c in chunks)
     assert " ".join(body(c) for c in chunks) == text
 
 
 def test_chunk_text_hard_cuts_a_run_with_no_spaces():
-    chunks = imports.chunk_text("x" * 4000, "n.txt")
+    chunks = text_split.chunk_text("x" * 4000, "n.txt")
     assert len(chunks) == 3 and all(len(c) <= 1500 for c in chunks)
     assert "".join(body(c) for c in chunks) == "x" * 4000
 
 
 def test_chunk_text_short_text_is_one_chunk_as_it_is_and_empty_is_none():
-    assert imports.chunk_text("# Title\nbody\n", "n.md") == ["# Title\nbody\n"]
-    assert imports.chunk_text("", "n.md") == [] and imports.chunk_text(" \n\t\n", "n.md") == []
+    assert text_split.chunk_text("# Title\nbody\n", "n.md") == ["# Title\nbody\n"]
+    assert (
+        text_split.chunk_text("", "n.md") == [] and text_split.chunk_text(" \n\t\n", "n.md") == []
+    )
 
 
 def test_chunk_text_never_packs_two_sections_and_names_the_heading_path():
@@ -450,7 +447,7 @@ def test_chunk_text_never_packs_two_sections_and_names_the_heading_path():
         f"# A\n\n{sentences(20, 'aaa')}\n\n## B\n\n{sentences(20, 'bbb')}\n\n"
         f"# C\n\n{sentences(5, 'ccc')}"
     )
-    chunks = imports.chunk_text(text, "x.md")
+    chunks = text_split.chunk_text(text, "x.md")
     assert not any("aaa" in c and "ccc" in c for c in chunks)
     under_b = [c for c in chunks if "bbb" in c]
     assert under_b and all(c.startswith("x.md › A › B\n\n") for c in under_b)
@@ -459,16 +456,16 @@ def test_chunk_text_never_packs_two_sections_and_names_the_heading_path():
 
 def test_chunk_text_breadcrumb_is_capped_cutting_the_deepest_headings():
     text = f"# {'a' * 120}\n\n## {'b' * 120}\n\n{sentences(40)}"
-    crumbs = {c.split("\n", 1)[0] for c in imports.chunk_text(text, "x.md")}
+    crumbs = {c.split("\n", 1)[0] for c in text_split.chunk_text(text, "x.md")}
     assert crumbs == {f"x.md › {'a' * 120}"}
 
 
 def test_chunk_text_keeps_a_code_block_whole_and_splits_a_big_one_at_line_ends():
     code = "```\nline one\n\nline two\n```"
-    chunks = imports.chunk_text(f"{sentences(20)}\n\n{code}\n\n{sentences(20)}", "x.md")
+    chunks = text_split.chunk_text(f"{sentences(20)}\n\n{code}\n\n{sentences(20)}", "x.md")
     assert sum(code in c for c in chunks) == 1
     lines = [f"print({i})  # {'y' * 30}" for i in range(80)]
-    chunks = imports.chunk_text("```\n" + "\n".join(lines) + "\n```", "x.md")
+    chunks = text_split.chunk_text("```\n" + "\n".join(lines) + "\n```", "x.md")
     assert len(chunks) > 1
     assert all(
         line in lines or line.startswith(("```", "x.md")) or not line
@@ -479,7 +476,7 @@ def test_chunk_text_keeps_a_code_block_whole_and_splits_a_big_one_at_line_ends()
 
 def test_chunk_text_splits_a_long_table_between_rows_repeating_its_header():
     rows = [f"| r{i} | {'v' * 40} |" for i in range(80)]
-    chunks = imports.chunk_text("| key | value |\n|---|---|\n" + "\n".join(rows), "t.md")
+    chunks = text_split.chunk_text("| key | value |\n|---|---|\n" + "\n".join(rows), "t.md")
     assert len(chunks) > 1
     for c in chunks:
         assert body(c).startswith("| key | value |\n|---|---|\n| r")
@@ -489,27 +486,27 @@ def test_chunk_text_splits_a_long_table_between_rows_repeating_its_header():
 
 def test_chunk_text_merges_a_small_trailing_paragraph_into_the_previous_chunk():
     tail = "A short closing line of exactly fifty characters.."
-    chunks = imports.chunk_text(f"{sentences(40)}\n\n{tail}", "n.txt")
+    chunks = text_split.chunk_text(f"{sentences(40)}\n\n{tail}", "n.txt")
     assert len(chunks) == 2 and not any(body(c) == tail for c in chunks)
-    assert chunks[-1].endswith(tail) and len(body(chunks[-1])) >= imports.MIN_CHUNK_CHARS
+    assert chunks[-1].endswith(tail) and len(body(chunks[-1])) >= text_split.MIN_CHUNK_CHARS
 
 
 def test_chunk_text_merges_a_small_chunk_into_the_next_one_with_room():
     # 1,478 + 101 does not fit 1,500 less the breadcrumb, so the 101 starts a chunk, and
     # the long paragraph after it fills the rest of that chunk rather than leave it small.
     first, small, long = sentences(29, "a"), sentences(2, "b"), sentences(40, "c")
-    chunks = imports.chunk_text(f"{first}\n\n{small}\n\n{long}", "n.txt")
+    chunks = text_split.chunk_text(f"{first}\n\n{small}\n\n{long}", "n.txt")
     assert body(chunks[0]) == first and body(chunks[1]).startswith(small + "\n\n" + "c")
-    assert all(len(body(c)) >= imports.MIN_CHUNK_CHARS for c in chunks)
+    assert all(len(body(c)) >= text_split.MIN_CHUNK_CHARS for c in chunks)
     # The floor itself: into the previous body when it fits, else the next, else alone.
-    assert len(imports.merge_small(["x" * 900, "s" * 50, "y" * 900], 1000)) == 2
-    assert imports.merge_small(["s" * 50, "y" * 900], 1000) == ["s" * 50 + "\n\n" + "y" * 900]
-    assert imports.merge_small(["x" * 990, "s" * 50, "y" * 990], 1000)[1] == "s" * 50
+    assert len(text_split.merge_small(["x" * 900, "s" * 50, "y" * 900], 1000)) == 2
+    assert text_split.merge_small(["s" * 50, "y" * 900], 1000) == ["s" * 50 + "\n\n" + "y" * 900]
+    assert text_split.merge_small(["x" * 990, "s" * 50, "y" * 990], 1000)[1] == "s" * 50
 
 
 def test_chunk_text_keeps_a_list_whole():
     items = "\n".join(f"- item {i}\n  more about it" for i in range(5)) + "\n\n- after a blank"
-    chunks = imports.chunk_text(f"{sentences(25)}\n\n{items}\n\n{sentences(5)}", "n.md")
+    chunks = text_split.chunk_text(f"{sentences(25)}\n\n{items}\n\n{sentences(5)}", "n.md")
     assert sum(items in c for c in chunks) == 1
 
 
@@ -521,9 +518,9 @@ def test_chunk_text_every_chunk_fits_the_prompt():
         ]
         + ["```\n" + "z" * 3000 + "\n```", "- " + "w " * 2000]
     )
-    chunks = imports.chunk_text(text, "big.md")
-    assert len(chunks) > 5 and all(len(c) <= imports.CHUNK_CHARS for c in chunks)
-    assert imports.CHUNK_CHARS == 1500
+    chunks = text_split.chunk_text(text, "big.md")
+    assert len(chunks) > 5 and all(len(c) <= text_split.CHUNK_CHARS for c in chunks)
+    assert text_split.CHUNK_CHARS == 1500
 
 
 def test_a_long_text_file_reads_as_one_row_per_chunk(tmp_path):
@@ -565,7 +562,7 @@ def test_a_long_text_file_inside_a_zip_is_chunked_too(tmp_path):
 
 def test_chunk_text_drops_a_section_that_is_only_its_heading():
     text = f"# Guide\n\n## Install\n\n{sentences(25, 'i')}\n\n## Use\n\n{sentences(25, 'u')}"
-    chunks = imports.chunk_text(text, "x.md")
+    chunks = text_split.chunk_text(text, "x.md")
     assert all(body(c).strip("#").strip() not in ("Guide", "") for c in chunks)
     assert all(
         any(line and not line.startswith("#") for line in body(c).split("\n")) for c in chunks
@@ -573,19 +570,19 @@ def test_chunk_text_drops_a_section_that_is_only_its_heading():
     under = [c for c in chunks if "iiii" in c]
     assert under and all(c.startswith("x.md › Guide › Install\n\n") for c in under)
     # a heading with text of its own keeps its section
-    kept = imports.chunk_text(f"# Guide\n\nwelcome\n\n## Use\n\n{sentences(40, 'u')}", "x.md")
+    kept = text_split.chunk_text(f"# Guide\n\nwelcome\n\n## Use\n\n{sentences(40, 'u')}", "x.md")
     assert body(kept[0]) == "# Guide\n\nwelcome"
 
 
 def test_a_heading_only_section_under_its_parent_makes_no_chunk():
-    chunks = imports.chunk_text(f"# A\n## B\n{sentences(40, 'b')}", "x.md")
+    chunks = text_split.chunk_text(f"# A\n## B\n{sentences(40, 'b')}", "x.md")
     assert len(chunks) > 1 and all(c.startswith("x.md › A › B\n\n") for c in chunks)
     assert all("bbbb" in c for c in chunks)  # no chunk without a body
-    assert imports.sections("# A\n## B\nbody", True) == [(["A", "B"], ["## B", "body"])]
+    assert text_split.sections("# A\n## B\nbody", True) == [(["A", "B"], ["## B", "body"])]
 
 
 def test_sibling_headings_with_no_body_keep_their_text():
-    assert imports.sections("## one\n## two\n## three\nbody", True) == [
+    assert text_split.sections("## one\n## two\n## three\nbody", True) == [
         (["three"], ["## one", "", "## two", "", "## three", "body"])
     ]
     rows = imports.text_rows("x.md", f"## one\n## two\n## three\n{sentences(40)}")
@@ -593,7 +590,7 @@ def test_sibling_headings_with_no_body_keep_their_text():
     assert len(rows) > 1 and all(f"## {h}" in stored for h in ("one", "two", "three"))
     assert all(len(r["text"]) <= 1500 for r in rows)
     # a trailing heading with nothing after it goes on the end of the last section
-    assert imports.sections("# A\nbody\n## B", True) == [(["A"], ["# A", "body", "", "## B"])]
+    assert text_split.sections("# A\nbody\n## B", True) == [(["A"], ["# A", "body", "", "## B"])]
 
 
 def test_a_file_of_headings_only_is_chunked_like_plain_text():
@@ -608,7 +605,7 @@ def test_a_file_of_headings_only_is_chunked_like_plain_text():
 def test_chunk_text_one_chunk_needs_no_room_for_a_breadcrumb():
     text = sentences(29)  # 1,478 characters
     assert len(text) == 1478
-    assert imports.chunk_text(text, "n" * 60 + ".md") == [text]
+    assert text_split.chunk_text(text, "n" * 60 + ".md") == [text]
 
 
 def test_a_one_chunk_text_file_is_never_longer_than_a_chunk(tmp_path):
@@ -655,7 +652,7 @@ def test_a_repeated_passage_in_one_file_gets_a_numbered_id():
     h = sha(rows[0]["text"])
     assert [r["file"] for r in rows] == [f"a.md#{h}", f"a.md#{h}-2", f"a.md#{sha(rows[2]['text'])}"]
     seen: dict[str, int] = {}
-    assert [imports.chunk_id("b.md", t, seen) for t in ("x", "y", "x", "x")] == [
+    assert [text_split.chunk_id("b.md", t, seen) for t in ("x", "y", "x", "x")] == [
         f"b.md#{sha('x')}",
         f"b.md#{sha('y')}",
         f"b.md#{sha('x')}-2",

@@ -1,6 +1,6 @@
-import { $, BUSY, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
+import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
   confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
-  pill, plural, pts, refreshSpend, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
+  pill, plural, poll, pts, refreshSpend, say, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
 // What a hybrid_rerank run recorded before runs recorded its reranker and pool: it used these
@@ -34,7 +34,7 @@ const reranked = (s) => s.methods.includes("hybrid_rerank")
 const show = (v) =>
   Array.isArray(v) ? v.join(" · ")
   : v && typeof v === "object" ? Object.entries(v).map(([k, x]) => `${k} ${typeof x === "object" && x ? `(${show(x)})` : show(x)}`).join(" · ")
-  : v == null || v === "" ? "–" : String(v);
+  : v == null || v === "" ? NONE : String(v);
 const busy = () => BUSY.has(run.status);
 // The headline is the reasoning match shown raw: this run has no random example to set 0 by.
 const rawScale = () => run.scale?.unit === "raw";
@@ -52,7 +52,7 @@ function headHtml() {
     : run.since.changes.map((c) => ` · <span class="warn">${esc(c)} changed after this run</span>`).join("");
   const failed = run.error ? `<p class="err">${esc(run.error)}</p>` : "";
   // A run that has not started has asked no questions yet: "–", not "0".
-  const asked = busy() && !run.question_count ? "– questions" : plural(run.question_count, "question");
+  const asked = busy() && !run.question_count ? `${NONE} questions` : plural(run.question_count, "question");
   const evalSet = run.eval_set
     ? ` · eval set <a href="/e/${encodeURIComponent(run.eval_set)}">${esc(run.eval_set)}</a> · version ${esc(short(run.eval_set_version))}`
     : "";
@@ -382,7 +382,7 @@ function methodHtml(m, row, judged) {
     : `<p>Parsed answer: ${esc(show(row.pred))}
     <span class="muted">${esc(show(row.raw))}</span></p>`;
   return `<div data-method-hits><strong>${esc(method(m))}</strong>${parsed}
-    <p>Top hits:</p><ul>${hits || "<li>–</li>"}</ul></div>`;
+    <p>Top hits:</p><ul>${hits || `<li>${NONE}</li>`}</ul></div>`;
 }
 
 // The gold answers, else the evidence ids. An id the store does not hold is muted: the metrics
@@ -479,8 +479,6 @@ function actionsHtml() {
     <div id="act-confirm"></div><p id="act-msg" class="err" role="status"></p>`;
 }
 
-const say = (text) => ($("act-msg").textContent = text);
-
 // Free: without confirm the endpoint only estimates, or refuses with the reason in `detail`.
 async function probeResume() {
   try {
@@ -492,17 +490,17 @@ async function probeResume() {
 }
 
 async function cancel() {
-  say("");
+  say($("act-msg"), "");
   try {
     await api(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
     await refresh();
   } catch (e) {
-    say(e.message);
+    say($("act-msg"), e.message);
   }
 }
 
 async function rerun() {
-  say("");
+  say($("act-msg"), "");
   // The recorded search settings too, so the repeat is this run, not today's defaults.
   const { collection, split, methods, answer, model, k, rrf_k, search, eval_set, judge } = run.setup;
   const r = reranked(run.setup);
@@ -517,23 +515,23 @@ async function rerun() {
         refreshSpend();
         location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
       } catch (e) {
-        say(e.message);
+        say($("act-msg"), e.message);
       }
     });
   } catch (e) {
-    say(e.message);
+    say($("act-msg"), e.message);
   }
 }
 
 function bindActions() {
   $("act-cancel")?.addEventListener("click", cancel);
   $("act-resume")?.addEventListener("click", () => {
-    say("");
+    say($("act-msg"), "");
     askResume($("act-confirm"), id, refresh);
   });
   $("act-rerun")?.addEventListener("click", rerun);
   $("act-delete")?.addEventListener("click", () => {
-    say("");
+    say($("act-msg"), "");
     askDelete($("act-confirm"), {
       question: "Delete this run and its results? This cannot be undone.",
       yes: "Yes, delete this run",
@@ -545,10 +543,9 @@ function bindActions() {
 
 // -- refresh --------------------------------------------------------------------------------------
 
-let timer = null;
+let polling = null; // stop() for the poll that runs while the run is busy
 let shownOnce = false; // the first refresh has painted (or failed): the toggle may load from now on
 async function refresh() {
-  clearTimeout(timer);
   try {
     cat = await catalog();
     const was = run?.status;
@@ -587,7 +584,12 @@ async function refresh() {
   } finally {
     if (run) shownOnce = true;
   }
-  if (run && BUSY.has(run.status)) timer = setTimeout(refresh, POLL_MS);
+  if (run && BUSY.has(run.status)) {
+    polling ??= poll(refresh, POLL_MS);
+  } else {
+    polling?.();
+    polling = null;
+  }
 }
 
 $("q-method").addEventListener("change", loadQuestions);

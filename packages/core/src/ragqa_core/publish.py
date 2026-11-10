@@ -20,9 +20,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ragqa_core import db
-from ragqa_core.builder import Builder, abstracted_parts, as_item, build_of, make_builder
+from ragqa_core.builder import Builder, abstracted_parts, as_item, make_builder
 from ragqa_core.datasets import BRIGHT_REPO, ID_PREFIX
 from ragqa_core.hub import MANIFEST, Hub, entry_id, sha256, write_entry
+from ragqa_core.recipes import build_of
 from ragqa_core.settings import load_settings
 from ragqa_core.vocabulary import read_vocabulary
 

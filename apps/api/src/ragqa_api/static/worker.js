@@ -1,4 +1,4 @@
-import { $, BUSY, RESUMABLE, api, askResume, clock, esc, head, paint, pct, pill, problemText, shell, short } from "/static/ui.js";
+import { $, BUSY, RESUMABLE, api, askResume, clock, esc, head, paint, pct, pill, poll, problemText, say, shell, short } from "/static/ui.js";
 
 const POLL_MS = 5000;
 const FINISHED = 50;
@@ -11,8 +11,6 @@ const resumeBox = document.createElement("div"); // kept across repaints of the 
 
 shell("worker");
 $("head").innerHTML = head({ title: "Worker", sub: "What the background worker is doing." });
-
-const say = (text) => ($("msg").textContent = text);
 
 // Where a job's results live: an eval's run page, or its collection for loads and re-keys.
 function target(job) {
@@ -110,23 +108,23 @@ function placeResumeBox() {
 // -- actions ------------------------------------------------------------------------------
 
 async function cancel(jobId) {
-  say("");
+  say($("msg"), "");
   try {
     await api(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
   } catch (e) {
-    say(e.message);
+    say($("msg"), e.message);
   }
   await refresh();
 }
 
 // Money rule: the click only asks for the estimate (or the refusal); spending needs Start.
 async function resume(jobId) {
-  say("");
+  say($("msg"), "");
   if (jobs.find((j) => j.id === jobId)?.kind === "reembed") { // free: no estimate to confirm
     try {
       await api(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST", body: {} });
     } catch (e) {
-      say(e.message);
+      say($("msg"), e.message);
     }
     await refresh();
     return;
@@ -174,4 +172,4 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, POLL_MS);
+poll(refresh, POLL_MS);

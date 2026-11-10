@@ -8,15 +8,15 @@ import pytest
 from aiconnect.ai import UnknownModel, UnknownPrice
 from ragqa_core import db, search_defaults
 from ragqa_core.builder import Builder
-from ragqa_core.chats import AlreadyAnswered, Chats, UnknownChat, round_robin
+from ragqa_core.chats import AlreadyAnswered, Chats, NeedsAI, UnknownChat, round_robin
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
 from ragqa_core.prompts import CHAT_TURNS, chat_prompt
-from ragqa_core.retriever import MethodUnavailable, Retriever, UnknownCollection
+from ragqa_core.retriever import MethodUnavailable, Retriever
 from ragqa_core.search_defaults import RECOMMENDED
 from ragqa_core.store import Store
-from ragqa_core.types import Hit, Item, KeywordLists
+from ragqa_core.types import Hit, Item, KeywordLists, UnknownCollection
 
 WORDS = {
     "a": "enzyme kinetics catalyst assay substrate",
@@ -1040,7 +1040,7 @@ def test_an_inherited_method_the_store_cannot_run_falls_back_to_hybrid_with_a_no
     assert s["method"] == "hybrid" and s["error"] is None
     assert s["note"] == "kw_individual needs AI, so hybrid was used"
     # A chat's own value is refused the same way when it is set.
-    with pytest.raises(MethodUnavailable, match="needs AI"):
+    with pytest.raises(NeedsAI, match="needs AI"):
         chats.rerun(chat["id"], 1, stores={"s": {"method": "kw_individual"}})
 
 

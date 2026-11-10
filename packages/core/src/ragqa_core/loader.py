@@ -2,21 +2,21 @@
 then give the collection lists or run its build steps."""
 
 import random
-import re
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
 
 from aiconnect.ai import AI
 from ragqa_core import db, imports
-from ragqa_core.builder import Builder, as_item, build_of, builds
+from ragqa_core.builder import Builder, as_item, builds
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.hub import Hub
 from ragqa_core.indexer import Indexer
-from ragqa_core.recipes import build_for, build_settings
+from ragqa_core.recipes import build_for, build_of, build_settings
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Item, Question, unknown_store
+from ragqa_core.text_split import chunk_of
+from ragqa_core.types import CollectionSpec, Item, Question, UnknownCollection, unknown_store
 
 PROPOSE_SAMPLE = 40
 UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
@@ -51,6 +51,11 @@ def sample_items(store: Store, name: str, skip: tuple[str, ...] = ()) -> list[It
     return propose_sample([as_item(h) for batch in store.scroll(name, skip=skip) for h in batch])
 
 
+def add_usd(a: float | None, b: float | None) -> float | None:
+    """The sum of two prices, None when either is not priced."""
+    return None if a is None or b is None else a + b
+
+
 def propose_sample(items: list[Item]) -> list[Item]:
     """The items a load shows the AI when it proposes the keyword lists."""
     return random.Random(472).sample(items, min(PROPOSE_SAMPLE, len(items)))
@@ -63,16 +68,6 @@ def stored_exclusions(q: Question, stored: set[str]) -> Question:
         return q
     kept = [i for i in q.meta["excluded_ids"] if i in stored]
     return replace(q, meta={**q.meta, "excluded_ids": kept})
-
-
-CHUNK_MARK = re.compile(r"[0-9]+|[0-9a-f]{12}(?:-[0-9]+)?")
-
-
-def chunk_of(item_id: str) -> str | None:
-    """The file a chunk id names: `<file>#<digits>` (as loads before content ids named a
-    chunk by its place) or `<file>#<12 hex>`, maybe with `-<digits>`; None for any other id."""
-    base, mark, part = item_id.rpartition("#")
-    return base if mark and CHUNK_MARK.fullmatch(part) else None
 
 
 def keep_labels(old: Question, new: Question) -> Question:
@@ -131,7 +126,7 @@ class Loader:
         conn, name = self.conn, job["collection"]
         spec = self.indexer.spec(name)
         if spec is None:
-            raise ValueError(unknown_store(name))
+            raise UnknownCollection(unknown_store(name))
 
         eval_set = self.questions_set(spec)  # a type clash fails here, before anything is added
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
@@ -286,11 +281,11 @@ class Loader:
         keyword_calls = 0
         if self.ai.ready("keywords") and self.makes_lists(spec):
             propose, propose_calls = self.indexer.plan_propose(spec, propose_sample(items))
-            estimate = None if estimate is None else estimate + propose
+            estimate = add_usd(estimate, propose)
             keyword_calls += propose_calls
         if not built:
             build_usd, build_calls = self.builder.plan_build(spec, todo)
-            estimate = None if estimate is None or build_usd is None else estimate + build_usd
+            estimate = add_usd(estimate, build_usd)
             keyword_calls += build_calls
         return {
             "est_usd": estimate,
@@ -388,7 +383,7 @@ class Loader:
             raise ValueError(QUESTION_IMPORT_GONE)
         spec = self.indexer.spec(name)
         if spec is None:
-            raise ValueError(unknown_store(name))
+            raise UnknownCollection(unknown_store(name))
         built, skipped, files = self._read_upload(spec, setup)
         propose = bool(setup.get("propose", False))
         lists_source, build_result, counts = self._add(
@@ -427,7 +422,7 @@ class Loader:
             items = [i for i in items if i.id not in have]  # unbuilt stored ones: build's own
         estimate, calls = self.indexer.plan_summaries(items) if target.summarize else (0.0, 0)
         build_usd, build_calls = self.builder.plan_build(target, items)
-        estimate = None if estimate is None or build_usd is None else estimate + build_usd
+        estimate = add_usd(estimate, build_usd)
         return {
             "est_usd": estimate,
             "items": len(items),
