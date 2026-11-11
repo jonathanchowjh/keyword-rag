@@ -505,6 +505,19 @@ def test_ready_for_openai_kind_needs_no_key(tmp_path):
     assert not core.AI(tmp_path / "other.db").ready()
 
 
+def test_need_price_raises_only_for_a_usable_unpriced_model(tmp_path):
+    ai = core.AI(tmp_path / "ai.db")
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "nop", price_in=None, price_out=None)
+    ai.add_model("gw", "free", price_in=0, price_out=0)
+    with pytest.raises(UnknownPrice, match="has no price; enter one first"):
+        ai.need_price(model="gw/nop")
+    ai.update_model("gw", "nop", enabled=False)
+    assert ai.need_price(model="gw/nop") is None  # not usable: left to ready
+    assert ai.need_price(model="gw/free") is None
+    assert ai.need_price("keywords") is None  # no model for the role
+
+
 def test_provider_error_names_connection_and_hides_key(tmp_path):
     ai = fake_ai(tmp_path / "ai.db", lambda p: "ok", api_key="sk-ant-api03-abcdWXYZ")
 
@@ -522,3 +535,19 @@ def test_provider_error_names_connection_and_hides_key(tmp_path):
         wire.SEND["anthropic"] = wire.anthropic_send
     assert str(e.value).startswith("anthropic: ")
     assert "abcdWXYZ" not in str(e.value) and "sk-…WXYZ" in str(e.value)
+
+
+def test_plan_many_names_no_model_for_an_unpriced_model_that_cannot_be_called(tmp_path):
+    ai = core.AI(tmp_path / "ai.db")
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "nop", price_in=None, price_out=None)
+    with pytest.raises(UnknownPrice, match="has no price; enter one first"):
+        ai.plan_many(["p"], 100, model="gw/nop")  # usable but unpriced
+    ai.update_model("gw", "nop", enabled=False)
+    with pytest.raises(NoConnection):
+        ai.plan_many(["p"], 100, model="gw/nop")  # disabled: usable comes before priced
+    ai.update_model("gw", "nop", enabled=True)
+    ai.add_connection("ant", "anthropic", "Anthropic")  # needs a key, has none
+    ai.add_model("ant", "nop", price_in=None, price_out=None)
+    with pytest.raises(NoConnection):
+        ai.plan_many(["p"], 100, model="ant/nop")

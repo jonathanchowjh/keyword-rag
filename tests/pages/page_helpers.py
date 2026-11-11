@@ -17,7 +17,7 @@ def interrupt(seeded, run_id):
 @contextmanager
 def worker_stopped(seeded, name):
     """Stop the shared worker and queue an eval on its own collection `name`. Always leaves the
-    worker running again with that job no longer queued (R18)."""
+    worker running again with that job no longer queued."""
     worker = seeded.app.state.worker
     seeded.build(name)  # its lists are keyed by the worker, so before stopping it
     worker.stop()

@@ -4,23 +4,19 @@ import pytest
 from api_helpers import (
     add_collection,
     add_documents,
-    add_tags,
     add_text,
     chat_body,
     documents_with_passages,
     ids_of,
-    ledger_purposes,
     long_text,
     make_client,
     new_chat,
-    passages,
     record_queries,
     reembed,
     reference_with_vocabulary,
     small_model,
     source_ids,
     store_import,
-    terms_reply,
     wait,
 )
 
@@ -130,7 +126,9 @@ def test_query_documents_answers_like_a_run(client):
 
     add_documents(client)
     passages = [Item(f"p{n}", f"alpha beta passage {n}") for n in range(1, 7)]
-    client.app.state.indexer.add(client.app.state.indexer.spec("c"), passages, "upload:docs")
+    client.app.state.indexer.add(
+        db.get_collection(client.app.state.indexer.conn, "c"), passages, "upload:docs"
+    )
     search_defaults.save(client.app.state.conn, {"evidence_size": 3})
     fake_replies(client.app.state.ai, lambda p: "Ten days [1].")
     calls = record_queries(client)
@@ -739,35 +737,6 @@ def test_the_store_reports_a_stopped_switch_and_refuses_search(client, monkeypat
     assert body["count"] == len(ITEMS) and db.switching_model(app.conn, "c") is None
     hits = client.post("/query", json=ask).json()["results"]["hybrid"]["hits"]
     assert hits[0]["id"] == "enzyme-item"
-
-
-def test_add_keyword_tags_estimates_then_builds(tmp_path):
-    with make_client(tmp_path, reply=terms_reply) as client:
-        documents_with_passages(client)
-        conn = client.app.state.conn
-        client.put("/collections/c/search", json={"weights": {"keywords": 2}})
-        saved = db.get_collection(conn, "c").search
-        r = add_tags(client, False)
-        assert r.status_code == 200, r.text
-        estimate = r.json()["estimate"]
-        assert set(estimate) == {"est_usd", "calls"}
-        assert estimate["est_usd"] > 0 and estimate["calls"] >= 1
-        assert ledger_purposes(client) == [] and db.get_collection(conn, "c").recipe == "documents"
-        r = add_tags(client, True)
-        assert r.status_code == 202, r.text
-        job = wait(client, r.json()["job_id"])
-        assert job["status"] == "done", job
-        spec = db.get_collection(conn, "c")
-        assert spec.recipe == "documents_tagged" and spec.vocabulary_version is not None
-        assert spec.search == saved  # the switch keeps a saved search override
-        assert len(passages(client)) == 3 and all(h.tags for h in passages(client))
-        body = client.get("/collections/c").json()
-        assert "keyword_rag" in body["methods_available"]
-        terms = db.get_vocabulary(conn, "c")
-        assert terms and body["keyword_tags"] == {"state": "built", "terms": len(terms)}
-        query = {"collection": "c", "question": "alpha", "methods": ["keyword_rag"]}
-        result = client.post("/query", json=query).json()["results"]["keyword_rag"]
-        assert result["error"] is None and result["hits"]
 
 
 BRIEF_KEYS = {"n", "answer", "citations", "passages", "passages_only", "error", "usd"}

@@ -2,7 +2,7 @@
 them), and two controls that pick examples without looking at the question's content.
 
 Fusion is reciprocal rank fusion computed here, not by Qdrant, so the paper's
-k=1 and today's k=60 behave identically in every storage mode.
+k=1 and the default k=60 behave identically in every storage mode.
 """
 
 import random
@@ -32,8 +32,6 @@ from ragqa_core.types import (
     Hit,
     SearchSettings,
     Skip,
-    UnknownCollection,
-    unknown_store,
 )
 
 METHOD_NAMES = (
@@ -174,10 +172,7 @@ class Retriever:
         }
 
     def spec(self, name: str) -> CollectionSpec:
-        spec = db.get_collection(self.conn, name)
-        if spec is None:
-            raise UnknownCollection(unknown_store(name))
-        return spec
+        return db.require_collection(self.conn, name)
 
     def retrieve(
         self,

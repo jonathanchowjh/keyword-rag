@@ -418,6 +418,15 @@ export function head({ title, crumb = [], sub = "", aside = "" }) {
   </div>${aside ? `<div class="aside">${aside}</div>` : ""}</div>`;
 }
 
+// The server's refusal of a Start whose shown price has changed (ragqa_api.guards.PRICE_CHANGED).
+export const PRICE_CHANGED = "the price changed since you saw it: check it again";
+
+// After that refusal the old Start would resend the same stale price: take it away, so the next
+// click on the action prices it again. Any other error leaves the Start where it is.
+export function dropStaleStart(el, e) {
+  if (e.status === 409 && e.message === PRICE_CHANGED) el.innerHTML = "";
+}
+
 // Renders "≈ $0.41 · 400 AI calls · [Start]" into el; onStart runs only on click.
 export function confirmSpend(el, estimate, onStart) {
   const money = usd(estimate.est_usd);

@@ -1,5 +1,5 @@
 import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
-  confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
+  confirmSpend, count, dropStaleStart, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
   pill, plural, poll, pts, refreshSpend, say, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
@@ -26,6 +26,7 @@ const metric = (m) => metricLabel(m, qaType, cat);
 const says = (m) => metricSays(m, qaType, cat);
 const method = (m) => methodLabel(m, cat);
 const isControl = (m) => cat.methods[m]?.group === "control";
+const retrieves = (m) => cat.methods[m]?.retrieves !== false;
 // The reranker and pool a hybrid_rerank run used; null for a run without hybrid_rerank.
 const reranked = (s) => s.methods.includes("hybrid_rerank")
   ? { model: s.rerank_model ?? LEGACY_RERANK_MODEL, pool: s.rerank_pool ?? LEGACY_RERANK_POOL }
@@ -454,8 +455,10 @@ function fillMethodPicker() {
   $("q-method").innerHTML = run.setup.methods
     .map((m) => `<option value="${esc(m)}">${esc(method(m))}</option>`)
     .join("");
-  const first = run.setup.methods.find((m) => !isControl(m));
-  $("q-method").value = run.setup.methods.includes(run.reference) ? run.reference : (first ?? run.setup.methods[0]);
+  const ms = run.setup.methods;
+  $("q-method").value = ms.includes(run.reference)
+    ? run.reference
+    : (ms.find((m) => retrieves(m) && !isControl(m)) ?? ms.find((m) => !isControl(m)) ?? ms[0]);
 }
 
 // -- actions ------------------------------------------------------------------------------------
@@ -515,6 +518,7 @@ async function rerun() {
         refreshSpend();
         location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
       } catch (e) {
+        dropStaleStart($("act-confirm"), e);
         say($("act-msg"), e.message);
       }
     });

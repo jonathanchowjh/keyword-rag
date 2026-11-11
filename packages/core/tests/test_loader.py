@@ -53,7 +53,7 @@ def test_loader_runs_a_load_job(tmp_path, monkeypatch):
     result = ld.run(job, seen.append)
     assert result["added"] == 3 and result["questions"] == 1
     assert result["lists_source"] == "ai"
-    assert result["keyword_version"] == ix.spec("m").keyword_version is not None
+    assert result["keyword_version"] == db.get_collection(ix.conn, "m").keyword_version is not None
     assert seen[-1] == pytest.approx(1.0) and seen == sorted(seen)
 
 
@@ -92,16 +92,16 @@ def test_a_load_that_makes_lists_reports_and_cancels_inside_the_rekey(tmp_path, 
 
     with pytest.raises(Cancelled):
         ld.run(job, progress)
-    assert ix.spec("m").keyword_version is None  # the lists never took effect
+    assert db.get_collection(ix.conn, "m").keyword_version is None  # the lists never took effect
 
 
 def test_a_load_into_a_collection_with_lists_reports_adding_as_the_whole(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     ld.run(job, lambda p: None)
-    version = ix.spec("m").keyword_version
+    version = db.get_collection(ix.conn, "m").keyword_version
     seen: list[float] = []
     ld.run(job, seen.append)
-    assert seen == [1.0] and ix.spec("m").keyword_version == version
+    assert seen == [1.0] and db.get_collection(ix.conn, "m").keyword_version == version
 
 
 def test_an_unusable_proposal_saves_no_lists(tmp_path, monkeypatch):
@@ -110,7 +110,10 @@ def test_an_unusable_proposal_saves_no_lists(tmp_path, monkeypatch):
     result = ld.run(job, seen.append)
     # Named, unlike "no AI model" (None): the proposal was paid for and is why there are none.
     assert result["lists_source"] == loader.UNUSABLE_PROPOSAL == "none (ai proposal unusable)"
-    assert result["keyword_version"] is None and ix.spec("m").keyword_version is None
+    assert (
+        result["keyword_version"] is None
+        and db.get_collection(ix.conn, "m").keyword_version is None
+    )
     assert [r["purpose"] for r in conn.execute("select purpose from ai_ledger")] == ["propose"]
     assert seen[-1] == pytest.approx(1.0)
 
@@ -267,7 +270,7 @@ def test_a_build_estimate_on_cached_work_counts_no_calls(tmp_path, monkeypatch):
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w"), lambda p: 0)
     ix.store.delete_items("w", [r["id"] for r in ITEM_ROWS])  # untagged again, tags cached
     setup = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, name="w")["setup"]
-    spec = ix.spec("w")
+    spec = db.get_collection(ix.conn, "w")
     est = ld.estimate_import(spec, setup)
     assert est["new"] == 4 and est["calls"] == 0 and est["est_usd"] == 0
     items = [Item(r["id"], r["text"], None) for r in ITEM_ROWS]
@@ -276,16 +279,16 @@ def test_a_build_estimate_on_cached_work_counts_no_calls(tmp_path, monkeypatch):
 
 def test_import_items_without_lists_makes_ai_lists(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
-    assert ix.spec("m").keyword_version is None
+    assert db.get_collection(ix.conn, "m").keyword_version is None
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
-    assert ix.spec("m").keyword_version is not None
+    assert db.get_collection(ix.conn, "m").keyword_version is not None
 
 
 def test_import_items_without_ai_makes_no_lists(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
     ld.ai.update_connection("anthropic", api_key=None)
     ld.run_import(import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP), lambda p: None)
-    assert ix.spec("m").keyword_version is None
+    assert db.get_collection(ix.conn, "m").keyword_version is None
 
 
 def test_an_import_priced_without_a_keywords_model_proposes_nothing_when_one_appears(
@@ -294,7 +297,7 @@ def test_an_import_priced_without_a_keywords_model_proposes_nothing_when_one_app
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
     ld.ai.update_connection("anthropic", api_key=None)
     job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, propose=False)
-    assert ld.estimate_import(ix.spec("m"), job["setup"])["calls"] == 0
+    assert ld.estimate_import(db.get_collection(ix.conn, "m"), job["setup"])["calls"] == 0
     ld.ai.update_connection("anthropic", api_key="test")  # set up while the job waits
     result = ld.run_import(job, lambda p: None)
     assert result["new"] == 4 and result["lists_source"] is None
@@ -306,7 +309,7 @@ def test_a_load_priced_without_a_keywords_model_proposes_nothing_when_one_appear
 ):
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
     ld.ai.update_connection("anthropic", api_key=None)
-    assert ld.estimate_load(ix.spec("m"), "musique", None)["calls"] == 0
+    assert ld.estimate_load(db.get_collection(ix.conn, "m"), "musique", None)["calls"] == 0
     setup = {"dataset": "musique", "limit": None, "propose": False}
     job = get_job(conn, create_job(conn, "load", "m", setup))
     ld.ai.update_connection("anthropic", api_key="test")
@@ -319,7 +322,7 @@ def test_a_load_priced_without_a_keywords_model_proposes_nothing_when_one_appear
 
 def test_a_job_queued_before_propose_was_recorded_does_not_propose(tmp_path, monkeypatch):
     conn, ix, ld, _ = build(tmp_path, monkeypatch, proposing)
-    assert ld.ai.ready("keywords") and ld.makes_lists(ix.spec("m"))
+    assert ld.ai.ready("keywords") and ld.makes_lists(db.get_collection(ix.conn, "m"))
     job = import_job(conn, tmp_path, "items", ITEM_ROWS, ITEM_MAP, propose=None)
     assert "propose" not in job["setup"]
     result = ld.run_import(job, lambda p: None)
@@ -418,7 +421,7 @@ def test_worked_load_builds_vocabulary_tags_and_abstracts(tmp_path, monkeypatch)
     items = scibench_items(tmp_path)
     seen: list[float] = []
     result = ld.run(job, seen.append)
-    spec = ix.spec("w")
+    spec = db.get_collection(ix.conn, "w")
     # Induced, saved and switched to before tagging: tag() reads the version in force.
     assert result["vocabulary_version"] == spec.vocabulary_version is not None
     assert db.get_vocabulary(conn, "w") == ["energy conservation", "kinematics"]
@@ -442,13 +445,13 @@ def test_paper_2024_load_unchanged(tmp_path, monkeypatch):
     result = ld.run(job, seen.append)
     assert not {"vocabulary_version", "tagged", "abstracted"} & set(result)
     assert purposes(conn) == ["propose"] and result["lists_source"] == "ai"
-    assert ix.spec("m").vocabulary_version is None
+    assert db.get_collection(ix.conn, "m").vocabulary_version is None
     assert seen == sorted(seen) and seen[-1] == pytest.approx(1.0)
 
 
 def test_load_estimate_includes_build_cost(tmp_path, monkeypatch):
     conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
-    spec = ix.spec("w")
+    spec = db.get_collection(ix.conn, "w")
     items = sourced(scibench_items(tmp_path), "scibench")
     estimate = ld.estimate_load(spec, "scibench", None)
     build_usd = ld.builder.plan_build(spec, items)[0]
@@ -485,14 +488,16 @@ def test_roles_needed():
 
 def test_estimates_count_summary_and_keyword_calls_apart(tmp_path, monkeypatch):
     conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
-    estimate = ld.estimate_load(ix.spec("w"), "scibench", None)
+    estimate = ld.estimate_load(db.get_collection(ix.conn, "w"), "scibench", None)
     assert estimate["summary_calls"] == 0 and estimate["keyword_calls"] == estimate["calls"] > 0
     s = ix.create("s", "science", True)
     estimate = ld.estimate_load(s, "scibench", None)  # a summary each, and the proposal
     assert estimate["summary_calls"] == estimate["items"] > 0 and estimate["keyword_calls"] == 1
     assert estimate["calls"] == estimate["items"] + 1
     ld.run(job, lambda p: None)
-    target = ld.copy_spec(ix.spec("w"), "w2", "paper_2024", {"added_text": "summary"})
+    target = ld.copy_spec(
+        db.get_collection(ix.conn, "w"), "w2", "paper_2024", {"added_text": "summary"}
+    )
     copied = ld.estimate_copy("w", target)
     assert copied["summary_calls"] == copied["items"] == copied["calls"] > 0
     assert copied["keyword_calls"] == 0
@@ -501,7 +506,7 @@ def test_estimates_count_summary_and_keyword_calls_apart(tmp_path, monkeypatch):
 def test_load_estimate_is_none_without_a_keywords_model(tmp_path, monkeypatch):
     conn, ix, ld, job = worked_load(tmp_path, monkeypatch)
     ld.ai.set_role("default", None)
-    assert ld.estimate_load(ix.spec("w"), "scibench", None)["est_usd"] is None
+    assert ld.estimate_load(db.get_collection(ix.conn, "w"), "scibench", None)["est_usd"] is None
 
 
 def test_worked_import_builds_its_items(tmp_path, monkeypatch):
@@ -529,15 +534,15 @@ def test_a_stopped_build_is_finished_by_loading_again(tmp_path, monkeypatch):
     # Induce, tag, abstract: the build's thirds of the job's second half.
     with pytest.raises(Cancelled):
         ld.run(job, stop_between(0.6, 0.7))  # as the induction ends, before it is saved
-    assert ix.spec("w").vocabulary_version is None
+    assert db.get_collection(ix.conn, "w").vocabulary_version is None
     # The items are stored, so this load adds none, yet induces over all of them.
     with pytest.raises(Cancelled):
         ld.run(job, stop_between(0.7, 0.8))  # inside the tagging, before any tag is written
-    assert ix.spec("w").vocabulary_version is not None
+    assert db.get_collection(ix.conn, "w").vocabulary_version is not None
     assert all(not h.tags for batch in ix.store.scroll("w") for h in batch)
     # What is left is priced: a tag per item and an abstract per explained one, no induction.
     # The stopped tagging's replies are cached, so only the abstracts would be sent.
-    spec = ix.spec("w")
+    spec = db.get_collection(ix.conn, "w")
     assert ld.builder.build_calls(spec, []) == len(items) + 2
     assert ld.estimate_load(spec, "scibench", None)["calls"] == 2
     result = ld.run(job, lambda p: None)
@@ -566,18 +571,20 @@ def scibench_paper(tmp_path):
 
 def test_copy_rebuilds_the_items_under_another_recipe(tmp_path):
     conn, ix, ld, items = scibench_paper(tmp_path)
-    target = ld.copy_spec(ix.spec("p"), "w", "worked_examples", None)
+    target = ld.copy_spec(db.get_collection(ix.conn, "p"), "w", "worked_examples", None)
     estimate = ld.estimate_copy("p", target)
     # One induction batch, a tag per item, an abstract per explained item.
     assert estimate["items"] == len(items) and estimate["calls"] == 1 + len(items) + 2
-    assert estimate["est_usd"] > 0 and purposes(conn) == [] and ix.spec("w") is None
+    assert (
+        estimate["est_usd"] > 0 and purposes(conn) == [] and db.get_collection(ix.conn, "w") is None
+    )
     job = get_job(conn, ld.start_copy("p", target))
     assert job is not None and (job["kind"], job["collection"]) == ("copy", "w")
     assert db.default_eval_set(conn, "w") == "p"  # points to the source's set, copies nothing
     assert db.get_eval_set(conn, "w") is None
     seen: list[float] = []
     result = ld.run_copy(job, seen.append)
-    spec = ix.spec("w")
+    spec = db.get_collection(ix.conn, "w")
     assert spec is not None and spec.recipe == "worked_examples" and spec.qa_type == "science"
     assert spec.search is not None and spec.search.example == "abstracted"
     assert result["added"] == len(items) and result["sources"] == ["scibench"]
@@ -595,7 +602,7 @@ def test_copy_rebuilds_the_items_under_another_recipe(tmp_path):
 
 def test_copy_points_to_the_source_eval_set(tmp_path):
     conn, ix, ld, items = scibench_paper(tmp_path)
-    ld.start_copy("p", ld.copy_spec(ix.spec("p"), "w", "worked_examples", None))
+    ld.start_copy("p", ld.copy_spec(db.get_collection(ix.conn, "p"), "w", "worked_examples", None))
     assert db.default_eval_set(conn, "w") == "p"
     assert get_questions(conn, "w") == []
 
@@ -603,14 +610,14 @@ def test_copy_points_to_the_source_eval_set(tmp_path):
 def test_copy_into_paper_2024_takes_the_source_lists(tmp_path, monkeypatch):
     conn, ix, ld, job = build(tmp_path, monkeypatch, proposing)
     ld.run(job, lambda p: None)
-    source = ix.spec("m")
+    source = db.get_collection(ix.conn, "m")
     assert source is not None and source.keyword_version and purposes(conn) == ["propose"]
     target = ld.copy_spec(source, "m2", "paper_2024", {"chunk_overlap": 10})
     free = {"est_usd": 0.0, "items": 3, "calls": 0, "summary_calls": 0, "keyword_calls": 0}
     assert ld.estimate_copy("m", target) == free
     result = ld.run_copy(get_job(conn, ld.start_copy("m", target)), lambda p: None)
     assert result == {"added": 3, "sources": ["musique"]}
-    spec = ix.spec("m2")
+    spec = db.get_collection(ix.conn, "m2")
     assert spec is not None and spec.build is not None and spec.build.chunk_overlap == 10
     assert spec.keyword_version == source.keyword_version
     assert get_keyword_lists(conn, "m2") == get_keyword_lists(conn, "m")
@@ -620,13 +627,15 @@ def test_copy_into_paper_2024_takes_the_source_lists(tmp_path, monkeypatch):
 
 def test_copy_prices_summaries_for_a_summarising_target(tmp_path):
     conn, ix, ld, items = scibench_paper(tmp_path)
-    target = ld.copy_spec(ix.spec("p"), "s", "paper_2024", {"added_text": "summary"})
+    target = ld.copy_spec(
+        db.get_collection(ix.conn, "p"), "s", "paper_2024", {"added_text": "summary"}
+    )
     assert target.summarize
     estimate = ld.estimate_copy("p", target)
     assert estimate["calls"] == len(items) and estimate["est_usd"] > 0
     ld.ai.set_role("default", None)
     assert ld.estimate_copy("p", target)["est_usd"] is None  # no model to price it with
-    worked = ld.copy_spec(ix.spec("p"), "w", "worked_examples", None)
+    worked = ld.copy_spec(db.get_collection(ix.conn, "p"), "w", "worked_examples", None)
     assert ld.estimate_copy("p", worked)["est_usd"] is None
 
 
@@ -641,7 +650,7 @@ def test_a_copy_keeps_its_sources_model(tmp_path):
     target = ld.copy_spec(source, "cp", "paper_2024", None)
     assert target.dense_model == "fake/small"
     ld.start_copy("s", target)
-    created = ix.spec("cp")
+    created = db.get_collection(ix.conn, "cp")
     assert created is not None and (created.dense_model, created.dense_dim) == ("fake/small", 64)
     ix.add(created, [Item("a", "enzyme rate rose", "A")], "x")
     assert ix.store.vectors("cp", "text_dense", 3).shape[1] == 64
@@ -649,7 +658,7 @@ def test_a_copy_keeps_its_sources_model(tmp_path):
 
 def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
     conn, ix, ld, items = scibench_paper(tmp_path)
-    source = ix.spec("p")
+    source = db.get_collection(ix.conn, "p")
     for name, recipe, override in (
         ("bad name!", "reference", None),
         ("r", "nope", None),
@@ -658,7 +667,7 @@ def test_copy_spec_refuses_a_bad_name_recipe_or_override(tmp_path):
     ):
         with pytest.raises(ValueError):
             ld.copy_spec(source, name, recipe, override)
-    assert ix.spec("r") is None
+    assert db.get_collection(ix.conn, "r") is None
 
 
 def test_chunk_of_reads_old_and_new_ids():
@@ -726,7 +735,7 @@ def reimport(tmp_path, ld, conn, body):
         "source": "upload:notes",
         "propose": False,
     }
-    estimate = ld.estimate_import(ld.indexer.spec("m"), setup)
+    estimate = ld.estimate_import(db.get_collection(ld.indexer.conn, "m"), setup)
     job = get_job(conn, create_job(conn, "import", "m", setup))
     return estimate, ld.run_import(job, lambda f: None)
 

@@ -15,6 +15,9 @@ BUSY_STATE = {
     "tag_build": "tagging",
 }
 
+# The statuses of a job that has not ended.
+BUSY = ("queued", "running")
+
 # The statuses a job can be queued again from.
 RESUMABLE = (
     "interrupted",

@@ -138,7 +138,7 @@ def hub_load(
 def test_a_load_with_an_entry_sends_no_ai_call(tmp_path, monkeypatch):
     conn, ix, ld, job, _ = hub_load(tmp_path, monkeypatch)
     ld.ai.update_connection("anthropic", api_key=None)  # no model for keywords at all
-    estimate = ld.estimate_load(ix.spec("aops"), "bright_aops", 2)
+    estimate = ld.estimate_load(db.get_collection(ix.conn, "aops"), "bright_aops", 2)
     assert estimate["est_usd"] == 0 and estimate["calls"] == 0
     applied = {"entry": "bright_aops-2-worked_examples", "items": 2}
     assert estimate["hub"] == applied  # the estimate says what the result will
@@ -160,7 +160,7 @@ def test_a_hub_build_applies_to_a_store_of_any_embedding_model(tmp_path, monkeyp
     assert result["hub"] == {"entry": "bright_aops-2-worked_examples", "items": 2}
     assert conn.execute("select count(*) from ai_ledger")[0][0] == 0
     assert db.get_vocabulary(conn, "aops") == TERMS
-    assert ix.spec("aops").dense_model == "fake/small"
+    assert db.get_collection(ix.conn, "aops").dense_model == "fake/small"
     assert ix.store.vectors("aops", "kw_tags", 3).shape[1] == 64
 
 
@@ -170,7 +170,7 @@ def test_a_reload_with_nothing_to_build_never_reads_the_hub(tmp_path, monkeypatc
     asked.clear()
     again = get_job(conn, create_job(conn, "load", "aops", {"dataset": "bright_aops", "limit": 2}))
     assert "hub" not in ld.run(again, lambda p: None) and asked == []
-    assert ld.estimate_load(ix.spec("aops"), "bright_aops", 2)["hub"] == {}
+    assert ld.estimate_load(db.get_collection(ix.conn, "aops"), "bright_aops", 2)["hub"] == {}
 
 
 def test_a_load_builds_locally_when_the_hub_is_down(tmp_path, monkeypatch):
@@ -202,9 +202,9 @@ def test_an_entry_built_with_other_settings_is_not_applied(tmp_path, monkeypatch
 def test_an_entry_never_replaces_a_vocabulary_the_collection_has(tmp_path, monkeypatch):
     # A vocabulary built, authored or edited here stays: the new items are built under it.
     conn, ix, ld, job, asked = hub_load(tmp_path, monkeypatch)
-    own = ld.builder.save_vocabulary(ix.spec("aops"), ["my own term"])
+    own = ld.builder.save_vocabulary(db.get_collection(ix.conn, "aops"), ["my own term"])
     db.set_vocabulary_version(conn, "aops", own)
-    estimate = ld.estimate_load(ix.spec("aops"), "bright_aops", 2)
+    estimate = ld.estimate_load(db.get_collection(ix.conn, "aops"), "bright_aops", 2)
     assert estimate["hub"] == {"skipped": "the collection has a vocabulary of its own"}
     result = ld.run(job, lambda p: None)
     assert result["hub"] == estimate["hub"] and asked == []

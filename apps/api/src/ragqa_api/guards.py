@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import State
 
 from aiconnect.ai import NoConnection
-from ragqa_core import db
+from ragqa_core import db, jobs
 from ragqa_core.evaluator import EvalSetMismatch
 from ragqa_core.imports import FIELDS
 from ragqa_core.retriever import METHOD_NAMES
@@ -105,7 +105,7 @@ class Guards:
         """409 while any job is running or queued on the collection, or while a rebuild's
         switch stopped part-way: the store is then emptied or partly refilled, and the
         resume refills it from the rebuilt copy. Only resuming that switch may pass it."""
-        for status in ("running", "queued"):
+        for status in reversed(jobs.BUSY):  # a running job is named before a queued one
             busy = db.list_jobs(self.state.conn, collection=name, status=status, limit=1)
             if busy:
                 raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
@@ -118,6 +118,7 @@ class Guards:
         """Refuse at once a request that would spend on a job with no usable model.
         A model the request names is checked itself, not the job's."""
         if not self.state.ai.ready(role, model):
+            self.state.ai.need_price(role, model)  # a set-up model with no price: 422, names it
             raise NoConnection(role)
 
     def need_models(self, estimate: dict, model: str | None) -> None:
@@ -161,7 +162,7 @@ class Guards:
         default eval set."""
         return any(
             job["kind"] == "load"
-            for status in ("queued", "running")
+            for status in jobs.BUSY
             for job in db.list_jobs(self.state.conn, collection=store, status=status, limit=db.ALL)
         )
 

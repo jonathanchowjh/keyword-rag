@@ -16,7 +16,7 @@ from ragqa_core.indexer import Indexer
 from ragqa_core.recipes import build_for, build_of, build_settings
 from ragqa_core.store import Store
 from ragqa_core.text_split import chunk_of
-from ragqa_core.types import CollectionSpec, Item, Question, UnknownCollection, unknown_store
+from ragqa_core.types import CollectionSpec, Item, Question
 
 PROPOSE_SAMPLE = 40
 UNUSABLE_PROPOSAL = "none (ai proposal unusable)"
@@ -124,9 +124,7 @@ class Loader:
         or builds: re-keying every item with the lists, or the build steps, are the second.
         Returns the result dict."""
         conn, name = self.conn, job["collection"]
-        spec = self.indexer.spec(name)
-        if spec is None:
-            raise UnknownCollection(unknown_store(name))
+        spec = db.require_collection(conn, name)
 
         eval_set = self.questions_set(spec)  # a type clash fails here, before anything is added
         items, questions = load_dataset(job["setup"]["dataset"], self.home)
@@ -381,9 +379,7 @@ class Loader:
         name, setup = job["collection"], job["setup"]
         if setup["kind"] == "questions":
             raise ValueError(QUESTION_IMPORT_GONE)
-        spec = self.indexer.spec(name)
-        if spec is None:
-            raise UnknownCollection(unknown_store(name))
+        spec = db.require_collection(self.conn, name)
         built, skipped, files = self._read_upload(spec, setup)
         propose = bool(setup.get("propose", False))
         lists_source, build_result, counts = self._add(
@@ -455,8 +451,8 @@ class Loader:
         adding keys the items with them; it proposes none. Adding is the first half of the
         progress when the target builds. Returns the result dict."""
         conn, name, source = self.conn, job["collection"], job["setup"]["source"]
-        spec = self.indexer.spec(name)
-        if spec is None or self.indexer.spec(source) is None:
+        spec = db.get_collection(conn, name)
+        if spec is None or db.get_collection(conn, source) is None:
             raise ValueError(f"cannot copy {source!r} into {name!r}: no such store")
         lists = db.get_keyword_lists(conn, source)
         if build_of(spec).vocabulary == "lists" and lists is not None:

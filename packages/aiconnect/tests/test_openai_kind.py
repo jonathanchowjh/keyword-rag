@@ -189,9 +189,6 @@ def test_test_connection_is_refused_by_the_cap(tmp_path):
     assert out["ok"] is False and "cap" in out["error"]
 
 
-# carried from Task 2's review
-
-
 def test_paid_call_is_ledgered_even_if_price_cleared_mid_run(tmp_path):
     holder = {}
 

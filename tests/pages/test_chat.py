@@ -1410,7 +1410,7 @@ DECISION = {
 GONE = {**DECISION, "store": "gone", "method": None, "k": None, "search": None, "note": "deleted"}
 
 
-def test_stores_table_shows_errors_deleted_stores_and_the_no_passages_note(page, seeded):
+def test_retrieval_step_shows_store_errors_deleted_stores_and_the_no_passages_note(page, seeded):
     # An attempt saved before the pipeline, its decisions with notes but no counts.
     old_gone = {k: v for k, v in GONE.items() if k != "note"}  # saved before decisions had notes
     old_gone |= {"store": "old-gone", "kept": False, "reason": "deleted"}

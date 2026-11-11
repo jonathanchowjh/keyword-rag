@@ -40,7 +40,9 @@ from ragqa_core.types import (
     QaType,
     Question,
     SearchSettings,
+    UnknownCollection,
     slug,
+    unknown_store,
 )
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # a collection's or an eval set's name
@@ -427,6 +429,13 @@ def _spec(row: sqlite3.Row) -> CollectionSpec:
 def get_collection(conn: Connection, name: str) -> CollectionSpec | None:
     row = first(conn.execute("select * from collections where name = ?", (name,)))
     return _spec(row) if row else None
+
+
+def require_collection(conn: Connection, name: str) -> CollectionSpec:
+    spec = get_collection(conn, name)
+    if spec is None:
+        raise UnknownCollection(unknown_store(name))
+    return spec
 
 
 def get_include_leaked(conn: Connection, name: str) -> bool:
@@ -1116,8 +1125,8 @@ def job_waiting_or_running(conn: Connection, kind: str, collection: str) -> bool
     row = first(
         conn.execute(
             "select 1 from jobs where kind = ? and collection = ?"
-            " and status in ('queued', 'running') limit 1",
-            (kind, collection),
+            f" and status in ({', '.join('?' * len(jobs.BUSY))}) limit 1",
+            (kind, collection, *jobs.BUSY),
         )
     )
     return row is not None

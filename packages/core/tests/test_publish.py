@@ -39,7 +39,7 @@ def built(tmp_path):
         "ba-d1": {"tags": ["relative speed"], "principle": "P", "method": "M", "answer": "4"},
         "ba-d2": {"tags": ["unit conversion"]},
     }
-    builder.apply_outputs(ix.spec("aops"), TERMS, outputs)
+    builder.apply_outputs(db.get_collection(ix.conn, "aops"), TERMS, outputs)
     job = create_job(conn, "load", "aops", {"dataset": "bright_aops", "limit": 2})
     update_job(conn, job, status="done")
     hub = Hub("owner/builds", tmp_path / "cache")
@@ -226,7 +226,9 @@ def test_published_files_hold_only_the_build(tmp_path):
 
 def test_a_collection_with_untagged_items_is_refused(tmp_path):
     conn, builder, hub = built(tmp_path)
-    builder.indexer.add(builder.indexer.spec("aops"), [Item("ba-d3", "new", "1", None)], "x")
+    builder.indexer.add(
+        db.get_collection(builder.indexer.conn, "aops"), [Item("ba-d3", "new", "1", None)], "x"
+    )
     no_repo(hub)
     with pytest.raises(Refused, match="a load could not apply this build: item ba-d3 without tags"):
         run(tmp_path, hub, builder)
@@ -286,3 +288,18 @@ def test_card_lists_entries_columns_and_attribution():
     )
     assert "Su et al." in card and "xlangai/BRIGHT" in card and "CC BY 4.0" in card
     assert "AQuA-RAT" in card and "TheoremQA" in card
+
+
+def test_dataset_card_says_keyword_rag():
+    entry = {
+        "id": "e",
+        "dataset": "bright_aops",
+        "limit": 10,
+        "recipe": "worked_examples",
+        "authored_by": "x",
+        "items": 10,
+        "files": {"builds/e/outputs.parquet": "x"},
+    }
+    card = dataset_card({"entries": [entry]}, "owner/builds")
+    assert "keyword-rag" in card
+    assert "rag-qa" not in card.replace("github.com/jonathanchowjh/rag-qa", "")

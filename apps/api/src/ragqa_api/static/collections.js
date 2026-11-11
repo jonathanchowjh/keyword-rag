@@ -1,4 +1,4 @@
-import { $, LEGEND, api, catalog, clock, confirmSpend, esc, head, methodLabel, nameField, paint, pct, pill, plural,
+import { $, LEGEND, api, catalog, clock, confirmSpend, dropStaleStart, esc, head, methodLabel, nameField, paint, pct, pill, plural,
   noScoreLine, poll, refreshSpend, say, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
@@ -240,6 +240,7 @@ async function addDefault(dataset) {
         refreshSpend();
         await refresh();
       } catch (e) {
+        dropStaleStart(slot, e);
         $("defaults-msg").textContent = e.message;
       }
     });

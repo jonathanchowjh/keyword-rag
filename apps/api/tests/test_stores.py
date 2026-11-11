@@ -24,12 +24,14 @@ from api_helpers import (
     ledger_purposes,
     make_client,
     new_chat,
+    passages,
     put_questions,
     reembed,
     run_pair,
     scibench_source,
     set_running,
     small_model,
+    store_import,
     three_items,
     upload,
     wait,
@@ -616,7 +618,7 @@ def test_unconfirmed_load_with_a_stale_price_gets_the_estimate(tmp_path, monkeyp
         assert db.list_jobs(conn, limit=db.ALL) == [] and ledger_purposes(client) == []
 
 
-def test_unconfirmed_stale_free_load_queues(tmp_path, monkeypatch):
+def test_unconfirmed_stale_free_load_is_409(tmp_path, monkeypatch):
     three_items(monkeypatch)
     with make_client(tmp_path, api_key=None) as client:  # no AI: the load is free
         client.post("/collections", json={"name": "m", "qa_type": "multihop"})
@@ -624,9 +626,26 @@ def test_unconfirmed_stale_free_load_queues(tmp_path, monkeypatch):
         r = client.post(
             "/collections/m/load", json={"dataset": "musique", "calls": 5, "est_usd": 1}
         )
-        assert r.status_code == 202 and "estimate" not in r.json(), r.text
-        assert len(db.list_jobs(client.app.state.conn, limit=db.ALL)) == 1
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED, r.text
+        assert db.list_jobs(client.app.state.conn, limit=db.ALL) == []
         assert ledger_purposes(client) == []
+
+
+def test_stale_price_is_409_before_503_on_a_free_load_that_needs_a_model(tmp_path, monkeypatch):
+    # Free ($0) yet it would call the keywords role, and no model is set for it.
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        body = {"name": "r", "qa_type": "multihop", "recipe": "reference"}
+        assert client.post("/collections", json=body).status_code == 201
+        client.app.state.worker.stop()
+        quote = {"est_usd": 0.0, "items": 3, "calls": 1, "summary_calls": 0, "keyword_calls": 1}
+        client.app.state.loader.estimate_load = lambda spec, dataset, limit: {**quote, "hub": {}}
+        sent = {"dataset": "musique"}
+        r = client.post("/collections/r/load", json={**sent, "calls": 99, "est_usd": 0})
+        assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED, r.text
+        r = client.post("/collections/r/load", json={**sent, "calls": 1, "est_usd": 0})
+        assert r.status_code == 503 and "keywords" in r.json()["detail"], r.text  # price agreed
+        assert db.list_jobs(client.app.state.conn, limit=db.ALL) == []
 
 
 def test_copy_estimate_then_build(tmp_path):
@@ -1035,7 +1054,9 @@ def test_a_stopped_switch_refuses_deleting_a_source_and_copying(tmp_path, monkey
     small_model(client, monkeypatch)
     add_collection(client, lists=False)
     app = client.app.state
-    app.indexer.add(app.indexer.spec("c"), [Item("x-1", "optics light lens", "D")], "x")
+    app.indexer.add(
+        db.get_collection(app.indexer.conn, "c"), [Item("x-1", "optics light lens", "D")], "x"
+    )
     setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
     db.update_job(app.conn, db.create_job(app.conn, "reembed", "c", setup), status="interrupted")
     stopped = "the switch to fake/small stopped part-way; resume it first"
@@ -1127,3 +1148,70 @@ def test_collection_reports_the_newest_load_error(client):
     assert load("interrupted") == "the load was interrupted by a restart"
     assert load("stopped_budget") == "the load stopped at the monthly cap"
     assert load("stopped_odd") == "the load stopped_odd"  # a status with no phrasing yet
+
+
+def test_unconfirmed_free_load_with_a_stale_calls_is_409(client):
+    add_collection(client)  # lists in place, so the load is free
+    client.app.state.worker.stop()
+    r = client.post("/collections/c/load", json={"dataset": "scienceqa", "calls": 3})
+    assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED, r.text
+    assert db.list_jobs(client.app.state.conn, kind="load") == []
+
+
+def test_unconfirmed_free_load_with_no_shown_price_queues(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    r = client.post("/collections/c/load", json={"dataset": "scienceqa"})
+    assert r.status_code == 202 and "job_id" in r.json(), r.text
+
+
+def test_unconfirmed_paid_load_with_a_stale_calls_gets_the_fresh_estimate(client):
+    add_collection(client, summarize=True)
+    client.app.state.worker.stop()
+    r = client.post("/collections/c/load", json={"dataset": "scienceqa", "calls": 999})
+    assert r.status_code == 200 and "estimate" in r.json(), r.text
+
+
+def scored_documents_run(client, first: bool = True) -> str:
+    """A done, scored run of store c's set s, which holds one question over one passage."""
+    if first:
+        add_documents(client)
+        store_import(client, "x.md", b"some text about passwords")
+        r = client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+        assert r.status_code == 201, r.text
+        held = passages(client)[0].id
+        question = {"id": "a", "text": "passwords?", "gold_ids": [held]}
+        assert put_questions(client, "s", [question]).status_code == 200
+    body = {"collection": "c", "methods": ["hybrid_rerank"], "eval_set": "s", "confirm": True}
+    r = client.post("/eval", json=body)
+    assert r.status_code == 202, r.text
+    assert wait(client, r.json()["job_id"])["status"] == "done"
+    return r.json()["job_id"]
+
+
+def lose_version(client, run_id: str) -> None:
+    conn = client.app.state.conn
+    conn.execute(
+        "update jobs set setup_json = json_set(setup_json, '$.eval_set_version', 'gone') "
+        "where id = ?",
+        (run_id,),
+    )
+
+
+def test_store_page_reads_when_its_scored_runs_version_is_gone(client):
+    run = scored_documents_run(client)
+    assert client.get("/collections/c").json()["answer"] is not None
+    lose_version(client, run)
+    r = client.get("/collections/c")
+    assert r.status_code == 200, r.text
+    assert r.json()["answer"] is None
+
+
+def test_store_page_falls_back_past_a_gone_version_to_an_older_run(client):
+    older = scored_documents_run(client)
+    newer = scored_documents_run(client, first=False)
+    assert client.get("/collections/c").json()["answer"]["run_id"] == newer
+    lose_version(client, newer)
+    r = client.get("/collections/c")
+    assert r.status_code == 200, r.text
+    assert r.json()["answer"]["run_id"] == older

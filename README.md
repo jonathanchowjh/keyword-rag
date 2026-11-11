@@ -253,8 +253,8 @@ with their base URL.
 
 - **Prices.** A price is per million input and output tokens. A model you fetch
   or add starts at $0, and a $0 model's calls cost the budget nothing, so price
-  a paid model before you use it. A model added through the API with no
-  price stays unpriced and is refused until you set one.
+  a paid model before you use it. A model set to No price (in Settings, or
+  null prices through the API) is refused until you price it.
 - **The monthly cap**, on Settings (default $20). Each call is priced and
   written to a ledger. A call that would cross the cap is refused before it is
   sent.

@@ -1021,7 +1021,7 @@ def test_no_hits_score_zero_only_where_measurable(env):
         Question("q-bare", "a third problem", None, ["3"], [], {}),
     ]
     science_env(conn, ev, "sci", ITEMS, questions)
-    spec = ev.retriever.indexer.spec("sci")
+    spec = db.get_collection(ev.retriever.indexer.conn, "sci")
     rows = ev._retrieval_rows(spec, questions, [[], [], []], set())
     assert rows[0]["retrieval"] == {"solution_sim@1": 0.0, "same_skill@1": 0.0}
     assert rows[1]["retrieval"] == {"same_skill@1": 0.0}
@@ -1128,7 +1128,11 @@ LONG = "the enzyme rate rose sharply after the temperature was raised"
 def test_leaked_questions_are_left_out_unless_included(env):
     conn, ev = env
     ix = ev.retriever.indexer
-    ix.add(ix.spec("c"), [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
+    ix.add(
+        db.get_collection(ix.conn, "c"),
+        [Item("long-item", LONG + " in the lab", "A", "x", {})],
+        "x",
+    )
     leaked = replace(QUESTIONS[0], text=LONG, meta={**QUESTIONS[0].meta, "source": "hand"})
     save_questions(conn, "c", [leaked])
     assert ev.estimate("c", "full", ["hybrid"], False, None)["questions"] == 4
@@ -1701,7 +1705,7 @@ def test_store_answer_counts_only_its_default_eval_set_runs(env):
 def test_leaked_ids_scan_once_until_the_store_or_the_set_changes(env):
     conn, ev = env
     ix, store = ev.retriever.indexer, ev.retriever.store
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     ix.add(spec, [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
     hand = Question("h1", LONG, ["y", "n"], ["A"], [], {"source": "hand"})
     save_questions(conn, "c", [hand])
@@ -1723,7 +1727,7 @@ def test_leaked_ids_scan_once_until_the_store_or_the_set_changes(env):
 def test_leaked_ids_reads_no_questions_while_the_scan_is_kept(env, monkeypatch):
     conn, ev = env
     ix = ev.retriever.indexer
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     ix.add(spec, [Item("long-item", LONG + " in the lab", "A", "x", {})], "x")
     save_questions(conn, "c", [Question("h1", LONG, ["y", "n"], ["A"], [], {"source": "hand"})])
     assert ev.leaked_ids(spec, "c") == {"h1"}

@@ -1,4 +1,4 @@
-import { $, NONE, api, askDelete, confirmSpend, count, esc, passageHtml, refreshSpend, say, short, whereHtml } from "/static/ui.js";
+import { $, NONE, api, askDelete, confirmSpend, count, dropStaleStart, esc, passageHtml, refreshSpend, say, short, whereHtml } from "/static/ui.js";
 
 // -- a Documents set: labelling -------------------------------------------------------------------
 // Its questions are labelled against the linked store: Find passages, then y or n on each. Every
@@ -302,6 +302,7 @@ export class Labelling {
           if (this.asking === mine) $("lab-ai-confirm").innerHTML = "";
           if (this.answering === opened) this.showAnswer(answer); // a mark change keeps it; a question change doesn't
         } catch (e) {
+          dropStaleStart($("lab-ai-confirm"), e);
           if (this.answering === opened) say($("lab-ai-msg"), e.message, "err");
         } finally {
           this.paying = false;

@@ -21,8 +21,6 @@ from ragqa_core.types import (
     Item,
     KeywordLists,
     QaType,
-    UnknownCollection,
-    unknown_store,
 )
 
 NAME = db.NAME
@@ -136,9 +134,6 @@ class Indexer:
         db.save_collection(self.conn, spec)
         self.store.create(name, spec.dense_dim)
         return spec
-
-    def spec(self, name: str) -> CollectionSpec | None:
-        return db.get_collection(self.conn, name)
 
     def changed(
         self, spec: CollectionSpec, items: list[Item], source: str
@@ -280,7 +275,7 @@ class Indexer:
     ) -> None:
         """Re-key every item with a saved version's lists, then switch to it.
         If anything raises, the old version stays in force."""
-        spec = self.spec(name)
+        spec = db.get_collection(self.conn, name)
         lists = db.get_keyword_lists(self.conn, name, version)
         if spec is None or lists is None:
             raise ValueError(f"no keyword lists {version!r} for store '{name}'")
@@ -373,9 +368,7 @@ class Indexer:
         store as it was. Phase 2, the switch, refills the store from the copy and records
         the model; it reports no progress, so it can't be cancelled, and `switching=True`
         resumes it after a stop."""
-        spec = self.spec(name)
-        if spec is None:
-            raise UnknownCollection(unknown_store(name))
+        spec = db.require_collection(self.conn, name)
         if not switching:
             self._rebuild(spec, model, progress)
             on_switch()

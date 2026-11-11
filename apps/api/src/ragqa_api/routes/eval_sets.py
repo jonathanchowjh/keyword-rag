@@ -15,10 +15,12 @@ from ragqa_api.guards import (
     check_shown_price,
     type_clash,
 )
-from ragqa_core import db, imports
+from ragqa_core import db, imports, jobs
 from ragqa_core.imports import SOURCE_NAME
 from ragqa_core.search_defaults import MAX_EVIDENCE
 from ragqa_core.types import NotFound, QaType, Question
+
+PICK_STORE = "pick a store for this eval set first"
 
 
 class NewEvalSet(BaseModel):
@@ -227,7 +229,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if row["qa_type"] != "documents":
             raise HTTPException(409, "Find passages is for Documents eval sets")
         if row["store"] is None:
-            raise HTTPException(409, "pick a store for this eval set first")
+            raise HTTPException(409, PICK_STORE)
         return state.chats.labelling_pool(row["store"], body.question, body.labelled)
 
     @app.post("/eval-sets/{name}/answer")
@@ -236,7 +238,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if row["qa_type"] != "documents":
             raise HTTPException(409, "The AI's answer is for Documents eval sets")
         if row["store"] is None:
-            raise HTTPException(409, "pick a store for this eval set first")
+            raise HTTPException(409, PICK_STORE)
         question = body.question.strip()
         if not question:
             raise HTTPException(422, "a question needs some text")
@@ -290,7 +292,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def delete_eval_set(name: str, confirm: bool = False):
         guards.known_set(name)
         runs = eval_runs(name)
-        if busy := next((j for j in runs if j["status"] in ("queued", "running")), None):
+        if busy := next((j for j in runs if j["status"] in jobs.BUSY), None):
             raise HTTPException(409, f"an eval that uses '{name}' is {busy['status']}; wait")
         guards.not_loading(name)
         if not confirm:

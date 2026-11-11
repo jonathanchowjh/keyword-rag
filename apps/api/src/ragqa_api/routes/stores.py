@@ -11,7 +11,7 @@ from ragqa_core.builder import builds
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import measurable, runnable
 from ragqa_core.indexer import ListsBusy
-from ragqa_core.jobs import BUSY_STATE
+from ragqa_core.jobs import BUSY, BUSY_STATE
 from ragqa_core.loader import roles_needed
 from ragqa_core.recipes import resolve_search
 from ragqa_core.retriever import MethodUnavailable, method_reasons
@@ -290,11 +290,11 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         setup = {"dataset": body.dataset, "limit": body.limit, "propose": propose}
         if priced or ((spec.summarize or propose) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
-            if body.confirm:  # unconfirmed, a stale price gets the fresh estimate
+            spends = spec.summarize or propose or estimate["est_usd"] != 0
+            if body.confirm or not spends:  # it would queue; otherwise the fresh estimate
                 check_shown_price(estimate, body.calls, body.est_usd)  # before any 503
             for role in roles_needed(spec, estimate):
                 guards.need_ai(role)
-            spends = spec.summarize or propose or estimate["est_usd"] != 0
             if spends and not body.confirm:
                 return estimate_reply(estimate)
             if not body.confirm and estimate["hub"].get("entry"):
@@ -378,7 +378,7 @@ def keyword_tags_state(spec: CollectionSpec, jobs: list[dict], terms: list[str] 
     if spec.qa_type != "documents":
         return None
     job = next((j for j in jobs if j["kind"] == "tag_build"), None)
-    if job and job["status"] in ("queued", "running"):
+    if job and job["status"] in BUSY:
         return {"state": "building", "job_id": job["id"], "progress": job["progress"]}
     if job and job["status"] != "done":
         return {"state": "stopped", "job_id": job["id"]}

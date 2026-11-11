@@ -119,7 +119,7 @@ def stored_worked(client) -> None:
     """Collection w (worked examples, AI tagging) with ITEMS stored."""
     client.post("/collections", json=WORKED)
     app = client.app.state
-    spec = app.indexer.spec("w")
+    spec = db.get_collection(app.indexer.conn, "w")
     app.indexer.add(spec, [Item(**i) for i in ITEMS], "hand")
 
 
@@ -127,7 +127,7 @@ def reference_with_vocabulary(client) -> None:
     """Collection r (reference recipe) with ITEMS stored and tagged from a vocabulary."""
     client.post("/collections", json={"name": "r", "qa_type": "multihop", "recipe": "reference"})
     app = client.app.state
-    app.indexer.add(app.indexer.spec("r"), [Item(**i) for i in ITEMS], "hand")
+    app.indexer.add(db.get_collection(app.indexer.conn, "r"), [Item(**i) for i in ITEMS], "hand")
     terms = {"terms": ["enzyme", "market", "volcano"], "confirm": True}
     r = client.put("/collections/r/vocabulary", json=terms)
     assert r.status_code == 202, r.text
@@ -384,7 +384,7 @@ def scibench_source(client) -> list[Item]:
     r = client.post("/collections", json={"name": "p", "qa_type": "science"})
     assert r.status_code == 201, r.text
     items, _ = load_scibench(app.settings.home, {p.name: p for p in SCIBENCH.glob("*.json")})
-    spec = app.indexer.spec("p")
+    spec = db.get_collection(app.indexer.conn, "p")
     app.indexer.add(spec, items, "scibench")
     app.indexer.add(spec, [Item(**i) for i in ITEMS], "hand")
     db.save_questions(

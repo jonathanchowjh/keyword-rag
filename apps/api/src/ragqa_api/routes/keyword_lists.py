@@ -5,7 +5,7 @@ from dataclasses import asdict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from aiconnect.ai import NoConnection, UnknownModel, UnknownPrice
+from aiconnect.ai import NoConnection, UnknownModel
 from ragqa_api.guards import NO_KEYWORDS_MODEL, Guards, check_shown_price, estimate_reply
 from ragqa_core import db
 from ragqa_core.indexer import ListsBusy
@@ -95,7 +95,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if body.calls is not None or body.est_usd is not None:
             try:
                 estimate, calls = state.indexer.plan_propose(spec, sample)
-            except (UnknownPrice, UnknownModel):  # no model can price it: today's 503
+            except UnknownModel:
                 raise NoConnection("keywords") from None
             check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
         guards.need_ai("keywords")
@@ -177,7 +177,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             items = state.builder.stored_items(name)
             try:
                 estimate, calls = state.builder.plan_tag(spec, terms, items)
-            except (UnknownPrice, UnknownModel):  # no model can price it: today's 503
+            except UnknownModel:
                 raise NoConnection("keywords") from None
             if body.confirm:
                 check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)

@@ -1,4 +1,4 @@
-import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
+import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, dropStaleStart, embedderLabel, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, UNPRICED, usd, verdictHtml,
   importBox, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
@@ -285,6 +285,7 @@ function bindRunForm() {
           refreshSpend();
           location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
         } catch (e) {
+          dropStaleStart($("rf-confirm"), e);
           $("rf-msg").textContent = e.message;
         }
       });
@@ -365,6 +366,7 @@ function bindLoad() {
           refreshSpend();
           await refresh();
         } catch (e) {
+          dropStaleStart($("ld-confirm"), e);
           $("ld-msg").textContent = e.message;
         }
       });
@@ -627,6 +629,7 @@ async function askTags() {
         refreshSpend();
         await refresh();
       } catch (e) {
+        dropStaleStart(box, e);
         $("tags-msg").textContent = e.message;
       }
     });
@@ -655,7 +658,7 @@ function stoppedLine(r) {
 function embeddingHtml() {
   const r = col.rebuild;
   const line = `<p>Built with ${esc(col.dense_model)} · ${esc(col.dense_dim)} dimensions</p>`;
-  const live = r && (r.status === "queued" || r.status === "running");
+  const live = r && BUSY.has(r.status);
   const job = r ? `data-job="${esc(r.job_id)}"` : "";
   let status = "";
   if (live) {

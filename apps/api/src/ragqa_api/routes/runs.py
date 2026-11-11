@@ -19,6 +19,7 @@ from ragqa_core.loader import QUESTION_IMPORT_GONE, roles_needed
 from ragqa_core.recipes import resolve_search
 from ragqa_core.retriever import DEFAULT_K, DEFAULT_RRF_K, POOL
 
+NOT_RESUMABLE = "the job is no longer resumable"
 STALL_AFTER = timedelta(minutes=10)
 
 
@@ -120,7 +121,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         job = db.get_job(state.conn, job_id)
         if job is None or job["kind"] != "eval":
             raise HTTPException(404, f"no run {job_id}")
-        if job["status"] in ("queued", "running"):
+        if job["status"] in jobs.BUSY:
             raise HTTPException(409, f"the run is {job['status']}; cancel it first")
         db.delete_job(state.conn, job_id)
         return Response(status_code=204)
@@ -155,7 +156,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     @app.post("/jobs/{job_id}/cancel")
     def cancel(job_id: str) -> dict:
         row = job(job_id)
-        if row["status"] not in ("queued", "running"):
+        if row["status"] not in jobs.BUSY:
             raise HTTPException(409, f"job is {row['status']}")
         return {"status": db.request_cancel(state.conn, job_id)}
 
@@ -180,7 +181,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         check_shown_price(estimate, body.calls, body.est_usd)
         guards.need_models(estimate, job(job_id)["setup"]["model"])
         if not db.requeue(state.conn, job_id):  # moved since the check: a double confirm
-            raise HTTPException(409, "the job is no longer resumable")
+            raise HTTPException(409, NOT_RESUMABLE)
         return {"job_id": job_id}
 
     def resume_copy(row: dict, body: ResumeRequest | None):
@@ -201,7 +202,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             return estimate_reply(estimate)
         with guards.not_adding(source):
             if not db.requeue(state.conn, row["id"]):  # moved since the check
-                raise HTTPException(409, "the job is no longer resumable")
+                raise HTTPException(409, NOT_RESUMABLE)
         return {"job_id": row["id"]}
 
     def resume_tag_build(row: dict, body: ResumeRequest | None):
@@ -228,7 +229,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
                 guards.need_ai("keywords")
             if not db.requeue(state.conn, row["id"]):  # moved since the check
-                raise HTTPException(409, "the job is no longer resumable")
+                raise HTTPException(409, NOT_RESUMABLE)
         return {"job_id": row["id"]}
 
     def resume_reembed(row: dict) -> dict:
@@ -248,7 +249,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
                 )
             guards.refuse_busy(name, stopped_switch_ok=True)
             if not db.requeue(state.conn, row["id"]):  # moved since the check
-                raise HTTPException(409, "the job is no longer resumable")
+                raise HTTPException(409, NOT_RESUMABLE)
         return {"job_id": row["id"]}
 
     @app.get("/status")

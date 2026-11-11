@@ -203,6 +203,18 @@ def test_confirmed_paid_eval_without_a_key_is_503_and_queues_nothing(tmp_path):
         assert free.status_code == 202
 
 
+def test_eval_naming_an_unpriced_model_is_422_and_queues_nothing(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    ai = client.app.state.ai
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "nop", price_in=None, price_out=None)
+    body = {**EVAL, "answer": True, "model": "gw/nop", "confirm": True}
+    r = client.post("/eval", json=body)
+    assert r.status_code == 422 and r.json()["detail"] == "gw/nop has no price; enter one first"
+    assert client.get("/eval").json() == []
+
+
 def test_eval_refuses_a_changed_price(client):
     add_collection(client)
     seen = client.post("/eval", json={**EVAL, "answer": True}).json()["estimate"]
@@ -1124,7 +1136,7 @@ def test_cached_tag_build_resume_needs_no_model(tmp_path):
         def stop(spec, terms):  # after induction's reply is cached, before the vocabulary
             raise RuntimeError("stopped before the vocabulary")
 
-        builder.save_vocabulary = stop  # builder.py:334, the build's call after induction
+        builder.save_vocabulary = stop  # the build's call after induction
         job_id = add_tags(client, True).json()["job_id"]
         assert wait(client, job_id)["status"] == "failed"
         del builder.save_vocabulary

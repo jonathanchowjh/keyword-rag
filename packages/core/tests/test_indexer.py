@@ -51,7 +51,7 @@ def test_create_saves_spec_with_model(env):
         "fake/dense",
     )
     assert (spec.recipe, spec.corpus_type) == ("paper_2024", "worked")
-    assert spec == ix.spec("c")
+    assert spec == db.get_collection(ix.conn, "c")
     assert store.count("c") == 0
 
 
@@ -61,7 +61,7 @@ def test_create_with_recipe_records_settings(env):
     assert (spec.corpus_type, spec.recipe, spec.summarize) == ("worked", "worked_examples", False)
     assert spec.search is not None and spec.search.example == "abstracted"
     assert spec.build is not None and spec.build.units == "whole"
-    assert spec == ix.spec("w")
+    assert spec == db.get_collection(ix.conn, "w")
     paper = ix.create("p", "mcq", True)
     assert paper.summarize and paper.build is not None and paper.build.added_text == "summary"
     with pytest.raises(ValueError):
@@ -133,7 +133,7 @@ def test_add_after_lists_assigns_keywords(env):
     conn, store, models, ix, _ = env
     spec = ix.create("c", "mcq", False)
     ix.set_lists(spec, LISTS)
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     ix.add(spec, ITEMS, "x")
     assert store.get("c", ["2"])[0].keywords["topic"][0] == "market economics"
 
@@ -200,7 +200,9 @@ def test_list_and_term_vector_caches_are_per_model(tmp_path):
     for name, model in (("a", "fake/dense"), ("b", "fake/small")):
         spec = ix.create(name, "mcq", False, dense_model=model)
         ix.add(spec, ITEMS, "x")
-        ix.set_lists(ix.spec(name), LISTS)  # the same lists version: no cached vectors reused
+        ix.set_lists(
+            db.get_collection(ix.conn, name), LISTS
+        )  # the same lists version: no cached vectors reused
     assert store.vectors("a", "kw_all", 3).shape[1] == 256
     assert store.vectors("b", "kw_all", 3).shape[1] == 64
 
@@ -227,7 +229,11 @@ def test_an_existing_store_keeps_its_model_after_the_service_default_changes(tmp
     store, models, ix, _ = small_env(tmp_path)
     ix.add(ix.create("c", "mcq", False), ITEMS, "x")  # fake/dense, the service's model then
     models.dense_model = "fake/small"
-    ix.add(ix.spec("c"), [Item("4", "enzyme assay of a new substrate", "D", "New.")], "x")
+    ix.add(
+        db.get_collection(ix.conn, "c"),
+        [Item("4", "enzyme assay of a new substrate", "D", "New.")],
+        "x",
+    )
     assert store.vectors("c", "text_dense", 10).shape == (4, 256)
     asked: list[str | None] = []
     real = models.embed_query
@@ -253,7 +259,7 @@ def test_a_new_store_takes_the_settings_model_and_keeps_it(tmp_path, monkeypatch
     spec = ix.create("n", "mcq", False)
     assert (spec.dense_model, spec.dense_dim) == ("fake/small", 64)
     search_defaults.save(ix.conn, {"dense_model": None})
-    assert ix.spec("n") == spec
+    assert db.get_collection(ix.conn, "n") == spec
     assert ix.create("m", "mcq", False).dense_model == models.dense_model
 
 
@@ -263,10 +269,10 @@ def test_save_lists_does_not_switch_until_rekey_finishes(env):
     ix.add(spec, ITEMS, "x")
     v1 = ix.set_lists(spec, LISTS)
     v2 = ix.save_lists(spec, OTHER_LISTS)
-    assert v2 != v1 and ix.spec("c").keyword_version == v1
+    assert v2 != v1 and db.get_collection(ix.conn, "c").keyword_version == v1
     assert get_keyword_lists(conn, "c", v2) == OTHER_LISTS
     ix.rekey("c", v2)
-    assert ix.spec("c").keyword_version == v2
+    assert db.get_collection(ix.conn, "c").keyword_version == v2
 
 
 def test_rekey_that_fails_leaves_the_old_version(env):
@@ -281,7 +287,7 @@ def test_rekey_that_fails_leaves_the_old_version(env):
 
     with pytest.raises(Cancelled):
         ix.rekey("c", v2, progress=boom)
-    assert ix.spec("c").keyword_version == v1
+    assert db.get_collection(ix.conn, "c").keyword_version == v1
 
 
 def test_rekey_reports_progress_per_batch_and_once_for_an_empty_collection(env):
@@ -367,7 +373,10 @@ def test_set_lists_rejects_an_empty_facet_and_keeps_the_old_lists(env):
     version = ix.set_lists(spec, LISTS)
     with pytest.raises(ValueError, match="'topic' is empty"):
         ix.set_lists(spec, KeywordLists(topic=[], method=LISTS.method, common=LISTS.common))
-    assert get_keyword_lists(conn, "c") == LISTS and ix.spec("c").keyword_version == version
+    assert (
+        get_keyword_lists(conn, "c") == LISTS
+        and db.get_collection(ix.conn, "c").keyword_version == version
+    )
 
 
 def test_set_lists_saves_nothing_if_the_lists_cannot_be_embedded(env):
@@ -380,7 +389,10 @@ def test_set_lists_saves_nothing_if_the_lists_cannot_be_embedded(env):
     models.embed = broken
     with pytest.raises(RuntimeError, match="onnx failed"):
         ix.set_lists(spec, LISTS)
-    assert get_keyword_lists(conn, "c") is None and ix.spec("c").keyword_version is None
+    assert (
+        get_keyword_lists(conn, "c") is None
+        and db.get_collection(ix.conn, "c").keyword_version is None
+    )
 
 
 def test_propose_lists_rejects_a_reply_without_lists(tmp_path):
@@ -641,7 +653,7 @@ def test_reembed_switches_the_model_and_keeps_items_payloads_lists_and_tags(tmp_
     ix.set_lists(spec, LISTS)
     ids = [i.id for i in ITEMS]
     store.set_tags("c", ids, TAGS, models.embed([keyword_string(t, None) for t in TAGS]))
-    before = ix.spec("c")
+    before = db.get_collection(ix.conn, "c")
     assert before is not None
     kept = {
         h.id: (h.text, h.answer, h.explanation, h.meta, h.summary, h.tags)
@@ -650,7 +662,7 @@ def test_reembed_switches_the_model_and_keeps_items_payloads_lists_and_tags(tmp_
     hashes = store.hashes("c", ids)
     chunks = store.count(chunks_of("c"))
     result = ix.reembed("c", "fake/small")
-    after = ix.spec("c")
+    after = db.get_collection(ix.conn, "c")
     assert after is not None and (after.dense_model, after.dense_dim) == ("fake/small", 64)
     assert store.count("c") == 3 and after.keyword_version == before.keyword_version
     hits = store.get("c", ids)
@@ -710,7 +722,7 @@ def test_a_resume_after_the_switch_drops_a_left_over_chunks_copy(tmp_path):
 
     with pytest.raises(RuntimeError):
         ix.reembed("c", "fake/small", on_switch=half_drop_from_now)
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     assert spec is not None and spec.dense_model == "fake/small"  # the switch itself finished
     assert not store.exists(rebuild_of("c")) and store.exists(chunks_of(rebuild_of("c")))
     store.drop_rebuild = real_drop  # type: ignore[method-assign]
@@ -740,7 +752,7 @@ def test_a_cancelled_rebuild_leaves_the_store_as_it_was(tmp_path):
 
     with pytest.raises(Cancelled):
         ix.reembed("c", "fake/small", progress=stop, on_switch=lambda: switched.append(1))
-    assert ix.spec("c") == spec and switched == []
+    assert db.get_collection(ix.conn, "c") == spec and switched == []
     assert store.vectors("c", "text_dense", 10).shape == (3, 256)
     assert "1" in {h.id for h in retriever_for(ix).retrieve("c", "enzyme", "hybrid")}
     assert not store.exists(rebuild_of("c")) and not store.exists(chunks_of(rebuild_of("c")))
@@ -762,7 +774,7 @@ def test_a_switch_that_stops_resumes_from_the_rebuilt_copy(tmp_path):
     switched: list[int] = []
     with pytest.raises(RuntimeError):
         ix.reembed("c", "fake/small", on_switch=lambda: switched.append(1))
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     assert switched == [1] and spec is not None and spec.dense_model == "fake/dense"
     assert store.exists(rebuild_of("c"))
     job = db.create_job(ix.conn, "reembed", "c", {"model": "fake/small", "switching": True})
@@ -775,7 +787,7 @@ def test_a_switch_that_stops_resumes_from_the_rebuilt_copy(tmp_path):
         ix.check_model(spec)
     del store.copy  # type: ignore[attr-defined]
     result = ix.reembed("c", "fake/small", switching=True)
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     assert store.count("c") == 3 and spec is not None and spec.dense_model == "fake/small"
     assert result["items"] == 3 and store.vectors("c", "text_dense", 10).shape == (3, 64)
     assert not store.exists(rebuild_of("c"))
@@ -792,14 +804,14 @@ def test_a_resumed_switch_after_the_copy_was_dropped_changes_nothing(tmp_path):
     gone = "the copy made for the switch to fake/small is gone; delete the store and load it again"
     with pytest.raises(ValueError, match=gone):
         ix.reembed("d", "fake/small", switching=True)
-    assert ix.spec("d") == old and store.count("d") == 3
+    assert db.get_collection(ix.conn, "d") == old and store.count("d") == 3
 
 
 def test_reembed_of_an_empty_store_switches_its_model(tmp_path):
     store, _, ix, _ = small_env(tmp_path)
     ix.create("c", "mcq", False)
     assert ix.reembed("c", "fake/small")["items"] == 0
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     assert spec is not None and (spec.dense_model, spec.dense_dim) == ("fake/small", 64)
     assert dense_width(store, "c") == 64 and dense_width(store, chunks_of("c"), CHUNK) == 64
     ix.add(spec, ITEMS, "x")
@@ -819,7 +831,7 @@ def test_a_store_whose_model_cannot_load_can_still_be_rebuilt(tmp_path):
 
     models.dense_dim = dense_dim  # type: ignore[method-assign]
     assert ix.reembed("c", "fake/small")["items"] == 3
-    spec = ix.spec("c")
+    spec = db.get_collection(ix.conn, "c")
     assert spec is not None and spec.dense_model == "fake/small"
     ix.check_model(spec)
 

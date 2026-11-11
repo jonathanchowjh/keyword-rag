@@ -1251,3 +1251,26 @@ def test_import_many_clears_the_message_and_stops_on_a_new_choice(page, seeded, 
     # the first file is in and the store page shows it: the loop reached its stop, with b unsent
     expect(page.locator("#sources tbody tr", has_text="a (uploaded)")).to_be_visible()
     assert len(confirms) == 1
+
+
+def test_run_form_drops_its_start_after_a_price_change(page, seeded):
+    seeded.build("stalerf", run=True)
+
+    def refuse(route):
+        detail = "the price changed since you saw it: check it again"
+        if route.request.method == "POST" and route.request.post_data_json.get("confirm"):
+            return route.fulfill(status=409, json={"detail": detail})
+        route.fallback()
+
+    page.expected = ["409"]
+    page.route("**/eval", refuse)
+    page.goto(seeded.url + "/c/stalerf")
+    page.get_by_role("button", name="New run").click()
+    page.get_by_role("button", name="Estimate").click()
+    page.locator("#rf-confirm button").click()
+    expect(page.locator("#rf-confirm button")).to_have_count(0)
+    expect(page.locator("#rf-msg")).to_contain_text("check it again")
+    page.unroute("**/eval")
+    page.get_by_role("button", name="Estimate").click()
+    expect(page.locator("#rf-confirm button")).to_be_visible()
+    expect(page.locator("#rf-msg")).to_have_text("")

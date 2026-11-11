@@ -186,9 +186,15 @@ def test_run_picker_defaults_to_reference(page, seeded):
     page.get_by_text("Questions", exact=True).click()
     expect(page.locator("#questions details").first).to_be_visible()
     expect(page.locator("#q-method")).to_have_value("kw_individual")
-    # question_only is a baseline, not a control, so on a Documents run it is what gets picked.
+    # question_only retrieves nothing, so the first method that retrieves is picked.
     run_id, _ = documents_run(seeded, "nohyd", ["question_only", "vector"])
     page.goto(f"{seeded.url}/c/nohyd/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    expect(page.locator("#q-method")).to_have_value("vector")
+    # With nothing that retrieves, the first method that is not a control is picked.
+    seeded.build("onlyq")
+    run_id = seeded.run("onlyq", ["random_example", "question_only"])
+    page.goto(f"{seeded.url}/c/onlyq/runs/{run_id}")
     page.get_by_text("Questions", exact=True).click()
     expect(page.locator("#q-method")).to_have_value("question_only")
 
@@ -1660,3 +1666,25 @@ def test_new_run_disabled_without_eval_set_of_type(page, seeded):
     finally:
         httpx.delete(f"{seeded.url}/eval-sets/other-table", params={"confirm": True})
         httpx.delete(f"{seeded.url}/collections/noeval", params={"confirm": True})
+
+
+def _refuse_confirm(route):
+    detail = "the price changed since you saw it: check it again"
+    if route.request.method == "POST" and route.request.post_data_json.get("confirm"):
+        return route.fulfill(status=409, json={"detail": detail})
+    route.fallback()
+
+
+def test_rerun_drops_its_start_after_a_price_change(page, seeded):
+    run_id = seeded.build("stalerun", run=True)
+    page.expected = ["409"]
+    page.route("**/eval", _refuse_confirm)
+    page.goto(f"{seeded.url}/c/stalerun/runs/{run_id}")
+    page.get_by_role("button", name="Re-run").click()
+    page.locator("#act-confirm button").click()
+    expect(page.locator("#act-confirm button")).to_have_count(0)
+    expect(page.locator("#act-msg")).to_contain_text("check it again")
+    page.unroute("**/eval")
+    page.get_by_role("button", name="Re-run").click()
+    expect(page.locator("#act-confirm button")).to_be_visible()
+    expect(page.locator("#act-msg")).to_have_text("")

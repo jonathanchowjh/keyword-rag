@@ -161,7 +161,7 @@ def test_cached_ai_retag_needs_no_model(client):
     ai.update_model("gw", "llama", enabled=False)
     seen = client.put("/collections/w/vocabulary", json={"terms": terms["terms"]})
     assert seen.json()["estimate"]["calls"] == 0, seen.text
-    r = client.put("/collections/w/vocabulary", json=terms)  # today: 503, the tagging is "ai"
+    r = client.put("/collections/w/vocabulary", json=terms)
     assert r.status_code == 202, r.text
     assert wait(client, r.json()["job_id"])["status"] == "done"
 
@@ -177,16 +177,23 @@ def test_empty_ai_retag_needs_no_model(client):
     assert client.get("/collections/w/vocabulary").json()["version"] == r.json()["version"]
 
 
-def test_vocabulary_with_an_unpriced_model_is_still_503(client):  # a pin of today's 503
-    client.app.state.worker.stop()
-    stored_worked(client)
+UNPRICED = "gw/nop has no price; enter one first"
+
+
+def unpriced_keywords_model(client):
     ai = client.app.state.ai
     ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
-    ai.add_model("gw", "nop", price_in=None, price_out=None)  # unpriced: plan_many raises
+    ai.add_model("gw", "nop", price_in=None, price_out=None)
     ai.set_role("keywords", "gw/nop")
+
+
+def test_vocabulary_with_an_unpriced_model_is_422(client):
+    client.app.state.worker.stop()
+    stored_worked(client)
+    unpriced_keywords_model(client)
     for body in ({"terms": ["enzymes"]}, {"terms": ["enzymes"], "confirm": True}):
         r = client.put("/collections/w/vocabulary", json=body)
-        assert r.status_code == 503 and "'keywords'" in r.json()["detail"], r.text
+        assert r.status_code == 422 and r.json()["detail"] == UNPRICED, r.text
 
 
 def test_vocabulary_retag_runs_and_switches(client):
@@ -332,7 +339,9 @@ def test_writes_are_refused_while_a_rebuild_is_queued(tmp_path, monkeypatch):
     small_model(client, monkeypatch)
     add_collection(client, lists=False)
     app = client.app.state
-    app.indexer.add(app.indexer.spec("c"), [Item("x-1", "optics light lens", "D")], "x")
+    app.indexer.add(
+        db.get_collection(app.indexer.conn, "c"), [Item("x-1", "optics light lens", "D")], "x"
+    )
     r = reembed(client)
     assert r.status_code == 202, r.text
     job = db.get_job(app.conn, r.json()["job_id"])
@@ -356,6 +365,35 @@ NOT_UNTAGGED = "only a Documents store without keyword tags can add them"
 
 def keyword_tags(client, name="c"):
     return client.get(f"/collections/{name}").json()["keyword_tags"]
+
+
+def test_add_keyword_tags_estimates_then_builds(tmp_path):
+    with make_client(tmp_path, reply=terms_reply) as client:
+        documents_with_passages(client)
+        conn = client.app.state.conn
+        client.put("/collections/c/search", json={"weights": {"keywords": 2}})
+        saved = db.get_collection(conn, "c").search
+        r = add_tags(client, False)
+        assert r.status_code == 200, r.text
+        estimate = r.json()["estimate"]
+        assert set(estimate) == {"est_usd", "calls"}
+        assert estimate["est_usd"] > 0 and estimate["calls"] >= 1
+        assert ledger_purposes(client) == [] and db.get_collection(conn, "c").recipe == "documents"
+        r = add_tags(client, True)
+        assert r.status_code == 202, r.text
+        job = wait(client, r.json()["job_id"])
+        assert job["status"] == "done", job
+        spec = db.get_collection(conn, "c")
+        assert spec.recipe == "documents_tagged" and spec.vocabulary_version is not None
+        assert spec.search == saved  # the switch keeps a saved search override
+        assert len(passages(client)) == 3 and all(h.tags for h in passages(client))
+        body = client.get("/collections/c").json()
+        assert "keyword_rag" in body["methods_available"]
+        terms = db.get_vocabulary(conn, "c")
+        assert terms and body["keyword_tags"] == {"state": "built", "terms": len(terms)}
+        query = {"collection": "c", "question": "alpha", "methods": ["keyword_rag"]}
+        result = client.post("/query", json=query).json()["results"]["keyword_rag"]
+        assert result["error"] is None and result["hits"]
 
 
 def test_add_keyword_tags_without_ai_is_refused_and_changes_nothing(client):
@@ -446,16 +484,64 @@ def test_tag_build_and_proposal_refuse_a_changed_price(tmp_path):
         assert ledger_purposes(client) == []
 
 
-def test_confirmed_proposal_with_an_unpriced_model_is_503(tmp_path):
+def test_confirmed_proposal_with_an_unpriced_model_is_422(tmp_path):
     with make_client(tmp_path) as client:
         add_collection(client, lists=False, name="p")
-        ai = client.app.state.ai
-        ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
-        ai.add_model("gw", "nop", price_in=None, price_out=None)  # unpriced
-        ai.set_role("keywords", "gw/nop")
+        unpriced_keywords_model(client)
         shown = {"confirm": True, "calls": 1, "est_usd": 0.0}
         r = client.post("/collections/p/keyword-lists/propose", json=shown)
-        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]
+        assert r.status_code == 422 and r.json()["detail"] == UNPRICED
+
+
+def test_every_keyword_route_answers_422_for_an_unpriced_model(tmp_path):
+    with make_client(tmp_path) as client:
+        documents_with_passages(client)  # store c, Documents
+        add_collection(client, lists=False, name="p")  # no lists: a proposal prices
+        unpriced_keywords_model(client)
+        for body in ({}, {"confirm": True}):
+            r = client.post("/collections/c/keyword-tags", json=body)
+            assert r.status_code == 422 and r.json()["detail"] == UNPRICED, r.text
+        for body in (None, {"confirm": True}):
+            r = client.post("/collections/p/keyword-lists/propose", json=body)
+            assert r.status_code == 422 and r.json()["detail"] == UNPRICED, r.text
+
+
+def test_a_disabled_unpriced_model_is_still_503(tmp_path):
+    with make_client(tmp_path) as client:
+        add_collection(client, lists=False, name="p")
+        unpriced_keywords_model(client)
+        client.app.state.ai.update_model("gw", "nop", enabled=False)
+        r = client.post("/collections/p/keyword-lists/propose")
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"], r.text
+
+
+def test_a_disabled_or_keyless_unpriced_model_is_503_on_every_keyword_route(tmp_path):
+    for cut in ("disabled", "keyless"):
+        with make_client(tmp_path / cut) as client:
+            documents_with_passages(client)  # store c, Documents
+            add_collection(client, lists=False, name="p")
+            client.app.state.worker.stop()
+            stored_worked(client)  # store w, which takes a vocabulary
+            ai = client.app.state.ai
+            if cut == "disabled":
+                unpriced_keywords_model(client)
+                ai.update_model("gw", "nop", enabled=False)
+            else:
+                ai.add_connection("ant", "anthropic", "Anthropic")  # needs a key; none set
+                ai.add_model("ant", "nop", price_in=None, price_out=None)
+                ai.set_role("keywords", "ant/nop")
+            shown = {"confirm": True, "calls": 1, "est_usd": 0.0}
+            calls = [
+                ("post", "/collections/p/keyword-lists/propose", shown),
+                ("put", "/collections/w/vocabulary", {"terms": ["a"]}),
+                ("put", "/collections/w/vocabulary", {"terms": ["a"], "confirm": True}),
+                ("post", "/collections/c/keyword-tags", {}),
+                ("post", "/collections/c/keyword-tags", {"confirm": True}),
+            ]
+            for method, url, body in calls:
+                r = getattr(client, method)(url, json=body)
+                detail = r.json()["detail"]
+                assert r.status_code == 503 and "keywords" in detail, (cut, url, r.text)
 
 
 def test_put_vocabulary_is_refused_on_an_untagged_documents_store(client):

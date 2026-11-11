@@ -97,11 +97,11 @@ def dataset_card(manifest: dict, repo: str) -> str:
             "",
             "# keyword-rag builds",
             "",
-            "Build outputs for [rag-qa](https://github.com/jonathanchowjh/rag-qa)"
-            " collections: a vocabulary of technique terms, and each document's tags from it"
-            " with its abstracted form (principle, method, answer). A rag-qa load of the"
+            "Build outputs for [keyword-rag](https://github.com/jonathanchowjh/rag-qa)"
+            " stores: a vocabulary of technique terms, and each document's tags from it"
+            " with its abstracted form (principle, method, answer). A keyword-rag load of the"
             " same dataset, limit, recipe and build settings applies them with no AI call;"
-            " anyone can read them without rag-qa.",
+            " anyone can read them without keyword-rag.",
             "",
             "| Entry | Dataset | Limit | Recipe | Documents | Authored by |",
             "|---|---|---|---|---|---|",

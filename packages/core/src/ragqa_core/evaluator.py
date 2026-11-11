@@ -1594,6 +1594,10 @@ class Evaluator:
             if method not in job["setup"]["methods"]:
                 without += 1
                 continue
+            try:
+                self._set_questions(spec, job["setup"])
+            except NotFound:  # its eval-set version is gone: pass it over like an unscored run
+                continue
             summary = self.summary(job["id"], None, method)
             if summary is not None and summary["answer"] is not None:
                 break

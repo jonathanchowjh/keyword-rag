@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Changed (breaking): a request whose job's model is set up and usable but unpriced is refused with 422 `<connection>/<model> has no price; enter one first` where it would spend (proposing keyword lists, saving a vocabulary and requests checked for a model first answered 503; a disabled or keyless unpriced model is 503 everywhere, adding keyword tags included); a load that would only propose keyword lists skips the proposal, and chat's attempt-answer route puts it in the attempt's `error`.
+- Changed (breaking): an unconfirmed load that would queue because it is free is refused with 409 when the `calls` or `est_usd` it sends are stale, as adding documents already was.
+- The Hub dataset card says keyword-rag; the link still points at the rag-qa repository.
+
+### Fixed
+
+- The run page's question picker now defaults to the first method that retrieves, not the no-retrieval baseline.
+- After a refusal because the price changed, the page takes away the old Start, so a fresh click prices it again instead of resending the old price.
+- GET /collections/{n} on a Documents store whose scored run's eval-set version is gone shows the next run's score, or none, instead of 404; the store page loads again.
+
 ## 0.2.0 — 2026-11-11
 
 Lines marked breaking are changes a client of 0.1.0 can notice. Routes, fields and settings are described in [REFERENCE.md](REFERENCE.md).

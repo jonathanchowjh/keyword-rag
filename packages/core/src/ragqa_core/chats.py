@@ -51,6 +51,7 @@ from ragqa_core.types import CollectionSpec, Hit, SearchSettings, UnknownCollect
 # the decision's or the attempt's `error`.
 CHAT_ERRORS = PER_METHOD_ERRORS + (UnknownPrice, UnknownModel)
 NEW_TITLE = "New chat"
+NO_STORE = "a chat needs at least one store"
 TITLE_CHARS = 60
 CHAT_FIELDS = ("evidence_size", "rerank", "rewrite")  # the chat's own; null: Settings
 UPDATE_FIELDS = ("title", "stores", *CHAT_FIELDS)
@@ -188,7 +189,7 @@ class Chats:
     def create(self, stores: list[str], title: str | None = None) -> dict:
         stores = list(dict.fromkeys(stores))
         if not stores:
-            raise ValueError("a chat needs at least one store")
+            raise ValueError(NO_STORE)
         for store in stores:
             self.retriever.spec(store)
         settings = {"evidence_size": None, "rewrite": None, "rerank": None, "stores": {}}
@@ -200,7 +201,7 @@ class Chats:
         template = self._chat(chat_id)
         stores = [s for s in template["stores"] if db.get_collection(self.conn, s)]
         if not stores:
-            raise ValueError("a chat needs at least one store")
+            raise ValueError(NO_STORE)
         settings = copy.deepcopy(template["settings"])
         chosen = settings.get("stores") or {}
         settings["stores"] = {s: v for s, v in chosen.items() if s in stores}
@@ -251,7 +252,7 @@ class Chats:
                     raise ValueError("stores must be a list of store names")
                 stores = list(dict.fromkeys(stores))
                 if not stores:
-                    raise ValueError("a chat needs at least one store")
+                    raise ValueError(NO_STORE)
                 for store in stores:
                     if store not in chat["stores"]:
                         self.retriever.spec(store)

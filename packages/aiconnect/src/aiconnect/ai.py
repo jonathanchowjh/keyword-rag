@@ -539,6 +539,16 @@ class AI:
             self.usable(connection_id, model_id) and self.rates(connection_id, model_id) is not None
         )
 
+    def need_price(self, role: str = "default", model: str | None = None) -> None:
+        """Refuse a model a call would use that is usable but has no price. A missing,
+        disabled or keyless model is left to `ready`: it is not this refusal."""
+        try:
+            connection_id, model_id = self.resolve(model or self.model_for(role))
+        except (NoConnection, UnknownModel):
+            return
+        if self.usable(connection_id, model_id):
+            self.need_rates(connection_id, model_id)
+
     def usable(self, connection_id: str, model_id: str) -> bool:
         """The model is enabled and its connection can be called: it has a key, or needs none."""
         rows = self.sql(
@@ -980,8 +990,11 @@ class AI:
         """What complete_many would spend on these prompts, and how many calls it would send:
         the cache misses, a repeated prompt once. A cached one is free, and the rest are
         priced batched exactly when it would send them as a batch (more than
-        BATCH_THRESHOLD misses, on a kind with a Batch API). Raises as estimate_usd does."""
+        BATCH_THRESHOLD misses, on a kind with a Batch API). Raises as estimate_usd does,
+        except that an unpriced model that cannot be called is NoConnection: usable first."""
         connection_id, model_id = self.resolve(model or self.model_for(role))
+        if self.rates(connection_id, model_id) is None and not self.usable(connection_id, model_id):
+            raise NoConnection(role)
         rates = self.need_rates(connection_id, model_id)
         keys = self._keys(connection_id, model_id, system, prompts, max_tokens)
         cached: dict[str, Completion] = {}

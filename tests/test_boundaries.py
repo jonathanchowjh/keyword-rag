@@ -409,8 +409,7 @@ def test_readme_names_real_ui_labels_and_env_vars():
 
 def test_changelog_keeps_every_breaking_line():
     text = (ROOT / "CHANGELOG.md").read_text()
-    section = re.split(r"^## ", text, flags=re.M)[1]
-    assert section.startswith("0.2.0")
+    section = next(s for s in re.split(r"^## ", text, flags=re.M) if s.startswith("0.2.0"))
     breaking = [line for line in section.splitlines() if "(breaking)" in line]
     # 15 `(breaking)` lines in `## Unreleased` at 11eeeac, plus the one then written
     # `Breaking:` (keyword-lists/propose needing confirm), now marked like the rest.
@@ -439,3 +438,19 @@ def test_versions_agree():
     changelog = (ROOT / "CHANGELOG.md").read_text()
     versions["CHANGELOG.md"] = re.search(r"^## (\d+\.\d+\.\d+)", changelog, re.M).group(1)
     assert len(set(versions.values())) == 1, versions
+
+
+def test_ui_js_copies_of_server_rules_agree():
+    from ragqa_api import guards
+    from ragqa_core import jobs
+
+    ui = (API_SRC / "ragqa_api/static/ui.js").read_text()
+
+    def strings(name):
+        body = re.search(rf"export const {name} = new Set\(\[(.*?)\]\)", ui, re.S).group(1)
+        return re.findall(r'"([^"]*)"', body)
+
+    assert tuple(strings("BUSY")) == jobs.BUSY
+    assert set(strings("RESUMABLE")) == set(jobs.RESUMABLE)
+    price = re.search(r'export const PRICE_CHANGED = "([^"]*)"', ui).group(1)
+    assert price == guards.PRICE_CHANGED
