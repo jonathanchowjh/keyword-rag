@@ -1,12 +1,8 @@
-import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
-  confirmSpend, count, dropStaleStart, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, notFound, num, paint, pct,
+import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, capital, catalog, clock,
+  confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, notFound, num, paint, pct,
   pill, plural, poll, pts, refreshSpend, say, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
-// What a hybrid_rerank run recorded before runs recorded its reranker and pool: it used these
-// (evaluator.LEGACY_RERANK_MODEL and retriever.POOL), and a resume or repeat keeps them.
-const LEGACY_RERANK_MODEL = "BAAI/bge-reranker-v2-m3-int8";
-const LEGACY_RERANK_POOL = 50;
 const STATE_TEXT = { ahead: "ahead", cant_tell: "can't tell", behind: "behind" };
 
 const parts = location.pathname.split("/");
@@ -29,7 +25,7 @@ const isControl = (m) => cat.methods[m]?.group === "control";
 const retrieves = (m) => cat.methods[m]?.retrieves !== false;
 // The reranker and pool a hybrid_rerank run used; null for a run without hybrid_rerank.
 const reranked = (s) => s.methods.includes("hybrid_rerank")
-  ? { model: s.rerank_model ?? LEGACY_RERANK_MODEL, pool: s.rerank_pool ?? LEGACY_RERANK_POOL }
+  ? { model: s.rerank_model, pool: s.rerank_pool }
   : null;
 // Lists joined; settings (a run's search) as "name value" pairs, a nested one in brackets.
 const show = (v) =>
@@ -159,7 +155,7 @@ function answerHtml() {
     return `<p class="verdict">${lead} ${esc(why)}, so it gives no answer.</p>`;
   }
   const notes = verdictNotes({ ...a, proxy_trusted: run.proxy_trusted }, { raw: rawScale() })
-    .map((n) => `${n.charAt(0).toUpperCase()}${n.slice(1)}.`)
+    .map((n) => capital(n) + ".")
     .join(" ");
   return `<p class="verdict">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
     plural(run.question_count, "question"))}.</p>${partialHtml()}
@@ -531,16 +527,11 @@ async function rerun() {
     ...(r ? { rerank_model: r.model, rerank_pool: r.pool } : {}) };
   try {
     const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
-    confirmSpend($("act-confirm"), estimate, async () => {
-      try {
-        const queued = await api("/eval", { method: "POST", body: { ...request, confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
-        refreshSpend();
-        location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
-      } catch (e) {
-        dropStaleStart($("act-confirm"), e);
-        say($("act-msg"), e.message);
-      }
-    });
+    confirmSpend($("act-confirm"), estimate, async (shown) => {
+      const queued = await api("/eval", { method: "POST", body: { ...request, ...shown } });
+      refreshSpend();
+      location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
+    }, $("act-msg"));
   } catch (e) {
     say($("act-msg"), e.message);
   }

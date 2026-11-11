@@ -25,6 +25,22 @@ class UnknownCollection(Exception):
     pass
 
 
+class Stale(Exception):
+    """The thing changed since the caller read it. The API answers 409."""
+
+
+class EvalSetMismatch(Exception):
+    """An eval set and a store of different question types: a run cannot ask one of the other."""
+
+
+def type_clash(eval_set: str, set_type: str, store: str, store_type: str) -> EvalSetMismatch:
+    return EvalSetMismatch(f"eval set '{eval_set}' is {set_type}; store '{store}' is {store_type}")
+
+
+def unknown_set(name: str) -> str:
+    return f"no eval set {name!r}"
+
+
 def unknown_store(name: str) -> str:
     return f"no store named {name!r}"
 

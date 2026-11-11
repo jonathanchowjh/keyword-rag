@@ -4,7 +4,7 @@ Run it inside the service, which has the model cache and no uv or scripts/:
 
     docker compose exec -T api python - < scripts/time_embed.py
 
-Models are argv, else MODELS. For each it prints the load time (a first run downloads
+Models are argv, else EMBEDDERS. For each it prints the load time (a first run downloads
 the model into the cache), the time to embed 1,000 passages of 1,500 characters in
 batches of EMBED_BATCH after one untimed call, and the median of 20 single-query calls.
 """
@@ -16,10 +16,9 @@ import time
 from fastembed import TextEmbedding
 
 from ragqa_core.models import EMBED_BATCH
+from ragqa_core.search_defaults import EMBEDDERS
 from ragqa_core.settings import load_settings
 
-# search_defaults.EMBEDDERS is missing from the image until it is rebuilt: repeated here.
-MODELS = ("BAAI/bge-small-en-v1.5", "BAAI/bge-base-en-v1.5", "Qwen/Qwen3-Embedding-0.6B-Q")
 PASSAGES = 1000
 CHARS = 1500
 QUERIES = 20
@@ -59,7 +58,7 @@ def load_model(name: str, settings) -> TextEmbedding:
 
 def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
-    names = list(argv) if argv else list(MODELS)
+    names = list(argv) if argv else list(EMBEDDERS)
     texts = passages(PASSAGES, CHARS)
     print("model  dim  load_s  per_1000_s  query_ms", flush=True)
     for name in names:

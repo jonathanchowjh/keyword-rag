@@ -900,7 +900,9 @@ def test_rerun_repeats_the_run_s_reranker_and_pool(page, seeded):
 
 
 def test_rerun_of_a_run_from_before_the_reranker_was_recorded_uses_bge_at_50(page, seeded):
-    setup = {"methods": ["hybrid", "hybrid_rerank"], "rerank_pool": None, "rerank_model": None}
+    # The server fills in what an old run never recorded (see the API test).
+    bge = "BAAI/bge-reranker-v2-m3-int8"
+    setup = {"methods": ["hybrid", "hybrid_rerank"], "rerank_pool": 50, "rerank_model": bge}
     sent = rerun_bodies(page, seeded, setup)
     page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
     expect(page.locator("#head")).to_contain_text("reranker bge-reranker-v2-m3-int8, pool 50")
@@ -1186,7 +1188,7 @@ def test_documents_run_form_ticks_chat_method_not_controls(page, seeded):
     with page.expect_request(lambda r: r.url.endswith("/eval") and r.method == "POST") as sent:
         page.get_by_role("button", name="Estimate").click()
     posted = json.loads(sent.value.post_data)
-    assert posted["rerank_pool"] == 20
+    assert not {"k", "rrf_k", "rerank_pool"} & posted.keys()  # the server picks all three
 
 
 def test_documents_partial_run_says_partial(page, seeded):

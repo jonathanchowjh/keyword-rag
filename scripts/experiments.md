@@ -14,7 +14,9 @@ python scripts/experiments.py report JOB_ID [JOB_ID ...]
 - `estimate` posts every arm to `/eval` without `confirm` and prints each price. It
   queues nothing.
 - `run` needs `--confirm`. It prices the arms first and refuses (exit 2, nothing
-  queued) when any arm costs money unless you also pass `--paid`.
+  queued) when any arm costs money unless you also pass `--paid`. It confirms each arm
+  with the calls and price it showed, and stops with exit 3 when the server says the
+  price changed since (the arms already queued stay queued; run `estimate` again).
 - `report` prints one table: arm, metric, value, 95% bootstrap CI. Arms are named
   by method and their search settings (`keyword_rag w=1/1/2 tags=oracle
   ex=abstracted`, `rrf_k=30`). A run that has not finished is marked with its status. Take the job ids from the `run` output.

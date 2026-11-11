@@ -45,13 +45,14 @@ from ragqa_core.retriever import (
     method_reasons,
 )
 from ragqa_core.search_defaults import RECOMMENDED, STORE_FIELDS, inherited
-from ragqa_core.types import CollectionSpec, Hit, SearchSettings, UnknownCollection
+from ragqa_core.types import CollectionSpec, Hit, NotFound, SearchSettings, UnknownCollection
 
 # What a store's step or an answer may raise and still leave a saved attempt: it becomes
 # the decision's or the attempt's `error`.
 CHAT_ERRORS = PER_METHOD_ERRORS + (UnknownPrice, UnknownModel)
 NEW_TITLE = "New chat"
 NO_STORE = "a chat needs at least one store"
+NOT_ON_CHAT = "'{}' is not on this chat"
 TITLE_CHARS = 60
 CHAT_FIELDS = ("evidence_size", "rerank", "rewrite")  # the chat's own; null: Settings
 UPDATE_FIELDS = ("title", "stores", *CHAT_FIELDS)
@@ -79,13 +80,6 @@ NEEDS_AI = "needs AI"  # why_not's reason when no AI resolves for a method that 
 class NeedsAI(Exception):
     """A method set on a chat that would call AI when none resolves: no model, not the
     store, is what is missing."""
-
-
-class UnknownChat(KeyError):
-    """An unknown chat, message or attempt."""
-
-    def __str__(self) -> str:  # a KeyError quotes its message
-        return str(self.args[0]) if self.args else ""
 
 
 def error_text(e: Exception) -> str:
@@ -191,7 +185,7 @@ class Chats:
         if not stores:
             raise ValueError(NO_STORE)
         for store in stores:
-            self.retriever.spec(store)
+            db.require_collection(self.conn, store)
         settings = {"evidence_size": None, "rewrite": None, "rerank": None, "stores": {}}
         return self._chat(db.create_chat(self.conn, title or NEW_TITLE, stores, settings))
 
@@ -226,11 +220,6 @@ class Chats:
     def in_force(self, chat_id: str) -> dict[str, Any]:
         return self._in_force(self._chat(chat_id))
 
-    def store_in_force(self, store: str, chosen: dict | None = None) -> dict[str, Any]:
-        """The store's method and candidates, each with the level it comes from. `chosen`
-        holds the chat's values for the store."""
-        return search_defaults.store_in_force(self.conn, store, chosen)
-
     def update(self, chat_id: str, changes: dict[str, object]) -> dict:
         """Only stores being added must exist, so a list naming a deleted store still saves.
         None for evidence_size, rewrite or rerank inherits; a store taken off the chat drops
@@ -255,7 +244,7 @@ class Chats:
                     raise ValueError(NO_STORE)
                 for store in stores:
                     if store not in chat["stores"]:
-                        self.retriever.spec(store)
+                        db.require_collection(self.conn, store)
             settings = {**chat["settings"], **{f: changes[f] for f in CHAT_FIELDS if f in changes}}
             if stores is not None:
                 chosen = settings.get("stores") or {}
@@ -381,8 +370,8 @@ class Chats:
         with self._lock:
             chat = self._chat(chat_id)
             if store not in chat["stores"]:
-                raise UnknownCollection(f"'{store}' is not on this chat")
-            spec = self.retriever.spec(store)
+                raise UnknownCollection(NOT_ON_CHAT.format(store))
+            spec = db.require_collection(self.conn, store)
             stores = dict(chat["settings"].get("stores") or {})
             chosen = stores.get(store) or {}
             method = chosen.get("method")
@@ -401,7 +390,7 @@ class Chats:
         return {
             "chat_method": search_defaults.chat_method(db.get_chat_method(self.conn, store)),
             "chat_k": db.get_chat_k(self.conn, store),
-            "in_force": self.store_in_force(store),
+            "in_force": search_defaults.store_in_force(self.conn, store),
         }
 
     # -- one attempt -------------------------------------------------------------
@@ -461,11 +450,9 @@ class Chats:
             for s in chat["stores"]
         }
         size = int(force["evidence_size"]["value"])
-        rerank, rrf_k = bool(force["rerank"]["value"]), int(force["rrf_k"])
-        reranker, pool_cap = str(force["rerank_model"]), int(force["rerank_pool"])
-        found = self.search(
-            plan, text["search_text"], text["rerank_text"], size, rerank, rrf_k, reranker, pool_cap
-        )
+        rerank = bool(force["rerank"]["value"])
+        c = {f: force[f] for f in ("rrf_k", "rerank_model", "rerank_pool")}
+        found = self.search(plan, text["search_text"], text["rerank_text"], size, rerank, c)
         # No answer model was available when this attempt was made, re-runs included.
         passages_only = model is None and not self._resolves("answer")
         row = {
@@ -483,12 +470,12 @@ class Chats:
                 "rerank_text": text["rerank_text"],
                 "merged_by": found["merged_by"],
                 "rerank": rerank,
-                "rerank_model": reranker,
-                "rerank_pool": pool_cap,
+                "rerank_model": c["rerank_model"],
+                "rerank_pool": c["rerank_pool"],
                 "rewrite": bool(force["rewrite"]["value"]),
                 "follow_up_turns": int(force["follow_up_turns"]),
                 "evidence_size": size,
-                "rrf_k": rrf_k,
+                "rrf_k": c["rrf_k"],
                 "pool": found["pool"],
                 "notes": found["notes"],
                 "passages_only": passages_only,
@@ -514,16 +501,15 @@ class Chats:
         rerank_text: str,
         evidence_size: int,
         rerank: bool,
-        rrf_k: int,
-        rerank_model: str,
-        rerank_pool: int,
+        c: dict[str, Any],
     ) -> dict:
         """Searches each store in `plan` ({store: {method, candidates}}) with search_text,
-        pools their passages round-robin by rank up to rerank_pool, reranks the pool against
+        pools their passages round-robin by rank up to c['rerank_pool'], reranks the pool against
         rerank_text when `rerank` is set and the reranker is ready, and cuts to
         evidence_size. The pool is never smaller than evidence_size. Without a rerank the
-        pool keeps its order, scored 1 / (rrf_k + rank); a loading or failed reranker leaves
+        pool keeps its order, scored 1 / (c['rrf_k'] + rank); a loading or failed reranker leaves
         a note, and is never waited for."""
+        rrf_k = c["rrf_k"]
         decisions, lists = [], {}
         for store, chosen in plan.items():
             decision, hits = self._decide(
@@ -532,13 +518,15 @@ class Chats:
             decisions.append(decision)
             if hits:
                 lists[store] = hits
-        pool = round_robin(lists, max(rerank_pool, evidence_size))  # never fewer passages
+        pool = round_robin(lists, max(c["rerank_pool"], evidence_size))  # never fewer passages
         notes: list[str] = []
         merged: list[tuple[str, Hit, int, float, float | None]] = [
             (store, hit, rank, 1 / (rrf_k + rank), None) for store, hit, rank in pool
         ]
         merged_by = "rrf"
-        scores = self._rerank(rerank_text, pool, rerank_model, notes) if rerank and pool else None
+        scores = (
+            self._rerank(rerank_text, pool, c["rerank_model"], notes) if rerank and pool else None
+        )
         if scores is not None:
             order = sorted(range(len(pool)), key=lambda i: (-scores[i], i))
             merged = [(*pool[i], scores[i], relevance(scores[i])) for i in order]
@@ -563,10 +551,9 @@ class Chats:
         round-robin order, with a note. keyword_rag whose tags would be the AI's is left out
         with a note, AI or none; so is a method whose search fails. `labelled` passages the
         pool missed come back under `labelled`; those the store no longer holds, `missing`."""
-        spec = self.retriever.spec(store)
+        spec = db.require_collection(self.conn, store)
         settings: dict[str, Any] = search_defaults.in_force(self.conn)
-        rrf_k = int(settings["rrf_k"])
-        reranker = search_defaults.reranker_in_force(settings, self.retriever.models.rerank_model)
+        c = search_defaults.search_settings(settings, self.retriever.models.rerank_model)
         notes: list[str] = []
         lists: dict[str, list[Hit]] = {}
         reasons = method_reasons(self.conn, spec)
@@ -579,7 +566,7 @@ class Chats:
             if self.why_not(spec, method) is not None or is_paid(spec, method):
                 continue
             try:
-                hits, _ = self._retrieve(spec, question, method, POOL_DEPTH, rrf_k, search)
+                hits, _ = self._retrieve(spec, question, method, POOL_DEPTH, c["rrf_k"], search)
             except CHAT_ERRORS as e:
                 label = catalog.METHODS[method]["label"]
                 notes.append(f"{label} was left out: {error_text(e)}")
@@ -592,7 +579,7 @@ class Chats:
             notes.append(f"No passages found in {store}")
         else:
             said: list[str] = []
-            scores = self._rerank(question, pool, reranker, said)
+            scores = self._rerank(question, pool, c["rerank_model"], said)
             if scores is None:
                 notes.append(POOL_LOADING if said == [RERANK_LOADING] else POOL_UNAVAILABLE)
             else:
@@ -618,7 +605,7 @@ class Chats:
     ) -> tuple[str, str]:
         """The labelling answer's prompt: chat's, over the store's held passages among
         `passage_ids`, each once in the order sent, with no history."""
-        self.retriever.spec(store)
+        db.require_collection(self.conn, store)
         hits = self.retriever.store.get(store, list(dict.fromkeys(passage_ids)))
         if not hits:
             raise ValueError(f"mark at least one passage Right that is in {store} first")
@@ -692,7 +679,7 @@ class Chats:
             return decision, []
         decision["note"] = None
         if method is None or candidates is None:  # not given: the store's own chain
-            force = self.store_in_force(store)
+            force = search_defaults.store_in_force(self.conn, store)
             method = method or str(force["method"]["value"])
             candidates = candidates or int(force["candidates"]["value"])
         search = chat_search(spec)
@@ -810,11 +797,11 @@ class Chats:
             search_defaults.check(field, value)
         for store, values in stores.items():
             if store not in chat["stores"]:
-                raise UnknownCollection(f"'{store}' is not on this chat")
+                raise UnknownCollection(NOT_ON_CHAT.format(store))
             known(values, STORE_FIELDS, f"settings for '{store}'")
             for field, value in values.items():
                 search_defaults.check(field, value)
-            spec = self.retriever.spec(store)
+            spec = db.require_collection(self.conn, store)
             method = values.get("method")
             why = self.why_not(spec, method) if method is not None else None
             if why:
@@ -852,34 +839,33 @@ class Chats:
             f: inherited({"chat": own.get(f), "settings": saved[f], "recommended": RECOMMENDED[f]})
             for f in CHAT_FIELDS
         }
-        for field in ("follow_up_turns", "rrf_k", "rerank_pool"):
-            out[field] = settings[field]
-        out["rerank_model"] = search_defaults.reranker_in_force(
-            settings, self.retriever.models.rerank_model
-        )
+        out["follow_up_turns"] = settings["follow_up_turns"]
+        out.update(search_defaults.search_settings(settings, self.retriever.models.rerank_model))
         out["rewrite_available"] = self._resolves("rewrite")
         out["answer_available"] = self._resolves("answer")
         chosen = own.get("stores") or {}
         live = [s for s in chat["stores"] if db.get_collection(self.conn, s) is not None]
-        out["stores"] = {s: self.store_in_force(s, chosen.get(s)) for s in live}
+        out["stores"] = {
+            s: search_defaults.store_in_force(self.conn, s, chosen.get(s)) for s in live
+        }
         return out
 
     def _chat(self, chat_id: str) -> dict:
         chat = db.get_chat(self.conn, chat_id)
         if chat is None:
-            raise UnknownChat(f"no chat {chat_id}")
+            raise NotFound(f"no chat {chat_id}")
         return chat
 
     def _message(self, chat_id: str, n: int) -> dict:
         found = [m for m in db.chat_messages(self.conn, chat_id) if m["n"] == n]
         if not found:
-            raise UnknownChat(f"no message {n} in chat {chat_id}")
+            raise NotFound(f"no message {n} in chat {chat_id}")
         return found[0]
 
     def _attempt_row(self, chat_id: str, n: int, attempt: int) -> dict:
         found = [a for a in db.chat_attempts(self.conn, chat_id, n) if a["attempt"] == attempt]
         if not found:
-            raise UnknownChat(f"no attempt {attempt} of message {n} in chat {chat_id}")
+            raise NotFound(f"no attempt {attempt} of message {n} in chat {chat_id}")
         return found[0]
 
     def list(self) -> list[dict]:

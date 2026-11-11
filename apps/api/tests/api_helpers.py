@@ -422,6 +422,3 @@ def small_model(client, monkeypatch) -> None:
 
 def reembed(client, name="c", model="fake/small"):
     return client.post(f"/collections/{name}/reembed", json={"model": model})
-
-
-NO_KEYWORDS_MODEL = "connect a model for keywords first"

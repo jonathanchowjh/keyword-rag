@@ -1,4 +1,5 @@
-import { $, NONE, api, askDelete, catalog, clock, count, esc, head, importBox, notFound, plural, say, shell, short } from "/static/ui.js";
+import { ImportBox } from "/static/import_box.js";
+import { $, NONE, api, askDelete, catalog, clock, count, esc, head, notFound, plural, say, shell, short } from "/static/ui.js";
 import { Labelling } from "/static/labelling.js";
 
 const PAGE_SIZE = 50;
@@ -270,34 +271,27 @@ async function viewVersion(version) {
   }
 }
 
-// The whole-set save of the old questions, checked against the version the page holds. While
-// it is under way no mark, Find, Save, Label or Delete can change what the panel holds.
+// The whole-set PUT of the old questions, checked against the version the page holds.
 async function restore() {
   const { version, questions } = viewing;
   say($("ver-msg"), "", "err");
-  labelling.restoring = true;
-  labelling.canSave(); // set before the first await, so a second click finds it disabled
-  try {
-    await api(`/eval-sets/${enc}/questions`, { method: "PUT", body: { questions, base_version: set.version } });
-  } catch (e) {
-    labelling.restoring = false;
-    say($("ver-msg"), e.message, "err");
-    labelling.canSave();
-    return;
-  }
-  viewing = null;
-  drawView();
-  try {
-    await load();
-    say($("ver-msg"), `Restored version ${short(version)}.`, "ok");
-  } catch (e) {
-    say($("ver-msg"), e.message, "err");
-  }
-  labelling.restoring = false;
-  // The question it held may be gone. Typed in while the PUT was out, the panel is left as it
-  // is: the next Save is checked against the question as read, and offers Reload.
-  if (labelling.open && !labelling.saving && !labelling.unsaved) labelling.openQuestion(null);
-  labelling.canSave();
+  await labelling.restore(async () => {
+    try {
+      await api(`/eval-sets/${enc}/questions`, { method: "PUT", body: { questions, base_version: set.version } });
+    } catch (e) {
+      say($("ver-msg"), e.message, "err");
+      return false;
+    }
+    viewing = null;
+    drawView();
+    try {
+      await load();
+      say($("ver-msg"), `Restored version ${short(version)}.`, "ok");
+    } catch (e) {
+      say($("ver-msg"), e.message, "err");
+    }
+    return true;
+  });
 }
 
 function bindVersions() {
@@ -382,7 +376,7 @@ async function start() {
   try {
     cat = await catalog();
     await load();
-    importBox($("imp-questions"), {
+    new ImportBox($("imp-questions"), {
       uploadPath: `/eval-sets/${enc}/uploads`,
       importPath: `/eval-sets/${enc}/imports`,
       kind: "questions",

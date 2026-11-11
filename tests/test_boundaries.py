@@ -109,16 +109,9 @@ def test_gate_has_the_slow_steps():
 
 def test_env_example_lists_every_setting():
     names = re.findall(r"^#?\s*([A-Z_]+)=", (ROOT / ".env.example").read_text(), re.M)
-    assert set(names) >= {
-        "ANTHROPIC_API_KEY",
-        "RAGQA_MONTHLY_CAP_USD",
-        "RAGQA_MODEL",
-        "RAGQA_USERNAME",
-        "RAGQA_PASSWORD",
-        "RAGQA_DENSE_MODEL",
-        "RAGQA_JUDGE_MODEL",
-        "RAGQA_RERANK_MODEL",
-    }
+    source = (ROOT / "packages/core/src/ragqa_core/settings.py").read_text()
+    settings = set(re.findall(r'get\("([A-Z_]+)"', source)) - {"RAGQA_HOME"}  # the image sets it
+    assert settings <= set(names), settings - set(names)
 
 
 def test_env_example_sets_nothing():

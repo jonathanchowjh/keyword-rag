@@ -28,6 +28,7 @@ from aiconnect.ai import (
     BudgetExceeded,
     Conflict,
     NoConnection,
+    NotStored,
     ProviderError,
     UnknownModel,
     UnknownPrice,
@@ -37,18 +38,18 @@ from ragqa_api.routes import ai_settings, chats, documents, eval_sets, keyword_l
 from ragqa_core import db, search_defaults
 from ragqa_core.builder import Builder
 from ragqa_core.catalog import catalog
-from ragqa_core.chats import AlreadyAnswered, Chats, NeedsAI, UnknownChat
+from ragqa_core.chats import AlreadyAnswered, Chats, NeedsAI
 from ragqa_core.datasets import DATASETS
-from ragqa_core.evaluator import EvalSetMismatch, Evaluator
+from ragqa_core.evaluator import Evaluator
 from ragqa_core.imports import TooLarge
-from ragqa_core.indexer import Indexer, ListsBusy, ModelMismatch
+from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.jobs import no_ai
 from ragqa_core.loader import Loader
 from ragqa_core.models import Models
 from ragqa_core.retriever import MethodUnavailable, Retriever
 from ragqa_core.settings import Settings, load_settings
 from ragqa_core.store import Store
-from ragqa_core.types import AlreadyExists, NotFound, UnknownCollection
+from ragqa_core.types import AlreadyExists, EvalSetMismatch, NotFound, Stale, UnknownCollection
 from ragqa_worker.worker import Worker
 
 
@@ -138,22 +139,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return handler
 
-    for exc in (UnknownCollection, NotFound):
+    for exc in (UnknownCollection, NotFound, NotStored):
         app.add_exception_handler(exc, error(404))
     app.add_exception_handler(ValueError, error(422))
     app.add_exception_handler(TooLarge, error(413))
     for exc in (UnknownModel, UnknownPrice):
         app.add_exception_handler(exc, error(422))
-    app.add_exception_handler(UnknownChat, error(404))
     for exc in (
         AlreadyAnswered,
         MethodUnavailable,
         ModelMismatch,
-        ListsBusy,
         Conflict,
         AwaitingReplies,
         EvalSetMismatch,
         AlreadyExists,
+        Stale,
     ):
         app.add_exception_handler(exc, error(409))
     app.add_exception_handler(NeedsAI, error(503))

@@ -8,12 +8,12 @@ from pathlib import Path
 
 from aiconnect.ai import AI
 from ragqa_core import db, imports
-from ragqa_core.builder import Builder, as_item, builds
+from ragqa_core.builder import Builder, as_item
 from ragqa_core.connection import Connection
 from ragqa_core.datasets import load as load_dataset
 from ragqa_core.hub import Hub
 from ragqa_core.indexer import Indexer
-from ragqa_core.recipes import build_for, build_of, build_settings
+from ragqa_core.recipes import build_for, build_of, build_settings, builds
 from ragqa_core.store import Store
 from ragqa_core.text_split import chunk_of
 from ragqa_core.types import CollectionSpec, Item, Question
@@ -68,23 +68,6 @@ def stored_exclusions(q: Question, stored: set[str]) -> Question:
         return q
     kept = [i for i in q.meta["excluded_ids"] if i in stored]
     return replace(q, meta={**q.meta, "excluded_ids": kept})
-
-
-def keep_labels(old: Question, new: Question) -> Question:
-    """The file's question over the stored one in a Documents set. A file that carries
-    judged_ids replaces the stored question whole. Otherwise its text and meta win, its gold
-    ids join the stored ones, and the stored judged passages and typed answers are kept
-    unless the file has answers of its own. The result is what gets stored."""
-    if new.judged_ids is not None:
-        return db.judged_with_gold(new)
-    gold_ids = list(dict.fromkeys([*old.gold_ids, *new.gold_ids]))
-    merged = replace(
-        new,
-        gold_ids=gold_ids,
-        gold_answers=new.gold_answers or old.gold_answers,
-        judged_ids=old.judged_ids,
-    )
-    return db.judged_with_gold(merged)
 
 
 def roles_needed(spec: CollectionSpec, estimate: dict | None) -> list[str]:
@@ -340,28 +323,6 @@ class Loader:
             db.ensure_eval_set(self.conn, name, spec.qa_type)
             db.set_default_eval_set(self.conn, spec.name, name)
         return name
-
-    def question_counts(
-        self, eval_set: str, questions: list[Question]
-    ) -> tuple[dict, list[Question]]:
-        """New, updated, unchanged against the eval set's questions."""
-        stored = {q.id: q for q in db.get_questions(self.conn, eval_set)}
-        found = db.get_eval_set(self.conn, eval_set)
-        documents = found is not None and found["qa_type"] == "documents"
-        counts, todo = {"new": 0, "updated": 0, "unchanged": 0}, []
-        for q in questions:
-            old = stored.get(q.id)
-            if old is not None and documents:
-                q = keep_labels(old, q)
-            if old is None:
-                counts["new"] += 1
-            elif asdict(q) == asdict(old):
-                counts["unchanged"] += 1
-                continue
-            else:
-                counts["updated"] += 1
-            todo.append(q)
-        return counts, todo
 
     def estimate_import(self, spec: CollectionSpec, setup: dict) -> dict:
         built, skipped, files = self._read_upload(spec, setup)

@@ -72,7 +72,7 @@ def test_ai_settings_round_trip(client):
     assert client.put("/ai/budget", json={"cap_usd": 7.5}).status_code == 200
     assert client.get("/ai").json()["budget"]["cap_usd"] == 7.5
     r = client.post("/ai/connections/router/models", json={"model_id": "x", "price_in": 1})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
     r = client.patch("/ai/connections/router", json={"label": "Mine", "api_key": "abc"})
     assert r.status_code == 200 and client.get("/ai").json()["connections"][1]["label"] == "Mine"
     assert client.put("/ai/roles/answer", json={"model": None}).status_code == 200
@@ -87,7 +87,7 @@ def test_ai_validation_errors_are_422(client):
     assert client.patch("/ai/connections/oa", json={"label": ""}).status_code == 422
     r = client.post("/ai/connections/oa/models", json={"model_id": "m", "price_in": -1})
     assert r.status_code == 422
-    assert client.put("/ai/models/oa/ghost", json={"enabled": False}).status_code == 422
+    assert client.put("/ai/models/oa/ghost", json={"enabled": False}).status_code == 404
     client.post("/ai/connections/oa/models", json={"model_id": "m"})
     assert client.put("/ai/models/oa/m", json={"enabled": None}).status_code == 422
     assert client.post("/ai/connections", json={"preset": "openai", "id": "oa"}).status_code == 409
@@ -294,3 +294,15 @@ def test_an_unknown_reranker_is_422(client):
     r = client.put("/search-defaults", json={"rerank_model": "nope/y"})
     assert r.status_code == 422 and "unknown reranker" in r.text
     assert called == []
+
+
+def test_a_missing_connection_on_a_path_is_404(client):
+    calls = [
+        client.patch("/ai/connections/nope", json={"label": "x"}),
+        client.delete("/ai/connections/nope"),
+        client.post("/ai/connections/nope/test"),
+        client.post("/ai/connections/nope/models/fetch"),
+        client.post("/ai/connections/nope/models", json={"model_id": "m"}),
+    ]
+    for r in calls:
+        assert (r.status_code, r.json()["detail"]) == (404, "no connection nope")

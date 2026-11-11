@@ -18,13 +18,21 @@ from ragqa_core.db import (
     run_items,
     save_questions,
 )
-from ragqa_core.evaluator import EvalSetMismatch, Evaluator, changes_since
+from ragqa_core.evaluator import Evaluator, changes_since
 from ragqa_core.fakes import fake_ai, fake_models, fake_replies
 from ragqa_core.indexer import Indexer
 from ragqa_core.recipes import resolve_search
 from ragqa_core.retriever import Retriever
 from ragqa_core.store import Store
-from ragqa_core.types import CollectionSpec, Hit, Item, KeywordLists, Question, SearchSettings
+from ragqa_core.types import (
+    CollectionSpec,
+    EvalSetMismatch,
+    Hit,
+    Item,
+    KeywordLists,
+    Question,
+    SearchSettings,
+)
 
 TOPICS = ["enzyme", "market", "volcano", "optics", "genetics"]
 ITEMS = [
@@ -390,7 +398,7 @@ def test_run_skips_recorded_ids_whose_question_is_gone(env):
     job = ev.queue("c", "dev", ["hybrid"], False, None)
     setup = get_job(conn, job)["setup"]
     ids = ["q-gone", "q-market", "q-enzyme"]
-    versions = ev._record_setup(job, ev.retriever.spec("c"), setup)
+    versions = ev._record_setup(job, db.require_collection(ev.conn, "c"), setup)
     db.set_job_setup(conn, job, {**versions, "question_ids": ids})
     ev.run(job)
     assert get_job(conn, job)["status"] == "done"
@@ -485,8 +493,8 @@ def test_resume_refused_when_lists_changed(env):
         ev.run(j)
         db.update_job(conn, j, status="interrupted")
     assert ev.resume_refusal(job) is None
-    old = ev.retriever.spec("c").keyword_version
-    new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    old = db.require_collection(ev.conn, "c").keyword_version
+    new = ev.retriever.indexer.set_lists(db.require_collection(ev.conn, "c"), OTHER_LISTS)
     assert ev.resume_refusal(job) == (
         f"keyword lists changed since this run ({old} → {new}); start a new run"
     )
@@ -509,16 +517,13 @@ def test_resume_refused_by_kind_and_status(env):
     job = ev.queue("c", "dev", ["hybrid"], False, None)
     ev.run(job)
     assert ev.resume_refusal(job) == "a done run cannot be resumed"
-    other = create_job(conn, "load", "c", {})
-    db.update_job(conn, other, status="interrupted")
-    assert ev.resume_refusal(other) == "only evals can be resumed"
 
 
 def test_a_run_that_never_started_is_resumable_after_list_changes(env):
     conn, ev = env
     job = ev.queue("c", "dev", ["hybrid"], False, None)
     db.update_job(conn, job, status="cancelled")
-    ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    ev.retriever.indexer.set_lists(db.require_collection(ev.conn, "c"), OTHER_LISTS)
     assert ev.resume_refusal(job) is None
 
 
@@ -594,8 +599,8 @@ def test_a_resume_claimed_after_a_rekey_fails_without_spending(env):
             raise Cancelled()
 
     ev.run(job, check=stop_after_first_method)
-    old = ev.retriever.spec("c").keyword_version
-    new = ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    old = db.require_collection(ev.conn, "c").keyword_version
+    new = ev.retriever.indexer.set_lists(db.require_collection(ev.conn, "c"), OTHER_LISTS)
     rows = run_items(conn, job)
     ledger = conn.execute("select count(*) from ai_ledger")[0][0]
     requeue(conn, job)  # as if the re-key was queued after the resume was accepted
@@ -626,7 +631,7 @@ def legacy_job(conn, ev):
         **setup_for(["kw_individual"]),
         "dense_model": "fake/dense",
         "judge_model": "fake/judge",
-        "keyword_version": ev.retriever.spec("c").keyword_version,
+        "keyword_version": db.require_collection(ev.conn, "c").keyword_version,
         "seed": 7,
         "dataset_filter": "an older filter",
     }
@@ -653,7 +658,7 @@ def test_a_legacy_run_keeps_its_setup_and_its_own_questions(env):
 def test_a_legacy_run_is_refused_after_list_changes(env):
     conn, ev = env
     job, _ = legacy_job(conn, ev)
-    ev.retriever.indexer.set_lists(ev.retriever.spec("c"), OTHER_LISTS)
+    ev.retriever.indexer.set_lists(db.require_collection(ev.conn, "c"), OTHER_LISTS)
     assert "keyword lists changed" in (ev.resume_refusal(job) or "")
 
 
@@ -947,7 +952,7 @@ def test_an_answering_run_judges_only_answers(env):
 def test_since_notes_lists_set_after_a_run_that_had_none(env):
     from ragqa_core.evaluator import changes_since
 
-    spec = env[1].retriever.spec("c")
+    spec = db.require_collection(env[1].conn, "c")
     assert spec.keyword_version is not None
     setup = {**setup_for(["kw_individual"]), "keyword_version": None, "dense_model": "fake/dense"}
     assert changes_since(setup, spec, []) == {"untracked": False, "changes": ["keyword lists"]}
@@ -956,7 +961,7 @@ def test_since_notes_lists_set_after_a_run_that_had_none(env):
 def test_since_has_no_keyword_note_for_a_run_without_keyword_methods(env):
     from ragqa_core.evaluator import changes_since
 
-    spec = env[1].retriever.spec("c")
+    spec = db.require_collection(env[1].conn, "c")
     for version in (None, "older"):
         setup = {
             **setup_for(["vector", "keyword", "hybrid"]),
@@ -1076,7 +1081,7 @@ def test_run_records_sources_and_resume_is_refused_after_a_switch(env):
     assert ev.resume_refusal(job) is None
     db.set_source_enabled(conn, "c", "x", False)
     assert "sources switched" in (ev.resume_refusal(job) or "")
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     assert changes_since(setup, spec, ["x"])["changes"] == ["sources"]
     assert changes_since(setup, spec, [])["changes"] == []
 
@@ -1084,7 +1089,7 @@ def test_run_records_sources_and_resume_is_refused_after_a_switch(env):
 def test_untracked_run_shows_no_source_change(env):
     from ragqa_core.evaluator import changes_since
 
-    spec = env[1].retriever.spec("c")
+    spec = db.require_collection(env[1].conn, "c")
     setup = {**setup_for(["hybrid"]), "question_ids": ["q-enzyme"]}
     assert changes_since(setup, spec, ["x"]) == {"untracked": True, "changes": []}
 
@@ -1189,10 +1194,10 @@ def test_measurable_rules():
 def with_vocabulary(ev: Evaluator, terms: list[str]) -> str:
     """Put a vocabulary in force on collection c and tag every item with it."""
     builder = ev.retriever.builder
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     version = builder.save_vocabulary(spec, terms)
     db.set_vocabulary_version(ev.conn, "c", version)
-    builder.tag(ev.retriever.spec("c"), builder.stored_items("c"))
+    builder.tag(db.require_collection(ev.conn, "c"), builder.stored_items("c"))
     return version
 
 
@@ -1258,7 +1263,7 @@ def test_model_query_tags_are_priced_and_asked_once_per_question(env):
 def test_oracle_tags_from_gold_units(tmp_path):
     conn, ev = multihop_env(tmp_path)
     with_vocabulary(ev, ["enzyme", "market", "volcano"])
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     both = Question("qb", "x", None, ["A"], ["g2", "g1"], {})
     tags_g1 = ev.retriever.store.get("c", ["g1"])[0].tags
     tags_g2 = ev.retriever.store.get("c", ["g2"])[0].tags
@@ -1277,7 +1282,7 @@ def test_oracle_run_searches_with_the_gold_tags(tmp_path):
     ev.run(job)
     assert get_job(conn, job)["status"] == "done", get_job(conn, job)["error"]
     rows = {r["question_id"]: r for r in run_items(conn, job)}
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     assert rows["q2"]["query_tags"] == ev.oracle_tags(spec, db.get_questions(conn, "c")[1])
     assert rows["q2"]["query_tags"][0] == "market" and rows["q3"]["query_tags"] == []
 
@@ -1287,7 +1292,7 @@ def test_since_notes_a_new_vocabulary_for_keyword_rag_runs(env):
 
     _, ev = env
     version = with_vocabulary(ev, TOPICS)
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     base = {"keyword_version": spec.keyword_version, "dense_model": "fake/dense"}
     old = {**setup_for(["keyword_rag"]), **base, "vocabulary_version": "older"}
     assert changes_since(old, spec, [])["changes"] == ["vocabulary"]
@@ -1563,7 +1568,7 @@ def test_a_run_keeps_its_eval_set_version_after_an_edit(env):
     texts = {q["question_id"]: q["question"] for q in ev.questions(done, False)}
     assert texts["q-enzyme"] == "a enzyme question"
     assert ev.table(done)["since"]["changes"] == ["eval set"]
-    spec = ev.retriever.spec("c")
+    spec = db.require_collection(ev.conn, "c")
     assert changes_since(get_job(conn, done)["setup"], spec, [], new)["changes"] == ["eval set"]
     sent: list[str] = []
     ev.ai = fake_ai(conn, lambda p: sent.append(p) or "Answer: A")
@@ -1686,7 +1691,7 @@ def test_leaked_ids_skips_the_store_scan_without_hand_or_uploaded_questions(env)
         raise AssertionError("scanned the store")
 
     ev.retriever.store.scroll = no_scan
-    assert ev.leaked_ids(ev.retriever.spec("c"), "c") == set()
+    assert ev.leaked_ids(db.require_collection(ev.conn, "c"), "c") == set()
 
 
 def test_store_answer_counts_only_its_default_eval_set_runs(env):
@@ -1803,7 +1808,7 @@ def test_a_documents_run_scores_recall_mrr_and_ndcg_at_10(tmp_path):
     # question (spec section 1), so with no lists there is nothing to set against.
     assert table["best_of_each"] is None
     # Best of each sets the best keyword-list method against the best other: lists let one run.
-    ev.retriever.indexer.set_lists(ev.retriever.spec("d"), LISTS)
+    ev.retriever.indexer.set_lists(db.require_collection(ev.conn, "d"), LISTS)
     pair = ev.queue("d", "full", ["kw_individual", "hybrid"], False, None)
     ev.run(pair)
     table = ev.table(pair)
@@ -1827,9 +1832,9 @@ def test_documents_questions_are_never_leaked(tmp_path):
     from ragqa_core import imports
 
     held = Item("p0", f"{words} and more")  # the question's whole text inside a passage
-    ev.retriever.indexer.add(ev.retriever.spec("d"), [held], "upload:docs")
+    ev.retriever.indexer.add(db.require_collection(ev.conn, "d"), [held], "upload:docs")
     assert imports.leaked_ids(db.get_questions(conn, "d"), [held.text]) == {"d1"}  # it would be
-    assert ev.leaked_ids(ev.retriever.spec("d"), "d") == set()
+    assert ev.leaked_ids(db.require_collection(ev.conn, "d"), "d") == set()
     job = ev.queue("d", "full", ["hybrid"], False, None)
     ev.run(job)
     setup = get_job(conn, job)["setup"]
@@ -2282,7 +2287,9 @@ def test_a_documents_resume_answers_from_the_passages_it_priced(tmp_path):
     stored = {q.id: row_of(conn, job, "hybrid", q.id) for q in (D1, D2)}
     # A passage that now outranks the stored hits of both questions.
     ev.retriever.indexer.add(
-        ev.retriever.spec("d"), [Item("p0", "alpha beta gamma filler5 padding5")], "upload:docs"
+        db.require_collection(ev.conn, "d"),
+        [Item("p0", "alpha beta gamma filler5 padding5")],
+        "upload:docs",
     )
     for q in (D1, D2):
         fresh = [h.id for h in ev.retriever.retrieve("d", q.text, "hybrid", 10)]
@@ -2746,7 +2753,7 @@ def test_answered_runs_of_other_types_are_unchanged(tmp_path, qa_type):
     assert [(p, len(prompts)) for p, prompts, _ in calls] == [("answer", 3)] * 2
     setup = get_job(conn, job)["setup"]
     # the store's own: science asks programs
-    search = resolve_search(ev.retriever.spec("t"), setup.get("search"))
+    search = resolve_search(db.require_collection(ev.conn, "t"), setup.get("search"))
     by_id = {q.id: q for q in db.get_questions(conn, "t")}
     for (_, prompts, _), method in zip(calls, ("vector", "hybrid"), strict=True):
         expected = []
@@ -2888,7 +2895,7 @@ def test_answer_parts_match_the_run(env, tmp_path):
         calls, found = record_answers(ev)
         ev.run(job)
         assert get_job(ev.conn, job)["status"] == "done"
-        spec = ev.retriever.spec(name)
+        spec = db.require_collection(ev.conn, name)
         search = spec.search or SearchSettings()
         by_text = {q.text: q for q in questions}
         assert len(calls) == len(methods)

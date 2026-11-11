@@ -870,6 +870,7 @@ name = "ragqa-api"
 version = "0.2.0"
 source = { editable = "apps/api" }
 dependencies = [
+    { name = "aiconnect" },
     { name = "fastapi" },
     { name = "ragqa-core" },
     { name = "ragqa-worker" },
@@ -878,6 +879,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiconnect", editable = "packages/aiconnect" },
     { name = "fastapi", specifier = "==0.161.*" },
     { name = "ragqa-core", editable = "packages/core" },
     { name = "ragqa-worker", editable = "apps/worker" },
@@ -914,11 +916,15 @@ name = "ragqa-worker"
 version = "0.2.0"
 source = { editable = "apps/worker" }
 dependencies = [
+    { name = "aiconnect" },
     { name = "ragqa-core" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ragqa-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "aiconnect", editable = "packages/aiconnect" },
+    { name = "ragqa-core", editable = "packages/core" },
+]
 
 [[package]]
 name = "requests"

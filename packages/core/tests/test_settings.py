@@ -7,7 +7,7 @@ from ragqa_core.settings import load_settings
 
 def test_defaults():
     s = load_settings({})
-    assert s.port == 8080 and s.qdrant_url is None
+    assert s.qdrant_url is None
     assert s.home == Path("~/.ragqa").expanduser()
     assert s.judge_model == "BAAI/bge-small-en-v1.5"
 
@@ -35,7 +35,6 @@ def test_reads_every_variable():
             "RAGQA_DENSE_MODEL": "d",
             "RAGQA_JUDGE_MODEL": "j",
             "RAGQA_RERANK_MODEL": "r",
-            "PORT": "9000",
         }
     )
     assert (s.api_key, s.cap_usd, s.model, s.qdrant_url) == (
@@ -44,7 +43,7 @@ def test_reads_every_variable():
         "claude-sonnet-5-5",
         "http://qdrant:6333",
     )
-    assert (s.home, s.username, s.password, s.port) == (Path("/data"), "u", "p", 9000)
+    assert (s.home, s.username, s.password) == (Path("/data"), "u", "p")
     assert (s.dense_model, s.judge_model, s.rerank_model) == ("d", "j", "r")
 
 

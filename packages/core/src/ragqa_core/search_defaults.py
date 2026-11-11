@@ -94,6 +94,15 @@ def reranker_in_force(settings: dict, service: str) -> str:
     return str(settings["rerank_model"] or service)
 
 
+def search_settings(settings: dict, service_reranker: str) -> dict[str, Any]:
+    """The three plain fields every chat search reads the same way."""
+    return {
+        "rrf_k": int(settings["rrf_k"]),
+        "rerank_pool": int(settings["rerank_pool"]),
+        "rerank_model": reranker_in_force(settings, service_reranker),
+    }
+
+
 def check(field: str, value: object) -> None:
     """Raises ValueError unless `value` may be saved for `field`; None always may."""
     if field not in RECOMMENDED:
@@ -188,16 +197,21 @@ def store_in_force(conn: Connection, store: str, chosen: dict | None = None) -> 
     }
 
 
+def run_method(method: str, rerank: bool) -> str:
+    """The method as a run names it: Hybrid with rerank on is hybrid_rerank."""
+    return "hybrid_rerank" if method == "hybrid" and rerank else method
+
+
 def store_search(conn: Connection, store: str) -> dict[str, Any]:
     """The search a chat on the store uses, as a run names it: Hybrid reranked is the run's
     hybrid_rerank; any other method with rerank on is scored before its rerank step.
     A chat's own overrides are not reflected."""
     method = store_in_force(conn, store)["method"]["value"]
     rerank = bool(in_force(conn)["rerank"])
-    run_method = "hybrid_rerank" if method == "hybrid" and rerank else method
+    run = run_method(method, rerank)
     return {
         "method": method,
         "rerank": rerank,
-        "run_method": run_method,
-        "before_rerank": rerank and run_method != "hybrid_rerank",
+        "run_method": run,
+        "before_rerank": rerank and run != "hybrid_rerank",
     }

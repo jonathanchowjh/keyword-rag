@@ -104,6 +104,12 @@ def build_of(spec: CollectionSpec) -> BuildSettings:
     return spec.build or build_for("paper_2024", spec.summarize)
 
 
+def builds(spec: CollectionSpec) -> bool:
+    """Whether adding items runs the build steps: every recipe but paper 2024 and documents,
+    which keeps a Documents store's passages as uploaded until keyword tags are added."""
+    return spec.recipe not in ("paper_2024", "documents")
+
+
 def default_search(qa_type: QaType, build: BuildSettings) -> SearchSettings:
     return SearchSettings(
         query_tags="classifier" if build.classifier else "similarity",

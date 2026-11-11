@@ -70,4 +70,4 @@ and ledgered at the model's price. This lets a person, or an agent session, be t
 model.
 
 Other errors are the package's own: `NoConnection`, `UnknownModel`,
-`ProviderError`, `Conflict`, `Cancelled`.
+`NotStored`, `ProviderError`, `Conflict`, `Cancelled`.

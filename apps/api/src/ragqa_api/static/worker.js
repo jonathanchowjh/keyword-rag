@@ -1,47 +1,24 @@
-import { $, BUSY, RESUMABLE, api, askResume, clock, esc, head, paint, pct, pill, poll, problemText, say, shell, short } from "/static/ui.js";
+import { $, BUSY, api, askResume, clock, esc, head, paint, pct, pill, poll, say, shell, short } from "/static/ui.js";
 
 const POLL_MS = 5000;
 const FINISHED = 50;
-const KIND_WORDS = { load: "Loading", rekey: "Re-keying", eval: "Evaluating", reembed: "Re-embedding", tag_build: "Adding keyword tags" };
-const RESUMES = new Set(["eval", "copy", "reembed", "tag_build"]); // the kinds whose stopped jobs can resume
-
-let jobs = []; // the latest GET /jobs, newest first
 let resumeFor = null; // the finished job whose Resume was clicked; its estimate shows under its row
 const resumeBox = document.createElement("div"); // kept across repaints of the finished table
 
 shell("worker");
 $("head").innerHTML = head({ title: "Worker", sub: "What the background worker is doing." });
 
-// Where a job's results live: an eval's run page, or its collection for loads and re-keys.
-function target(job) {
-  const c = `/c/${encodeURIComponent(job.collection)}`;
-  return job.kind === "eval" ? `${c}/runs/${encodeURIComponent(job.id)}` : c;
-}
-
 // "Evaluating sqa 1a2b3c4d", linked to where its results live.
 function named(job) {
-  return `<a href="${esc(target(job))}">${esc(`${KIND_WORDS[job.kind] ?? job.kind} ${job.collection}`)}</a>
+  return `<a href="${esc(job.href)}">${esc(job.label)}</a>
     <code>${esc(short(job.id))}</code>`;
-}
-
-// A problem line is server text; it names a job by "<8 id characters> on <collection> ", or a
-// collection's lists by "lists on <collection> ". Linked when a known job matches, plain otherwise.
-function problemHref(text) {
-  const job = jobs.find((j) => text.includes(`${short(j.id)} on ${j.collection} `));
-  if (job) return target(job);
-  const lists = jobs.find((j) => text.includes(`lists on ${j.collection} `));
-  return lists ? `/c/${encodeURIComponent(lists.collection)}` : null;
 }
 
 // -- sections -----------------------------------------------------------------------------
 
 function problemsHtml(problems) {
   if (!problems.length) return '<p class="muted">Nothing needs attention.</p>';
-  const line = (p) => {
-    const href = problemHref(p);
-    const text = problemText(p);
-    return href ? `<a href="${esc(href)}">${esc(text)}</a>` : esc(text);
-  };
+  const line = (p) => (p.href ? `<a href="${esc(p.href)}">${esc(p.text)}</a>` : esc(p.text));
   return `<ul>${problems.map((p) => `<li class="err" data-problem>${line(p)}</li>`).join("")}</ul>`;
 }
 
@@ -86,7 +63,7 @@ function finishedHtml(finished) {
   if (!finished.length) return '<p class="muted">Nothing has finished yet.</p>';
   const rows = finished
     .map((j) => {
-      const resume = RESUMES.has(j.kind) && RESUMABLE.has(j.status)
+      const resume = j.resumable
         ? `<button type="button" class="secondary" data-resume="${esc(j.id)}">Resume</button>` : "";
       const error = j.error ? ` <span class="err">${esc(j.error)}</span>` : "";
       const row = `<tr data-finished-job="${esc(j.id)}"><td>${named(j)}</td>
@@ -120,15 +97,6 @@ async function cancel(jobId) {
 // Money rule: the click only asks for the estimate (or the refusal); spending needs Start.
 async function resume(jobId) {
   say($("msg"), "");
-  if (jobs.find((j) => j.id === jobId)?.kind === "reembed") { // free: no estimate to confirm
-    try {
-      await api(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST", body: {} });
-    } catch (e) {
-      say($("msg"), e.message);
-    }
-    await refresh();
-    return;
-  }
   resumeFor = jobId;
   resumeBox.innerHTML = "";
   await refresh(); // draws the row the box goes in
@@ -155,8 +123,7 @@ $("main").addEventListener("click", (event) => {
 
 async function refresh() {
   try {
-    let status;
-    [status, jobs] = await Promise.all([api("/status"), api("/jobs?limit=200")]);
+    const [status, jobs] = await Promise.all([api("/status"), api("/jobs?limit=200")]);
     const finished = jobs.filter((j) => !BUSY.has(j.status)).slice(0, FINISHED);
     if (!finished.some((j) => j.id === resumeFor)) resumeFor = null;
     paint("problems", problemsHtml(status.problems));

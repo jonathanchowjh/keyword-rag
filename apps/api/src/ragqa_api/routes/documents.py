@@ -9,9 +9,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ragqa_api.guards import Guards, body_chunks, check_mapping, check_shown_price, estimate_reply
-from ragqa_core import db, imports, jobs
-from ragqa_core.imports import FIELDS, SOURCE_NAME, TEXT_SUFFIXES
+from ragqa_api.guards import (
+    ADDING_BUSY,
+    EstimateReply,
+    Guards,
+    body_chunks,
+    check_mapping,
+    check_ready,
+    check_shown_price,
+    check_source_name,
+    check_upload_size,
+    estimate_reply,
+)
+from ragqa_core import db, imports
+from ragqa_core.imports import FIELDS, TEXT_SUFFIXES
 from ragqa_core.loader import add_usd, roles_needed
 from ragqa_core.types import CollectionSpec, Item
 
@@ -86,20 +97,28 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "mapping": shown["mapping"],
             "source": source,
         }
-        return state.loader.estimate_import(spec, setup)
+        estimate = state.loader.estimate_import(spec, setup)
+        return guards.with_missing(estimate, roles_needed(spec, estimate))
 
-    @app.post("/collections/{name}/documents", status_code=202)
+    @app.post(
+        "/collections/{name}/documents",
+        status_code=202,
+        responses={
+            200: {
+                "description": "Without confirm: {estimate} when it spends or a model is missing; "
+                "a free add answers {added}"
+            }
+        },
+    )
     def add_documents(name: str, body: Documents):
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         # An item added now would be keyed under mixed lists, miss a version or skew a run;
         # under the lock, so no job is queued between this check and the add's end.
         now = len(body.items) <= SYNC_ITEMS
         with state.adding_lock:
-            for kind in jobs.BUSY_STATE:
-                if db.job_waiting_or_running(state.conn, kind, name):
-                    raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+            guards.refuse_busy(name)
             if name in state.adding:
-                raise HTTPException(409, f"items are being added to '{name}'; try again shortly")
+                raise HTTPException(409, ADDING_BUSY.format(name=name))
             if now:
                 state.adding.add(name)
         if not now:
@@ -123,10 +142,13 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "summary_calls": summary_calls,
             "keyword_calls": keyword_calls,
         }
-        if estimate["est_usd"] != 0 and not body.confirm:  # None: not priced, so not free
-            return estimate_reply(estimate)
-        check_shown_price(estimate, body.calls, body.est_usd)
-        for role in roles_needed(spec, estimate):  # before adding: a refusal adds nothing
+        roles = roles_needed(spec, estimate)
+        shown = guards.with_missing(estimate, roles)
+        if not body.confirm and (estimate["est_usd"] != 0 or shown["missing"]):  # None: not free
+            return estimate_reply(shown)
+        if estimate is not None:  # always, once ready; the type checker cannot see it
+            check_shown_price(estimate, body.calls, body.est_usd)
+        for role in roles:  # before adding: a refusal adds nothing
             guards.need_ai(role)
         state.indexer.add(spec, items, "hand")
         state.builder.build(spec, todo)
@@ -141,10 +163,12 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         queued = False
         try:  # the upload is the job's input: without a job it goes, whatever stopped it
             estimate = state.loader.estimate_import(spec, setup)
-            if estimate["est_usd"] != 0 and not body.confirm:  # None: not priced, so not free
-                return estimate_reply(estimate)
+            roles = roles_needed(spec, estimate)
+            shown = guards.with_missing(estimate, roles)
+            if not body.confirm and (estimate["est_usd"] != 0 or shown["missing"]):
+                return estimate_reply(shown)
             check_shown_price(estimate, body.calls, body.est_usd)
-            for role in roles_needed(spec, estimate):
+            for role in roles:
                 guards.need_ai(role)
             setup["propose"] = guards.proposes(spec)
             with guards.not_adding(spec.name):
@@ -165,16 +189,14 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     ):
         """The raw file as the body; answers with a preview under a guessed mapping.
         With accept=text only a .txt or .md file is taken."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         if accept == "text" and Path(filename).suffix.lower() not in TEXT_SUFFIXES:
             raise HTTPException(422, "only .txt and .md files can be added here")
         # Each file becomes passages: a zip, a table or json lines is not a Documents file.
         is_text = Path(filename).suffix.lower() in TEXT_SUFFIXES
         if spec.qa_type == "documents" and not is_text:
             raise HTTPException(422, DOCUMENTS_ONLY)
-        length = request.headers.get("content-length", "")
-        if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
-            raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
+        check_upload_size(request)
         upload_id = imports.save_upload(state.settings.home, name, filename, body_chunks(request))
         path, _ = imports.open_upload(state.settings.home, name, upload_id)
         source_name = imports.source_name(filename)
@@ -193,27 +215,29 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "estimate": estimate,
         }
 
-    @app.post("/collections/{name}/imports", status_code=202)
+    @app.post(
+        "/collections/{name}/imports",
+        status_code=202,
+        responses={
+            200: {
+                "model": EstimateReply,
+                "description": "Without confirm: what it would spend; nothing is queued",
+            }
+        },
+    )
     def start_import(name: str, body: ImportRequest):
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         path, meta = imports.open_upload(state.settings.home, name, body.upload_id)
-        if not SOURCE_NAME.match(body.source_name):
-            raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
+        check_source_name(body.source_name)
         check_mapping("items", body.mapping)
         source = "upload:" + body.source_name
         shown = preview_upload(spec, path, meta["filename"], body.mapping, source)
         estimate = estimate_upload(spec, body.upload_id, shown, source)
         if not body.confirm:
             return estimate_reply(estimate, preview=shown)
-        if estimate is not None:
+        check_ready(shown)
+        if estimate is not None:  # always, once ready; the type checker cannot see it
             check_shown_price(estimate, body.calls, body.est_usd)
-        if estimate is None:
-            why = (
-                f"map these fields first: {shown['missing']}"
-                if shown["missing"]
-                else "no usable rows"
-            )
-            raise HTTPException(422, why)
         for role in roles_needed(spec, estimate):
             guards.need_ai(role)
         setup = {
@@ -224,7 +248,5 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "propose": guards.proposes(spec),
         }
         with guards.not_adding(name):
-            # It was priced on the recipe now; a queued tag_build would switch it first.
-            if db.job_waiting_or_running(state.conn, "tag_build", name):
-                raise HTTPException(409, f"a tag_build job is queued or running on '{name}'; wait")
+            guards.refuse_tag_build(name)
             return {"job_id": db.create_job(state.conn, "import", name, setup)}

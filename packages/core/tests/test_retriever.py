@@ -99,9 +99,9 @@ def build(
 
 def tag_all(r: Retriever, terms: list[str]) -> None:
     """Put a vocabulary in force and tag every stored item with it by similarity."""
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     db.set_vocabulary_version(r.conn, "c", r.builder.save_vocabulary(spec, terms))
-    r.builder.tag(r.spec("c"), r.builder.stored_items("c"))
+    r.builder.tag(db.require_collection(r.conn, "c"), r.builder.stored_items("c"))
 
 
 def tagged(r: Retriever, tags: dict[str, list[str]]) -> None:
@@ -190,7 +190,11 @@ def test_controls_keep_their_first_pick_whatever_k(tmp_path, method):
 def test_controls_see_items_added_later(tmp_path, method):
     r, _ = build(tmp_path)
     r.retrieve("c", "enzyme", method, k=1)
-    r.indexer.add(r.spec("c"), [Item("late-item", "added after the first query", "B", "late")], "x")
+    r.indexer.add(
+        db.require_collection(r.conn, "c"),
+        [Item("late-item", "added after the first query", "B", "late")],
+        "x",
+    )
     ids = {h.id for h in r.retrieve("c", "enzyme", method, k=10)}
     assert ids == {i.id for i in ITEMS} | {"late-item"}
 
@@ -251,7 +255,7 @@ def test_summarize_query_without_key_raises(tmp_path):
 def test_prepare_summarises_all_queries_in_one_call(tmp_path):
     seen: list[str] = []
     r, _ = build(tmp_path, summarize=True, reply=lambda p: seen.append(p) or "S.")
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     before = len(seen)
     r.prepare(spec, ["q one", "q two"])
     assert len(seen) == before + 2
@@ -330,7 +334,7 @@ SKIP_METHODS = [m for m in METHOD_NAMES if m != "question_only"]
 
 def build_sources(tmp_path):
     r, conn = build(tmp_path, lists=False, vocabulary=False)
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     r.indexer.add(spec, [Item("a1", "enzyme rate shared words", "A", "e")], "a")
     r.indexer.add(spec, [Item("a2", "market price shared words", "A", "e")], "a")
     r.indexer.add(spec, [Item("b1", "enzyme market shared words", "A", "e")], "b")
@@ -363,7 +367,7 @@ def test_excluded_items_are_never_retrieved(tmp_path, method):
 def test_fused_methods_fill_k_past_an_excluded_pool(tmp_path, monkeypatch, method):
     monkeypatch.setattr("ragqa_core.retriever.POOL", 2)
     r, conn = build(tmp_path, lists=False, vocabulary=False)
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     fillers = [Item(f"f{n}", f"enzyme market shared words filler {n}", "A", "e") for n in range(8)]
     r.indexer.add(spec, fillers, "x")
     tag_all(r, TERMS)
@@ -402,7 +406,7 @@ OHM = ["ohm-1", "ohm-2", "ohm-3"]
 def build_physics(tmp_path):
     """Three items on Ohm's law, one on kinematics nearest the query alone."""
     r, conn = build(tmp_path, lists=False, vocabulary=False)
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     physics = [Item(i, "current voltage resistor", "A", "V = IR") for i in OHM]
     r.indexer.add(spec, [*physics, Item("kin", "car velocity", "B", "v = d/t")], "x")
     db.set_vocabulary_version(
@@ -414,7 +418,7 @@ def build_physics(tmp_path):
 
 def test_classifier_votes_neighbours_tags(tmp_path):
     r, _ = build_physics(tmp_path)
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     classify = SearchSettings(query_tags="classifier")
     # "kin" is the single nearest unit, but three Ohm's-law neighbours outvote it.
     query = r.models.embed(["car velocity current"])[0]
@@ -431,7 +435,12 @@ def test_classifier_votes_neighbours_tags(tmp_path):
 
 def test_similarity_query_tags_are_the_nearest_terms(tmp_path):
     r, _ = build(tmp_path)
-    tags = r.query_tags(r.spec("c"), "volcano magma", SearchSettings(query_tags="similarity"), ())
+    tags = r.query_tags(
+        db.require_collection(r.conn, "c"),
+        "volcano magma",
+        SearchSettings(query_tags="similarity"),
+        (),
+    )
     assert tags[:2] == ["volcano", "magma"] and len(tags) == 3
 
 
@@ -441,7 +450,7 @@ def test_model_query_tags_are_the_ais_pick_of_the_vocabulary(tmp_path):
     reply = '{"terms": ["optics", "made-up", "kinematics"]}'
     fake_replies(r.ai, lambda p: sent.append(p) or reply)
     asked = SearchSettings(query_tags="model")
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     # Terms outside the vocabulary are dropped; the rest keep the AI's order.
     assert r.query_tags(spec, "a lens bends light", asked, ()) == ["optics", "kinematics"]
     [prompt] = sent
@@ -459,22 +468,28 @@ def test_prepared_model_tags_cost_one_call_each(tmp_path):
     r, conn = build_physics(tmp_path)
     fake_replies(r.ai, lambda p: '{"terms": ["optics"]}')
     questions = ["a lens bends light", "a mirror reflects it"]
-    r.prepare_tags(r.spec("c"), questions)
+    r.prepare_tags(db.require_collection(r.conn, "c"), questions)
     asked = SearchSettings(query_tags="model")
     for q in questions:
-        assert r.query_tags(r.spec("c"), q, asked, ()) == ["optics"]
+        assert r.query_tags(db.require_collection(r.conn, "c"), q, asked, ()) == ["optics"]
     assert conn.execute("select count(*) from ai_ledger")[0][0] == len(questions)
 
 
 def test_oracle_query_tags_need_gold(tmp_path):
     r, _ = build(tmp_path)
     with pytest.raises(ValueError, match="oracle tags need a question's gold"):
-        r.query_tags(r.spec("c"), "x", SearchSettings(query_tags="oracle"), ())
+        r.query_tags(
+            db.require_collection(r.conn, "c"), "x", SearchSettings(query_tags="oracle"), ()
+        )
 
 
 def test_keyword_rag_fuses_three_channels(tmp_path):
     r, _ = build(tmp_path)
-    r.indexer.add(r.spec("c"), [Item("odd-item", "nothing in common here", "D", "e")], "x")
+    r.indexer.add(
+        db.require_collection(r.conn, "c"),
+        [Item("odd-item", "nothing in common here", "D", "e")],
+        "x",
+    )
     tagged(r, {"odd-item": ["enzyme", "kinetics"]})
     no_meaning = SearchSettings(weights={"meaning": 0.0, "words": 1.0, "keywords": 1.0})
     found = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=10, search=no_meaning)
@@ -483,7 +498,7 @@ def test_keyword_rag_fuses_three_channels(tmp_path):
     assert by_id["enzyme-item"].channels == ["words", "keywords"]
     [top] = r.retrieve("c", "enzyme kinetics", "keyword_rag", k=1)
     assert top.id == "enzyme-item" and top.channels == ["meaning", "words", "keywords"]
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     tags = r.query_tags(spec, "enzyme kinetics", spec.search or SearchSettings(), ())
     assert top.matched == [t for t in tags if t in top.tags]  # the query's tags the hit carries
     assert "enzyme" in top.matched and "kinetics" in top.matched
@@ -552,7 +567,7 @@ def test_keyword_rag_without_vocabulary_is_unavailable(tmp_path):
     with pytest.raises(MethodUnavailable, match=message):
         r.retrieve("c", "enzyme", "keyword_rag")
     with pytest.raises(MethodUnavailable, match=message):
-        r.query_tags(r.spec("c"), "enzyme", SearchSettings(), ())
+        r.query_tags(db.require_collection(r.conn, "c"), "enzyme", SearchSettings(), ())
 
 
 def test_keyword_rag_refuses_while_retagging(tmp_path):
@@ -577,7 +592,7 @@ def test_keyword_rag_refuses_after_a_retag_stopped_writing(tmp_path):
     with pytest.raises(MethodUnavailable, match="partly re-tagged"):
         r.retrieve("c", "enzyme kinetics", "keyword_rag")
     with pytest.raises(MethodUnavailable, match="partly re-tagged"):
-        r.query_tags(r.spec("c"), "enzyme", SearchSettings(), ())
+        r.query_tags(db.require_collection(r.conn, "c"), "enzyme", SearchSettings(), ())
     claim_next_job_id(conn)
     db.update_job(conn, db.newest_jobs(conn)[0]["id"], status="done", progress=1.0)
     assert r.retrieve("c", "enzyme kinetics", "keyword_rag")
@@ -597,7 +612,7 @@ def test_keyword_rag_is_not_paid(tmp_path):
 
 def test_hybrid_rerank_reranks_only_its_pool(tmp_path):
     r, _ = build(tmp_path)
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     r.indexer.add(spec, [Item(f"extra-{n}", f"filler text {n}", "A", "e") for n in range(26)], "y")
     sizes, models = [], []
     real = r.models.rerank
@@ -630,7 +645,7 @@ def test_keyword_rag_waits_for_an_unfinished_tag_build(tmp_path):
     """The vocabulary is switched to before tagging, so keyword_rag waits for the job."""
     needs = "needs keyword tags: Add keyword tags on the store page"
     r, conn = build(tmp_path, qa_type="documents", recipe="documents_tagged")
-    spec = r.spec("c")
+    spec = db.require_collection(r.conn, "c")
     assert available_methods(spec, True)["keyword_rag"] is None
     assert available_methods(spec, True, tagging=True)["keyword_rag"] == needs
     assert available_methods(spec, True, tagging=True)["hybrid"] is None

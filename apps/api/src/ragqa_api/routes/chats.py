@@ -1,36 +1,15 @@
-"""The chat routes: chats and their messages, and the one-shot /query and /chat."""
+"""The chat routes: chats and their messages, and the one-shot /chat."""
 
-from dataclasses import asdict
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from aiconnect.ai import NoConnection
 from ragqa_api.guards import Guards, check_methods
 from ragqa_core import db, search_defaults
 from ragqa_core.chats import NEEDS_AI
-from ragqa_core.evaluator import answer_parts, read_reply, retrieval_depth
-from ragqa_core.jobs import no_ai
 from ragqa_core.prompts import CHAT_TURNS
-from ragqa_core.recipes import resolve_search
-from ragqa_core.retriever import PER_METHOD_ERRORS
 from ragqa_core.search_defaults import MAX_CANDIDATES, MAX_EVIDENCE
-from ragqa_core.types import CollectionSpec, Hit, Question, SearchSettings
-
-
-class QueryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    collection: str
-    question: str
-    choices: list[str] | None = None
-    methods: list[str] | None = None  # None: the Settings method
-    k: int = Field(5, ge=1, le=50)
-    rrf_k: int | None = Field(None, ge=0)  # None: the Settings RRF k
-    answer: bool = False
-    model: str | None = None
-    search: dict | None = None  # overrides the collection's search settings in part
 
 
 class ChatTurn(BaseModel):
@@ -134,35 +113,6 @@ def brief_reply(message: dict) -> dict:
 def add_routes(app: FastAPI, guards: Guards) -> None:
     state = app.state
 
-    def run_method(
-        spec: CollectionSpec,
-        question: str,
-        method: str,
-        k: int,
-        rrf_k: int,
-        search: SearchSettings,
-        skip: tuple[str, ...],
-        answer=None,
-    ) -> dict:
-        """One method's reply to a question: its hits, the answer `answer(hits)` gives (a
-        dict merged into the reply) and every call's cost. A provider or budget failure is the
-        reply's `error`, so it does not hide what the other methods spent."""
-        out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None, "program": None}
-        with state.ai.tally() as spent:
-            try:
-                tags = None
-                if method == "keyword_rag":
-                    tags = state.retriever.query_tags(spec, question, search, skip)
-                    out["query_tags"] = tags
-                hits = state.retriever.retrieve(spec.name, question, method, k, rrf_k, search, tags)
-                out["hits"] = [asdict(h) for h in hits]
-                if answer:
-                    out.update(answer(hits))
-            except PER_METHOD_ERRORS as e:
-                out["error"] = no_ai(e.role) if isinstance(e, NoConnection) else str(e)
-        out["usd"] = spent["usd"]
-        return out
-
     # -- chats -----------------------------------------------------------------
     # Chats tallies its own spending, so these routes never open a tally.
 
@@ -219,58 +169,6 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def chat_default(chat_id: str, store: str) -> dict:
         return state.chats.set_default(chat_id, store)
 
-    @app.post("/query")
-    def query(body: QueryRequest) -> dict:
-        """Each method's hits for a question; with no methods or rrf_k, Settings' own."""
-        defaults: dict[str, Any] = search_defaults.in_force(state.conn)
-        methods = body.methods if body.methods is not None else [str(defaults["method"])]
-        rrf_k = body.rrf_k if body.rrf_k is not None else int(defaults["rrf_k"])
-        check_methods(methods)
-        spec = state.retriever.spec(body.collection)
-        # A store mid-switch is emptied, so every method is refused at once (409); a model
-        # it can't load fails only the methods that embed, each with its error.
-        if db.switching_model(state.conn, spec.name):
-            state.indexer.check_model(spec)
-        search = resolve_search(spec, body.search)
-        if "keyword_rag" in methods and search.query_tags == "oracle":
-            raise ValueError("oracle tags need a question's gold")  # eval only
-        skip = tuple(db.disabled_sources(state.conn, body.collection))
-        # Answered as a run answers: a Documents store's over Settings' evidence size.
-        size = int(defaults["evidence_size"])
-        q = Question(
-            id="lab", text=body.question, choices=body.choices or [], gold_answers=[], gold_ids=[]
-        )
-        # An answer on a Documents store reads at least the evidence size, so retrieve that many.
-        reads = size if spec.qa_type == "documents" and body.answer else 0
-        depth = retrieval_depth(spec.qa_type, q, body.k, reads)
-        results = {}
-        for method in methods:
-
-            def answer(hits: list[Hit], retrieves: bool = method != "question_only") -> dict:
-                system, user, tokens, program = answer_parts(spec, q, hits, search, retrieves, size)
-                done = state.ai.complete(
-                    user,
-                    role="answer",
-                    system=system,
-                    model=body.model,
-                    max_tokens=tokens,
-                    purpose="query",
-                )
-                text, prog = read_reply(spec, done.text, bool(q.choices), program)
-                return {"answer": text, "program": prog}
-
-            results[method] = run_method(
-                spec,
-                body.question,
-                method,
-                depth,
-                rrf_k,
-                search,
-                skip,
-                answer if body.answer else None,
-            )
-        return {"results": results}
-
     @app.post("/chat")
     def chat(body: ChatRequest) -> dict:
         """An answer from a store's passages, citing them as [n]. Searched as a chat searches
@@ -280,8 +178,8 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         *earlier, last = body.messages
         if last.role != "user":
             raise ValueError("the last message must be the user's")
-        spec = state.retriever.spec(body.collection)
-        chain = state.chats.store_in_force(spec.name)
+        spec = db.require_collection(state.conn, body.collection)
+        chain = search_defaults.store_in_force(state.conn, spec.name)
         method = body.method or str(chain["method"]["value"])
         if body.method is not None:
             check_methods([method])
@@ -292,16 +190,13 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
                 status = 503 if why == NEEDS_AI else 409
                 raise HTTPException(status, f"{method} {why} on '{body.collection}'")
         defaults: dict[str, Any] = search_defaults.in_force(state.conn)
-        reranker = search_defaults.reranker_in_force(defaults, state.models.rerank_model)
         found = state.chats.search(
             {spec.name: {"method": method, "candidates": chain["candidates"]["value"]}},
             last.content,
             last.content,
             body.k or int(defaults["evidence_size"]),
             bool(defaults["rerank"]),
-            int(defaults["rrf_k"]),
-            str(reranker),
-            int(defaults["rerank_pool"]),
+            search_defaults.search_settings(defaults, state.models.rerank_model),
         )
         decision, evidence = found["decisions"][0], found["evidence"]
         out: dict = {"answer": None, "citations": [], "error": decision["error"]}

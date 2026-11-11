@@ -1020,7 +1020,7 @@ def test_store_page_shows_rebuild_progress_cancel_and_a_stopped_switch(page, see
         "progress": 0.4,
         "switching": False,
     }
-    current = {"rebuild": rebuild, "state": "rebuilding"}
+    current = {"rebuild": rebuild, "state": "rebuilding", "busy": True}
 
     def store(route):
         body = route.fetch().json()
@@ -1060,6 +1060,43 @@ def test_store_page_shows_rebuild_progress_cancel_and_a_stopped_switch(page, see
     page.goto(seeded.url + "/c/rbp")
     expect(box).to_contain_text(f"Switching to {REBUILD_MODEL}…")
     expect(box.get_by_role("button", name="Stop job")).to_have_count(0)
+
+
+def test_store_page_polls_slowly_on_a_stopped_switch(page, seeded):
+    seeded.build("rbs")
+    job = {"id": "job-1", "kind": "reembed", "status": "interrupted", "progress": 0.4}
+    stopped = {
+        "rebuild": {
+            "job_id": "job-1",
+            "status": "interrupted",
+            "model": REBUILD_MODEL,
+            "from": "fake/dense",
+            "progress": 0.4,
+            "switching": True,
+        },
+        "state": "rebuilding",
+        "busy": True,
+        "job": job,
+    }
+    gets = []
+
+    def store(route):
+        gets.append(1)
+        route.fulfill(json={**route.fetch().json(), **stopped})
+
+    page.route("**/collections/rbs", store)
+    page.clock.install()
+    page.goto(seeded.url + "/c/rbs")
+    expect(page.locator("#embedding")).to_contain_text("stopped part-way")
+    first = len(gets)
+    page.clock.run_for(4_000)
+    page.wait_for_timeout(500)
+    assert len(gets) == first  # not the 3 s poll of a job in flight
+    page.clock.run_for(12_000)
+    page.wait_for_timeout(500)
+    assert len(gets) == first + 1  # the 15 s poll
+    expect(page.get_by_role("button", name="Rebuild", exact=True)).to_be_disabled()
+    expect(page.locator("#sources input[data-source]").first).to_be_disabled()
 
 
 def test_documents_store_shows_its_chat_search_score(page, seeded):
@@ -1337,3 +1374,24 @@ def test_a_documents_store_without_an_eval_set_points_at_labelling(page, seeded)
     expect(page.locator("#answer")).to_contain_text(
         "No score yet: label a few questions to get one"
     )
+
+
+def test_add_documents_with_a_missing_model_offers_connect_ai(page, seeded, tmp_path):
+    seeded.build("nomodel")
+
+    def missing(route):
+        body = route.fetch().json()
+        body["estimate"] = {**body["estimate"], "missing": ["summary"]}
+        route.fulfill(json=body)
+
+    page.route("**/collections/nomodel/uploads?*", missing)
+    notes = tmp_path / "notes.jsonl"
+    notes.write_text(json.dumps({"id": "u1", "text": "a note about reefs"}))
+    page.goto(seeded.url + "/c/nomodel")
+    page.locator("#imp-items-file").set_input_files(str(notes))
+    page.locator("#imp-items-go").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview.get_by_role("link", name="Connect AI first")).to_have_attribute(
+        "href", "/settings"
+    )
+    expect(page.locator("#imp-items-import")).to_be_disabled()

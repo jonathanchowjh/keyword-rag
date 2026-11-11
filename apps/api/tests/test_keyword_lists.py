@@ -5,7 +5,6 @@ from dataclasses import asdict
 from api_helpers import (
     EVAL,
     LISTS,
-    NO_KEYWORDS_MODEL,
     OTHER_LISTS,
     WORKED,
     add_collection,
@@ -28,6 +27,7 @@ from api_helpers import (
 from ragqa_api.guards import PRICE_CHANGED
 from ragqa_core import db
 from ragqa_core.fakes import ITEMS, fake_replies
+from ragqa_core.jobs import no_ai
 from ragqa_core.types import Item
 
 
@@ -54,7 +54,7 @@ def test_vocabulary_export_import_queues_retag(client):
     terms = {"terms": [" Ohm's Law ", "ideal gas law"]}
     r = client.put("/collections/w/vocabulary", json=terms)
     assert r.status_code == 200 and r.json() == {
-        "estimate": {"est_usd": 0.0, "items": 0, "calls": 0}
+        "estimate": {"est_usd": 0.0, "items": 0, "calls": 0, "roles": [], "missing": []}
     }
     assert client.get("/collections/w/vocabulary").json() == empty  # nothing saved
     assert client.get("/jobs").json() == []  # nothing queued
@@ -136,9 +136,10 @@ def test_vocabulary_put_with_ai_tagging_and_no_model_is_503(tmp_path):
     with make_client(tmp_path, api_key=None) as client:
         client.app.state.worker.stop()
         stored_worked(client)
-        for body in ({"terms": ["enzymes"]}, {"terms": ["enzymes"], "confirm": True}):
-            r = client.put("/collections/w/vocabulary", json=body)
-            assert r.status_code == 503 and "'keywords'" in r.json()["detail"], body
+        r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes"]})
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+        r = client.put("/collections/w/vocabulary", json={"terms": ["enzymes"], "confirm": True})
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"], r.text
         assert client.get("/collections/w/vocabulary").json()["versions"] == []
         assert client.get("/jobs").json() == []
         # Similarity tagging spends nothing, so it needs no model.
@@ -237,7 +238,10 @@ def test_vocabulary_put_refuses_while_busy_and_an_empty_list(client):
 def test_propose_lists_needs_a_key(client):
     add_collection(client, lists=False)
     client.app.state.ai.update_connection("anthropic", api_key=None)
-    assert client.post("/collections/c/keyword-lists/propose").status_code == 503
+    r = client.post("/collections/c/keyword-lists/propose")
+    assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+    r = client.post("/collections/c/keyword-lists/propose", json={"confirm": True})
+    assert r.status_code == 503 and r.json()["detail"] == no_ai("keywords"), r.text
 
 
 def test_lists_save_is_busy_only_while_an_eval_runs(client):
@@ -376,7 +380,7 @@ def test_add_keyword_tags_estimates_then_builds(tmp_path):
         r = add_tags(client, False)
         assert r.status_code == 200, r.text
         estimate = r.json()["estimate"]
-        assert set(estimate) == {"est_usd", "calls"}
+        assert set(estimate) == {"est_usd", "calls", "roles", "missing"}
         assert estimate["est_usd"] > 0 and estimate["calls"] >= 1
         assert ledger_purposes(client) == [] and db.get_collection(conn, "c").recipe == "documents"
         r = add_tags(client, True)
@@ -399,9 +403,10 @@ def test_add_keyword_tags_estimates_then_builds(tmp_path):
 def test_add_keyword_tags_without_ai_is_refused_and_changes_nothing(client):
     documents_with_passages(client)
     client.app.state.ai.set_role("default", None)  # no model for keywords at all
-    for confirm in (False, True):
-        r = add_tags(client, confirm)
-        assert r.status_code == 503 and r.json()["detail"] == NO_KEYWORDS_MODEL, r.text
+    r = add_tags(client, False)
+    assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+    r = add_tags(client, True)
+    assert r.status_code == 503 and r.json()["detail"] == no_ai("keywords"), r.text
     spec = db.get_collection(client.app.state.conn, "c")
     assert spec.recipe == "documents" and spec.vocabulary_version is None
     assert db.list_jobs(client.app.state.conn, kind="tag_build") == []
@@ -440,7 +445,12 @@ def test_a_tag_build_stopped_after_its_vocabulary_resumes_with_no_keywords_model
         assert db.get_vocabulary(conn, "c") and not any(h.tags for h in passages(client))
         client.app.state.ai.set_role("default", None)  # what is left is free: no model needed
         r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
-        assert r.status_code == 200 and r.json()["estimate"] == {"est_usd": 0, "calls": 0}, r.text
+        assert r.status_code == 200 and r.json()["estimate"] == {
+            "est_usd": 0,
+            "calls": 0,
+            "roles": [],
+            "missing": [],
+        }, r.text
         r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
         assert r.status_code == 202, r.text
         assert wait(client, job_id)["status"] == "done"
@@ -512,7 +522,7 @@ def test_a_disabled_unpriced_model_is_still_503(tmp_path):
         unpriced_keywords_model(client)
         client.app.state.ai.update_model("gw", "nop", enabled=False)
         r = client.post("/collections/p/keyword-lists/propose")
-        assert r.status_code == 503 and "'keywords'" in r.json()["detail"], r.text
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
 
 
 def test_a_disabled_or_keyless_unpriced_model_is_503_on_every_keyword_route(tmp_path):
@@ -540,8 +550,14 @@ def test_a_disabled_or_keyless_unpriced_model_is_503_on_every_keyword_route(tmp_
             ]
             for method, url, body in calls:
                 r = getattr(client, method)(url, json=body)
-                detail = r.json()["detail"]
-                assert r.status_code == 503 and "keywords" in detail, (cut, url, r.text)
+                if body is shown:  # a stale price: 409 comes before the missing model
+                    assert (r.status_code, r.json()["detail"]) == (409, PRICE_CHANGED), r.text
+                elif body.get("confirm"):
+                    detail = r.json()["detail"]
+                    assert r.status_code == 503 and "keywords" in detail, (cut, url, r.text)
+                else:
+                    assert r.status_code == 200, (cut, url, r.text)
+                    assert r.json()["estimate"]["missing"] == ["keywords"], (cut, url, r.text)
 
 
 def test_put_vocabulary_is_refused_on_an_untagged_documents_store(client):

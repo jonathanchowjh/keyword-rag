@@ -6,7 +6,7 @@ import math
 
 from ragqa_core.catalog import ANSWER_PAIR, CONTROLS, METHODS
 from ragqa_core.metrics import bootstrap_ci, paired_diff_ci, spearman
-from ragqa_core.search_defaults import CHAT_METHODS
+from ragqa_core.search_defaults import CHAT_METHODS, run_method
 from ragqa_core.types import EXAMPLE_TYPES, QaType
 
 PROXY_TRUST = 0.5
@@ -100,14 +100,6 @@ def answer(
     return _compare(per_method, pair[0], pair[1], metric, factor)
 
 
-def switchable(rerank: bool) -> tuple[str, ...]:
-    """The methods a chat can switch to, as a run names them: with rerank on, Hybrid is
-    hybrid_rerank."""
-    if not rerank:
-        return CHAT_METHODS
-    return (*(m for m in CHAT_METHODS if m != "hybrid"), "hybrid_rerank")
-
-
 def score(
     per_method: PerMethod, method: str, factor: float, before_rerank: bool, rerank: bool
 ) -> dict | None:
@@ -117,7 +109,7 @@ def score(
     if not values:
         return None
     mean, lo, hi = bootstrap_ci(values)
-    offered = switchable(rerank)
+    offered = {run_method(m, rerank) for m in CHAT_METHODS}
     switch = next(
         (
             {k: g[k] for k in ("method", "diff", "lo", "hi")}

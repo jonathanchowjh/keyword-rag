@@ -7,34 +7,43 @@ from pathlib import Path
 from anyio import from_thread
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.datastructures import State
 
 from aiconnect.ai import NoConnection
-from ragqa_core import db, jobs
-from ragqa_core.evaluator import EvalSetMismatch
-from ragqa_core.imports import FIELDS
+from ragqa_core import db, imports, jobs
+from ragqa_core.imports import FIELDS, SOURCE_NAME
 from ragqa_core.retriever import METHOD_NAMES
-from ragqa_core.types import CollectionSpec
+from ragqa_core.types import CollectionSpec, type_clash, unknown_set
 
 STATIC = Path(__file__).parent / "static"
-NO_KEYWORDS_MODEL = "connect a model for keywords first"
-PROBLEM = {
-    "failed": "failed",
-    "interrupted": "was interrupted by a restart",
-    "stopped_budget": "stopped at the monthly cap",
-    "stopped_no_key": "stopped: no AI model is set up for this job (see the Settings page)",
-    "stopped_replies": "stopped: its prompts wait for replies by hand",
-}
-
-
-def type_clash(eval_set: str, set_type: str, store: str, store_type: str) -> EvalSetMismatch:
-    return EvalSetMismatch(f"eval set '{eval_set}' is {set_type}; store '{store}' is {store_type}")
+ADDING_BUSY = "items are being added to '{name}'; try again shortly"
 
 
 def check_mapping(kind: str, mapping: dict | None) -> None:
     unknown = [k for k in mapping or {} if k not in FIELDS[kind]]
     if unknown:
         raise HTTPException(422, f"unknown fields {unknown}; known: {list(FIELDS[kind])}")
+
+
+def check_upload_size(request: Request) -> None:
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
+        raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
+
+
+def check_source_name(name: str) -> None:
+    if not SOURCE_NAME.match(name):
+        raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
+
+
+def check_ready(shown: dict) -> None:
+    """Refuses a preview that cannot be imported yet, saying why."""
+    if shown["ready"]:
+        return
+    if shown["missing"]:
+        raise HTTPException(422, f"map these fields first: {shown['missing']}")
+    raise HTTPException(422, "no usable rows")
 
 
 PRICE_CHANGED = "the price changed since you saw it: check it again"
@@ -57,6 +66,23 @@ def price_changed(estimate: dict, calls: int | None, est_usd: float | None) -> b
 def check_shown_price(estimate: dict, calls: int | None, est_usd: float | None) -> None:
     if price_changed(estimate, calls, est_usd):
         raise HTTPException(409, PRICE_CHANGED)
+
+
+class Estimate(BaseModel):
+    """What a spending request would do, as an unconfirmed one is shown it."""
+
+    model_config = ConfigDict(extra="allow")
+    calls: int
+    est_usd: float | None
+    roles: list[str]
+    missing: list[str]
+
+
+class EstimateReply(BaseModel):
+    """An unconfirmed spending request's 200. None only for an import not yet mapped."""
+
+    model_config = ConfigDict(extra="allow")
+    estimate: Estimate | None
 
 
 def estimate_reply(estimate: dict | None, **extra) -> JSONResponse:
@@ -98,21 +124,37 @@ class Guards:
         """Held while a job on the collection is queued; refused while items are added."""
         with self.state.adding_lock:
             if name in self.state.adding:
-                raise HTTPException(409, f"items are being added to '{name}'; try again shortly")
+                raise HTTPException(409, ADDING_BUSY.format(name=name))
             yield
 
     def refuse_busy(self, name: str, stopped_switch_ok: bool = False) -> None:
         """409 while any job is running or queued on the collection, or while a rebuild's
         switch stopped part-way: the store is then emptied or partly refilled, and the
         resume refills it from the rebuilt copy. Only resuming that switch may pass it."""
-        for status in reversed(jobs.BUSY):  # a running job is named before a queued one
-            busy = db.list_jobs(self.state.conn, collection=name, status=status, limit=1)
-            if busy:
-                raise HTTPException(409, f"a {busy[0]['kind']} job is {status} on '{name}'; wait")
+        self._refuse(name, tuple(jobs.BUSY_STATE))
         # switching_model reads the newest rebuild: a new one would hide the stopped switch.
         switching = db.switching_model(self.state.conn, name)
         if switching and not stopped_switch_ok:
             raise HTTPException(409, f"the switch to {switching} stopped part-way; resume it first")
+
+    def _refuse(self, name: str, kinds: tuple[str, ...]) -> None:
+        if kind := db.busy_job(self.state.conn, name, kinds):
+            raise HTTPException(409, f"a {kind} job is queued or running on '{name}'; wait")
+
+    def refuse_item_jobs(self, name: str) -> None:
+        """409 while an item job is queued or running: a vocabulary saved now would mix
+        versions or skew a run."""
+        self._refuse(name, db.ITEM_JOBS)
+
+    def refuse_tag_build(self, name: str) -> None:
+        """409 while a tag build is queued or running: an import priced now was priced on the
+        recipe the tag build is about to switch."""
+        self._refuse(name, ("tag_build",))
+
+    def refuse_running_eval(self, name: str) -> None:
+        """409 while an eval is running: a queued eval has not read the lists or sources yet."""
+        if db.job_running(self.state.conn, "eval", name):
+            raise HTTPException(409, f"an eval is running on '{name}'; wait")
 
     def need_ai(self, role: str, model: str | None = None) -> None:
         """Refuse at once a request that would spend on a job with no usable model.
@@ -120,6 +162,25 @@ class Guards:
         if not self.state.ai.ready(role, model):
             self.state.ai.need_price(role, model)  # a set-up model with no price: 422, names it
             raise NoConnection(role)
+
+    def with_missing(self, estimate: dict, roles: list[str], model: str | None = None) -> dict:
+        """The estimate as an unconfirmed request is shown it: the roles it would call, and
+        those with no usable, priced model. Only `need_ai` refuses; this just names them."""
+        missing = [r for r in roles if not self.state.ai.ready(r, model if r == "answer" else None)]
+        return {**estimate, "roles": roles, "missing": missing}
+
+    def tag_build_gate(self, spec: CollectionSpec, body) -> JSONResponse | None:
+        """What Add keyword tags (or its resume) would spend: the estimate while unconfirmed,
+        then None once the shown price holds and a keywords model is ready."""
+        estimate, calls = self.state.builder.plan_tag_build(spec)
+        price = {"est_usd": estimate, "calls": calls}
+        roles = ["keywords"] if estimate is None or calls > 0 else []  # unpriced, or it makes calls
+        if not (body and body.confirm):
+            return estimate_reply(self.with_missing(price, roles))
+        check_shown_price(price, body.calls, body.est_usd)
+        for role in roles:
+            self.need_ai(role)
+        return None
 
     def need_models(self, estimate: dict, model: str | None) -> None:
         """Every job a run spends on, with its answers on `model` when one is named. A
@@ -154,7 +215,7 @@ class Guards:
     def known_set(self, name: str) -> dict:
         row = db.get_eval_set(self.state.conn, name)
         if row is None:
-            raise HTTPException(404, f"no eval set {name!r}")
+            raise HTTPException(404, unknown_set(name))
         return row
 
     def store_is_loading(self, store: str) -> bool:

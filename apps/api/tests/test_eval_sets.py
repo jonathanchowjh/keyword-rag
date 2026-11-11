@@ -39,7 +39,7 @@ from ragqa_core import db, imports
 from ragqa_core.chats import relevance
 from ragqa_core.indexer import ModelMismatch
 from ragqa_core.jobs import no_ai
-from ragqa_core.types import Question
+from ragqa_core.types import Question, Stale
 
 
 def test_eval_set_crud_and_versions(client):
@@ -289,32 +289,32 @@ def test_a_documents_set_round_trips_through_its_json(client, tmp_path):
     assert second[2]["judged_ids"] is None
 
 
-def test_a_label_saved_while_an_import_merges_is_never_overwritten(client):
+def test_a_label_saved_while_an_import_merges_is_never_overwritten(client, monkeypatch):
     import threading
 
     new_set(client, "d", "documents")
     q = {"id": "q1", "text": "one?", "gold_ids": ["p1"], "judged_ids": ["p1"]}
     assert put_questions(client, "d", [q]).status_code == 200
     read = Question(**client.get("/eval-sets/d").json()["questions"][0])
-    conn, loader = client.app.state.conn, client.app.state.loader
-    counts, saved, threads = loader.question_counts, [], []
+    conn = client.app.state.conn
+    counts, saved, threads = db.question_counts, [], []
 
     def label() -> None:  # a labeller's PUT of q1, sent while the import is merging
         marked = replace(read, gold_ids=["p9"], judged_ids=["p1", "p9"])
         try:
             db.upsert_question(conn, "d", marked, read)
             saved.append("saved")
-        except ValueError:
+        except Stale:
             saved.append("refused")
 
-    def merge_slowly(name, questions):
-        out = counts(name, questions)
+    def merge_slowly(conn, name, questions):
+        out = counts(conn, name, questions)
         threads.append(threading.Thread(target=label))
         threads[0].start()
         threads[0].join(0.3)  # time for the PUT to land between the merge and its write
         return out
 
-    loader.question_counts = merge_slowly
+    monkeypatch.setattr(db, "question_counts", merge_slowly)
     row = json.dumps({"id": "q1", "text": "one?", "gold_ids": ["p2"]})
     up = client.post("/eval-sets/d/uploads", params={"filename": "qs.jsonl"}, content=row)
     assert up.status_code == 200, up.text
@@ -873,7 +873,12 @@ def test_reference_answer_estimate_spends_nothing_and_confirm_makes_one_call(tmp
         assert r.json()["answer"] == "Ten days." and r.json()["usd"] >= 0
         assert seen == ["reference_answer"]
         r = ask_answer(client, ids[:2])
-        assert r.json()["estimate"] == {"est_usd": 0, "calls": 0}
+        assert r.json()["estimate"] == {
+            "est_usd": 0,
+            "calls": 0,
+            "roles": ["answer"],
+            "missing": [],
+        }
         assert seen == ["reference_answer"]
         after = client.get("/eval-sets/cq").json()
         assert (after["version"], after["questions"]) == (before["version"], before["questions"])

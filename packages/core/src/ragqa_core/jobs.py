@@ -28,14 +28,59 @@ RESUMABLE = (
     "failed",
 )
 PARTLY_DONE = ("failed", "cancelled", "interrupted")
-NOUN = {"eval": "run", "copy": "copy", "tag_build": "tag build", "reembed": "rebuild"}
+# The lead-in of a job's label: the page shows "<word> <collection>".
+WORD = {
+    "load": "Loading",
+    "import": "Importing into",
+    "copy": "Copying into",
+    "rekey": "Re-keying",
+    "retag": "Re-tagging",
+    "backfill": "Labelling",
+    "reembed": "Re-embedding",
+    "tag_build": "Adding keyword tags",
+    "eval": "Evaluating",
+}
+NOUN = {
+    "load": "load",
+    "import": "import",
+    "copy": "copy",
+    "rekey": "re-key",
+    "retag": "re-tag",
+    "backfill": "labelling job",
+    "reembed": "rebuild",
+    "tag_build": "tag build",
+    "eval": "run",
+}
+# The kinds whose stopped jobs run again; any other is started again by hand.
+RESUMING_KINDS = ("eval", "copy", "reembed", "tag_build")
+# What each stopped status says about a job in a problem line.
+PROBLEM = {
+    "failed": "failed",
+    "interrupted": "was interrupted by a restart",
+    "stopped_budget": "stopped at the monthly cap",
+    "stopped_no_key": "stopped: no AI model is set up for this job (see the Settings page)",
+    "stopped_replies": "stopped: its prompts wait for replies by hand",
+}
+
+
+def label(job: dict) -> str:
+    """What the pages call a job: "Evaluating wl", "Importing into docs"."""
+    return f"{WORD.get(job['kind'], job['kind'])} {job['collection']}"
+
+
+def resumable(job: dict) -> bool:
+    return job["kind"] in RESUMING_KINDS and job["status"] in RESUMABLE
 
 
 def not_resumable(job: dict) -> str | None:
-    """Why a job's status rules out resuming it, None when it can be resumed."""
+    """Why a job cannot be resumed (its kind never does, or its status rules it out),
+    None when it can be."""
+    noun = NOUN.get(job["kind"], "job")
+    if job["kind"] not in RESUMING_KINDS:
+        return f"this {noun} cannot be resumed; start it again"
     if job["status"] in RESUMABLE:
         return None
-    return f"a {job['status']} {NOUN.get(job['kind'], 'job')} cannot be resumed"
+    return f"a {job['status']} {noun} cannot be resumed"
 
 
 def ended(e: Exception) -> dict:

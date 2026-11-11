@@ -1,4 +1,4 @@
-import { $, NONE, api, askDelete, confirmSpend, count, dropStaleStart, esc, passageHtml, refreshSpend, say, short, whereHtml } from "/static/ui.js";
+import { $, NONE, api, askDelete, confirmSpend, count, esc, passageHtml, refreshSpend, say, short, whereHtml } from "/static/ui.js";
 
 // -- a Documents set: labelling -------------------------------------------------------------------
 // Its questions are labelled against the linked store: Find passages, then y or n on each. Every
@@ -44,6 +44,19 @@ export class Labelling {
 
   busy() {
     return this.saving || this.restoring;
+  }
+
+  // Runs Restore's `work` with the panel held: no mark, Find, Save, Label or Delete can change what
+  // it holds. `work` resolves true once the PUT landed; the question it held may then be gone.
+  // Typed in while the PUT was out, the panel is left as it is: the next Save is checked against
+  // the question as read, and offers Reload.
+  async restore(work) {
+    this.restoring = true;
+    this.canSave(); // set before the first await, so a second click finds it disabled
+    const landed = await work();
+    this.restoring = false;
+    if (landed && this.open && !this.saving && !this.unsaved) this.openQuestion(null);
+    this.canSave();
   }
 
   docStore() {
@@ -303,7 +316,7 @@ export class Labelling {
     try {
       const { estimate } = await api(path, { method: "POST", body });
       if (this.asking !== mine) return; // the panel changed while it was priced
-      confirmSpend($("lab-ai-confirm"), estimate, async () => {
+      confirmSpend($("lab-ai-confirm"), estimate, async (shown) => {
         // A save or Restore may reset the panel, dropping what was paid for; one call per confirm.
         if (this.busy() || this.paying) return;
         if (this.asking !== mine) {
@@ -312,19 +325,18 @@ export class Labelling {
         }
         this.paying = true;
         try {
-          const shown = { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd };
           const { answer } = await api(path, { method: "POST", body: { ...body, ...shown } });
           refreshSpend();
           if (this.asking === mine) $("lab-ai-confirm").innerHTML = "";
           if (this.answering === opened) this.showAnswer(answer); // a mark change keeps it; a question change doesn't
         } catch (e) {
-          dropStaleStart($("lab-ai-confirm"), e);
-          if (this.answering === opened) say($("lab-ai-msg"), e.message, "err");
+          if (this.answering !== opened) return; // the question changed: its error is not this one's
+          throw e;
         } finally {
           this.paying = false;
           this.canSave();
         }
-      });
+      }, $("lab-ai-msg"));
       this.canSave(); // Start waits out a save or Restore under way
     } catch (e) {
       if (this.asking === mine) say($("lab-ai-msg"), e.message, "err");

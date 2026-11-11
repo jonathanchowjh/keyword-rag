@@ -487,7 +487,8 @@ def test_labelling_ai_answer_asks_before_it_spends(page, seeded):
         expect(answer.get_by_text("Is this the right answer?", exact=True)).to_be_visible()
         expect(answer.locator(".full")).to_have_text("Answer: A")
     assert purposes == ["reference_answer"]
-    assert sent[1:] == [{"question": question, "passages": [first], "confirm": True, **shown}]
+    price = {"calls": shown["calls"], "est_usd": shown["est_usd"]}  # what the page sends back
+    assert sent[1:] == [{"question": question, "passages": [first], "confirm": True, **price}]
     expect(page.locator("#lab-ai-confirm")).to_be_empty()
     answer.get_by_role("button", name="Right", exact=True).click()
     expect(panel.get_by_label(REFERENCE)).to_have_value("Answer: A")
@@ -927,3 +928,24 @@ def test_a_question_opened_with_label_saves_at_once(page, seeded):
     page.goto(seeded.url + "/e/reopenq")
     page.get_by_role("button", name="Label").first.click()
     expect(page.locator("#lab-save")).to_be_enabled()
+
+
+def test_lab_answer_refused_keeps_start_and_says_why(page, seeded):
+    labelling_set(seeded, "rf9")
+    panel, passages, sent = ai_panel(page, seeded, "rf9", "How long is leave? (rf9)")
+    mark(passages.first, "right")
+    page.route(
+        "**/eval-sets/rf9q/answer",
+        lambda route: (
+            route.fulfill(status=409, json={"detail": "boom"})
+            if route.request.post_data_json.get("confirm")
+            else route.fallback()
+        ),
+    )
+    panel.get_by_role("button", name=ASK_AI).click()
+    start = page.locator("#lab-ai-confirm").get_by_role("button", name="Start")
+    expect(start).to_be_visible()
+    page.expected = ["409"]
+    start.click()
+    expect(page.locator("#lab-ai-msg")).to_contain_text("boom")
+    expect(start).to_be_visible()

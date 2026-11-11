@@ -12,13 +12,14 @@ from ragqa_api.guards import (
     Guards,
     body_chunks,
     check_mapping,
+    check_ready,
     check_shown_price,
-    type_clash,
+    check_source_name,
+    check_upload_size,
 )
 from ragqa_core import db, imports, jobs
-from ragqa_core.imports import SOURCE_NAME
 from ragqa_core.search_defaults import MAX_EVIDENCE
-from ragqa_core.types import NotFound, QaType, Question
+from ragqa_core.types import NotFound, QaType, Question, type_clash
 
 PICK_STORE = "pick a store for this eval set first"
 
@@ -137,7 +138,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         return JSONResponse(db.list_eval_sets(state.conn), headers=vary)
 
     def check_link(name: str, qa_type: str, store: str) -> None:
-        spec = state.retriever.spec(store)  # unknown: 404
+        spec = db.require_collection(state.conn, store)  # unknown: 404
         if spec.qa_type != qa_type:
             raise type_clash(name, qa_type, store, spec.qa_type)
 
@@ -211,10 +212,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         q = Question(**body.question.model_dump())
         if problem := imports.question_problem(q, row["qa_type"]):
             raise HTTPException(422, f"question '{q.id}': {problem}")
-        try:
-            version = db.upsert_question(state.conn, name, q, Question(**body.base.model_dump()))
-        except ValueError as e:
-            raise HTTPException(409, str(e)) from None
+        version = db.upsert_question(state.conn, name, q, Question(**body.base.model_dump()))
         return {"version": version}
 
     @app.delete("/eval-sets/{name}/questions/{question_id:path}")
@@ -232,7 +230,10 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             raise HTTPException(409, PICK_STORE)
         return state.chats.labelling_pool(row["store"], body.question, body.labelled)
 
-    @app.post("/eval-sets/{name}/answer")
+    @app.post(
+        "/eval-sets/{name}/answer",
+        responses={200: {"description": "Without confirm: {estimate}; with confirm: the result"}},
+    )
     def eval_set_answer(name: str, body: ReferenceAnswerRequest) -> dict:
         row = guards.known_set(name)
         if row["qa_type"] != "documents":
@@ -245,7 +246,10 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if body.confirm and (body.calls is not None or body.est_usd is not None):
             priced = state.chats.reference_answer(row["store"], question, body.passages, False)
             check_shown_price(priced["estimate"], body.calls, body.est_usd)
-        return state.chats.reference_answer(row["store"], question, body.passages, body.confirm)
+        reply = state.chats.reference_answer(row["store"], question, body.passages, body.confirm)
+        if not body.confirm:
+            reply["estimate"] = guards.with_missing(reply["estimate"], ["answer"])
+        return reply
 
     @app.put("/eval-sets/{name}/questions")
     def put_eval_questions(name: str, body: QuestionsPut) -> dict:
@@ -268,10 +272,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             if problem := imports.question_problem(q, row["qa_type"]):
                 raise HTTPException(422, f"question '{q.id}': {problem}")
         guards.not_loading(name)
-        try:
-            version = db.replace_questions(state.conn, name, questions, body.base_version)
-        except ValueError as e:  # the questions were checked above: only a stale base is left
-            raise HTTPException(409, str(e)) from None
+        version = db.replace_questions(state.conn, name, questions, body.base_version)
         return {"version": version}
 
     @app.patch("/eval-sets/{name}")
@@ -305,9 +306,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def add_eval_set_upload(name: str, request: Request, filename: str):
         """The raw file as the body, questions only; answers with a preview."""
         row = guards.known_set(name)
-        length = request.headers.get("content-length", "")
-        if length.isdigit() and int(length) > imports.UPLOAD_LIMIT:
-            raise HTTPException(413, f"the file is over {imports.UPLOAD_LIMIT} bytes")
+        check_upload_size(request)
         owner = f"eval-set:{name}"
         upload_id = imports.save_upload(state.settings.home, owner, filename, body_chunks(request))
         path, _ = imports.open_upload(state.settings.home, owner, upload_id)
@@ -335,28 +334,17 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             )
         except NotFound:
             raise HTTPException(404, f"no upload {body.upload_id!r} on eval set '{name}'") from None
-        if not SOURCE_NAME.match(body.source_name):
-            raise HTTPException(422, "the source name needs 1-64 letters, digits, space, _ . -")
+        check_source_name(body.source_name)
         check_mapping("questions", body.mapping)
         source = "upload:" + body.source_name
         shown = imports.preview(
             path, meta["filename"], "questions", row["qa_type"], body.mapping, None, source
         )
-        if not shown["ready"]:
-            raise HTTPException(
-                422,
-                f"map these fields first: {shown['missing']}"
-                if shown["missing"]
-                else "no usable rows",
-            )
-        _, rows, _ = imports.read_rows(path, meta["filename"])
-        built, _ = imports.build_questions(rows, shown["mapping"], row["qa_type"])
-        built = [replace(q, meta={**q.meta, "source": source}) for q in built]
-        with state.conn.lock:  # no labeller's save between reading the set and writing it
-            counts, todo = state.loader.question_counts(name, built)
-            db.save_questions(state.conn, name, todo)
+        check_ready(shown)
+        counts = imports.import_questions(
+            state.conn, name, path, meta["filename"], row["qa_type"], shown["mapping"], source
+        )
         return {
             **counts,
-            "skipped": len(rows) - len(built),
             "version": guards.known_set(name)["version"],
         }

@@ -1,4 +1,5 @@
-import { $, UNPRICED, api, catalog, esc, followJob, head, manyBody, methodLabel, modelOptions, plural, refreshSpend, say, shell, upload, usd } from "/static/ui.js";
+import { manyBody } from "/static/import_box.js";
+import { $, CONNECT_AI, api, catalog, esc, followJob, head, mayCost, methodLabel, modelOptions, needsAI, plural, priceText, refreshSpend, say, shell, shownPrice, upload } from "/static/ui.js";
 import { PASSAGES_ONLY, attemptHtml, passagesOnly, retrievalHtml } from "/static/reply.js";
 
 const REWRITE_AGAIN = "Re-run rewrites this follow-up with AI: one AI call.";
@@ -250,8 +251,7 @@ function methodOptions(store, value) {
   const methods = [...new Set([...(cat?.chat_methods ?? defaults?.methods ?? []), ...(value ? [value] : [])])];
   const documents = details[store]?.qa_type === "documents";
   const listed = methods.filter((m) => !(documents && cat?.methods?.[m]?.group === "keywords" && m !== value)).map((m) => {
-    const paid = cat?.methods?.[m]?.paid;
-    const label = methodLabel(m, cat) + (paid && paid !== "never" ? " (may cost AI)" : "") + (why[m] ? ` (${why[m]})` : "");
+    const label = mayCost(m, cat) + (why[m] ? ` (${why[m]})` : "");
     return option(m, value, label, Boolean(why[m]));
   });
   return option("", value, `Inherit (${inherited})`) + listed.join("");
@@ -327,7 +327,8 @@ function messageHtml(m) {
             })
             .join("")}</div>`
         : "";
-    body = tabs + attemptHtml(shown, at, ui, chat, hasModel) + retrievalHtml(shown, at, ui, n, chat, hasModel, cat);
+    const ctx = { at, ui, n, chat, hasModel, cat };
+    body = tabs + attemptHtml(shown, ctx) + retrievalHtml(shown, ctx);
     if (n === latestN()) body += panelHtml(n);
   }
   return `<div class="turn" id="msg-${n}" data-n="${n}"><div class="msg user">${esc(m.content)}</div>${body}</div>`;
@@ -801,11 +802,11 @@ async function answerAttempt(n, number) {
 
 // Asks, in #adding, whether to spend `estimate`; resolves true on Add and false on Cancel.
 function askToAdd(file, estimate) {
-  const cost = estimate.est_usd == null ? UNPRICED : `≈ ${usd(estimate.est_usd)}`;
-  $("adding").innerHTML = `${esc(file)}: ${esc(cost)} · ${esc(plural(estimate.calls ?? 0, "AI call"))}
-    <button type="button" data-add>Add</button> <button type="button" data-cancel class="secondary">Cancel</button>`;
+  const add = needsAI(estimate) ? CONNECT_AI : "<button type=\"button\" data-add>Add</button>";
+  $("adding").innerHTML = `${esc(file)}: ${esc(priceText(estimate))} · ${esc(plural(estimate.calls ?? 0, "AI call"))}
+    ${add} <button type="button" data-cancel class="secondary">Cancel</button>`;
   return new Promise((resolve) => {
-    $("adding").querySelector("[data-add]").addEventListener("click", () => resolve(true));
+    $("adding").querySelector("[data-add]")?.addEventListener("click", () => resolve(true));
     $("adding").querySelector("[data-cancel]").addEventListener("click", () => resolve(false));
   });
 }
@@ -825,10 +826,10 @@ async function addFile(store, file) {
   const name = encodeURIComponent(store);
   $("adding").textContent = `Adding ${file.name}…`;
   const up = await upload(`/collections/${name}/uploads?kind=items&accept=text&filename=${encodeURIComponent(file.name)}`, file);
-  const free = up.estimate?.est_usd === 0; // unpriced (null) is not free
+  const free = up.estimate?.est_usd === 0 && !needsAI(up.estimate); // unpriced (null) is not free
   if (!free && !(await askToAdd(file.name, up.estimate ?? { est_usd: null }))) return null;
   $("adding").textContent = `Adding ${file.name}…`;
-  const body = { ...manyBody(up, true), calls: up.estimate?.calls, est_usd: up.estimate?.est_usd };
+  const body = { ...manyBody(up, true), ...shownPrice(up.estimate) };
   const queued = await api(`/collections/${name}/imports`, { method: "POST", body });
   const job = await follow(file.name, queued.job_id);
   if (job.status !== "done") throw new Error(job.error || `the import ${job.status}`);

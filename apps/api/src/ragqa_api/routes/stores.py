@@ -5,18 +5,21 @@ from dataclasses import asdict
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from ragqa_api.guards import PROBLEM, Guards, check_shown_price, estimate_reply, type_clash
+from ragqa_api.guards import (
+    EstimateReply,
+    Guards,
+    check_shown_price,
+    estimate_reply,
+)
 from ragqa_core import db, imports, search_defaults
-from ragqa_core.builder import builds
 from ragqa_core.datasets import DATASETS, dev_slice
 from ragqa_core.evaluator import measurable, runnable
-from ragqa_core.indexer import ListsBusy
-from ragqa_core.jobs import BUSY, BUSY_STATE
+from ragqa_core.jobs import BUSY, BUSY_STATE, PROBLEM
 from ragqa_core.loader import roles_needed
-from ragqa_core.recipes import resolve_search
+from ragqa_core.recipes import builds, resolve_search
 from ragqa_core.retriever import MethodUnavailable, method_reasons
 from ragqa_core.search_defaults import MAX_CANDIDATES
-from ragqa_core.types import CollectionSpec, QaType
+from ragqa_core.types import CollectionSpec, QaType, type_clash
 
 
 class NewCollection(BaseModel):
@@ -73,12 +76,12 @@ class CopyRequest(BaseModel):
     est_usd: float | None = None
 
 
-def spec_json(spec: CollectionSpec) -> dict:
-    return asdict(spec)
-
-
 def add_routes(app: FastAPI, guards: Guards) -> None:
     state = app.state
+
+    def check_embedder(model: str) -> None:
+        if model not in (*search_defaults.supported_embedders(), state.models.dense_model):
+            raise HTTPException(422, f"unknown embedding model {model}")
 
     def source_rows(name: str) -> list[dict]:
         counts, disabled = state.store.source_counts(name), db.disabled_sources(state.conn, name)
@@ -107,11 +110,10 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if found and found["qa_type"] != body.qa_type:  # it would be the store's default
             raise type_clash(body.name, found["qa_type"], body.name, body.qa_type)
         model = body.dense_model
-        known = (*search_defaults.supported_embedders(), state.models.dense_model)
-        if model is not None and model not in known:
-            raise HTTPException(422, f"unknown embedding model {model}")
+        if model is not None:
+            check_embedder(model)
         recipe = body.recipe or ("documents" if body.qa_type == "documents" else "paper_2024")
-        return spec_json(
+        return asdict(
             state.indexer.create(body.name, body.qa_type, body.summarize, recipe, None, model)
         )
 
@@ -121,26 +123,26 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         GET names it."""
         defaults = db.default_eval_sets(state.conn)
         return [
-            {**spec_json(s), "eval_set": defaults.get(s.name)}
-            for s in db.list_collections(state.conn)
+            {**asdict(s), "eval_set": defaults.get(s.name)} for s in db.list_collections(state.conn)
         ]
 
     @app.get("/collections/{name}")
     def get_collection(name: str) -> dict:
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         lists = db.get_keyword_lists(state.conn, name)
         reasons = method_reasons(state.conn, spec)
         available = [m for m, why in reasons.items() if not why]
         count = state.store.count(name)
         jobs = db.list_jobs(state.conn, collection=name, limit=db.ALL)
-        busy, job = collection_state(jobs, count, lists is not None or spec.qa_type == "documents")
+        has_lists = lists is not None or spec.qa_type == "documents"
+        state_name, job = collection_state(jobs, count, has_lists)
         eval_set, everything = guards.store_questions(name)
         include_leaked = db.get_include_leaked(state.conn, eval_set) if eval_set else False
         leaked = guards.leaked_ids(spec, eval_set)
         questions = runnable(everything, leaked, include_leaked)
         fields = field_report(name, questions)
         return {
-            **spec_json(spec),
+            **asdict(spec),
             "count": count,
             "keyword_lists": asdict(lists) if lists else None,
             "methods_available": available,
@@ -150,10 +152,11 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             # one saved before it left the chat list (hybrid_rerank) reads as null
             "chat_method": search_defaults.chat_method(db.get_chat_method(state.conn, name)),
             "chat_k": db.get_chat_k(state.conn, name),
-            "chat_settings": state.chats.store_in_force(name),
+            "chat_settings": search_defaults.store_in_force(state.conn, name),
             # The search a chat uses, as a run names it: a Documents store is scored on it.
             "chat_search": search_defaults.store_search(state.conn, name),
-            "state": busy,
+            "state": state_name,
+            "busy": job is not None,
             "progress": job["progress"] if job and job["status"] == "running" else None,
             "job": job,
             "load_error": load_error(jobs),
@@ -177,7 +180,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         """Makes the eval set the store's default, null clearing it, and sets a chat's
         method and candidates on the store, null inheriting. Every field is checked before
         any is saved; a field left out stays as it is."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         sent = body.model_fields_set
         if "chat_method" in sent and body.chat_method is not None:
             search_defaults.check("method", body.chat_method)  # not a chat method: 422
@@ -200,7 +203,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.delete("/collections/{name}", status_code=204)
     def delete_collection(name: str) -> Response:
-        state.retriever.spec(name)
+        db.require_collection(state.conn, name)
         running = db.list_jobs(state.conn, collection=name, status="running", limit=1)
         if running:
             raise HTTPException(
@@ -219,11 +222,11 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.get("/collections/{name}/sources")
     def list_sources(name: str) -> list[dict]:
-        state.retriever.spec(name)
+        db.require_collection(state.conn, name)
         return source_rows(name)
 
     def known_source(name: str, source: str) -> dict:
-        state.retriever.spec(name)
+        db.require_collection(state.conn, name)
         row = next((r for r in source_rows(name) if r["source"] == source), None)
         if row is None:
             raise HTTPException(404, f"no source {source!r} on '{name}'")
@@ -232,8 +235,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     @app.patch("/collections/{name}/sources/{source}")
     def switch_source(name: str, source: str, body: SourceSwitch) -> dict:
         row = known_source(name, source)
-        if db.job_running(state.conn, "eval", name):
-            raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
+        guards.refuse_running_eval(name)
         if db.job_waiting_or_running(state.conn, "backfill", name):
             raise HTTPException(409, "sources are still being labelled; try again shortly")
         if not body.enabled and row["enabled"]:
@@ -262,14 +264,23 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.put("/collections/{name}/search")
     def put_search(name: str, body: dict) -> dict:
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         merged = resolve_search(spec, body)
         db.set_search(state.conn, name, merged)
         return asdict(merged)
 
-    @app.post("/collections/{name}/load", status_code=202)
+    @app.post(
+        "/collections/{name}/load",
+        status_code=202,
+        responses={
+            200: {
+                "model": EstimateReply,
+                "description": "Without confirm: what it would spend; nothing is queued",
+            }
+        },
+    )
     def load(name: str, body: LoadRequest):
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         guards.check_default_set(spec)
         if body.dataset not in DATASETS:
             raise HTTPException(422, f"unknown dataset {body.dataset!r}; known: {list(DATASETS)}")
@@ -291,12 +302,14 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         if priced or ((spec.summarize or propose) and not body.confirm):
             estimate = state.loader.estimate_load(spec, body.dataset, body.limit)
             spends = spec.summarize or propose or estimate["est_usd"] != 0
+            roles = roles_needed(spec, estimate)
+            shown = guards.with_missing(estimate, roles)
             if body.confirm or not spends:  # it would queue; otherwise the fresh estimate
                 check_shown_price(estimate, body.calls, body.est_usd)  # before any 503
-            for role in roles_needed(spec, estimate):
+            if not body.confirm and (spends or shown["missing"]):
+                return estimate_reply(shown)
+            for role in roles:
                 guards.need_ai(role)
-            if spends and not body.confirm:
-                return estimate_reply(estimate)
             if not body.confirm and estimate["hub"].get("entry"):
                 # Free only because of this entry: the run fails rather than spend unasked.
                 setup["hub_entry"] = estimate["hub"]["entry"]
@@ -304,12 +317,21 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             job_id = db.create_job(state.conn, "load", name, setup)
         return {"job_id": job_id}
 
-    @app.post("/collections/{name}/copy", status_code=202)
+    @app.post(
+        "/collections/{name}/copy",
+        status_code=202,
+        responses={
+            200: {
+                "model": EstimateReply,
+                "description": "Without confirm: what it would spend; nothing is queued",
+            }
+        },
+    )
     def copy_collection(name: str, body: CopyRequest):
         """A new collection of this one's items, questions and switched-off sources, built
         under another recipe. Without confirm, what the copy would spend; with it, the
         collection is made and a queued copy job adds and builds its items."""
-        source = state.retriever.spec(name)
+        source = db.require_collection(state.conn, name)
         if db.get_collection(state.conn, body.name):
             raise HTTPException(409, f"store '{body.name}' already exists")
         found = db.get_eval_set(state.conn, body.name)
@@ -319,12 +341,12 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
         # A job on the source could change the items while the copy reads them.
         guards.refuse_busy(name)
         estimate = state.loader.estimate_copy(name, target)
-        if body.confirm:
-            check_shown_price(estimate, body.calls, body.est_usd)
-        for role in roles_needed(target, estimate):
-            guards.need_ai(role)
+        roles = roles_needed(target, estimate)
         if not body.confirm:
-            return estimate_reply(estimate)
+            return estimate_reply(guards.with_missing(estimate, roles))
+        check_shown_price(estimate, body.calls, body.est_usd)
+        for role in roles:
+            guards.need_ai(role)
         with guards.not_adding(name):  # the copy reads the source's items
             return {"name": body.name, "job_id": state.loader.start_copy(name, target)}
 
@@ -332,10 +354,9 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def reembed(name: str, body: ReembedRequest) -> dict:
         """Queues a rebuild of the store with another embedding model. It is free: every
         item is embedded again on this machine, so there is nothing to estimate or confirm."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         model = body.model
-        if model not in (*search_defaults.supported_embedders(), state.models.dense_model):
-            raise HTTPException(422, f"unknown embedding model {model}")
+        check_embedder(model)
         # Under the lock, so no job is queued between these checks and this one's queueing.
         with guards.not_adding(name):
             guards.refuse_busy(name)  # items added or changed meanwhile would miss the rebuilt copy

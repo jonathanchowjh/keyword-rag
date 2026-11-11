@@ -19,7 +19,7 @@ from ragqa_core.indexer import BATCH, Indexer
 from ragqa_core.keywords import keyword_string
 from ragqa_core.models import Models
 from ragqa_core.prompts import abstract_prompt, induce_prompt, parse_json, tag_prompt
-from ragqa_core.recipes import build_for, build_of
+from ragqa_core.recipes import build_for, build_of, builds
 from ragqa_core.settings import load_settings
 from ragqa_core.store import Store
 from ragqa_core.types import CollectionSpec, Hit, Item
@@ -42,12 +42,6 @@ CUTOFF_MOST = 10  # a cut-off keeps at most this many tags
 # errs high, never low.
 GUESSED_TERMS = [f"guessed term {n} ".ljust(MAX_TERM_CHARS, "x") for n in range(MAX_TERMS)]
 ABSTRACTED = re.compile(r"Principle: (.*?)\nMethod: (.*)\nAnswer: (.*)", re.S)
-
-
-def builds(spec: CollectionSpec) -> bool:
-    """Whether adding items runs the build steps: every recipe but paper 2024 and documents,
-    which keeps a Documents store's passages as uploaded until keyword tags are added."""
-    return spec.recipe not in ("paper_2024", "documents")
 
 
 def picked_terms(text: str, terms: list[str], k: int) -> list[str]:
@@ -448,6 +442,18 @@ class Builder:
         of the stored items with the store switched to documents_tagged."""
         tagged = replace(spec, recipe="documents_tagged", build=build_for("documents_tagged"))
         return self.plan_build(tagged, [])
+
+    def tag_build(self, name: str, progress) -> dict:
+        """Add keyword tags: the Documents store switches to documents_tagged in place
+        (once: a resume finds it switched) and builds every passage. An induction with no
+        usable term switches it back, so it can be tried again."""
+        if db.require_collection(self.conn, name).recipe != "documents_tagged":
+            db.set_recipe(self.conn, name, "documents_tagged", build_for("documents_tagged"))
+        result = self.build(db.require_collection(self.conn, name), [], progress)
+        if db.require_collection(self.conn, name).vocabulary_version is None:
+            db.set_recipe(self.conn, name, "documents", build_for("documents"))
+            return {**result, "note": "no usable terms: nothing was tagged"}
+        return result
 
     def build_calls(self, spec: CollectionSpec, items: list[Item]) -> int:
         """How many AI calls `build` would make after adding the items, cached or not."""

@@ -222,7 +222,7 @@ def test_a_stale_price_is_refused_before_a_missing_model(tmp_path, monkeypatch):
         assert r.status_code == 409
         assert r.json()["detail"] == "the price changed since you saw it: check it again"
         state = client.app.state
-        now = state.loader.estimate_load(state.retriever.spec("s"), "scienceqa", None)
+        now = state.loader.estimate_load(db.require_collection(state.conn, "s"), "scienceqa", None)
         shown = {"calls": 3, "est_usd": now["est_usd"]}  # what it costs now
         r = client.post("/collections/s/load", json={**body, **shown})
         assert r.status_code == 503 and "'summary'" in r.json()["detail"]
@@ -235,7 +235,9 @@ def test_a_load_free_because_of_a_hub_build_needs_no_keywords_model(tmp_path, mo
         client.app.state.worker.stop()
         assert client.post("/collections", json=WORKED).status_code == 201
         r = client.post("/collections/w/load", json={"dataset": "scibench"})
-        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]  # it would build
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"]  # it builds
+        r = client.post("/collections/w/load", json={"dataset": "scibench", "confirm": True})
+        assert r.status_code == 503 and "'keywords'" in r.json()["detail"]
         loader = client.app.state.loader
         published = {"entry": {"id": "scibench-all-worked_examples"}}
         hub = {"entry": "scibench-all-worked_examples", "items": 3}
@@ -262,7 +264,7 @@ def test_summarising_load_estimate_includes_the_propose(tmp_path, monkeypatch):
     items = three_items(monkeypatch)
     with make_client(tmp_path) as client:
         client.post("/collections", json={"name": "s", "qa_type": "multihop", "summarize": True})
-        spec = client.app.state.retriever.spec("s")
+        spec = db.require_collection(client.app.state.conn, "s")
         indexer = client.app.state.indexer
         summaries = (
             indexer.plan_summaries(indexer.changed(spec, items, "hand")[0])[0]
@@ -567,17 +569,21 @@ def test_zero_priced_disabled_summary_model_is_refused(tmp_path):
             assert r.status_code == 503, r.text
             assert "'summary'" in r.json()["detail"]
 
+        def estimate_only(r) -> None:
+            assert r.status_code == 200, r.text
+            assert r.json()["estimate"]["missing"] == ["summary"]
+
         up = upload(client, name="s").json()
         assert up["estimate"]["est_usd"] == 0 and up["estimate"]["calls"] > 0
         refused(do_import(client, up, name="s", confirm=True))
         two = [{"id": f"t{i}", "text": f"tide note {i}"} for i in range(2)]
-        refused(client.post("/collections/s/documents", json={"items": two}))
+        estimate_only(client.post("/collections/s/documents", json={"items": two}))
         many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
-        refused(client.post("/collections/s/documents", json={"items": many}))
+        estimate_only(client.post("/collections/s/documents", json={"items": many}))
         refused(client.post("/collections/s/documents", json={"items": many, "confirm": True}))
         body = {"name": "x", "recipe": "paper_2024", "build": {"added_text": "summary"}}
-        for confirm in (False, True):
-            refused(client.post("/collections/p/copy", json={**body, "confirm": confirm}))
+        estimate_only(client.post("/collections/p/copy", json=body))
+        refused(client.post("/collections/p/copy", json={**body, "confirm": True}))
         assert client.get("/collections/s").json()["count"] == 0
         assert client.get("/collections/x").status_code == 404
         assert db.list_jobs(conn, limit=db.ALL) == [] and ledger_purposes(client) == []
@@ -595,11 +601,17 @@ def test_zero_priced_disabled_keywords_model_is_refused(tmp_path, monkeypatch):
             assert r.status_code == 503, r.text
             assert "'keywords'" in r.json()["detail"]
 
-        refused(client.post("/collections/w/load", json={"dataset": "scibench"}))
-        refused(client.post("/collections/w/documents", json={"items": ITEMS}))
-        for confirm in (False, True):
-            body = {"name": "x", "recipe": "worked_examples", "confirm": confirm}
-            refused(client.post("/collections/p/copy", json=body))
+        def estimate_only(r) -> None:
+            assert r.status_code == 200, r.text
+            assert r.json()["estimate"]["missing"] == ["keywords"]
+
+        estimate_only(client.post("/collections/w/load", json={"dataset": "scibench"}))
+        estimate_only(client.post("/collections/w/documents", json={"items": ITEMS}))
+        estimate_only(
+            client.post("/collections/p/copy", json={"name": "x", "recipe": "worked_examples"})
+        )
+        body = {"name": "x", "recipe": "worked_examples", "confirm": True}
+        refused(client.post("/collections/p/copy", json=body))
         assert db.list_jobs(client.app.state.conn, limit=db.ALL) == []
 
 
@@ -643,8 +655,12 @@ def test_stale_price_is_409_before_503_on_a_free_load_that_needs_a_model(tmp_pat
         sent = {"dataset": "musique"}
         r = client.post("/collections/r/load", json={**sent, "calls": 99, "est_usd": 0})
         assert r.status_code == 409 and r.json()["detail"] == PRICE_CHANGED, r.text
-        r = client.post("/collections/r/load", json={**sent, "calls": 1, "est_usd": 0})
-        assert r.status_code == 503 and "keywords" in r.json()["detail"], r.text  # price agreed
+        r = client.post("/collections/r/load", json={**sent, "calls": 1, "est_usd": 0})  # agreed
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+        r = client.post(
+            "/collections/r/load", json={**sent, "calls": 1, "est_usd": 0, "confirm": True}
+        )
+        assert r.status_code == 503 and "keywords" in r.json()["detail"], r.text
         assert db.list_jobs(client.app.state.conn, limit=db.ALL) == []
 
 
@@ -769,8 +785,12 @@ def test_copy_without_a_model_is_503_when_it_would_spend(tmp_path):
             for confirm in (False, True):
                 body = {"name": "x", "recipe": recipe, "build": build, "confirm": confirm}
                 r = client.post("/collections/p/copy", json=body)
-                assert r.status_code == 503, r.text
-                assert f"'{role}'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+                if confirm:
+                    assert r.status_code == 503, r.text
+                    assert f"'{role}'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+                else:
+                    assert r.status_code == 200, r.text
+                    assert r.json()["estimate"]["missing"] == [role]
         assert client.get("/collections/x").status_code == 404 and client.get("/jobs").json() == []
         # Embedding is free: a plain paper 2024 copy needs no model.
         r = client.post("/collections/p/copy", json={"name": "x", "recipe": "paper_2024"})
@@ -789,7 +809,7 @@ def test_copy_state_and_problem_wording(client):
     set_running(conn, copy, 0.4)
     assert client.get("/collections/w").json()["state"] == "copying"
     db.update_job(conn, copy, status="failed", error="boom", progress=0.4)
-    problems = client.get("/status").json()["problems"]
+    problems = [p["text"] for p in client.get("/status").json()["problems"]]
     assert "The copy into w failed; delete w and copy it again" in problems
     # A collection being copied into takes no hand-added items or vocabulary meanwhile.
     db.update_job(conn, db.create_job(conn, "copy", "w", {"source": "p"}), status="queued")
@@ -1065,6 +1085,36 @@ def test_a_stopped_switch_refuses_deleting_a_source_and_copying(tmp_path, monkey
     r = client.post("/collections/c/copy", json={"name": "cc", "recipe": "paper_2024"})
     assert r.status_code == 409 and r.json()["detail"] == stopped
     assert app.store.count("c") == len(ITEMS) + 1 and db.get_collection(app.conn, "cc") is None
+
+
+def test_add_documents_is_refused_while_a_switch_is_stopped(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: the stopped switch stays stopped
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
+    db.update_job(conn, db.create_job(conn, "reembed", "c", setup), status="interrupted")
+    r = client.post("/collections/c/documents", json={"items": ITEMS[:1], "confirm": True})
+    assert r.status_code == 409 and "stopped part-way" in r.json()["detail"]
+
+
+def test_store_reads_busy(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: no worker claims the jobs
+    small_model(client, monkeypatch)
+    conn = client.app.state.conn
+    assert client.post("/collections", json={"name": "e", "qa_type": "mcq"}).status_code == 201
+    assert client.get("/collections/e").json()["busy"] is False
+    add_collection(client, lists=False)
+    assert client.get("/collections/c").json()["busy"] is False
+    job_id = db.create_job(conn, "eval", "c", {})
+    assert client.get("/collections/c").json()["busy"] is True  # queued
+    db.update_job(conn, job_id, status="running")
+    assert client.get("/collections/c").json()["busy"] is True
+    db.update_job(conn, job_id, status="done")
+    assert client.get("/collections/c").json()["busy"] is False
+    setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
+    db.update_job(conn, db.create_job(conn, "reembed", "c", setup), status="interrupted")
+    assert client.get("/collections/c").json()["busy"] is True  # a stopped switch
 
 
 def test_a_running_rebuild_reports_its_state(tmp_path, monkeypatch):

@@ -1,10 +1,10 @@
-import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, dropStaleStart, embedderLabel, esc, gapBar, gapSpan,
-  head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, UNPRICED, usd, verdictHtml,
-  importBox, notFound, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
+import { ImportBox } from "/static/import_box.js";
+import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, capital, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
+  head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, usd, verdictHtml,
+  notFound, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
-const BUSY_STATES = new Set(["loading", "rekeying", "retagging", "tagging", "copying", "evaluating", "queued", "importing", "labelling", "rebuilding"]); // the collection's own
 const GROUPS = [
   ["baseline", "Baseline"],
   ["control", "Controls"],
@@ -214,10 +214,6 @@ function bindRunForm() {
     model: $("rf-model").value || null,
     split: $("rf-split").value,
     eval_set: $("rf-set").value || null,
-    k: 5,
-    rrf_k: 60,
-    // hybrid_rerank reranks the pool chat does: Settings' (up to 60), capped at a run's 50
-    ...(documents() ? { rerank_pool: Math.min(50, defaults?.in_force?.rerank_pool ?? 20) } : {}),
   });
   let estimating = 0; // bumped by each Estimate and each change, so a late estimate draws no Start
   const forget = () => {
@@ -276,16 +272,11 @@ function bindRunForm() {
     try {
       const { estimate } = await api("/eval", { method: "POST", body: { ...request, confirm: false } });
       if (mine !== estimating) return;
-      confirmSpend($("rf-confirm"), estimate, async () => {
-        try {
-          const queued = await api("/eval", { method: "POST", body: { ...request, confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
-          refreshSpend();
-          location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
-        } catch (e) {
-          dropStaleStart($("rf-confirm"), e);
-          $("rf-msg").textContent = e.message;
-        }
-      });
+      confirmSpend($("rf-confirm"), estimate, async (shown) => {
+        const queued = await api("/eval", { method: "POST", body: { ...request, ...shown } });
+        refreshSpend();
+        location.href = `/c/${enc}/runs/${encodeURIComponent(queued.job_id)}`;
+      }, $("rf-msg"));
     } catch (e) {
       if (mine === estimating) $("rf-msg").textContent = e.message;
     }
@@ -318,7 +309,7 @@ async function toggleRunForm() {
 // The built-in benchmark is offered while nothing is loaded, or the newest load did not finish;
 // a collection that merely has no questions is not offered it again.
 function needsLoad() {
-  if (BUSY_STATES.has(col.state)) return false;
+  if (col.busy) return false;
   return col.count === 0 || (loadJob != null && loadJob.status !== "done");
 }
 
@@ -372,19 +363,12 @@ function bindLoad() {
         await refresh();
         return;
       }
-      confirmSpend($("ld-confirm"), first.estimate, async () => {
-        try {
-          // What was shown: a price that changed since is refused, to be checked again.
-          const shown = { calls: first.estimate.calls, est_usd: first.estimate.est_usd };
-          const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, ...shown, confirm: true } });
-          $("ld-confirm").textContent = `Queued (job ${short(job.job_id)})`;
-          refreshSpend();
-          await refresh();
-        } catch (e) {
-          dropStaleStart($("ld-confirm"), e);
-          $("ld-msg").textContent = e.message;
-        }
-      });
+      confirmSpend($("ld-confirm"), first.estimate, async (shown) => {
+        const job = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, ...shown } });
+        $("ld-confirm").textContent = `Queued (job ${short(job.job_id)})`;
+        refreshSpend();
+        await refresh();
+      }, $("ld-msg"));
     } catch (e) {
       $("ld-msg").textContent = e.message;
     }
@@ -396,7 +380,7 @@ function bindLoad() {
 function sourcesHtml() {
   const rows = col.sources ?? [];
   if (!rows.length) return "";
-  const locked = BUSY_STATES.has(col.state) || col.unlabelled > 0;
+  const locked = col.busy || col.unlabelled > 0;
   const body = rows
     .map(
       (r) => `<tr><td>${esc(sourceLabel(r.source))}</td><td class="num">${esc(count(r.items))}</td>
@@ -409,7 +393,7 @@ function sourcesHtml() {
     ? `<p class="muted">${esc(plural(col.unlabelled, noun()))} ${col.unlabelled === 1 ? "is" : "are"} still being
       labelled with their source; switches open when that finishes.</p>`
     : "";
-  return `<table><thead><tr><th>Source</th><th>${esc(noun().replace(/^./, (c) => c.toUpperCase()))}s</th><th>Used by retrieval</th><th>Delete</th></tr></thead>
+  return `<table><thead><tr><th>Source</th><th>${esc(capital(noun()))}s</th><th>Used by retrieval</th><th>Delete</th></tr></thead>
     <tbody>${body}</tbody></table>${waiting}`;
 }
 
@@ -585,17 +569,16 @@ async function proposeLists() {
   try {
     const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
     const slot = document.createElement("span");
-    $("kw-msg").replaceChildren("Proposing costs ", slot);
-    confirmSpend(slot, estimate, async () => {
-      try {
-        fillLists(await api(path, { method: "POST", body: { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } }));
-        listsDirty = true;
-        note("Proposed by the AI. Review them, then Save lists.");
-        refreshSpend();
-      } catch (e) {
-        note(`<span class="err">${esc(e.message)}</span>`);
-      }
-    });
+    const err = document.createElement("span");
+    err.id = "kw-err";
+    err.className = "err";
+    $("kw-msg").replaceChildren("Proposing costs ", slot, err);
+    confirmSpend(slot, estimate, async (shown) => {
+      fillLists(await api(path, { method: "POST", body: shown }));
+      listsDirty = true;
+      note("Proposed by the AI. Review them, then Save lists.");
+      refreshSpend();
+    }, err);
   } catch (e) {
     note(`<span class="err">${esc(e.message)}</span>`);
   }
@@ -638,17 +621,12 @@ async function askTags() {
   box.innerHTML = "";
   try {
     const { estimate } = await api(path, { method: "POST", body: { confirm: false } });
-    confirmSpend(box, estimate, async () => {
-      try {
-        await api(path, { method: "POST", body: { confirm: true, calls: estimate.calls, est_usd: estimate.est_usd } });
-        box.innerHTML = "";
-        refreshSpend();
-        await refresh();
-      } catch (e) {
-        dropStaleStart(box, e);
-        $("tags-msg").textContent = e.message;
-      }
-    });
+    confirmSpend(box, estimate, async (shown) => {
+      await api(path, { method: "POST", body: shown });
+      box.innerHTML = "";
+      refreshSpend();
+      await refresh();
+    }, $("tags-msg"));
   } catch (e) {
     $("tags-msg").textContent = e.message;
   }
@@ -686,7 +664,7 @@ function embeddingHtml() {
     status = `<p class="warn" data-rebuild>${esc(stoppedLine(r))}
       <button type="button" class="secondary" data-rebuild-resume ${job}>Resume</button></p>`;
   }
-  const busy = BUSY_STATES.has(col.state);
+  const busy = col.busy;
   const options = (defaults?.embedders ?? [])
     .filter((e) => e.name !== col.dense_model)
     .map((e) => `<option value="${esc(e.name)}">${esc(embedderLabel(e, defaults.embed_machine, defaults.recommended.dense_model))}</option>`)
@@ -824,7 +802,7 @@ async function refresh() {
     }
     $("lists-section").hidden = documents();
     $("imp-title").textContent = documents() ? "Add your own passages" : "Add your own items";
-    imports ??= importBox($("imp-items"), {
+    imports ??= new ImportBox($("imp-items"), {
       uploadPath: `/collections/${enc}/uploads`,
       importPath: `/collections/${enc}/imports`,
       kind: "items",
@@ -918,4 +896,4 @@ buildDelete();
 bindSources();
 bindAsked();
 // The first wait follows the first refresh, so a busy store is polled fast from the start.
-refresh().then(() => poll(refresh, () => (col && BUSY_STATES.has(col.state) ? FAST_MS : SLOW_MS)));
+refresh().then(() => poll(refresh, () => (col?.job && BUSY.has(col.job.status) ? FAST_MS : SLOW_MS)));

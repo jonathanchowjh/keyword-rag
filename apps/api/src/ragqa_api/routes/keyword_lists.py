@@ -6,9 +6,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from aiconnect.ai import NoConnection, UnknownModel
-from ragqa_api.guards import NO_KEYWORDS_MODEL, Guards, check_shown_price, estimate_reply
+from ragqa_api.guards import EstimateReply, Guards, check_shown_price, estimate_reply
 from ragqa_core import db
-from ragqa_core.indexer import ListsBusy
 from ragqa_core.loader import sample_items
 from ragqa_core.types import KeywordLists
 from ragqa_core.vocabulary import clean_terms
@@ -58,12 +57,21 @@ class KeywordTagsRequest(BaseModel):
 def add_routes(app: FastAPI, guards: Guards) -> None:
     state = app.state
 
-    @app.post("/collections/{name}/keyword-tags", status_code=202)
+    @app.post(
+        "/collections/{name}/keyword-tags",
+        status_code=202,
+        responses={
+            200: {
+                "model": EstimateReply,
+                "description": "Without confirm: what it would spend; nothing is queued",
+            }
+        },
+    )
     def add_keyword_tags(name: str, body: KeywordTagsRequest | None = None):
         """Add keyword tags: a Documents store switches to documents_tagged in place, and a
         queued tag_build job induces its vocabulary and tags every passage. Without confirm,
         what that would spend."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         if spec.qa_type != "documents" or spec.recipe != "documents":
             raise HTTPException(409, NOT_UNTAGGED)
         # Under the lock, so no job is queued and no passage added between these checks and
@@ -72,31 +80,31 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             if state.store.count(name) == 0:
                 raise HTTPException(409, "add passages first")
             guards.refuse_busy(name)
-            estimate, calls = state.builder.plan_tag_build(spec)
-            if estimate is None:
-                raise HTTPException(503, NO_KEYWORDS_MODEL)
-            if not (body and body.confirm):
-                return estimate_reply({"est_usd": estimate, "calls": calls})
-            check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
-            if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
-                guards.need_ai("keywords")
+            if reply := guards.tag_build_gate(spec, body):
+                return reply
             return {"job_id": db.create_job(state.conn, "tag_build", name, {})}
 
-    @app.post("/collections/{name}/keyword-lists/propose")
+    @app.post(
+        "/collections/{name}/keyword-lists/propose",
+        responses={200: {"description": "Without confirm: {estimate}; with confirm: the result"}},
+    )
     def propose(name: str, body: ProposeRequest | None = None):
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         skip = tuple(db.disabled_sources(state.conn, name))
         if not (body and body.confirm):
-            guards.need_ai("keywords")  # before the sample: no model, no scroll of the store
             sample = sample_items(state.store, name, skip)
-            estimate, calls = state.indexer.plan_propose(spec, sample)
-            return estimate_reply({"est_usd": estimate, "calls": calls})
+            try:
+                estimate, calls = state.indexer.plan_propose(spec, sample)
+            except (NoConnection, UnknownModel):
+                estimate, calls = None, 1  # nothing can price it: the same as vocabulary
+            price = {"est_usd": estimate, "calls": calls}
+            return estimate_reply(guards.with_missing(price, ["keywords"]))
         sample = sample_items(state.store, name, skip)
         if body.calls is not None or body.est_usd is not None:
             try:
                 estimate, calls = state.indexer.plan_propose(spec, sample)
-            except UnknownModel:
-                raise NoConnection("keywords") from None
+            except (NoConnection, UnknownModel):
+                estimate, calls = None, 1  # nothing can price it: the shown price is checked first
             check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
         guards.need_ai("keywords")
         return asdict(state.indexer.propose_lists(spec, sample))
@@ -104,7 +112,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     @app.get("/collections/{name}/keyword-lists")
     def list_versions(name: str) -> list[dict]:
         """Every saved version of the lists, newest first, with a count per list."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         return [
             {
                 "version": v["version"],
@@ -117,7 +125,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.get("/collections/{name}/keyword-lists/{version}")
     def get_version(name: str, version: str) -> dict:
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         v = db.get_keyword_version(state.conn, name, version)
         if v is None:
             raise HTTPException(404, f"no keyword-list version {version!r} on '{name}'")
@@ -132,9 +140,8 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def put_lists(name: str, body: Lists) -> dict:
         """Saves the lists as a version; a queued rekey job switches to it once every
         item is re-keyed (spec §5.5)."""
-        spec = state.retriever.spec(name)
-        if db.job_running(state.conn, "eval", name):
-            raise ListsBusy(f"an eval is running on '{name}'; wait for it to finish")
+        spec = db.require_collection(state.conn, name)
+        guards.refuse_running_eval(name)
         with guards.not_adding(name):  # a refused rekey saves no version either
             version = state.indexer.save_lists(spec, KeywordLists(**body.model_dump()))
             job_id = db.create_job(state.conn, "rekey", name, {"version": version})
@@ -144,18 +151,27 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def get_vocabulary(name: str) -> dict:
         """The vocabulary in force and every saved version. This body is the export:
         PUT it back, edited, to import a version (spec §16)."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         return {
             "version": spec.vocabulary_version,
             "terms": db.get_vocabulary(state.conn, name),
             "versions": db.list_vocabularies(state.conn, name),
         }
 
-    @app.put("/collections/{name}/vocabulary", status_code=202)
+    @app.put(
+        "/collections/{name}/vocabulary",
+        status_code=202,
+        responses={
+            200: {
+                "model": EstimateReply,
+                "description": "Without confirm: what it would spend; nothing is queued",
+            }
+        },
+    )
     def put_vocabulary(name: str, body: Vocabulary):
         """Without confirm, what re-tagging every item would cost; with it, saves the terms
         as a version and a queued retag job switches to it once every item is tagged."""
-        spec = state.retriever.spec(name)
+        spec = db.require_collection(state.conn, name)
         if spec.recipe == "documents":  # a vocabulary comes with Add keyword tags
             raise HTTPException(
                 409, f"'{name}' has no keyword tags yet; use Add keyword tags on the store page"
@@ -166,9 +182,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
                 409, f"'{name}' uses keyword lists, not a vocabulary; edit its lists instead"
             )
         # Items tagged now would mix versions, or skew a run that is reading them.
-        busy = db.busy_job(state.conn, name)
-        if busy:
-            raise HTTPException(409, f"a {busy} job is queued or running on '{name}'; wait")
+        guards.refuse_item_jobs(name)
         state.indexer.check_model(spec)  # the retag would embed with a model it can't load
         terms = clean_terms(body.terms)
         if not terms:
@@ -177,14 +191,15 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             items = state.builder.stored_items(name)
             try:
                 estimate, calls = state.builder.plan_tag(spec, terms, items)
-            except UnknownModel:
-                raise NoConnection("keywords") from None
-            if body.confirm:
-                check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
-            if calls > 0:  # roles_needed's rule: the role is needed when its step makes calls
-                guards.need_ai("keywords")
+            except (NoConnection, UnknownModel):
+                estimate, calls = None, len(items)
+            roles = ["keywords"] if calls > 0 else []  # roles_needed's rule: its step makes calls
             if not body.confirm:
-                return estimate_reply({"est_usd": estimate, "items": len(items), "calls": calls})
+                shown = {"est_usd": estimate, "items": len(items), "calls": calls}
+                return estimate_reply(guards.with_missing(shown, roles))
+            check_shown_price({"est_usd": estimate, "calls": calls}, body.calls, body.est_usd)
+            for role in roles:
+                guards.need_ai(role)
         with guards.not_adding(name):
             version = state.builder.save_vocabulary(spec, terms)
             job_id = db.create_job(state.conn, "retag", name, {"version": version})

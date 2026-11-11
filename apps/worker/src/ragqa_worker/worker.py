@@ -8,8 +8,6 @@ from ragqa_core.evaluator import Evaluator
 from ragqa_core.indexer import Indexer
 from ragqa_core.jobs import ended
 from ragqa_core.loader import Loader
-from ragqa_core.recipes import build_for
-from ragqa_core.types import NotFound
 
 
 class Worker:
@@ -74,9 +72,7 @@ class Worker:
             job = None
             try:
                 log("started")
-                job = db.get_job(conn, job_id)
-                if job is None:
-                    raise NotFound(f"no job {job_id}")
+                job = db.require_job(conn, job_id)
                 self._dispatch(job, check, progress)
             except Exception as e:
                 try:
@@ -141,24 +137,12 @@ class Worker:
             self.evaluator.forget_store(name)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "tag_build":
-            result = self._tag_build(job["collection"], progress)
+            result = self.builder.tag_build(job["collection"], progress)
             db.update_job(self.conn, job_id, status="done", progress=1.0, result=result)
         elif kind == "eval":
             self.evaluator.run(job_id, check)
         else:
             db.update_job(self.conn, job_id, status="failed", error=f"unknown job kind {kind!r}")
-
-    def _tag_build(self, name: str, progress) -> dict:
-        """Add keyword tags: the Documents store switches to documents_tagged in place
-        (once: a resume finds it switched) and builds every passage. An induction with no
-        usable term switches it back, so it can be tried again."""
-        if db.require_collection(self.conn, name).recipe != "documents_tagged":
-            db.set_recipe(self.conn, name, "documents_tagged", build_for("documents_tagged"))
-        result = self.builder.build(db.require_collection(self.conn, name), [], progress)
-        if db.require_collection(self.conn, name).vocabulary_version is None:
-            db.set_recipe(self.conn, name, "documents", build_for("documents"))
-            return {**result, "note": "no usable terms: nothing was tagged"}
-        return result
 
     def _failed(self, e: Exception) -> None:
         self.error = repr(e)

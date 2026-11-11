@@ -15,6 +15,7 @@ DEFAULT_RERANK_MODEL = "jinaai/jina-reranker-v1-tiny-en"
 # change: fast, and already the judge model, so an install has it cached. A store keeps
 # the model it was made with.
 DEFAULT_DENSE_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_JUDGE_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,6 @@ class Settings:
     dense_model: str
     judge_model: str
     rerank_model: str
-    port: int
     build_hub: str
 
 
@@ -57,8 +57,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         username=get("RAGQA_USERNAME"),
         password=get("RAGQA_PASSWORD"),
         dense_model=get("RAGQA_DENSE_MODEL", DEFAULT_DENSE_MODEL) or "",
-        judge_model=get("RAGQA_JUDGE_MODEL", "BAAI/bge-small-en-v1.5") or "",
+        judge_model=get("RAGQA_JUDGE_MODEL", DEFAULT_JUDGE_MODEL) or "",
         rerank_model=get("RAGQA_RERANK_MODEL", DEFAULT_RERANK_MODEL) or "",
-        port=int(get("PORT", "8080") or "8080"),
         build_hub=env.get("RAGQA_BUILD_HUB", HUB_REPO).strip(),  # empty is off, not unset
     )

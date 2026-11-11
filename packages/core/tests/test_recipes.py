@@ -43,7 +43,7 @@ def test_recipes_match_spec_table():
 
 
 def test_documents_recipe_builds_nothing_and_tagged_builds():
-    from ragqa_core.builder import builds
+    from ragqa_core.recipes import builds
 
     d, t = RECIPES["documents"], RECIPES["documents_tagged"]
     assert d == t  # only the name differs, and builds() reads it

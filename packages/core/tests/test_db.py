@@ -55,6 +55,7 @@ from ragqa_core.types import (
     NotFound,
     Question,
     SearchSettings,
+    Stale,
 )
 
 SPEC = CollectionSpec("arc", "mcq", True, "m", 64)
@@ -440,6 +441,14 @@ def test_job_running_matches_kind_and_collection(conn):
     claim_next_job_id(conn)
     assert job_running(conn, "load", "c") is True
     assert job_running(conn, "eval", "c") is False
+
+
+def test_busy_job_takes_kinds(conn):
+    create_job(conn, "tag_build", "c", {})
+    assert db.busy_job(conn, "c") == "tag_build"
+    assert db.busy_job(conn, "c", ("tag_build",)) == "tag_build"
+    assert db.busy_job(conn, "c", ("load",)) is None
+    assert db.busy_job(conn, "other", ("tag_build",)) is None
 
 
 def test_log_keeps_last_50(conn):
@@ -848,7 +857,7 @@ def test_replace_questions_refuses_a_stale_base_and_writes_nothing(conn):
     v1 = db.get_eval_set(conn, "e")["version"]
     v2 = db.replace_questions(conn, "e", questions_of("three"), v1)
     assert v2 != v1 and [q.text for q in get_questions(conn, "e")] == ["three"]
-    with pytest.raises(ValueError, match=f"changed since it was read \\(now {v2}\\)"):
+    with pytest.raises(Stale, match=f"changed since it was read \\(now {v2}\\)"):
         db.replace_questions(conn, "e", questions_of("four"), v1)
     assert [q.text for q in get_questions(conn, "e")] == ["three"]
     assert db.get_eval_set(conn, "e")["version"] == v2
@@ -1234,7 +1243,7 @@ def test_upsert_question_refuses_a_stale_base(conn):
     q1b = Question(q1.id, "one b", None, ["a"], [])
     q2a = Question(q2.id, "two a", None, ["a"], [])
     db.upsert_question(conn, "e", q1a, q1)
-    with pytest.raises(ValueError, match="changed by someone else since you opened it"):
+    with pytest.raises(Stale, match="changed by someone else since you opened it"):
         db.upsert_question(conn, "e", q1b, q1)
     db.upsert_question(conn, "e", q2a, q2)
     assert [q.text for q in get_questions(conn, "e")] == ["one a", "two a"]
@@ -1269,3 +1278,19 @@ def test_upsert_and_delete_make_a_version_each(conn):
     assert v not in seen and get_questions(conn, "e") == []
     with pytest.raises(NotFound):
         db.delete_question(conn, "e", "q0")
+
+
+def test_require_job_raises_not_found(conn):
+    with pytest.raises(NotFound, match="^no job nope$"):
+        db.require_job(conn, "nope")
+
+
+def test_a_stale_eval_set_write_raises_stale(conn):
+    db.create_eval_set(conn, "e", "mcq")
+    save_questions(conn, "e", questions_of("one"))
+    with pytest.raises(Stale, match="changed since it was read"):
+        db.replace_questions(conn, "e", questions_of("two"), "old-version")
+    q = questions_of("one")[0]
+    read = Question(q.id, "an older text", None, ["a"], [])
+    with pytest.raises(Stale, match="changed by someone else since you opened it"):
+        db.upsert_question(conn, "e", Question(q.id, "x", None, ["a"], []), read)

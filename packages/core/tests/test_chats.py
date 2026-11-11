@@ -8,7 +8,7 @@ import pytest
 from aiconnect.ai import UnknownModel, UnknownPrice
 from ragqa_core import db, search_defaults
 from ragqa_core.builder import Builder
-from ragqa_core.chats import AlreadyAnswered, Chats, NeedsAI, UnknownChat, round_robin
+from ragqa_core.chats import AlreadyAnswered, Chats, NeedsAI, round_robin
 from ragqa_core.db import connect
 from ragqa_core.fakes import fake_ai, fake_models
 from ragqa_core.indexer import Indexer
@@ -16,7 +16,7 @@ from ragqa_core.prompts import CHAT_TURNS, chat_prompt
 from ragqa_core.retriever import MethodUnavailable, Retriever
 from ragqa_core.search_defaults import RECOMMENDED
 from ragqa_core.store import Store
-from ragqa_core.types import Hit, Item, KeywordLists, UnknownCollection
+from ragqa_core.types import Hit, Item, KeywordLists, NotFound, UnknownCollection
 
 WORDS = {
     "a": "enzyme kinetics catalyst assay substrate",
@@ -79,7 +79,7 @@ def summarized(chats: Chats, name: str = "s") -> None:
     summarise each query."""
     ix = chats.retriever.indexer
     ix.add(ix.create(name, "multihop", True), items("a"), "x")
-    ix.set_lists(chats.retriever.spec(name), LISTS)
+    ix.set_lists(db.require_collection(chats.conn, name), LISTS)
 
 
 def unloadable(chats: Chats, name: str) -> None:
@@ -93,7 +93,7 @@ def unloadable(chats: Chats, name: str) -> None:
         return real(model)
 
     models.dense_dim = dense_dim  # type: ignore[method-assign]
-    spec = chats.retriever.spec(name)
+    spec = db.require_collection(chats.conn, name)
     db.save_collection(chats.conn, replace(spec, dense_model="gone/model"))
 
 
@@ -149,7 +149,7 @@ def test_create_list_get_update_delete_a_chat(tmp_path):
         chats.create(["a", "nope"])
     with pytest.raises(ValueError):
         chats.create([])
-    with pytest.raises(UnknownChat, match="^no chat nope$"):
+    with pytest.raises(NotFound, match="^no chat nope$"):
         chats.get("nope")
 
     first = chats.create(["a", "b"])
@@ -191,7 +191,7 @@ def test_create_list_get_update_delete_a_chat(tmp_path):
 
     chats.rerun(first["id"], 1, stores={"a": {"candidates": 2}})
     chats.delete(first["id"])
-    with pytest.raises(UnknownChat):
+    with pytest.raises(NotFound):
         chats.get(first["id"])
     assert [c["id"] for c in chats.list()] == [second["id"]]
     assert chats.conn.execute("select count(*) as n from chat_attempts")[0]["n"] == 0
@@ -310,7 +310,7 @@ def test_the_pool_is_capped_round_robin_by_rank(tmp_path):
     chats, _ = build(tmp_path)
     ix = chats.retriever.indexer
     for name in WORDS:
-        ix.add(chats.retriever.spec(name), items(name, 30, start=10), "x")
+        ix.add(db.require_collection(chats.conn, name), items(name, 30, start=10), "x")
     ix.add(ix.create("c", "multihop", False), items("c", 30, words=TIDES), "x")
     search_defaults.save(chats.conn, {"candidates": 30})
     texts: list[list[str]] = []
@@ -662,9 +662,9 @@ def test_rerun_adds_an_attempt_without_answering_and_answer_answers_it(tmp_path)
     assert [c["n"] for c in answered["citations"]] == [1, 3]
     assert answered["model"] and answered["usd"] > 0
     assert chats.get(chat["id"])["messages"][0]["attempts"][1] == answered
-    with pytest.raises(UnknownChat):
+    with pytest.raises(NotFound):
         chats.answer(chat["id"], 1, 3)
-    with pytest.raises(UnknownChat):
+    with pytest.raises(NotFound):
         chats.rerun(chat["id"], 2, {})
 
 
@@ -744,10 +744,10 @@ def test_answer_keeps_the_attempts_rewrite_note(tmp_path):
 
 def test_a_keyword_rag_decision_records_its_query_tags(tmp_path):
     chats, _ = build(tmp_path)
-    spec = chats.retriever.spec("a")
+    spec = db.require_collection(chats.conn, "a")
     builder = chats.retriever.builder
     db.set_vocabulary_version(chats.conn, "a", builder.save_vocabulary(spec, WORDS["a"].split()))
-    builder.tag(chats.retriever.spec("a"), builder.stored_items("a"))
+    builder.tag(db.require_collection(chats.conn, "a"), builder.stored_items("a"))
     db.set_chat_method(chats.conn, "a", "keyword_rag")  # the recommended method is hybrid
     chat = chats.create(["a", "b"])
     one = attempt(chats.ask(chat["id"], BOTH))
@@ -777,7 +777,7 @@ def test_rerun_of_a_message_with_no_attempt_is_unknown(tmp_path):
     chats, _ = build(tmp_path)
     chat = chats.create(["a"])
     n = db.add_chat_message(chats.conn, chat["id"], ENZYME)  # as while its attempt is made
-    with pytest.raises(UnknownChat, match=f"^no attempt 1 of message {n}"):
+    with pytest.raises(NotFound, match=f"^no attempt 1 of message {n}"):
         chats.rerun(chat["id"], n, {})
 
 
@@ -1055,7 +1055,7 @@ def test_a_saved_method_outside_the_chat_list_reads_as_inherited(tmp_path):
     chat = chats.create(["a"])
     hybrid = {"value": "hybrid", "from": "recommended"}
     assert chats.in_force(chat["id"])["stores"]["a"]["method"] == hybrid
-    assert chats.store_in_force("a")["method"] == hybrid
+    assert search_defaults.store_in_force(chats.conn, "a")["method"] == hybrid
     assert decision(attempt(chats.ask(chat["id"], ENZYME)), "a")["method"] == "hybrid"
 
 
@@ -1123,7 +1123,7 @@ def test_set_default_saves_the_chats_store_values_and_clears_them(tmp_path):
     conn = chats.conn
     chat = chats.create(["a", "b"])
     chats.ask(chat["id"], ENZYME)
-    search = chats.retriever.spec("a").search
+    search = db.require_collection(chats.conn, "a").search
     stores = {"a": {"method": "vector", "candidates": 12}, "b": {"candidates": 4}}
     chats.rerun(chat["id"], 1, stores=stores)
 
@@ -1136,7 +1136,9 @@ def test_set_default_saves_the_chats_store_values_and_clears_them(tmp_path):
     assert saved == {"chat_method": "vector", "chat_k": 12, "in_force": from_store}
     force = chats.in_force(chat["id"])["stores"]
     assert force["a"] == from_store
-    assert chats.retriever.spec("a").search == search  # the chat never edits a store's search
+    assert (
+        db.require_collection(chats.conn, "a").search == search
+    )  # the chat never edits a store's search
     # b is untouched
     assert force["b"]["candidates"] == {"value": 4, "from": "chat"}
     assert (db.get_chat_method(conn, "b"), db.get_chat_k(conn, "b")) == (None, None)
@@ -1212,7 +1214,7 @@ def test_create_like_copies_stores_and_saved_settings(tmp_path):
     assert copy["settings"] == first["settings"] and copy["title"] == "New chat"
     assert chats.get(copy["id"])["messages"] == []
     assert chats.create_like(first["id"], "Bot")["title"] == "Bot"
-    with pytest.raises(UnknownChat):
+    with pytest.raises(NotFound):
         chats.create_like("nope")
 
 
@@ -1331,14 +1333,16 @@ def test_a_cached_rewrite_alone_is_not_marked(tmp_path):
     assert two["pipeline"]["answer_cached"] is False
 
 
-def test_store_in_force_matches_search_defaults(tmp_path):
+def test_store_in_force_reads_chat_and_store(tmp_path):
     chats, _ = build(tmp_path)
     db.set_chat_k(chats.conn, "a", 7)
     search_defaults.save(chats.conn, {"method": "vector"})
     chosen = {"method": "keyword"}
-    for picked in (None, chosen):
-        assert chats.store_in_force("a", picked) == search_defaults.store_in_force(
-            chats.conn, "a", picked
-        )
-    assert chats.store_in_force("a", chosen)["method"] == {"value": "keyword", "from": "chat"}
-    assert chats.store_in_force("a")["candidates"] == {"value": 7, "from": "store"}
+    assert search_defaults.store_in_force(chats.conn, "a", chosen)["method"] == {
+        "value": "keyword",
+        "from": "chat",
+    }
+    assert search_defaults.store_in_force(chats.conn, "a")["candidates"] == {
+        "value": 7,
+        "from": "store",
+    }

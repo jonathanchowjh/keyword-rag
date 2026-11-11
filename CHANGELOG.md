@@ -5,22 +5,39 @@
 ### Added
 
 - GET /ai lists each model's `usable` and `ready`.
+- GET /jobs, /jobs/{id} and /status rows carry label, resumable and href.
+- GET /collections/{name} returns busy: true while a job is queued or running on the store, or its rebuild's switch has stopped part-way.
 
 ### Changed
 
+- Changed (breaking): an AI connection or model that doesn't exist answers 404 on the routes that name it in the path (it answered 422); POST /eval with an eval_set that doesn't exist answers 404.
+- Changed (breaking): POST /ai/connections/{id}/models answers 201.
+- Changed (breaking): adding documents is refused with 409 while a rebuild's switch has stopped part-way, as REFERENCE.md said.
+- Changed (breaking): a job in the way reads "a <kind> job is queued or running on '<name>'; wait", and a running eval "an eval is running on '<name>'; wait".
+- Changed (breaking): GET /status lists each problem as {text, href}, not a string, and names the job as the Worker page does ("Evaluating wl (ab12cd34) failed").
+- Changed (breaking): resuming a load, import, re-key, re-tag or labelling job says "this <job> cannot be resumed; start it again" instead of "only evals can be resumed".
+- The Worker page names every kind of job ("Importing into docs", "Re-tagging w") and links every problem to its page.
 - Changed (breaking): PATCH /chats/{id} with a null title or stores answers 422 with a plain-text `detail`, as the other routes do, instead of a list.
 - Chat's Add document is now Add file…: it names the store the file is added to, lists Documents stores first, and says what it added beside the button.
 - Changed (breaking): a request whose job's model is set up and usable but unpriced is refused with 422 `<connection>/<model> has no price; enter one first` where it would spend (proposing keyword lists, saving a vocabulary and requests checked for a model first answered 503; a disabled or keyless unpriced model is 503 everywhere, adding keyword tags included); a load that would only propose keyword lists skips the proposal, and chat's attempt-answer route puts it in the attempt's `error`.
+- Changed (breaking): an unconfirmed spending request answers 200 with its estimate when no model is usable, where load, copy, resuming a copy or tag build, Add keyword tags, proposing keyword lists and saving a vocabulary answered 503; every estimate lists the roles it would call (`roles`) and those with no usable model (`missing`); only a confirm is refused with 503, and the keywords refusal is the usual "no AI model is set up for the 'keywords' job" text. A load that summarises, on a store that doesn't build and with no calls or est_usd sent, still answers 503 before it downloads.
 - Changed (breaking): an unconfirmed load that would queue because it is free is refused with 409 when the `calls` or `est_usd` it sends are stale, as adding documents already was.
+- OpenAPI documents the estimate a spending route answers without confirm.
+- scripts/experiments.py confirms with the calls and price it showed, and stops (exit 3) when the price changed.
 - The Hub dataset card says keyword-rag; the link still points at the rag-qa repository.
+- Changed (breaking): a Documents run that sends no rerank_pool reranks up to Settings' Rerank up to (at most 50), where it took 50; the run form no longer sends k, rrf_k or rerank_pool.
+- GET /eval/{id} names the reranker and pool of a hybrid_rerank run recorded before they were stored.
+- The Lab's Items per method accepts up to 50, as /query does, and Settings' RRF k says it applies to chat and /query.
 - A job stopped for replies names the export command with its path.
 - An empty Documents store says to add documents, and one with no labelled questions says to label some, instead of asking for a run that can't start; Add keyword tags waits for passages; Save question waits for Find passages and asks before saving a question with no right passage.
 - Chat lists a reply's evidence best match first; each passage keeps the [n] the answer cites.
 - Documents stores no longer offer benchmark-only options (controls, multiple-choice choices, keyword-list methods); a Documents run lists each question's right passages and puts unscored questions last.
 - Changed (breaking): a chat whose answer model is missing, deleted, disabled or on a connection with no key (an answer role pointing at a deleted model included) answers with passages only and no error; with such a rewrite or query model, follow-ups are joined, not rewritten, and AI methods say they need AI. A usable but unpriced model is still refused.
+- Start reads Connect AI first, linking to Settings, when what it would run needs a model that isn't usable; prices read the same everywhere (chat no longer shows "≈ < $0.01"); a refused Start or Resume shows why beside it, and only a changed price takes it away.
 
 ### Fixed
 
+- The store page no longer polls every 3 seconds while a rebuild's switch is stopped.
 - Settings' Test, Fetch models, Save key and Save prices stay disabled until their request answers, so a double click can't test (and pay) twice.
 - A refused request's reason shows on the page instead of "Unprocessable Entity".
 - A store, eval set, run or chat that doesn't exist shows "No store named x." and a way back, instead of an empty page with live buttons; an unknown page is an HTML page for a browser.

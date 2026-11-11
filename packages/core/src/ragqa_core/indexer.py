@@ -13,7 +13,15 @@ from ragqa_core.keywords import assign, keyword_string, list_version, pick_all
 from ragqa_core.models import Models
 from ragqa_core.prompts import SUMMARY_TOKENS, parse_json, propose_prompt, summary_prompt
 from ragqa_core.recipes import build_for, build_of, corpus_type_for, default_search, recipes_for
-from ragqa_core.store import CHUNK, SPARSE, Store, chunks_of, item_hash, rebuild_of
+from ragqa_core.store import (
+    CHUNK,
+    SEARCH_DATA_SUFFIXES,
+    SPARSE,
+    Store,
+    chunks_of,
+    item_hash,
+    rebuild_of,
+)
 from ragqa_core.types import (
     FACETS,
     BuildSettings,
@@ -23,16 +31,11 @@ from ragqa_core.types import (
     QaType,
 )
 
-NAME = db.NAME
 BATCH = 64
 PROPOSE_TOKENS = 2000
 
 
 class ModelMismatch(Exception):
-    pass
-
-
-class ListsBusy(Exception):
     pass
 
 
@@ -91,11 +94,11 @@ class Indexer:
     ) -> CollectionSpec:
         """A new collection's spec, not yet saved: the recipe's build, or the one given, and
         the dense model given, or the one new stores take."""
-        if not NAME.match(name):
+        if not db.NAME.match(name):
             raise ValueError(db.refused_name(name, "a store name"))
-        if name.endswith(("__rebuild", "__chunks")):  # the names of a store's search data
+        if name.endswith(SEARCH_DATA_SUFFIXES):  # the names of a store's search data
             raise ValueError(
-                "store names may not end in __rebuild or __chunks;"
+                f"store names may not end in {' or '.join(SEARCH_DATA_SUFFIXES)};"
                 " those are kept for its search data"
             )
         build = build or build_for(recipe, summarize)

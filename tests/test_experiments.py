@@ -85,13 +85,27 @@ def test_unknown_experiment_is_refused():
         arms("x9", "c")
 
 
-def fake_api(est_usd: float | None, posts: list[dict]) -> httpx.Client:
+PRICE_CHANGED = "the price changed since you saw it: check it again"
+
+
+def fake_api(
+    est_usd: float | None,
+    posts: list[dict],
+    missing: list[str] | None = None,
+    stale_from: int | None = None,
+) -> httpx.Client:
+    """stale_from=N answers 409 PRICE_CHANGED to the Nth confirm and every one after."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/eval":
             body = json.loads(request.content)
             posts.append(body)
             if not body["confirm"]:
-                return httpx.Response(200, json={"estimate": {"est_usd": est_usd, "calls": 3}})
+                estimate = {"est_usd": est_usd, "calls": 3, "roles": [], "missing": missing or []}
+                return httpx.Response(200, json={"estimate": estimate})
+            confirms = sum(p["confirm"] for p in posts)
+            if stale_from is not None and confirms >= stale_from:
+                return httpx.Response(409, json={"detail": PRICE_CHANGED})
             return httpx.Response(202, json={"job_id": f"job{len(posts)}", "estimate": {}})
         if request.method == "GET" and request.url.path == "/eval/job1":
             return httpx.Response(
@@ -252,3 +266,38 @@ def test_report_names_the_rerank_pool(monkeypatch, capsys):
     assert experiments.main(["report", "job1"]) == 0
     assert "hybrid_rerank pool=20 jina-reranker-v1-tiny-en" in capsys.readouterr().out
     assert "pool=20" in experiments.body_label(arms("x5", "c")[0])
+
+
+def test_run_confirms_with_the_calls_and_price_it_was_shown(monkeypatch, capsys):
+    posts: list[dict] = []
+    monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.4, posts))
+    assert experiments.main(["run", "x4", "c", "--confirm", "--paid"]) == 0
+    confirmed_bodies = [p for p in posts if p["confirm"]]
+    assert len(confirmed_bodies) == 4
+    assert all(b["calls"] == 3 and b["est_usd"] == 0.4 for b in confirmed_bodies)
+
+
+def test_run_confirms_an_unpriced_arm_with_no_price(monkeypatch, capsys):
+    posts: list[dict] = []
+    monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(None, posts))
+    assert experiments.main(["run", "x1", "c", "--confirm", "--paid"]) == 0
+    (body,) = [p for p in posts if p["confirm"]]
+    assert body["calls"] == 3 and body["est_usd"] is None
+
+
+def test_run_stops_on_a_changed_price(monkeypatch, capsys):
+    posts: list[dict] = []
+    monkeypatch.setattr(experiments, "make_client", lambda api: fake_api(0.4, posts, stale_from=2))
+    assert experiments.main(["run", "x4", "c", "--confirm", "--paid"]) == 3
+    err = capsys.readouterr().err
+    assert "stopped: the price changed since you saw it" in err
+    assert "queued 1 of 4 arms" in err
+
+
+def test_estimate_names_a_missing_model(monkeypatch, capsys):
+    posts: list[dict] = []
+    monkeypatch.setattr(
+        experiments, "make_client", lambda api: fake_api(0.0, posts, missing=["answer"])
+    )
+    assert experiments.main(["estimate", "x1", "c"]) == 0
+    assert "needs a model: answer" in capsys.readouterr().out

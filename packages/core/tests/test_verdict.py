@@ -1,6 +1,5 @@
 import pytest
 
-from ragqa_core.search_defaults import CHAT_METHODS
 from ragqa_core.verdict import (
     answer,
     best_of_each,
@@ -9,7 +8,6 @@ from ragqa_core.verdict import (
     proxy,
     scale,
     score,
-    switchable,
 )
 
 SAME = {f"q{n}": 0.5 for n in range(40)}
@@ -177,13 +175,6 @@ def test_score_offers_no_switch_unless_one_is_ahead():
     s = score(pm, "hybrid", 100, False, False)
     assert s is not None and s["switch"] is None and s["lo"] <= s["mean"] <= s["hi"]
     assert score({"hybrid": {}}, "hybrid", 100, False, False) is None
-
-
-def test_switchable_swaps_hybrid_for_hybrid_rerank_when_rerank_is_on():
-    assert switchable(False) == CHAT_METHODS
-    on = switchable(True)
-    assert "hybrid" not in on and "hybrid_rerank" in on
-    assert set(on) == set(CHAT_METHODS) - {"hybrid"} | {"hybrid_rerank"}
 
 
 def test_pair_answers_are_tagged_pair():

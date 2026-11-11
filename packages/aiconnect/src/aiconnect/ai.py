@@ -32,6 +32,7 @@ KEEP: Any = object()  # update_*: leave this field as it is
 DEFAULT_CAP_USD = 20.0
 BATCH_THRESHOLD = 50
 BATCH_POLL_SECONDS = 30
+OUTPUT_MARGIN = 1.3  # a reply is priced this much past max_tokens
 CURRENT_JOB = object()  # _record default: the calling thread's job
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
@@ -70,6 +71,10 @@ create table if not exists ai_waiting (
 
 class Conflict(Exception):
     pass
+
+
+class NotStored(Exception):
+    """A connection or model named in the path is not stored."""
 
 
 class NoConnection(Exception):
@@ -126,6 +131,11 @@ def usd_for(rates: tuple[float, float], tokens_in: int, tokens_out: int, batch: 
     """USD at (input, output) prices per million tokens. The Batch API is half."""
     usd = (tokens_in * rates[0] + tokens_out * rates[1]) / 1e6
     return usd / 2 if batch else usd
+
+
+def priced(row: dict | sqlite3.Row) -> bool:
+    """A model row has both prices."""
+    return row["price_in"] is not None and row["price_out"] is not None
 
 
 def callable_connection(connection: dict | sqlite3.Row) -> bool:
@@ -257,7 +267,7 @@ class AI:
     def need_connection(self, id: str) -> sqlite3.Row:
         rows = self.sql("select * from ai_connections where id = ?", (id,))
         if not rows:
-            raise ValueError(f"no connection {id}")
+            raise NotStored(f"no connection {id}")
         return rows[0]
 
     # models
@@ -296,7 +306,7 @@ class AI:
             "select 1 from ai_models where connection_id = ? and model_id = ?",
             (connection_id, model_id),
         ):
-            raise UnknownModel(f"no model {connection_id}/{model_id}")
+            raise NotStored(f"no model {connection_id}/{model_id}")
         for value in (price_in, price_out):
             if value is not KEEP:
                 check_price(value)
@@ -346,10 +356,7 @@ class AI:
             (
                 m["model_id"]
                 for m in self.models()
-                if m["connection_id"] == connection_id
-                and m["enabled"]
-                and m["price_in"] is not None
-                and m["price_out"] is not None
+                if m["connection_id"] == connection_id and m["enabled"] and priced(m)
             ),
             None,
         )
@@ -399,7 +406,7 @@ class AI:
                     "price_out": r["price_out"],
                     "enabled": bool(r["enabled"]),
                     "usable": usable,
-                    "ready": usable and r["price_in"] is not None and r["price_out"] is not None,
+                    "ready": usable and priced(r),
                 }
             )
         return out
@@ -578,7 +585,7 @@ class AI:
             "select price_in, price_out from ai_models where connection_id = ? and model_id = ?",
             (connection_id, model_id),
         )[0]
-        if row["price_in"] is None or row["price_out"] is None:
+        if not priced(row):
             return None
         return row["price_in"], row["price_out"]
 
@@ -699,7 +706,7 @@ class AI:
 
     @staticmethod
     def _usd(rates, system: str, prompts: list[str], max_tokens: int, batch: bool) -> float:
-        out = math.ceil(max_tokens * 1.3)
+        out = math.ceil(max_tokens * OUTPUT_MARGIN)
         return sum(
             usd_for(rates, estimate_tokens(len(system) + len(p)), out, batch) for p in prompts
         )
@@ -977,7 +984,9 @@ class AI:
         rates = self.need_rates(connection_id, model_id)
         # Only a kind with a Batch API sends batches; the others pay full price.
         batch = batch and self.need_connection(connection_id)["kind"] in BATCH
-        return usd_for(rates, estimate_tokens(prompt_chars), math.ceil(output_tokens * 1.3), batch)
+        return usd_for(
+            rates, estimate_tokens(prompt_chars), math.ceil(output_tokens * OUTPUT_MARGIN), batch
+        )
 
     def estimate_many(
         self,

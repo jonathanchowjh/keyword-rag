@@ -10,8 +10,6 @@ from ragqa_api.guards import Guards
 from ragqa_core import search_defaults
 from ragqa_core.catalog import ROLE_LABELS
 
-KNOWN_ROLES = ["default", "answer", "summary", "keywords", "query", "rewrite"]
-
 
 class NewConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -101,7 +99,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "models": state.ai.models(),
             "roles": state.ai.roles(),
             "default_from_env": state.ai.env_default,
-            "known_roles": KNOWN_ROLES,
+            "known_roles": list(ROLE_LABELS),
             "resolved": {role: state.ai.ready(role) for role in ROLE_LABELS},
             "budget": {
                 "cap_usd": state.ai.cap_usd,
@@ -159,7 +157,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
     def fetch_models(id: str) -> dict:
         return {"added": state.ai.fetch_models(id)}
 
-    @app.post("/ai/connections/{id}/models")
+    @app.post("/ai/connections/{id}/models", status_code=201)
     def add_model(id: str, body: NewModel) -> dict:
         state.ai.add_model(
             id, body.model_id, label=body.label, price_in=body.price_in, price_out=body.price_out
@@ -176,8 +174,8 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.put("/ai/roles/{role}")
     def set_role(role: str, body: RoleSet) -> dict:
-        if role not in KNOWN_ROLES:
-            raise HTTPException(422, f"unknown role {role!r}; known: {KNOWN_ROLES}")
+        if role not in ROLE_LABELS:
+            raise HTTPException(422, f"unknown role {role!r}; known: {list(ROLE_LABELS)}")
         state.ai.set_role(role, body.model)
         return {"role": role, "model": state.ai.roles().get(role)}
 

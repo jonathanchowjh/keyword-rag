@@ -127,31 +127,44 @@ def make_client(api: str) -> httpx.Client:
     return httpx.Client(base_url=api, timeout=60)
 
 
-def estimates(client: httpx.Client, bodies: list[dict]) -> list[float | None]:
-    """Each arm priced without confirm; prints one line per arm. None means unpriced."""
-    costs: list[float | None] = []
+def estimates(client: httpx.Client, bodies: list[dict]) -> list[dict]:
+    """Each arm priced without confirm; prints one line per arm and returns the estimates.
+    An est_usd of None means unpriced."""
+    ests: list[dict] = []
     for body in bodies:
         r = client.post("/eval", json={**body, "confirm": False})
         r.raise_for_status()
         est = r.json()["estimate"]
+        ests.append(est)
         usd = est.get("est_usd")  # null when the job has no model to price it
-        costs.append(None if usd is None else float(usd))
         price = "unpriced (no model)" if usd is None else f"${usd:.4f}"
-        print(f"{body_label(body):55} {price}  {est.get('calls', 0)} calls")
-    print(f"{'total':55} ${sum(c for c in costs if c is not None):.4f}")
-    return costs
+        line = f"{body_label(body):55} {price}  {est.get('calls', 0)} calls"
+        if est.get("missing"):
+            line += f"  needs a model: {', '.join(est['missing'])}"
+        print(line)
+    total = sum(e["est_usd"] for e in ests if e.get("est_usd") is not None)
+    print(f"{'total':55} ${total:.4f}")
+    return ests
 
 
 def run(client: httpx.Client, bodies: list[dict], paid: bool) -> int:
-    costs = estimates(client, bodies)
-    if any(c is None or c > 0 for c in costs) and not paid:
+    ests = estimates(client, bodies)
+    if any(e.get("est_usd") is None or e["est_usd"] > 0 for e in ests) and not paid:
         print(
             "these arms cost money or are unpriced; read the estimate, then add --paid",
             file=sys.stderr,
         )
         return 2  # nothing is queued
-    for body in bodies:
-        r = client.post("/eval", json={**body, "confirm": True})
+    for queued, (body, est) in enumerate(zip(bodies, ests, strict=True)):
+        # Confirm with the calls and price it showed: the server refuses if they changed.
+        confirm = {**body, "confirm": True, "calls": est["calls"], "est_usd": est["est_usd"]}
+        r = client.post("/eval", json=confirm)
+        if r.status_code == 409:
+            print(
+                f"stopped: {r.json()['detail']}; queued {queued} of {len(bodies)} arms",
+                file=sys.stderr,
+            )
+            return 3
         r.raise_for_status()
         print(f"queued {body_label(body)}: {r.json()['job_id']}")
     return 0

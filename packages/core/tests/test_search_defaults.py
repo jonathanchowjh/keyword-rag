@@ -6,6 +6,7 @@ from ragqa_core.search_defaults import (
     chat_method,
     check,
     in_force,
+    run_method,
     save,
     saved,
     source,
@@ -142,3 +143,9 @@ def test_store_search_without_rerank_runs_the_method_itself(conn):
     search_defaults.save(conn, {"rerank": False})
     s = store_search(conn, "d")
     assert s["run_method"] == "hybrid" and s["before_rerank"] is False
+
+
+def test_run_method_names_a_reranked_hybrid():
+    assert run_method("hybrid", True) == "hybrid_rerank"
+    assert run_method("hybrid", False) == "hybrid"
+    assert run_method("vector", True) == "vector"

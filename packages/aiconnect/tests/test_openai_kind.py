@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aiconnect import Conflict, ProviderError, wire
+from aiconnect import Conflict, NotStored, ProviderError, wire
 from aiconnect.ai import estimate_tokens
 from aiconnect.fakes import fake_ai
 from aiconnect.presets import PRESETS
@@ -126,7 +126,7 @@ def test_fetch_models_prices_new_models_at_zero_and_adds_only_new(tmp_path):
 
 
 def test_fetch_models_unknown_connection(tmp_path):
-    with pytest.raises(ValueError):
+    with pytest.raises(NotStored):
         gateway_ai(tmp_path).fetch_models("nope")
 
 

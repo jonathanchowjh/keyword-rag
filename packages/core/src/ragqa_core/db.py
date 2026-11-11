@@ -40,6 +40,7 @@ from ragqa_core.types import (
     QaType,
     Question,
     SearchSettings,
+    Stale,
     UnknownCollection,
     slug,
     unknown_store,
@@ -695,6 +696,46 @@ def save_questions(conn: Connection, name: str, questions: list[Question]) -> No
         snapshot_eval_set(conn, name)
 
 
+def keep_labels(old: Question, new: Question) -> Question:
+    """The file's question over the stored one in a Documents set. A file that carries
+    judged_ids replaces the stored question whole. Otherwise its text and meta win, its gold
+    ids join the stored ones, and the stored judged passages and typed answers are kept
+    unless the file has answers of its own. The result is what gets stored."""
+    if new.judged_ids is not None:
+        return judged_with_gold(new)
+    gold_ids = list(dict.fromkeys([*old.gold_ids, *new.gold_ids]))
+    merged = replace(
+        new,
+        gold_ids=gold_ids,
+        gold_answers=new.gold_answers or old.gold_answers,
+        judged_ids=old.judged_ids,
+    )
+    return judged_with_gold(merged)
+
+
+def question_counts(
+    conn: Connection, eval_set: str, questions: list[Question]
+) -> tuple[dict, list[Question]]:
+    """New, updated, unchanged against the eval set's questions."""
+    stored = {q.id: q for q in get_questions(conn, eval_set)}
+    found = get_eval_set(conn, eval_set)
+    documents = found is not None and found["qa_type"] == "documents"
+    counts, todo = {"new": 0, "updated": 0, "unchanged": 0}, []
+    for q in questions:
+        old = stored.get(q.id)
+        if old is not None and documents:
+            q = keep_labels(old, q)
+        if old is None:
+            counts["new"] += 1
+        elif asdict(q) == asdict(old):
+            counts["unchanged"] += 1
+            continue
+        else:
+            counts["updated"] += 1
+        todo.append(q)
+    return counts, todo
+
+
 def snapshot_eval_set(conn: Connection, name: str) -> str:
     """Saves the eval set's questions as a version when that content is new, makes it the
     current one and returns it. The same content always has the same version."""
@@ -714,28 +755,22 @@ def replace_questions(
     conn: Connection, name: str, questions: list[Question], base_version: str | None
 ) -> str:
     """Makes the eval set's questions exactly `questions`; refuses when `base_version` is
-    given and the set has moved on since it was read."""
-    with conn.lock:
-        _ensure_for_write(conn, name)
+    given and the set has moved on since it was read (Stale)."""
+
+    def write() -> None:
         current = (get_eval_set(conn, name) or {})["version"]
         if base_version is not None and base_version != current:
-            raise ValueError(f"eval set '{name}' changed since it was read (now {current})")
+            raise Stale(f"eval set '{name}' changed since it was read (now {current})")
         ids = [q.id for q in questions]
         if repeated := next((i for i in ids if ids.count(i) > 1), None):
             raise ValueError(f"question id '{repeated}' appears more than once")
-        conn.execute("begin immediate")  # all or nothing: a failed insert keeps the old ones
-        try:
-            conn.execute("delete from questions where collection = ?", (name,))
-            conn.executemany(
-                "insert into questions values (?, ?, ?)",
-                [(name, q.id, question_json(q)) for q in questions],
-            )
-            version = snapshot_eval_set(conn, name)
-            conn.execute("commit")
-        except BaseException:
-            conn.execute("rollback")
-            raise
-        return version
+        conn.execute("delete from questions where collection = ?", (name,))
+        conn.executemany(
+            "insert into questions values (?, ?, ?)",
+            [(name, q.id, question_json(q)) for q in questions],
+        )
+
+    return _in_transaction(conn, name, write)
 
 
 def _stored_question(conn: Connection, name: str, question_id: str) -> Question | None:
@@ -765,35 +800,32 @@ def _in_transaction(conn: Connection, name: str, write) -> str:
 def add_question(conn: Connection, name: str, q: Question) -> tuple[str, str]:
     """Adds one question under q.id, or the first `-2`, `-3`... not yet stored; returns its id
     and the new version. The id is picked inside the lock, so two adds never clash."""
-    with conn.lock:
-        _ensure_for_write(conn, name)
-        conn.execute("begin immediate")
-        try:
-            new_id, n = q.id, 2
-            while _stored_question(conn, name, new_id) is not None:
-                new_id, n = f"{q.id}-{n}", n + 1
-            conn.execute(
-                "insert into questions values (?, ?, ?)",
-                (name, new_id, question_json(replace(q, id=new_id))),
-            )
-            version = snapshot_eval_set(conn, name)
-            conn.execute("commit")
-        except BaseException:
-            conn.execute("rollback")
-            raise
-        return new_id, version
+    new_id = q.id
+
+    def write() -> None:
+        nonlocal new_id
+        n = 2
+        while _stored_question(conn, name, new_id) is not None:
+            new_id, n = f"{q.id}-{n}", n + 1
+        conn.execute(
+            "insert into questions values (?, ?, ?)",
+            (name, new_id, question_json(replace(q, id=new_id))),
+        )
+
+    version = _in_transaction(conn, name, write)
+    return new_id, version
 
 
 def upsert_question(conn: Connection, name: str, q: Question, base: Question) -> str:
     """Replaces one stored question; refuses when it is gone (NotFound) or differs from `base`,
-    the question as the caller read it (ValueError)."""
+    the question as the caller read it (Stale)."""
 
     def write() -> None:
         stored = _stored_question(conn, name, q.id)
         if stored is None:
             raise NotFound(GONE_QUESTION)
         if asdict(stored) != asdict(base):
-            raise ValueError("This question was changed by someone else since you opened it")
+            raise Stale("This question was changed by someone else since you opened it")
         conn.execute(
             "update questions set json = ? where collection = ? and id = ?",
             (question_json(q), name, q.id),
@@ -961,6 +993,13 @@ def get_job(conn: Connection, job_id: str) -> dict | None:
     return None if row is None else _job(row)
 
 
+def require_job(conn: Connection, job_id: str) -> dict:
+    job = get_job(conn, job_id)
+    if job is None:
+        raise NotFound(f"no job {job_id}")
+    return job
+
+
 def _job(row: sqlite3.Row) -> dict:
     job = dict(row)
     job["setup"] = json.loads(job.pop("setup_json"))
@@ -1117,9 +1156,9 @@ def tag_build_unfinished(conn: Connection, collection: str) -> bool:
 ITEM_JOBS = ("load", "import", "retag", "copy", "eval", "reembed", "tag_build")
 
 
-def busy_job(conn: Connection, collection: str) -> str | None:
-    """The first of ITEM_JOBS queued or running on the collection, or None."""
-    return next((k for k in ITEM_JOBS if job_waiting_or_running(conn, k, collection)), None)
+def busy_job(conn: Connection, collection: str, kinds: tuple[str, ...] = ITEM_JOBS) -> str | None:
+    """The first of `kinds` queued or running on the collection, or None."""
+    return next((k for k in kinds if job_waiting_or_running(conn, k, collection)), None)
 
 
 def job_waiting_or_running(conn: Connection, kind: str, collection: str) -> bool:

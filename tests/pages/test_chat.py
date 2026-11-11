@@ -1885,3 +1885,50 @@ def test_chat_method_select_over_documents_store_has_no_keyword_list_methods(pag
     assert not set(values["chatdoc"]) & set(keywords)
     assert "hybrid" in values["chatdoc"]
     assert set(values["c"]) & set(keywords)
+
+
+def test_add_file_price_is_never_approx_less_than(page, seeded, tmp_path):
+    free_store(seeded, "pricey")
+    fake = {"est_usd": 0.004, "missing": []}
+
+    def estimate(route):
+        body = route.fetch().json()
+        body["estimate"] = {**body["estimate"], "calls": 2, **fake}
+        route.fulfill(json=body)
+
+    page.route("**/collections/pricey/uploads?*", estimate)
+    chat_upload(page, seeded, "pricey", tmp_path, "one.txt", "some words about tides")
+    box = page.locator("#adding")
+    expect(box).to_contain_text("< $0.01")
+    expect(box).not_to_contain_text("≈")
+    box.get_by_role("button", name="Cancel").click()
+    expect(box).to_be_empty()
+    fake["missing"] = ["summary"]
+    two = tmp_path / "two.txt"
+    two.write_text("other words about winds")
+    page.locator("#doc-file").set_input_files(str(two))
+    expect(box.get_by_role("link", name="Connect AI first")).to_have_attribute("href", "/settings")
+    expect(box.get_by_role("button", name="Add", exact=True)).to_have_count(0)
+    expect(box.get_by_role("button", name="Cancel")).to_be_visible()
+
+
+def test_add_file_free_but_missing_a_model_offers_connect_ai(page, seeded, tmp_path):
+    free_store(seeded, "freeno")
+
+    def estimate(route):
+        body = route.fetch().json()
+        body["estimate"] = {**body["estimate"], "est_usd": 0, "calls": 2, "missing": ["summary"]}
+        route.fulfill(json=body)
+
+    page.route("**/collections/freeno/uploads?*", estimate)
+    imports = []
+    page.on(
+        "request",
+        lambda r: imports.append(r) if r.url.endswith("/collections/freeno/imports") else None,
+    )
+    chat_upload(page, seeded, "freeno", tmp_path, "one.txt", "some words about tides")
+    box = page.locator("#adding")
+    expect(box.get_by_role("link", name="Connect AI first")).to_have_attribute("href", "/settings")
+    expect(box.get_by_role("button", name="Add", exact=True)).to_have_count(0)
+    expect(box.get_by_role("button", name="Cancel")).to_be_visible()
+    assert imports == []

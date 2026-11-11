@@ -60,7 +60,7 @@ every request a 503. See [SECURITY.md](SECURITY.md).
 
 **Without an AI model the service still runs.** Search, imports into a Documents
 store, labelling, runs that only search, and chat as passages all work and cost
-nothing. Anything that would spend answers 503 until you connect a model.
+nothing. Anything that would spend shows Connect AI first until you connect a model.
 
 ## Words used here
 

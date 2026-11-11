@@ -74,18 +74,23 @@ CLIENT_CALLS = (
 )
 
 
+CHUNKS_SUFFIX = "__chunks"
+REBUILD_SUFFIX = "__rebuild"
+SEARCH_DATA_SUFFIXES = (REBUILD_SUFFIX, CHUNKS_SUFFIX)
+
+
 def point_id(name: str, item_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{name}/{item_id}"))
 
 
 def chunks_of(name: str) -> str:
-    return f"{name}__chunks"
+    return f"{name}{CHUNKS_SUFFIX}"
 
 
 def rebuild_of(name: str) -> str:
     """The side collection a store is re-embedded into before it switches; its chunks
     live in chunks_of(rebuild_of(name))."""
-    return f"{name}__rebuild"
+    return f"{name}{REBUILD_SUFFIX}"
 
 
 def item_hash(item: Item) -> str:

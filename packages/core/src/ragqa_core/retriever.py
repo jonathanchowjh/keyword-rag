@@ -13,6 +13,7 @@ import numpy as np
 from aiconnect.ai import AI, AwaitingReplies, BudgetExceeded, NoConnection, ProviderError
 from ragqa_core import db
 from ragqa_core.builder import TAG_TOKENS, Builder, picked_terms
+from ragqa_core.catalog import METHODS
 from ragqa_core.connection import Connection
 from ragqa_core.indexer import Indexer, ModelMismatch
 from ragqa_core.keywords import keyword_string, matched
@@ -108,7 +109,9 @@ def method_reasons(conn: Connection, spec: CollectionSpec) -> dict[str, str | No
 
 
 def is_paid(spec: CollectionSpec, method: str) -> bool:
-    return method == "iterative" or (method in KEYWORD_METHODS and spec.summarize)
+    # with_model_tags (keyword_rag) is not counted: callers add it back from the chat's query tags.
+    paid = METHODS[method]["paid"]
+    return paid == "always" or (paid == "with_summaries" and spec.summarize)
 
 
 def rrf(rankings: list[list[Hit]], k: int, weights: list[float] | None = None) -> list[Hit]:
@@ -171,9 +174,6 @@ class Retriever:
             "fixed_example": lambda spec, q, k, rk, skip: self._control(spec, FIXED_SEED, k, skip),
         }
 
-    def spec(self, name: str) -> CollectionSpec:
-        return db.require_collection(self.conn, name)
-
     def retrieve(
         self,
         collection: str,
@@ -194,7 +194,7 @@ class Retriever:
         and with which model (None is the service's)."""
         if method not in METHOD_NAMES:
             raise ValueError(f"unknown method {method!r}; known: {', '.join(METHOD_NAMES)}")
-        spec = self.spec(collection)
+        spec = db.require_collection(self.conn, collection)
         # Every query is embedded with the store's own model; a store whose model this
         # service can't load, or whose dimension is not its model's, is refused by name.
         self.indexer.check_model(spec)

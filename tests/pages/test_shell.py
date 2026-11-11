@@ -70,7 +70,9 @@ def test_sidebar_shows_the_first_problem_under_the_worker_dot(page, seeded):
 def test_sidebar_counts_further_problems_and_escapes_the_text(page, seeded):
     def problems(route):
         data = route.fetch().json()
-        data["problems"] = ["<b>first</b> trouble", "second", "third"]
+        data["problems"] = [
+            {"text": text, "href": None} for text in ("<b>first</b> trouble", "second", "third")
+        ]
         route.fulfill(json=data)
 
     page.route("**/status", problems)
@@ -478,3 +480,53 @@ def test_an_unknown_page_is_an_html_page(page, seeded):
     page.goto(seeded.url + "/nothing")
     expect(page.locator("h1")).to_have_text("Page not found")
     expect(page.get_by_role("link", name="Stores", exact=True).last).to_be_visible()
+
+
+def test_price_text_reads_one_way(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      const text = [0.004, 0, 0.41, null].map((usd) => m.priceText({ est_usd: usd }));
+      return text.concat([m.UNPRICED]) }"""
+    )
+    assert out[:4] == ["< $0.01", "≈ $0.00", "≈ $0.41", out[4]] and "cost unknown" in out[4]
+
+
+def test_confirm_spend_shows_connect_ai_when_a_role_is_missing(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      const el = document.createElement('div');
+      m.confirmSpend(el, { est_usd: 0.1, calls: 2, missing: ['summary'] }, () => {});
+      const a = el.querySelector('a');
+      return [el.querySelectorAll('button').length, a?.textContent, a?.getAttribute('href')] }"""
+    )
+    assert out == [0, "Connect AI first", "/settings"]
+
+
+def test_confirm_spend_keeps_start_on_a_plain_error_and_drops_it_on_a_changed_price(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      const run = async (e) => { const el = document.createElement('div');
+        const msg = document.createElement('p');
+        m.confirmSpend(el, { est_usd: 0.1, calls: 2 }, async () => { throw e }, msg);
+        el.querySelector('button').click();
+        await new Promise((r) => setTimeout(r, 20));
+        return [el.querySelector('button') !== null, msg.textContent] };
+      const stale = Object.assign(new Error(m.PRICE_CHANGED), { status: 409 });
+      return [await run(new Error('boom')), await run(stale), m.PRICE_CHANGED] }"""
+    )
+    assert out[0] == [True, "boom"]
+    assert out[1] == [False, out[2]]
+
+
+def test_confirm_line_has_no_dot_before_start(page, seeded):
+    page.goto(seeded.url + "/")
+    out = page.evaluate(
+        """async () => { const m = await import('/static/ui.js');
+      const el = document.createElement('div');
+      m.confirmSpend(el, { est_usd: 0.1, calls: 2 }, () => {});
+      return el.textContent.split('Start')[0].trim() }"""
+    )
+    assert out.endswith("AI calls")

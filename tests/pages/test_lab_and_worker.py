@@ -10,6 +10,8 @@ from page_helpers import (
 )
 from playwright.sync_api import expect
 
+from ragqa_core import db
+
 pytestmark = pytest.mark.pages
 
 
@@ -130,7 +132,12 @@ def test_worker_page_links_jobs_and_problems_to_their_pages(page, seeded):
 
         def problem(route):
             data = route.fetch().json()
-            data["problems"].append(f"Eval {run_id[:8]} on wl failed")
+            data["problems"].append(
+                {
+                    "text": f"Evaluating wl ({run_id[:8]}) failed",
+                    "href": f"/c/wl/runs/{run_id}",
+                }
+            )
             route.fulfill(json=data)
 
         page.route("**/status", problem)
@@ -139,9 +146,9 @@ def test_worker_page_links_jobs_and_problems_to_their_pages(page, seeded):
         expect(queued).to_have_attribute("href", f"/c/wl/runs/{run_id}")
         expect(queued).to_contain_text("Evaluating wl")
         expect(page.locator("[data-finished-job] a[href='/c/wl']").first).to_be_visible()  # re-key
-        expect(page.locator("[data-problem] a", has_text="on wl failed")).to_have_attribute(
-            "href", f"/c/wl/runs/{run_id}"
-        )
+        expect(
+            page.locator("[data-problem] a", has_text="Evaluating wl (" + run_id[:8] + ") failed")
+        ).to_have_attribute("href", f"/c/wl/runs/{run_id}")
         expect(page.locator("#queued thead th")).to_have_count(3)
         expect(page.locator("#finished thead th")).to_have_count(4)
         expect(page.locator("#worker-dot")).to_have_attribute("aria-label", "needs attention")
@@ -241,6 +248,9 @@ def test_worker_page_names_a_tag_build_and_resumes_it(page, seeded):
         "status": "failed",
         "error": None,
         "progress": 0.4,
+        "label": "Adding keyword tags docs",
+        "href": "/c/docs",
+        "resumable": True,
         "created_at": "2026-11-08T10:00:00",
         "updated_at": "2026-11-08T10:05:00",
     }
@@ -250,7 +260,9 @@ def test_worker_page_names_a_tag_build_and_resumes_it(page, seeded):
 
     def status(route):
         got = route.fetch().json()
-        got["problems"] = ["Tag_build tagjob02 on docs failed"]
+        got["problems"] = [
+            {"text": "Adding keyword tags docs (tagjob02) failed", "href": "/c/docs"}
+        ]
         route.fulfill(json=got)
 
     resumes = []
@@ -266,10 +278,10 @@ def test_worker_page_names_a_tag_build_and_resumes_it(page, seeded):
     row = page.locator("[data-finished-job='tagjob02aaaa']")
     expect(row).to_contain_text("Adding keyword tags docs")
     expect(page.locator("[data-problem]")).to_have_text(
-        "Adding keyword tags tagjob02 on docs failed"
+        "Adding keyword tags docs (tagjob02) failed"
     )
     expect(page.locator("#worker-problem")).to_have_text(
-        "Adding keyword tags tagjob02 on docs failed"
+        "Adding keyword tags docs (tagjob02) failed"
     )
     row.get_by_role("button", name="Resume").click()
     expect(page.locator("[data-resume-row]")).to_contain_text("3 AI calls")
@@ -284,6 +296,9 @@ def test_worker_page_offers_resume_for_a_stopped_rebuild(page, seeded):
         "status": "cancelled",
         "error": None,
         "progress": 0.2,
+        "label": "Re-embedding rb",
+        "href": "/c/rb",
+        "resumable": True,
         "created_at": "2026-11-08T10:00:00+00:00",
         "updated_at": "2026-11-08T10:05:00+00:00",
         "setup": {"model": REBUILD_MODEL},
@@ -325,3 +340,67 @@ def test_lab_hides_multiple_choice_parts_for_a_documents_store(page, seeded):
     expect(page.locator("#methods input[value=kw_individual]")).to_be_visible()
     expect(choices).to_be_visible()
     expect(page.locator("#head .sub")).to_contain_text("Highlighted chips")
+
+
+def test_resume_refused_for_a_plain_reason_keeps_start(page, seeded):
+    ok = seeded.build("wrp", run=True)
+    interrupt(seeded, ok)
+    page.route(
+        f"**/jobs/{ok}/resume",
+        lambda route: (
+            route.fulfill(status=409, json={"detail": "a failed run cannot be resumed"})
+            if route.request.post_data_json.get("confirm")
+            else route.fallback()
+        ),
+    )
+    page.goto(seeded.url + "/worker")
+    page.locator(f"[data-finished-job='{ok}'] button", has_text="Resume").click()
+    start = page.get_by_role("button", name="Start")
+    expect(start).to_be_visible()
+    page.expected = ["409"]
+    start.click()
+    expect(page.get_by_text("a failed run cannot be resumed")).to_be_visible()
+    expect(start).to_be_visible()
+
+
+def test_worker_page_names_every_kind(page, seeded):
+    def row(job_id, kind, collection, label):
+        return {
+            "id": job_id,
+            "kind": kind,
+            "collection": collection,
+            "status": "done",
+            "error": None,
+            "progress": 1.0,
+            "label": label,
+            "href": f"/c/{collection}",
+            "resumable": False,
+            "created_at": "2026-11-08T10:00:00+00:00",
+            "updated_at": "2026-11-08T10:05:00+00:00",
+        }
+
+    rows = [
+        row("imp00001aaaa", "import", "docs", "Importing into docs"),
+        row("cpy00001aaaa", "copy", "docs", "Copying into docs"),
+        row("rtg00001aaaa", "retag", "w", "Re-tagging w"),
+        row("bfl00001aaaa", "backfill", "x", "Labelling x"),
+    ]
+    page.route("**/jobs?limit=200", lambda route: route.fulfill(json=rows))
+    page.goto(seeded.url + "/worker")
+    names = page.locator("[data-finished-job] a")
+    expect(names).to_have_text(
+        ["Importing into docs", "Copying into docs", "Re-tagging w", "Labelling x"]
+    )
+
+
+def test_worker_page_problem_lines_read_plainly(page, seeded):
+    conn = seeded.app.state.conn
+    job = db.create_job(conn, "import", "docs", {"kind": "items"})
+    db.update_job(conn, job, status="interrupted")
+    try:
+        page.goto(seeded.url + "/worker")
+        line = page.locator("[data-problem] a", has_text=f"Importing into docs ({job[:8]})")
+        expect(line).to_have_text(f"Importing into docs ({job[:8]}) was interrupted by a restart")
+        expect(line).to_have_attribute("href", "/c/docs")
+    finally:
+        db.delete_job(conn, job)

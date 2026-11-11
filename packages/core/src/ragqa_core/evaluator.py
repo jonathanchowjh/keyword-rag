@@ -56,6 +56,7 @@ from ragqa_core.retriever import (
     HOP_TOKENS,
     KEYWORD_METHODS,
     MAX_HOPS,
+    PER_METHOD_ERRORS,
     POOL,
     Retriever,
     is_paid,
@@ -68,6 +69,8 @@ from ragqa_core.types import (
     QaType,
     Question,
     SearchSettings,
+    type_clash,
+    unknown_set,
 )
 
 # What worked collections whose questions name relevant items (BRIGHT) gain, measured
@@ -78,12 +81,21 @@ GOLD_DEPTH = 10
 DOCUMENTS_METRICS = ("ndcg@10", "recall@10", "mrr@10")
 # The reranker every run used before runs recorded one: a resumed old run keeps it.
 LEGACY_RERANK_MODEL = "BAAI/bge-reranker-v2-m3-int8"
+
+
+def reranker(setup: dict) -> tuple[str, int]:
+    """The reranker model and pool a hybrid_rerank run used; a run from before they were
+    recorded used the legacy model at POOL."""
+    return setup.get("rerank_model", LEGACY_RERANK_MODEL), setup.get("rerank_pool", POOL)
+
+
+# The recall cuts a Multi-hop or Table question is scored at.
+RECALL_CUTS: dict[QaType, tuple[int, ...]] = {"multihop": (2, 5), "table": (1, 3)}
 RETRIEVAL_METRICS: dict[QaType, tuple[str, ...]] = {
     "documents": DOCUMENTS_METRICS,
     "mcq": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
     "science": ("solution_sim@1", "same_skill@1", *GOLD_ID_METRICS),
-    "multihop": ("recall@2", "recall@5"),
-    "table": ("recall@1", "recall@3"),
+    **{t: tuple(f"recall@{c}" for c in cuts) for t, cuts in RECALL_CUTS.items()},
 }
 ANSWER_METRICS: dict[QaType, tuple[str, ...]] = {
     "documents": ("accuracy",),  # judged answers only
@@ -190,7 +202,7 @@ def answer_parts(
     shown = answer_hits(spec.qa_type, hits, search.example, evidence_size)
     system, user = run_prompt(spec.qa_type, question, shown, search, retrieves)
     program = not documents and search.program and not question.choices
-    tokens = CHAT_TOKENS if documents else answer_tokens(spec.qa_type, program)
+    tokens = answer_tokens(spec.qa_type, program)
     return system, user, tokens, program
 
 
@@ -202,6 +214,30 @@ def read_reply(
     if spec.qa_type == "documents":
         return strip_citations(text), None
     return read_answer(spec.qa_type, text, has_choices, program)
+
+
+def answer_plan(
+    spec: CollectionSpec,
+    questions: list[Question],
+    all_hits: list[list[Hit]],
+    rows: list[dict],
+    search: SearchSettings,
+    size: int | None,
+    retrieves: bool,
+) -> tuple[list[int], list[tuple[str, str]], list[bool], list]:
+    """A method's answer step before its call: the rows still to answer (`pending`), their
+    (system, user) prompts, whether each question is a program, and the hits each was shown,
+    as example_form reads them. A judged run stopped before judging keeps the answers it
+    stored, and what they cost: only the rows without one are answered."""
+    shown = [answer_hits(spec.qa_type, hits, search.example) for hits in all_hits]
+    pending = [i for i, row in enumerate(rows) if "pred" not in row]
+    parts = [
+        answer_parts(spec, q, hits, search, retrieves, size)
+        for q, hits in zip(questions, all_hits, strict=True)
+    ]
+    prompts = [parts[i][:2] for i in pending]
+    programs = [program for *_, program in parts]
+    return pending, prompts, programs, shown
 
 
 # A method whose top GOLD_DEPTH holds more never-judged passages than this, on average, has
@@ -248,10 +284,6 @@ def check_judge(spec: CollectionSpec, answer: bool, judge: bool, questions: list
         raise ValueError(JUDGE_NEEDS_ANSWERS)
     if not any(q.gold_answers for q in questions):
         raise ValueError(JUDGE_NO_REFERENCE)
-
-
-class EvalSetMismatch(Exception):
-    """An eval set and a store of different question types: a run cannot ask one of the other."""
 
 
 def runnable(questions: list[Question], leaked: set[str], include_leaked: bool) -> list[Question]:
@@ -432,11 +464,9 @@ class Evaluator:
             raise ValueError(f"store '{spec.name}' has no eval set; choose one")
         found = db.get_eval_set(self.conn, name)
         if found is None:
-            raise ValueError(f"no eval set '{name}'")
+            raise NotFound(unknown_set(name))
         if found["qa_type"] != spec.qa_type:
-            raise EvalSetMismatch(
-                f"eval set '{name}' is {found['qa_type']}; store '{spec.name}' is {spec.qa_type}"
-            )
+            raise type_clash(name, found["qa_type"], spec.name, spec.qa_type)
         return name
 
     def leaked_ids(self, spec: CollectionSpec, eval_set: str) -> set[str]:
@@ -577,7 +607,7 @@ class Evaluator:
         eval set): its questions, its dev slice, and of the questions asked, those naming
         evidence and those whose evidence the store holds; for Documents, those with a
         reference answer, which Judge answers grades."""
-        spec = self.retriever.spec(collection)
+        spec = db.require_collection(self.conn, collection)
         self.retriever.indexer.check_model(spec)
         every = self._questions(
             spec, {"split": "full", "eval_set": self._chosen_set(spec, eval_set)}
@@ -619,11 +649,9 @@ class Evaluator:
 
     def estimate_resume(self, job_id: str) -> dict:
         """What resuming would cost: only the incomplete (method, question) pairs."""
-        job = db.get_job(self.conn, job_id)
-        if job is None:
-            raise NotFound(f"no job {job_id}")
+        job = db.require_job(self.conn, job_id)
         setup = job["setup"]
-        spec = self.retriever.spec(setup["collection"])
+        spec = db.require_collection(self.conn, setup["collection"])
         self.retriever.indexer.check_model(spec)
         questions = self._run_questions(job_id, spec, setup)
         todo = {m: self._todo(job_id, m, questions) for m in setup["methods"]}
@@ -885,7 +913,7 @@ class Evaluator:
         rrf_k: int = DEFAULT_RRF_K,
         search: dict | None = None,
         eval_set: str | None = None,
-        rerank_pool: int = POOL,
+        rerank_pool: int | None = POOL,
         rerank_model: str | None = None,
         evidence_size: int | None = None,
         judge: bool = False,
@@ -893,8 +921,9 @@ class Evaluator:
         """Queue a run of the eval set (the store's default when None) with the request only;
         the rest of its setup is recorded when it runs. `search` overrides the collection's
         search settings in part; a bad one raises ValueError. A Documents run that answers
-        records `evidence_size`, the size its estimate priced (Settings' when None)."""
-        spec = self.retriever.spec(collection)
+        records `evidence_size`, the size its estimate priced (Settings' when None). A None
+        `rerank_pool` is the server's pick: a Documents store's Settings pool, at most POOL."""
+        spec = db.require_collection(self.conn, collection)
         documents = spec.qa_type == "documents"
         if not methods:
             raise ValueError("choose at least one method")
@@ -914,6 +943,11 @@ class Evaluator:
             raise ValueError(
                 NOTHING_TO_MEASURE_JUDGE if references else NOTHING_TO_MEASURE_DOCUMENTS
             )
+        if rerank_pool is None:
+            rerank_pool = POOL
+            if documents:
+                defaults: dict[str, Any] = search_defaults.in_force(self.conn)
+                rerank_pool = min(POOL, int(defaults["rerank_pool"]))
         setup = {
             "collection": collection,
             "split": split,
@@ -1032,15 +1066,11 @@ class Evaluator:
         return None
 
     def resume_refusal(self, job_id: str) -> str | None:
-        job = db.get_job(self.conn, job_id)
-        if job is None:
-            raise NotFound(f"no job {job_id}")
-        if job["kind"] != "eval":
-            return "only evals can be resumed"
+        job = db.require_job(self.conn, job_id)
         if refusal := jobs.not_resumable(job):
             return refusal
         setup = job["setup"]
-        return self._version_change(self.retriever.spec(setup["collection"]), setup)
+        return self._version_change(db.require_collection(self.conn, setup["collection"]), setup)
 
     def run(self, job_id: str, check: Callable[[], None] = lambda: None) -> None:
         """Run, or resume, a queued eval. check() raises Cancelled to stop it."""
@@ -1050,7 +1080,7 @@ class Evaluator:
         setup = job["setup"]
         db.update_job(self.conn, job_id, status="running")
         try:
-            spec = self.retriever.spec(setup["collection"])
+            spec = db.require_collection(self.conn, setup["collection"])
             # Checked again at claim: a re-key queued ahead of a resume must not mix versions.
             reason = self._version_change(spec, setup)
             if reason:
@@ -1108,34 +1138,14 @@ class Evaluator:
         # stored hits, the prompt a resume's estimate priced, even if the store changed since.
         kept = self._retrieved_rows(job_id, method) if documents else {}
         fresh = [q for q in questions if q.id not in kept]
-        skip = tuple(setup.get("disabled_sources", []))
+        rerank_model, pool = reranker(setup)
         all_hits, all_tags = [], []
         for n, q in enumerate(fresh, start=1):
-            # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE LEFT OUT
-            # BY EVERY SEARCH, the classifier's vote included, so they are never scored or
-            # shown and each channel's pool and the depth count only the others.
-            excluded = q.meta.get("excluded_ids", [])
-            tags = None
-            if method == "keyword_rag":
-                if search.query_tags == "oracle":
-                    tags = self.oracle_tags(spec, q)
-                else:
-                    tags = self.retriever.query_tags(spec, q.text, search, skip, excluded)
-            all_tags.append(tags)
-            all_hits.append(
-                self.retriever.retrieve(
-                    spec.name,
-                    q.text,
-                    method,
-                    retrieval_depth(spec.qa_type, q, setup["k"], size or 0),
-                    setup["rrf_k"],
-                    search,
-                    tags,
-                    excluded,
-                    pool=setup.get("rerank_pool", POOL),
-                    rerank_model=setup.get("rerank_model", LEGACY_RERANK_MODEL),
-                )
+            hits, tags = self._retrieve_one(
+                spec, q, method, setup, search, size, rerank_model, pool
             )
+            all_hits.append(hits)
+            all_tags.append(tags)
             if n % 10 == 0 and n < len(fresh):
                 report(span * n / len(fresh))
                 check()
@@ -1160,24 +1170,17 @@ class Evaluator:
                     found[q.id] = (kept[q.id], self._stored_hits(spec, kept[q.id], size))
             rows = [found[q.id][0] for q in questions]
             all_hits = [found[q.id][1] for q in questions]
-        shown = [answer_hits(spec.qa_type, hits, search.example) for hits in all_hits]
         retrieves = method != "question_only"
-        # A judged run stopped before judging keeps the answers it stored, and what they cost:
-        # only the rows without one are answered.
-        pending = [i for i, row in enumerate(rows) if "pred" not in row]
-        parts = [
-            answer_parts(spec, q, hits, search, retrieves, size)
-            for q, hits in zip(questions, all_hits, strict=True)
-        ]
-        prompts = [parts[i][:2] for i in pending]
-        programs = [program for *_, program in parts]
+        pending, prompts, programs, shown = answer_plan(
+            spec, questions, all_hits, rows, search, size, retrieves
+        )
         done = (
             self.ai.complete_many(  # one call per method: its prompts share one system
                 [user for _, user in prompts],
                 role="answer",
                 system=prompts[0][0],
                 model=setup["model"],
-                max_tokens=CHAT_TOKENS if documents else answer_tokens(spec.qa_type, any(programs)),
+                max_tokens=answer_tokens(spec.qa_type, any(programs)),
                 purpose="answer",
             )
             if prompts
@@ -1210,6 +1213,44 @@ class Evaluator:
             self._judge(job_id, method, questions, rows, setup)
         report(0.99)
         check()
+
+    def _retrieve_one(
+        self,
+        spec: CollectionSpec,
+        q: Question,
+        method: str,
+        setup: dict,
+        search: SearchSettings,
+        size: int | None,
+        rerank_model: str,
+        pool: int,
+    ) -> tuple[list[Hit], list[str] | None]:
+        """One question's retrieval in a run: `keyword_rag`'s query tags (the oracle's or
+        the classifier's), then its hits, as deep as the answer step reads (`size`)."""
+        # EXCLUDED IDS (a BRIGHT question's own problem and its near copies) ARE LEFT OUT
+        # BY EVERY SEARCH, the classifier's vote included, so they are never scored or
+        # shown and each channel's pool and the depth count only the others.
+        excluded = q.meta.get("excluded_ids", [])
+        tags = None
+        if method == "keyword_rag":
+            if search.query_tags == "oracle":
+                tags = self.oracle_tags(spec, q)
+            else:
+                skip = tuple(setup.get("disabled_sources", []))
+                tags = self.retriever.query_tags(spec, q.text, search, skip, excluded)
+        hits = self.retriever.retrieve(
+            spec.name,
+            q.text,
+            method,
+            retrieval_depth(spec.qa_type, q, setup["k"], size or 0),
+            setup["rrf_k"],
+            search,
+            tags,
+            excluded,
+            pool=pool,
+            rerank_model=rerank_model,
+        )
+        return hits, tags
 
     def _judge(
         self, job_id: str, method: str, questions: list[Question], rows: list[dict], setup: dict
@@ -1304,7 +1345,7 @@ class Evaluator:
                     "mrr@10": mrr_at(ids, q.gold_ids, GOLD_DEPTH),
                 }
             else:
-                cuts = (2, 5) if spec.qa_type == "multihop" else (1, 3)
+                cuts = RECALL_CUTS[spec.qa_type]
                 metrics = {f"recall@{c}": recall_at(ids, q.gold_ids, c) for c in cuts}
             rows.append(
                 {
@@ -1443,7 +1484,7 @@ class Evaluator:
         if job is None:
             return None
         setup = job["setup"]
-        spec = self.retriever.spec(setup["collection"])
+        spec = db.require_collection(self.conn, setup["collection"])
         by_method, has_answers = self._rows_by_method(job_id)
         trusted = proxy_trusted if spec.qa_type in EXAMPLE_TYPES and not has_answers else None
         headline, scaling, per_method = run_headline(spec, by_method, has_answers, trusted)
@@ -1458,29 +1499,14 @@ class Evaluator:
         }
 
     def table(self, job_id: str) -> dict:
-        job = db.get_job(self.conn, job_id)
-        if job is None:
-            raise NotFound(f"no job {job_id}")
+        job = db.require_job(self.conn, job_id)
         setup = job["setup"]
-        spec = self.retriever.spec(setup["collection"])
+        spec = db.require_collection(self.conn, setup["collection"])
         by_method, has_answers = self._rows_by_method(job_id)
         metric_names = RETRIEVAL_METRICS[spec.qa_type] + (
             ANSWER_METRICS[spec.qa_type] if has_answers else ()
         )
-        methods = {}
-        for method, per_q in by_method.items():
-            entry: dict = {"usd": sum(r.get("usd", 0.0) for r in per_q.values()), "n": len(per_q)}
-            for metric in metric_names:
-                values = metric_values(per_q.values(), metric)
-                if values:
-                    mean, lo, hi = bootstrap_ci(values)
-                    entry[metric] = {
-                        "mean": clean(mean),
-                        "lo": clean(lo),
-                        "hi": clean(hi),
-                        "n": len(values),
-                    }
-            methods[method] = entry
+        methods = method_entries(by_method, metric_names)
         # The type's first retrieval metric that any method has: BRIGHT has no solutions or
         # skills, so its runs pair on nDCG@10, their headline.
         retrieval = RETRIEVAL_METRICS[spec.qa_type]
@@ -1488,32 +1514,16 @@ class Evaluator:
         pair_metrics = measured[:1] or [retrieval[0]]
         if has_answers:
             pair_metrics.append(PAIR_ANSWER_METRIC[spec.qa_type])
-        pairs = []
-        for metric in pair_metrics:
-            for a, b in itertools.combinations(by_method, 2):
-                # By question id: absent values drop out per method, so position can't pair them.
-                va, vb = (metric_by_question(by_method[m], metric) for m in (a, b))
-                paired = verdict.paired_by_question(va, vb, 1.0)
-                if paired is None:
-                    continue
-                diff, lo, hi = paired
-                pairs.append(
-                    {
-                        "a": a,
-                        "b": b,
-                        "metric": metric,
-                        "diff": clean(diff),
-                        "lo": clean(lo),
-                        "hi": clean(hi),
-                        "separated": separated(lo, hi),
-                    }
-                )
+        pairs = method_pairs(by_method, pair_metrics)
         proxy = self._proxy_for(job_id) if spec.qa_type in EXAMPLE_TYPES and has_answers else None
         trusted = None
         if spec.qa_type in EXAMPLE_TYPES and not has_answers:
             trusted = self.collection_proxy_trusted(spec.name)
         headline, scaling, per_method = run_headline(spec, by_method, has_answers, trusted)
         answer, reference = self._answer(spec, setup, per_method, headline, scaling["factor"])
+        if "hybrid_rerank" in setup["methods"]:  # a run from before they were stored reads back
+            model, pool = reranker(setup)
+            setup = {**setup, "rerank_model": model, "rerank_pool": pool}
         return {
             "setup": setup,
             "status": job["status"],
@@ -1549,7 +1559,7 @@ class Evaluator:
         """The collection's answer: the newest answered run that has the pair, else the
         newest run that has it (spec §7.3: a run lacking the pair gives no answer). A
         Documents store's is the score of the search its chats use (_documents_answer)."""
-        spec = self.retriever.spec(name)
+        spec = db.require_collection(self.conn, name)
         if spec.qa_type == "documents":
             return self._documents_answer(spec)
         done = self._done_evals(name)
@@ -1657,31 +1667,25 @@ class Evaluator:
                     return check["trusted"]
         return None
 
-    def items(self, job_id: str, method: str, wrong_only: bool) -> list[dict]:
-        job = db.get_job(self.conn, job_id)
-        if job is None:
-            raise NotFound(f"no job {job_id}")
-        spec = self.retriever.spec(job["setup"]["collection"])
+    def _run_view(self, job_id: str) -> tuple[CollectionSpec, dict[str, Question], str, bool]:
+        """What items() and questions() read a run's rows against: its store, its eval set's
+        questions by id, the primary measure and whether its rows are marked by answers."""
+        job = db.require_job(self.conn, job_id)
+        spec = db.require_collection(self.conn, job["setup"]["collection"])
         questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
         primary = MISS_METRIC[spec.qa_type]
         answering = answering_outcome(spec.qa_type, job["setup"])
+        return spec, questions, primary, answering
+
+    def items(self, job_id: str, method: str, wrong_only: bool) -> list[dict]:
+        spec, questions, primary, answering = self._run_view(job_id)
         rows = [
             (row, questions.get(row["question_id"]))
             for row in db.run_items(self.conn, job_id, method)
             if not wrong_only or is_wrong(row, primary, answering)
         ]
         held = self._held_ids(spec, [q for _, q in rows if q])
-        return [
-            {
-                **row,
-                "question": q.text if q else None,
-                "choices": q.choices if q else None,
-                "gold_answers": q.gold_answers if q else [],
-                "gold_ids": q.gold_ids if q else [],
-                "gold_held": [g for g in q.gold_ids if g in held] if q else [],
-            }
-            for row, q in rows
-        ]
+        return [{**row, **question_fields(q, held)} for row, q in rows]
 
     def questions(self, job_id: str, disagree: bool) -> list[dict]:
         """Each question of a run with every method's row and its right/wrong outcome. With
@@ -1689,13 +1693,7 @@ class Evaluator:
         left out of that, and a method with no outcome has nothing to differ from. An
         answering run is judged on answers only, so a method not answered yet has none; an
         unjudged Documents run's answers are unscored, so it keeps the retrieval outcome."""
-        job = db.get_job(self.conn, job_id)
-        if job is None:
-            raise NotFound(f"no job {job_id}")
-        spec = self.retriever.spec(job["setup"]["collection"])
-        questions = {q.id: q for q in self._set_questions(spec, job["setup"])}
-        primary = MISS_METRIC[spec.qa_type]
-        answering = answering_outcome(spec.qa_type, job["setup"])
+        spec, questions, primary, answering = self._run_view(job_id)
         by_question: dict[str, dict[str, dict]] = {}
         for r in db.run_items(self.conn, job_id):
             by_question.setdefault(r["question_id"], {})[r["method"]] = r
@@ -1715,18 +1713,57 @@ class Evaluator:
             if disagree and len(judged) < 2:
                 continue
             q = questions.get(qid)
-            row = {
-                "question_id": qid,
-                "question": q.text if q else None,
-                "choices": q.choices if q else None,
-                "gold_answers": q.gold_answers if q else [],
-                "gold_ids": q.gold_ids if q else [],
-                "gold_held": [g for g in q.gold_ids if g in held] if q else [],
-                "methods": methods,
-            }
+            row = {"question_id": qid, **question_fields(q, held), "methods": methods}
             if spec.qa_type == "documents":  # the pinned version's marks, None when unknown
                 row["judged_ids"] = q.judged_ids if q else None
             out.append(row)
+        return out
+
+    def query(
+        self,
+        spec: CollectionSpec,
+        q: Question,
+        method: str,
+        depth: int,
+        rrf_k: int,
+        search: SearchSettings,
+        skip: tuple[str, ...],
+        answer: bool,
+        model: str | None,
+        size: int,
+    ) -> dict:
+        """One method's reply to a question: its hits, the answer when `answer` is set, and
+        every call's cost. A provider or budget failure is the reply's `error`, so it does not
+        hide what the other methods spent."""
+        out: dict = {"hits": [], "answer": None, "usd": 0.0, "error": None, "program": None}
+        with self.ai.tally() as spent:
+            try:
+                tags = None
+                if method == "keyword_rag":
+                    tags = self.retriever.query_tags(spec, q.text, search, skip)
+                    out["query_tags"] = tags
+                hits = self.retriever.retrieve(
+                    spec.name, q.text, method, depth, rrf_k, search, tags
+                )
+                out["hits"] = [asdict(h) for h in hits]
+                if answer:
+                    retrieves = method != "question_only"
+                    system, user, tokens, program = answer_parts(
+                        spec, q, hits, search, retrieves, size
+                    )
+                    done = self.ai.complete(
+                        user,
+                        role="answer",
+                        system=system,
+                        model=model,
+                        max_tokens=tokens,
+                        purpose="query",
+                    )
+                    text, prog = read_reply(spec, done.text, bool(q.choices), program)
+                    out.update(answer=text, program=prog)
+            except PER_METHOD_ERRORS as e:
+                out["error"] = jobs.no_ai(e.role) if isinstance(e, NoConnection) else str(e)
+        out["usd"] = spent["usd"]
         return out
 
 
@@ -1776,6 +1813,63 @@ def metric_values(rows, metric: str) -> list[float]:
 
 def metric_by_question(per_q: dict[str, dict], metric: str) -> dict[str, float]:
     return {q: values[0] for q, row in per_q.items() if (values := metric_values([row], metric))}
+
+
+def method_entries(
+    by_method: dict[str, dict[str, dict]], metric_names: tuple[str, ...]
+) -> dict[str, dict]:
+    """Each method's spend, row count and, per metric it has, the mean with its 95% CI."""
+    methods = {}
+    for method, per_q in by_method.items():
+        entry: dict = {"usd": sum(r.get("usd", 0.0) for r in per_q.values()), "n": len(per_q)}
+        for metric in metric_names:
+            values = metric_values(per_q.values(), metric)
+            if values:
+                mean, lo, hi = bootstrap_ci(values)
+                entry[metric] = {
+                    "mean": clean(mean),
+                    "lo": clean(lo),
+                    "hi": clean(hi),
+                    "n": len(values),
+                }
+        methods[method] = entry
+    return methods
+
+
+def method_pairs(by_method: dict[str, dict[str, dict]], metrics: list[str]) -> list[dict]:
+    """Every two methods' paired difference on each metric, where they share questions."""
+    pairs = []
+    for metric in metrics:
+        for a, b in itertools.combinations(by_method, 2):
+            # By question id: absent values drop out per method, so position can't pair them.
+            va, vb = (metric_by_question(by_method[m], metric) for m in (a, b))
+            paired = verdict.paired_by_question(va, vb, 1.0)
+            if paired is None:
+                continue
+            diff, lo, hi = paired
+            pairs.append(
+                {
+                    "a": a,
+                    "b": b,
+                    "metric": metric,
+                    "diff": clean(diff),
+                    "lo": clean(lo),
+                    "hi": clean(hi),
+                    "separated": separated(lo, hi),
+                }
+            )
+    return pairs
+
+
+def question_fields(q: Question | None, held: set[str]) -> dict:
+    """A run row's question as items() and questions() show it; empty when it has gone."""
+    return {
+        "question": q.text if q else None,
+        "choices": q.choices if q else None,
+        "gold_answers": q.gold_answers if q else [],
+        "gold_ids": q.gold_ids if q else [],
+        "gold_held": [g for g in q.gold_ids if g in held] if q else [],
+    }
 
 
 def answering_outcome(qa_type: QaType, setup: dict) -> bool:

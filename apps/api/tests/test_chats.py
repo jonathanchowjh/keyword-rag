@@ -102,7 +102,7 @@ def test_query_on_other_types_sends_the_prompt_it_always_did(tmp_path):
             result = client.post("/query", json=body).json()["results"]["vector"]
             assert result["error"] is None and result["answer"]
             hits = [Hit(**h) for h in result["hits"]]
-            spec = client.app.state.retriever.spec(name)
+            spec = db.require_collection(client.app.state.conn, name)
             example = search.get("example", spec.search.example)
             program = search.get("program", spec.search.program) and not choices
             system, user = answer_prompt(
@@ -135,7 +135,7 @@ def test_query_documents_answers_like_a_run(client):
     body = {"collection": "c", "question": "alpha beta", "methods": ["hybrid", "question_only"]}
     results = client.post("/query", json={**body, "k": 6, "answer": True}).json()["results"]
     question = Question("lab", "alpha beta", [], [], [])
-    search = client.app.state.retriever.spec("c").search or SearchSettings()
+    search = db.require_collection(client.app.state.conn, "c").search or SearchSettings()
     for method, sent in zip(body["methods"], calls, strict=True):
         result = results[method]
         assert result["error"] is None

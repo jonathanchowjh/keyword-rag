@@ -1,6 +1,8 @@
 // A chat reply as the page draws it: the answer as safe markdown with its citations linked,
 // its sources and cost, and the Retrieval step with its evidence. Bare functions; what
-// they read of the open chat comes in as arguments: the chat, hasModel and the catalog.
+// they read of the open chat comes in as one context object, built per attempt:
+// ctx = { at, ui, n, chat, hasModel, cat }. `at` is "<message n>-<attempt>", `ui` the attempt's
+// view state, `n` the message number.
 import { NONE, esc, methodLabel, passageHtml, plural, sourceLabel, usd, whereHtml } from "/static/ui.js";
 
 export const PASSAGES_ONLY = "Passages only: no answer model";
@@ -9,12 +11,12 @@ export const PASSAGES_ONLY = "Passages only: no answer model";
 
 // A citation mark, the route's rule: [n], [n, m, …] or [n-m] (hyphen or en dash), each
 // number 1 to 4 ASCII digits.
-export const CITATION = /\[([0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?(?:\s*,\s*[0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?)*)\]/g;
+const CITATION = /\[([0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?(?:\s*,\s*[0-9]{1,4}(?:\s*[-–]\s*[0-9]{1,4})?)*)\]/g;
 
 // Escaped text with each cited number linked to its passage in the Retrieval step, whose id
 // is ev-<at>-<n>: a lone [n] as a whole, each number of a grouped bracket on its own. A mark
 // like [01] links to passage 1.
-export function citeHtml(escaped, cited, at) {
+function citeHtml(escaped, cited, at) {
   const have = new Set(cited.map((c) => c.n));
   const link = (n, shown) => (have.has(Number(n)) ? `<a class="cite" href="#ev-${at}-${Number(n)}">${shown}</a>` : shown);
   return escaped.replace(CITATION, (mark, inner) =>
@@ -24,7 +26,7 @@ export function citeHtml(escaped, cited, at) {
 
 // One escaped line: `code` spans kept as typed, bold and italic, then citation links.
 // An underscore inside a word (snake_case_name) is no emphasis.
-export function inlineHtml(line, cited, at) {
+function inlineHtml(line, cited, at) {
   return line
     .split(/(`[^`]+`)/)
     .map((s, i) => {
@@ -42,7 +44,7 @@ export function inlineHtml(line, cited, at) {
 // The reply as a safe subset of markdown. The text is escaped first, so no tag or attribute
 // ever comes from the model: fenced code, `code`, bold, italic, - and 1. lists, # headings
 // as bold lines, blank lines as paragraphs. Links, images, tables and HTML stay as text.
-export function textHtml(text, cited, at) {
+function textHtml(text, cited, at) {
   const lines = esc(text).replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let para = [];
@@ -93,20 +95,22 @@ export function textHtml(text, cited, at) {
 }
 
 // The store's name, marked when it has since been deleted.
-export const storeText = (store, chat) => (chat?.deleted_stores.includes(store) ? `${store} · deleted` : store);
+const storeText = (store, chat) => (chat?.deleted_stores.includes(store) ? `${store} · deleted` : store);
 
 // One cited passage, listed under the answer: its file and part, as its evidence is.
-export function sourceHtml(c, at, ui, chat) {
+function sourceHtml(c, ctx) {
+  const { at, ui, chat } = ctx;
   const from = (c.source ? ` · ${esc(sourceLabel(c.source))}` : "") + (c.store ? ` · ${esc(storeText(c.store, chat))}` : "");
   return `<li><span class="what">[${Number(c.n)}] ${whereHtml(c)}${from}</span>${passageHtml(c.text, { key: `src-${at}-${Number(c.n)}`, open: ui.expanded.has(`src-${at}-${Number(c.n)}`) })}</li>`;
 }
 
-export const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "");
+const costHtml = (x) => (x > 0 ? ` <span class="muted">(${usd(x)})</span>` : "");
 
 // One passage the attempt found. Its id, ev-<message n>-<attempt>-<passage n>, is where the
 // answer's [n] links, so the attempts of one message never share an id. Its rank is in its
 // own store's list; its rerank, the reranker's relevance, is there when the pool was reranked.
-export function evidenceHtml(e, at, ui, chat) {
+function evidenceHtml(e, ctx) {
+  const { at, ui, chat } = ctx;
   const key = `ev-${at}-${Number(e.n)}`;
   const what = [
     e.store && storeText(e.store, chat),
@@ -120,8 +124,8 @@ export function evidenceHtml(e, at, ui, chat) {
 }
 
 // The passages as the server sends them, best match first; each keeps the n the answer cites.
-export function evidenceListHtml(a, at, ui, chat) {
-  const passages = a.evidence.map((e) => evidenceHtml(e, at, ui, chat)).join("");
+function evidenceListHtml(a, ctx) {
+  const passages = a.evidence.map((e) => evidenceHtml(e, ctx)).join("");
   if (!passages) return '<p class="muted">No passages.</p>';
   const order = a.evidence.length >= 2
     ? `<p class="muted evidence-order">${a.answer != null ? "Best match first. [n] is the number the answer cites." : "Best match first."}</p>`
@@ -134,11 +138,12 @@ export const passagesOnly = (a, hasModel) => a.answer == null && !hasModel;
 
 // An attempt's answer with its sources and cost. With no answer: without an answer model,
 // its passages; with one, its error and cost (or that it is not answered yet) and Answer from
-// this attempt. `at` is "<message n>-<attempt>".
-export function attemptHtml(a, at, ui, chat, hasModel) {
+// this attempt.
+export function attemptHtml(a, ctx) {
+  const { at, ui, hasModel } = ctx;
   if (passagesOnly(a, hasModel)) {
     const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
-    return `<div class="msg passages"><p class="said">${esc(PASSAGES_ONLY)}${costHtml(a.usd)}</p>${note}${evidenceListHtml(a, at, ui, chat)}</div>`;
+    return `<div class="msg passages"><p class="said">${esc(PASSAGES_ONLY)}${costHtml(a.usd)}</p>${note}${evidenceListHtml(a, ctx)}</div>`;
   }
   if (a.answer == null) {
     const said = a.error
@@ -151,7 +156,7 @@ export function attemptHtml(a, at, ui, chat, hasModel) {
   const passages = new Set(a.evidence.map((e) => e.n));
   const cited = a.citations.filter((c) => passages.has(c.n)); // linked only where its passage is drawn
   const sources = a.citations.length
-    ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, at, ui, chat)).join("")}</ul>`
+    ? `<div class="what muted">Sources</div><ul class="sources">${a.citations.map((c) => sourceHtml(c, ctx)).join("")}</ul>`
     : "";
   // Said whenever the answer had no passages.
   const none = a.evidence.length ? "" : '<div class="meta warn no-passages">The stores found no passages, so this answer used none.</div>';
@@ -165,14 +170,15 @@ export function attemptHtml(a, at, ui, chat, hasModel) {
 
 // The method, and for keyword_rag how its query tags were picked and the tags it picked (an
 // attempt saved before tags were kept has none). `label` names the method.
-export function methodText(d, label = (m) => m) {
+function methodText(d, label = (m) => m) {
   if (!d.method) return NONE;
   if (d.method !== "keyword_rag" || !d.search?.query_tags) return label(d.method);
   return `${label("keyword_rag")} · query tags: ${d.search.query_tags}${d.tags?.length ? ` · ${d.tags.join(", ")}` : ""}`;
 }
 
 // Where an attempt's search text came from. A follow-up joined with no earlier message is as typed.
-export function fromText(p, n, chat) {
+function fromText(p, ctx) {
+  const { n, chat } = ctx;
   if (p.search_from === "rewrite") return "rewritten by AI";
   if (p.search_from === "legacy") return "kept from an earlier attempt";
   const earlier = chat.messages.filter((m) => m.n < n).length;
@@ -182,11 +188,12 @@ export function fromText(p, n, chat) {
 }
 
 // The reranker's short name: its model name after the last "/".
-export const shortName = (model) => String(model ?? "").split("/").at(-1);
+const shortName = (model) => String(model ?? "").split("/").at(-1);
 
 // One store's line: what it found, what the evidence kept, the method it ran, and its note or
 // error. A store deleted before the attempt was not searched.
-export function countHtml(d, chat, cat) {
+function countHtml(d, ctx) {
+  const { chat, cat } = ctx;
   const gone = d.note === "deleted" && !d.method;
   const count = gone ? `${storeText(d.store, chat)}: not searched` : `${storeText(d.store, chat)}: ${plural(d.found ?? 0, "candidate")}, ${d.used ?? 0} kept`;
   const method = d.method ? ` · ${methodText(d, (m) => methodLabel(m, cat))}` : "";
@@ -196,8 +203,9 @@ export function countHtml(d, chat, cat) {
 
 // An attempt's search as the pipeline ran it: the text and where it came from, what it was
 // reranked against and by which reranker, each store's counts, and the pipeline's notes.
-export function pipelineHtml(a, p, n, chat, cat) {
-  const searched = `<p><strong>Searched for:</strong> <span class="searched">${esc(a.search_text)}</span> <span class="from muted">${esc(fromText(p, n, chat))}</span></p>`;
+function pipelineHtml(a, ctx) {
+  const p = a.pipeline;
+  const searched = `<p><strong>Searched for:</strong> <span class="searched">${esc(a.search_text)}</span> <span class="from muted">${esc(fromText(p, ctx))}</span></p>`;
   let reranked = "";
   if (p.merged_by === "rerank") {
     const by = p.rerank_model ? `<span class="muted">by ${esc(shortName(p.rerank_model))}</span>` : "";
@@ -213,14 +221,14 @@ export function pipelineHtml(a, p, n, chat, cat) {
   const found = a.decisions.reduce((sum, d) => sum + (d.found ?? 0), 0);
   const cap = p.rerank_pool == null ? "" : ` (Rerank up to ${p.rerank_pool})`;
   const pooled = p.pool == null ? "" : `<p class="pooled muted">${esc(`Pooled ${p.pool} of ${found}${cap}`)}</p>`;
-  const counts = a.decisions.length ? `<ul class="counts">${a.decisions.map((d) => countHtml(d, chat, cat)).join("")}</ul>` : '<p class="muted">No store was searched.</p>';
+  const counts = a.decisions.length ? `<ul class="counts">${a.decisions.map((d) => countHtml(d, ctx)).join("")}</ul>` : '<p class="muted">No store was searched.</p>';
   const notes = p.notes?.length ? `<ul class="notes">${p.notes.map((x) => `<li class="warn">${esc(x)}</li>`).join("")}</ul>` : "";
   return `${searched}${reranked}${pooled}<h3>Stores</h3>${counts}${notes}`;
 }
 
 // An old decision's outcome as it was recorded: kept or dropped, with its reason. One saved
 // before stores were kept or dropped (it has no `kept`) was kept unless it failed.
-export function keptText(d) {
+function keptText(d) {
   if (d.reason === "deleted" || d.note === "deleted") return "deleted";
   if (d.error) return `dropped · error: ${d.error}`;
   const why = d.reason ?? d.note;
@@ -228,7 +236,8 @@ export function keptText(d) {
 }
 
 // An attempt saved before the pipeline: its search text and each store's decision, read only.
-export function recordedHtml(a, chat) {
+function recordedHtml(a, ctx) {
+  const { chat } = ctx;
   const rows = a.decisions
     .map((d) => {
       const dropped = d.kept === false || d.error || d.reason === "deleted" || d.note === "deleted";
@@ -243,8 +252,9 @@ export function recordedHtml(a, chat) {
 }
 
 // The attempt's Retrieval step, collapsed unless the reader opened it.
-export function retrievalHtml(a, at, ui, n, chat, hasModel, cat) {
-  const body = a.pipeline ? pipelineHtml(a, a.pipeline, n, chat, cat) : recordedHtml(a, chat);
-  const evidence = passagesOnly(a, hasModel) ? '<p class="muted">The passages are listed above.</p>' : evidenceListHtml(a, at, ui, chat);
+export function retrievalHtml(a, ctx) {
+  const { ui, hasModel } = ctx;
+  const body = a.pipeline ? pipelineHtml(a, ctx) : recordedHtml(a, ctx);
+  const evidence = passagesOnly(a, hasModel) ? '<p class="muted">The passages are listed above.</p>' : evidenceListHtml(a, ctx);
   return `<details class="retrieval"${ui.open ? " open" : ""}><summary>Retrieval step</summary>${body}<h3>Evidence</h3>${evidence}</details>`;
 }

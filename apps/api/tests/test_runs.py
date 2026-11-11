@@ -6,7 +6,6 @@ import pytest
 from api_helpers import (
     EVAL,
     MCQ,
-    NO_KEYWORDS_MODEL,
     NOTES,
     OTHER_LISTS,
     PAIR,
@@ -16,6 +15,7 @@ from api_helpers import (
     add_collection,
     add_documents,
     add_tags,
+    answer_store,
     bare_client,
     building,
     count_ai,
@@ -37,6 +37,7 @@ from api_helpers import (
     stale,
     stopped_eval_on,
     store_import,
+    stored_worked,
     terms_reply,
     three_items,
     unloadable,
@@ -46,8 +47,9 @@ from api_helpers import (
 from fastapi.testclient import TestClient
 
 from ragqa_api.guards import PRICE_CHANGED
-from ragqa_core import db, search_defaults
+from ragqa_core import db, jobs, search_defaults
 from ragqa_core.fakes import ITEMS, until
+from ragqa_core.jobs import no_ai
 from ragqa_core.loader import QUESTION_IMPORT_GONE
 from ragqa_core.types import Question
 
@@ -109,19 +111,28 @@ def test_a_run_whose_eval_set_version_is_gone_is_a_404(client):
 SPENDING = {
     "answer": lambda c: c.post("/eval", json={**EVAL, "answer": True, "confirm": True}),
     "summary": lambda c: c.post("/collections/s/load", json={"dataset": "scienceqa"}),
-    "keywords": lambda c: c.post("/collections/c/keyword-lists/propose"),
 }
 
 
 @pytest.mark.parametrize("role", SPENDING)
 def test_no_key_spending_request_is_503(tmp_path, role):
     with make_client(tmp_path, api_key=None) as client:
-        add_collection(client, lists=role != "keywords")
+        add_collection(client)
         client.post("/collections", json={"name": "s", "qa_type": "mcq", "summarize": True})
         client.app.state.worker.stop()
         r = SPENDING[role](client)
         assert r.status_code == 503, r.text
         assert f"'{role}'" in r.json()["detail"] and "Settings" in r.json()["detail"]
+        assert client.get("/eval").json() == []
+
+
+def test_no_key_unconfirmed_proposal_is_an_estimate(tmp_path):
+    with make_client(tmp_path, api_key=None) as client:
+        add_collection(client, lists=False)
+        client.app.state.worker.stop()
+        r = client.post("/collections/c/keyword-lists/propose")
+        assert r.status_code == 200, r.text
+        assert r.json()["estimate"]["missing"] == ["keywords"]
         assert client.get("/eval").json() == []
 
 
@@ -173,7 +184,7 @@ def test_retag_state_and_problem_wording(client):
     set_running(conn, retag, 0.4)
     assert client.get("/collections/w").json()["state"] == "retagging"
     db.update_job(conn, retag, status="failed", error="boom", progress=0.4)
-    problems = client.get("/status").json()["problems"]
+    problems = [p["text"] for p in client.get("/status").json()["problems"]]
     # still choosing tags at 0.4: nothing was written, so nothing is partly re-tagged
     assert not any("partly re-tagged" in p for p in problems)
 
@@ -184,7 +195,7 @@ def test_a_retag_stopped_while_writing_is_partly_re_tagged(client):
     client.app.state.worker.stop()
     retag = db.create_job(conn, "retag", "w", {"version": "v"})
     db.update_job(conn, retag, status="cancelled", progress=0.5)
-    problems = client.get("/status").json()["problems"]
+    problems = [p["text"] for p in client.get("/status").json()["problems"]]
     assert "The vocabulary on w is partly re-tagged; save it again" in problems
 
 
@@ -434,7 +445,10 @@ def test_resume_flow_estimates_then_requeues(client):
     assert r.status_code == 409 and "keyword lists changed since this run" in r.json()["detail"]
     rekey = client.get("/jobs", params={"kind": "rekey"}).json()[0]["id"]
     r = client.post(f"/jobs/{rekey}/resume")
-    assert r.status_code == 409 and r.json()["detail"] == "only evals can be resumed"
+    assert (
+        r.status_code == 409
+        and r.json()["detail"] == "this re-key cannot be resumed; start it again"
+    )
     assert client.post("/jobs/missing/resume").status_code == 404
 
 
@@ -455,6 +469,10 @@ def test_resume_refuses_a_changed_price(client):
 def test_resume_confirm_without_a_shown_price_is_unchanged(client):
     job = stopped_eval(client)
     assert client.post(f"/jobs/{job}/resume", json={"confirm": True}).status_code == 202
+
+
+def texts(client) -> list[str]:
+    return [p["text"] for p in client.get("/status").json()["problems"]]
 
 
 def test_status_reports_problems(client):
@@ -496,11 +514,11 @@ def test_status_reports_problems(client):
             "connection_id": "anthropic",
         }
     ]
-    assert body["problems"] == [
+    assert [p["text"] for p in body["problems"]] == [
         "The worker thread has stopped; restart the service",
         "Worker error: RuntimeError('x')",
-        f"Load {failed[:8]} on c failed",
-        f"Eval {stopped[:8]} on c stopped at the monthly cap",
+        f"Loading c ({failed[:8]}) failed",
+        f"Evaluating c ({stopped[:8]}) stopped at the monthly cap",
     ]
 
 
@@ -527,9 +545,9 @@ def test_status_reports_partly_rekeyed_lists(client):
     for status in ("failed", "cancelled", "interrupted"):
         rekey = db.create_job(conn, "rekey", "c", {})
         db.update_job(conn, rekey, status=status, progress=0.5)
-        assert line in client.get("/status").json()["problems"], status
+        assert line in texts(client), status
     db.update_job(conn, db.create_job(conn, "rekey", "c", {}), status="done")
-    assert not any("re-keyed" in p for p in client.get("/status").json()["problems"])
+    assert not any("re-keyed" in p for p in texts(client))
 
 
 def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):
@@ -539,21 +557,21 @@ def test_status_reports_a_running_job_with_no_progress_for_10_minutes(client):
     client.post("/collections", json={"name": "c", "qa_type": "mcq"})
     job = db.create_job(conn, "load", "c", {})
     set_running(conn, job)
-    assert client.get("/status").json()["problems"] == []  # just updated
+    assert texts(client) == []  # just updated
     for minutes, stalled in ((9, False), (11, True)):
         at = datetime.now(UTC) - timedelta(minutes=minutes)
         conn.execute(
             "update jobs set updated_at = ? where id = ?", (at.isoformat(timespec="seconds"), job)
         )
-        line = f"Load {job[:8]} on c has made no progress for {minutes} minutes"
-        assert (line in client.get("/status").json()["problems"]) is stalled
+        line = f"Loading c ({job[:8]}) has made no progress for {minutes} minutes"
+        assert (line in texts(client)) is stalled
     # Waiting on an AI batch can take hours: not a stall.
     conn.execute(
         "insert into ai_batches (id, model, purpose, created_at, usd, job_id, connection_id)"
         " values ('b1', 'm', 'answer', 't', 0.5, ?, 'anthropic')",
         (job,),
     )
-    assert client.get("/status").json()["problems"] == []
+    assert texts(client) == []
 
 
 def test_status_says_partly_rekeyed_only_when_the_rekey_started(client):
@@ -563,15 +581,14 @@ def test_status_says_partly_rekeyed_only_when_the_rekey_started(client):
     partly = "Keyword lists on c are partly re-keyed; save them again"
 
     def problems() -> list[str]:
-        found = client.get("/status").json()["problems"]
-        return [p for p in found if "Rekey" in p or "re-keyed" in p]
+        return [p for p in texts(client) if "Re-keying" in p or "re-keyed" in p]
 
     never = db.create_job(conn, "rekey", "c", {})
     assert db.request_cancel(conn, never) == "cancelled"
     assert problems() == []  # cancelled while queued: no line at all
     failed = db.create_job(conn, "rekey", "c", {})
     db.update_job(conn, failed, status="failed", error="boom")
-    assert problems() == [f"Rekey {failed[:8]} on c failed"]
+    assert problems() == [f"Re-keying c ({failed[:8]}) failed"]
     started = db.create_job(conn, "rekey", "c", {})
     db.update_job(conn, started, status="failed", progress=0.4)
     assert problems() == [partly]
@@ -756,7 +773,9 @@ def test_cached_summaries_need_no_summary_model(tmp_path):
         app = client.app.state
         # A second copy of p's items into a summarising store, stopped before it ran: its
         # summaries are the ones the first copy made.
-        again = app.loader.copy_spec(app.retriever.spec("p"), "y", "paper_2024", body["build"])
+        again = app.loader.copy_spec(
+            db.require_collection(app.conn, "p"), "y", "paper_2024", body["build"]
+        )
         assert again.summarize
         stopped = app.loader.start_copy("p", again)
         db.update_job(app.conn, stopped, status="interrupted")
@@ -782,8 +801,9 @@ def test_build_without_keywords_model_is_refused_before_spending(tmp_path, monke
             assert r.status_code == 503, r.text
             assert "'keywords'" in r.json()["detail"] and "Settings" in r.json()["detail"]
 
-        for body in ({"dataset": "scibench"}, {"dataset": "scibench", "confirm": True}):
-            refused(client.post("/collections/w/load", json=body))
+        r = client.post("/collections/w/load", json={"dataset": "scibench"})
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+        refused(client.post("/collections/w/load", json={"dataset": "scibench", "confirm": True}))
         refused(client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True}))
         many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
         refused(client.post("/collections/w/documents", json={"items": many, "confirm": True}))
@@ -795,7 +815,8 @@ def test_build_without_keywords_model_is_refused_before_spending(tmp_path, monke
         r = client.post("/collections/w/documents", json={"items": ITEMS})
         assert r.status_code == 200 and r.json()["estimate"]["est_usd"] is None
         refused(client.post("/collections/w/documents", json={"items": ITEMS, "confirm": True}))
-        refused(client.post("/collections/w/load", json={"dataset": "scibench"}))
+        r = client.post("/collections/w/load", json={"dataset": "scibench"})
+        assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
         assert client.get("/collections/w").json()["count"] == 0
         assert client.get("/jobs").json() == [] and ledger_purposes(client) == []
 
@@ -936,6 +957,46 @@ def test_a_run_recorded_before_the_reranker_and_pool_keeps_bge_at_50(client):
     assert seen and {(s["rerank_model"], s["pool"]) for s in seen} == {
         ("BAAI/bge-reranker-v2-m3-int8", 50)
     }
+
+
+def test_a_documents_run_without_a_pool_takes_settings_pool_capped_at_50(client):
+    add_documents(client)
+    store_import(client, "x.md", b"some text about passwords")
+    assert client.post("/eval-sets", json={"name": "s", "qa_type": "documents", "store": "c"})
+    held = passages(client)[0].id
+    question = {"id": "a", "text": "passwords?", "gold_ids": [held]}
+    assert put_questions(client, "s", [question]).status_code == 200
+    conn = client.app.state.conn
+    body = {"collection": "c", "methods": ["hybrid_rerank"], "eval_set": "s", "confirm": True}
+
+    def recorded(**extra) -> int:
+        r = client.post("/eval", json={**body, **extra})
+        assert r.status_code == 202, r.text
+        return db.get_job(conn, r.json()["job_id"])["setup"]["rerank_pool"]
+
+    search_defaults.save(conn, {"rerank_pool": 20})
+    assert recorded() == 20
+    search_defaults.save(conn, {"rerank_pool": 60})
+    assert recorded() == 50
+    assert recorded(rerank_pool=7) == 7
+    add_collection(client, name="m")  # an mcq store takes 50 whatever Settings says
+    mcq = {**EVAL, "collection": "m", "methods": ["hybrid_rerank"], "confirm": True}
+    r = client.post("/eval", json=mcq)
+    assert r.status_code == 202, r.text
+    assert db.get_job(conn, r.json()["job_id"])["setup"]["rerank_pool"] == 50
+
+
+def test_an_old_rerank_run_reads_back_its_reranker(client):
+    add_collection(client)
+    conn = client.app.state.conn
+    body = {**EVAL, "methods": ["hybrid_rerank"], "confirm": True}
+    done = wait(client, client.post("/eval", json=body).json()["job_id"])
+    old = {k: v for k, v in done["setup"].items() if k not in ("rerank_model", "rerank_pool")}
+    job_id = db.create_job(conn, "eval", "c", old)
+    setup = client.get(f"/eval/{job_id}").json()["setup"]
+    assert setup["rerank_model"] == "BAAI/bge-reranker-v2-m3-int8"
+    assert setup["rerank_pool"] == 50
+    assert "rerank_pool" not in db.get_job(conn, job_id)["setup"]  # nothing written back
 
 
 def test_a_run_records_and_uses_its_rerank_model(client):
@@ -1122,7 +1183,7 @@ def test_a_stopped_tag_build_resumes_and_finishes(tmp_path):
         assert add_tags(client, False).status_code == 409  # switched already: resume it
         r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
         assert r.status_code == 200, r.text
-        assert set(r.json()["estimate"]) == {"est_usd", "calls"}
+        assert set(r.json()["estimate"]) == {"est_usd", "calls", "roles", "missing"}
         assert db.get_job(conn, job_id)["status"] == "interrupted"  # only estimated
         r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
         assert r.status_code == 202 and r.json() == {"job_id": job_id}
@@ -1215,13 +1276,271 @@ def test_no_keywords_model_is_503(client):
     client.app.state.worker.stop()
     client.app.state.ai.set_role("default", None)  # no model for keywords at all
     shown = {"confirm": True, "calls": 3, "est_usd": 0.01}  # what a page drew before
-    for body in ({"confirm": False}, {"confirm": True}, shown):
-        r = client.post("/collections/c/keyword-tags", json=body)
-        assert (r.status_code, r.json()["detail"]) == (503, NO_KEYWORDS_MODEL), body
+    r = client.post("/collections/c/keyword-tags", json={"confirm": False})
+    assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+    r = client.post("/collections/c/keyword-tags", json={"confirm": True})
+    assert (r.status_code, r.json()["detail"]) == (503, no_ai("keywords")), r.text
+    r = client.post("/collections/c/keyword-tags", json=shown)
+    assert (r.status_code, r.json()["detail"]) == (409, PRICE_CHANGED), r.text  # the price first
     job_id = db.create_job(conn, "tag_build", "c", {})
     db.update_job(conn, job_id, status="interrupted")
-    for body in ({"confirm": False}, {"confirm": True}, shown):
-        r = client.post(f"/jobs/{job_id}/resume", json=body)
-        assert (r.status_code, r.json()["detail"]) == (503, NO_KEYWORDS_MODEL), body
+    r = client.post(f"/jobs/{job_id}/resume", json={"confirm": False})
+    assert r.status_code == 200 and r.json()["estimate"]["missing"] == ["keywords"], r.text
+    r = client.post(f"/jobs/{job_id}/resume", json={"confirm": True})
+    assert (r.status_code, r.json()["detail"]) == (503, no_ai("keywords")), r.text
+    r = client.post(f"/jobs/{job_id}/resume", json=shown)
+    assert (r.status_code, r.json()["detail"]) == (409, PRICE_CHANGED), r.text
     assert db.get_job(conn, job_id)["status"] == "interrupted"
     assert ledger_purposes(client) == []
+
+
+# One record per spending route that has a way to be unconfirmed: it sets up a store whose
+# role has no usable model and returns `send(confirm, **shown)`, and names the roles missing.
+def _send(client, method, url, **base):
+    def send(confirm=False, **shown):
+        return getattr(client, method)(url, json={**base, "confirm": confirm, **shown})
+
+    return send
+
+
+def _summarising_store(client) -> None:
+    body = {"name": "s", "qa_type": "mcq", "summarize": True}
+    assert client.post("/collections", json=body).status_code == 201
+
+
+def _stopped_copy(client) -> str:
+    scibench_source(client)
+    app = client.app.state
+    app.worker.stop()  # the copy stays queued until it is marked interrupted
+    target = app.loader.copy_spec(
+        db.require_collection(app.conn, "p"), "x", "worked_examples", None
+    )
+    job = app.loader.start_copy("p", target)
+    db.update_job(app.conn, job, status="interrupted")
+    return job
+
+
+def _load(client):
+    client.post("/collections", json=WORKED)
+    return _send(client, "post", "/collections/w/load", dataset="scibench")
+
+
+def _copy(client):
+    scibench_source(client)
+    return _send(client, "post", "/collections/p/copy", name="x", recipe="worked_examples")
+
+
+def _copy_summarising(client):
+    scibench_source(client)
+    build = {"added_text": "summary"}
+    return _send(client, "post", "/collections/p/copy", name="x", recipe="paper_2024", build=build)
+
+
+def _resume_copy(client):
+    job = _stopped_copy(client)
+    return _send(client, "post", f"/jobs/{job}/resume")
+
+
+def _resume_tag_build(client):
+    documents_with_passages(client)
+    client.app.state.worker.stop()
+    job = db.create_job(client.app.state.conn, "tag_build", "c", {})
+    db.update_job(client.app.state.conn, job, status="interrupted")
+    return _send(client, "post", f"/jobs/{job}/resume")
+
+
+def _keyword_tags(client):
+    documents_with_passages(client)
+    return _send(client, "post", "/collections/c/keyword-tags")
+
+
+def _propose(client):
+    add_collection(client, lists=False)
+    return _send(client, "post", "/collections/c/keyword-lists/propose")
+
+
+def _vocabulary(client):
+    stored_worked(client)
+    return _send(client, "put", "/collections/w/vocabulary", terms=["enzymes"])
+
+
+def _documents_priced(client):
+    _summarising_store(client)
+    return _send(client, "post", "/collections/s/documents", items=ITEMS)
+
+
+def _documents_free(client):
+    _summarising_store(client)
+    free_disabled_model(client, "summary")
+    return _send(client, "post", "/collections/s/documents", items=ITEMS)
+
+
+def _documents_many(client):
+    _summarising_store(client)
+    many = [{"id": f"m{i}", "text": f"note {i}"} for i in range(21)]
+    return _send(client, "post", "/collections/s/documents", items=many)
+
+
+def _imports(client):
+    _summarising_store(client)
+    up = upload(client, name="s").json()
+    return lambda confirm=False, **shown: do_import(client, up, name="s", confirm=confirm, **shown)
+
+
+def _eval(client):
+    add_collection(client)
+    return _send(client, "post", "/eval", **{**EVAL, "answer": True})
+
+
+def _resume_eval(client):
+    add_collection(client)
+    client.app.state.worker.stop()
+    job = client.app.state.evaluator.queue("c", "dev", ["hybrid"], True, None)
+    db.update_job(client.app.state.conn, job, status="stopped_no_key")
+    return _send(client, "post", f"/jobs/{job}/resume")
+
+
+def _answer(client):
+    ids = answer_store(client)
+    return _send(
+        client, "post", "/eval-sets/cq/answer", question="How many days?", passages=ids[:1]
+    )
+
+
+ALREADY_200 = [
+    pytest.param(_documents_priced, ["summary"], id="documents"),
+    pytest.param(_documents_many, ["summary"], id="documents-queued"),
+    pytest.param(_imports, ["summary"], id="imports"),
+    pytest.param(_eval, ["answer"], id="eval"),
+    pytest.param(_resume_eval, ["answer"], id="resume-eval"),
+    pytest.param(_answer, ["answer"], id="answer"),
+]
+WAS_503 = [
+    pytest.param(_documents_free, ["summary"], id="documents-free"),
+    pytest.param(_load, ["keywords"], id="load"),
+    pytest.param(_copy, ["keywords"], id="copy"),
+    pytest.param(_copy_summarising, ["summary"], id="copy-summarising"),
+    pytest.param(_resume_copy, ["keywords"], id="resume-copy"),
+    pytest.param(_resume_tag_build, ["keywords"], id="resume-tag-build"),
+    pytest.param(_keyword_tags, ["keywords"], id="keyword-tags"),
+    pytest.param(_propose, ["keywords"], id="propose"),
+    pytest.param(_vocabulary, ["keywords"], id="vocabulary"),
+]
+SPENDING_UNCONFIRMED = ALREADY_200 + WAS_503
+
+
+@pytest.mark.parametrize("prepare, missing", SPENDING_UNCONFIRMED)
+def test_unconfirmed_spend_with_no_usable_model_is_an_estimate(
+    tmp_path, monkeypatch, prepare, missing
+):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        send = prepare(client)
+        client.app.state.worker.stop()
+        before = client.get("/jobs").json()
+        r = send()
+        assert r.status_code == 200, r.text
+        est = r.json()["estimate"]
+        assert est["missing"] == missing
+        assert set(est["missing"]) <= set(est["roles"])
+        assert client.get("/jobs").json() == before  # nothing queued
+
+
+@pytest.mark.parametrize("prepare, missing", SPENDING_UNCONFIRMED)
+def test_confirmed_spend_with_no_usable_model_is_503(tmp_path, monkeypatch, prepare, missing):
+    three_items(monkeypatch)
+    with make_client(tmp_path, api_key=None) as client:
+        send = prepare(client)
+        client.app.state.worker.stop()
+        before = client.get("/jobs").json()
+        est = send().json()["estimate"]
+        r = send(True, calls=est["calls"], est_usd=est["est_usd"])
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"] == no_ai(missing[0])
+        assert client.get("/jobs").json() == before
+
+
+def test_free_add_with_a_disabled_free_model_is_an_estimate_not_a_run(tmp_path):
+    with make_client(tmp_path) as client:
+        send = _documents_free(client)
+        r = send()
+        assert r.status_code == 200, r.text
+        assert r.json()["estimate"]["est_usd"] == 0 and r.json()["estimate"]["missing"] == [
+            "summary"
+        ]
+        assert client.get("/collections/s").json()["count"] == 0
+        assert send(True).status_code == 503  # a confirm is still refused
+
+
+def test_estimates_carry_roles_and_missing_when_models_are_ready(client):
+    add_collection(client, name="m")
+    r = client.post("/eval", json={**EVAL, "collection": "m", "answer": True})
+    assert r.json()["estimate"]["roles"] == ["answer"] and r.json()["estimate"]["missing"] == []
+    documents_with_passages(client)
+    est = add_tags(client, False).json()["estimate"]
+    assert est["roles"] == ["keywords"] and est["missing"] == []
+
+
+def test_job_rows_carry_label_resumable_and_href(client):
+    run = stopped_eval(client)
+    conn = client.app.state.conn
+    load = db.create_job(conn, "load", "c", {})
+    db.update_job(conn, load, status="failed")
+    queued = db.create_job(conn, "import", "c", {})
+    running = db.create_job(conn, "retag", "c", {})
+    set_running(conn, running, 0.5)
+    want = {
+        run: ("Evaluating c", True, f"/c/c/runs/{run}"),
+        load: ("Loading c", False, "/c/c"),
+        queued: ("Importing into c", False, "/c/c"),
+        running: ("Re-tagging c", False, "/c/c"),
+    }
+    rows = {j["id"]: j for j in client.get("/jobs").json()}
+    for job_id, (label, resumable, href) in want.items():
+        row = client.get(f"/jobs/{job_id}").json()
+        assert (row["label"], row["resumable"], row["href"]) == (label, resumable, href)
+        assert rows[job_id] == row
+    status = client.get("/status").json()
+    assert status["worker"]["running"]["label"] == "Re-tagging c"
+    assert [j["label"] for j in status["queue"]] == ["Importing into c"]
+    assert status["queue"][0]["href"] == "/c/c" and status["queue"][0]["resumable"] is False
+
+
+def test_resumable_agrees_with_resume(client):
+    stopped = stopped_eval(client)
+    conn = client.app.state.conn
+    for kind in jobs.BUSY_STATE:
+        job = stopped if kind == "eval" else db.create_job(conn, kind, "c", {"source": "c"})
+        db.update_job(conn, job, status="interrupted")
+        row = client.get(f"/jobs/{job}").json()
+        r = client.post(f"/jobs/{job}/resume")
+        refused = r.status_code == 409 and "cannot be resumed" in r.json()["detail"]
+        assert row["resumable"] is (not refused), (kind, r.status_code, r.text)
+
+
+def test_status_problems_are_text_and_href(client):
+    stopped = stopped_eval(client)
+    conn = client.app.state.conn
+    client.app.state.worker.error = "boom"
+    imported = db.create_job(conn, "import", "c", {})
+    db.update_job(conn, imported, status="interrupted")
+    rekey = db.create_job(conn, "rekey", "c", {})
+    db.update_job(conn, rekey, status="failed", progress=0.5)
+    copy = db.create_job(conn, "copy", "d", {"source": "c"})
+    db.update_job(conn, copy, status="failed")
+    found = client.get("/status").json()["problems"]
+    by_text = {p["text"]: p["href"] for p in found}
+    assert by_text["The worker thread has stopped; restart the service"] is None
+    assert by_text["Worker error: boom"] is None
+    assert by_text[f"Importing into c ({imported[:8]}) was interrupted by a restart"] == "/c/c"
+    assert by_text["Keyword lists on c are partly re-keyed; save them again"] == "/c/c"
+    assert by_text["The copy into d failed; delete d and copy it again"] == "/c/d"
+    assert by_text[f"Evaluating c ({stopped[:8]}) was interrupted by a restart"] == (
+        f"/c/c/runs/{stopped}"
+    )
+
+
+def test_eval_with_a_missing_eval_set_is_404(client):
+    add_collection(client)
+    r = client.post("/eval", json={**EVAL, "eval_set": "nope"})
+    assert (r.status_code, r.json()["detail"]) == (404, "no eval set 'nope'")

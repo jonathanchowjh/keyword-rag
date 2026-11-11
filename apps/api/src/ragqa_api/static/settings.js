@@ -1,4 +1,4 @@
-import { $, api, askDelete, catalog, embedderLabel, esc, head, methodLabel, modelOptions, refreshSpend, say, shell, usd } from "/static/ui.js";
+import { $, api, askDelete, catalog, embedderLabel, esc, head, mayCost, methodLabel, modelOptions, refreshSpend, say, shell, usd } from "/static/ui.js";
 
 shell("settings");
 $("head").innerHTML = head({
@@ -321,9 +321,7 @@ let defaults = null; // the last GET /search-defaults
 const onOff = (v) => (v ? "on" : "off");
 
 function methodOption(m, chosen) {
-  const paid = cat?.methods?.[m]?.paid;
-  const label = methodLabel(m, cat) + (paid && paid !== "never" ? " (may cost AI)" : "");
-  return `<option value="${esc(m)}"${m === chosen ? " selected" : ""}>${esc(label)}</option>`;
+  return `<option value="${esc(m)}"${m === chosen ? " selected" : ""}>${esc(mayCost(m, cat))}</option>`;
 }
 
 function rerankerOption(name, size, chosen, recommended) {
@@ -373,7 +371,7 @@ function searchHtml() {
       <span class="muted">passages per message</span>${recommended(rec.rerank_pool)}</label>
     ${check("rewrite", "Rewrite follow-ups", `<span class="muted" data-rewrite-note${ai?.resolved?.rewrite ? " hidden" : ""}>(needs a rewrite model)</span>`)}
     ${number("follow_up_turns", "Previous messages joined, without rewrite")}
-    ${number("rrf_k", "RRF k", '<span class="muted">(rerank off, and inside hybrid)</span>')}
+    ${number("rrf_k", "RRF k", '<span class="muted">(chat and /query; rerank off, and inside hybrid)</span>')}
     <div class="row"><button type="submit" id="search-go">Save search defaults</button>
       <button type="button" id="search-reset" class="secondary">Reset to recommended</button></div>`;
 }

@@ -1,4 +1,4 @@
-import { $, LEGEND, api, catalog, clock, confirmSpend, dropStaleStart, esc, head, methodLabel, nameField, paint, pct, pill, plural,
+import { $, LEGEND, api, capital, catalog, clock, confirmSpend, esc, head, methodLabel, nameField, paint, pct, pill, plural, shownPrice,
   noScoreLine, poll, refreshSpend, say, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
@@ -10,7 +10,6 @@ const BENCHMARKS = [
 ];
 
 let cat = null;
-let lastList = "";
 let startHidden = false;
 let startDraw = 0; // the newest draw's number: an older, slower draw never paints
 const startDone = new Set(); // steps found done: kept for the page's life, not fetched again
@@ -56,14 +55,10 @@ async function refresh() {
       ? `<div class="table"><div class="th"><div>Store</div><div>Result</div>
           <div>Ready?</div></div>${full.map(rowHtml).join("")}</div>`
       : '<p class="muted">No stores yet. Make one from your documents below.</p>';
-    if (html !== lastList) {
-      $("list").innerHTML = html;
-      lastList = html;
-    }
+    paint("list", html);
     drawStart(full);
   } catch (e) {
-    $("list").innerHTML = `<p class="err">${esc(e.message)}</p>`;
-    lastList = "";
+    paint("list", `<p class="err">${esc(e.message)}</p>`);
   }
 }
 
@@ -128,8 +123,6 @@ $("start").addEventListener("click", (e) => {
     showForm();
   }
 });
-
-const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 // -- new store ------------------------------------------------------------
 
@@ -225,19 +218,12 @@ async function addDefault(dataset) {
     const slot = document.createElement("span");
     const free = first.estimate.est_usd === 0 && first.estimate.hub?.entry;
     $("defaults-confirm").replaceChildren(free ? "Free: built from the Hub. " : "", slot);
-    confirmSpend(slot, first.estimate, async () => {
-      try {
-        // What was shown: a price that changed since is refused, to be checked again.
-        const shown = { calls: first.estimate.calls, est_usd: first.estimate.est_usd };
-        const job = await api(path, { method: "POST", body: { dataset, ...shown, confirm: true } });
-        $("defaults-confirm").textContent = `Queued (job ${short(job.job_id)})`;
-        refreshSpend();
-        await refresh();
-      } catch (e) {
-        dropStaleStart(slot, e);
-        $("defaults-msg").textContent = e.message;
-      }
-    });
+    confirmSpend(slot, first.estimate, async (shown) => {
+      const job = await api(path, { method: "POST", body: { dataset, ...shown } });
+      $("defaults-confirm").textContent = `Queued (job ${short(job.job_id)})`;
+      refreshSpend();
+      await refresh();
+    }, $("defaults-msg"));
   } catch (e) {
     $("defaults-msg").textContent = e.message;
   }
@@ -299,16 +285,16 @@ function confirmLoads(paying) {
   const li = step(`Loading ${names} costs `);
   const slot = document.createElement("span");
   li.append(slot);
-  const total = { est_usd: unpriced ? null : sum("est_usd"), calls: sum("calls") };
+  const missing = [...new Set(paying.flatMap((p) => p.estimate.missing ?? []))];
+  const total = { est_usd: unpriced ? null : sum("est_usd"), calls: sum("calls"), missing };
   confirmSpend(slot, total, async () => {
     slot.textContent = "starting…";
     for (const { b, estimate } of paying) {
       try {
         // Each load's own shown price: one that changed since is refused, to be checked again.
-        const shown = { calls: estimate.calls, est_usd: estimate.est_usd };
         const job = await api(`/collections/${b.name}/load`, {
           method: "POST",
-          body: { dataset: b.dataset, ...shown, confirm: true },
+          body: { dataset: b.dataset, ...shownPrice(estimate), confirm: true },
         });
         step(`${b.name}: loading ${b.dataset} (queued, job ${short(job.job_id)})`, "ok");
       } catch (e) {

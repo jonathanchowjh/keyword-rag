@@ -695,27 +695,31 @@ def stored_labelled(tmp_path, qa_type):
 
 def test_reimporting_a_documents_set_keeps_its_labels(tmp_path):
     ld = stored_labelled(tmp_path, "documents")
-    counts, todo = ld.question_counts("s", [Question("q1", "new text", None, [], ["c"], {}, None)])
+    counts, todo = db.question_counts(
+        ld.conn, "s", [Question("q1", "new text", None, [], ["c"], {}, None)]
+    )
     assert counts["updated"] == 1
     assert todo[0].gold_ids == ["a", "c"] and todo[0].judged_ids == ["a", "b", "c"]
     assert todo[0].gold_answers == ["Ten days"] and todo[0].text == "new text"
     (tmp_path / "m").mkdir()
     ld = stored_labelled(tmp_path / "m", "multihop")
-    _, todo = ld.question_counts("s", [Question("q1", "new text", None, [], ["c"], {}, None)])
+    _, todo = db.question_counts(
+        ld.conn, "s", [Question("q1", "new text", None, [], ["c"], {}, None)]
+    )
     assert todo[0].gold_ids == ["c"] and todo[0].judged_ids is None
 
 
 def test_reimporting_labelled_questions_replaces_them(tmp_path):
     ld = stored_labelled(tmp_path, "documents")
     new = Question("q1", "new text", None, [], ["c"], {}, ["c"])
-    _, todo = ld.question_counts("s", [new])
+    _, todo = db.question_counts(ld.conn, "s", [new])
     assert todo[0].gold_ids == ["c"] and todo[0].judged_ids == ["c"]
     assert todo[0].gold_answers == []
 
 
 def test_question_counts_on_a_set_not_made_yet(tmp_path):
     ld = stored_labelled(tmp_path, "documents")
-    counts, todo = ld.question_counts("nope", [Question("q", "t", None, [], [], {}, None)])
+    counts, todo = db.question_counts(ld.conn, "nope", [Question("q", "t", None, [], [], {}, None)])
     assert counts["new"] == 1 and len(todo) == 1
 
 

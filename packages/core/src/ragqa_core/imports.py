@@ -10,8 +10,11 @@ import zipfile
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from pathlib import Path
 
+from ragqa_core import db
+from ragqa_core.connection import Connection
 from ragqa_core.datasets import mask_template
 from ragqa_core.db import now
 from ragqa_core.prompts import LETTERS
@@ -43,6 +46,7 @@ FORMATS = {
     ".md": "text",
     ".zip": "zip",
 }
+TEXT_SUFFIXES = tuple(s for s, f in FORMATS.items() if f == "text")
 FIELDS = {
     "items": ("id", "text", "answer", "explanation", "skill", "topic", "meta"),
     "questions": (
@@ -79,7 +83,6 @@ SYNONYMS = {
     "scale": ("scale",),
     "meta": ("meta",),
 }
-TEXT_SUFFIXES = (".txt", ".md")
 
 
 class TooLarge(Exception):
@@ -489,3 +492,23 @@ def leaked_ids(questions: list[Question], texts: list[str]) -> set[str]:
         if len(key.split()) >= LEAK_MIN_WORDS and f" {key} " in joined:
             leaked.add(q.id)
     return leaked
+
+
+def import_questions(
+    conn: Connection,
+    name: str,
+    path: Path,
+    filename: str,
+    qa_type: QaType,
+    mapping: dict,
+    source: str,
+) -> dict:
+    """Reads the upload's rows into questions marked with their source and saves them to the
+    eval set. Returns the new, updated and unchanged counts and the rows skipped."""
+    _, rows, _ = read_rows(path, filename)
+    built, _ = build_questions(rows, mapping, qa_type)
+    built = [replace(q, meta={**q.meta, "source": source}) for q in built]
+    with conn.lock:  # no labeller's save between reading the set and writing it
+        counts, todo = db.question_counts(conn, name, built)
+        db.save_questions(conn, name, todo)
+    return {**counts, "skipped": len(rows) - len(built)}
