@@ -155,7 +155,8 @@ A Documents eval set is built by labelling.
   again.
 - **Save.** **Save question** stores it (the `Reference answer` is a typed field,
   optional, and only a right answer is kept as `gold_answers`); **Save and write the
-  next** clears the panel. The table below lists each question with its right and
+  next** clears the panel. Save waits until Find passages has run, and asks before
+  saving a question with no passage marked Right: such a question isn't scored. The table below lists each question with its right and
   judged counts; **Label** reopens one and finds its passages again, and **Delete**
   asks first. Find, Save, Label and Delete use no AI and spend nothing. While a save
   is under way, Find, Save, Label and Delete are disabled. While the open question
@@ -487,8 +488,10 @@ unless `RAGQA_BUILD_HUB` names another; set to empty, loads never read it.
   and a dataset card crediting the source dataset, all in one commit. Nothing else
   leaves: no embeddings, keys, connections or ledger rows. It refuses a build a load
   would not apply, and a store with a job running on it.
-- **Authored outputs.** Outputs written by hand go into a store with
-  `python -m ragqa_core.apply_outputs COLLECTION VOCABULARY.json OUTPUTS.jsonl`.
+- **Authored outputs.** Outputs written by hand go into a store: copy both files in with
+  `docker compose cp VOCABULARY.json api:/home/app/.ragqa/` and
+  `docker compose cp OUTPUTS.jsonl api:/home/app/.ragqa/`, then
+  `docker compose exec api python -m ragqa_core.apply_outputs COLLECTION /home/app/.ragqa/VOCABULARY.json /home/app/.ragqa/OUTPUTS.jsonl`.
 
 ## Retrieval methods
 
@@ -676,14 +679,15 @@ the default).
 `Cost $0.00 · answer cached` (the answer only: a paid rewrite is not marked). The
 chat's own notes (an added file, a failed send) are kept in this browser across a
 reload, and dropped when the chat is deleted. On a phone the conversation comes
-first. The header keeps the store chips, Add a store, Model, Add document and Use
+first. The header keeps the store chips, Add a store, Model, Add file… and Use
 from your app; the retrieval settings (Evidence size, Rerank, Rewrite) are in
 *Settings for this chat*, under the latest message.
 
 **Passages only, without AI.** With no answer model, Send still works: the
 reply is the retrieval step and the evidence, marked `Passages only: no answer
-model`, and the page links to Settings. Nothing is paid, and Answer from this
-attempt answers it once a model is connected.
+model`, and the page links to Settings. A missing (deleted), disabled or keyless answer
+model counts as none; a usable but unpriced one is refused with "has no price". Nothing is
+paid, and Answer from this attempt answers it once a model is connected.
 
 **The retrieval step.** Under each answer, open the step to see the search text
 and where it came from (message, joined or rewrite), what the pool was reranked
@@ -692,6 +696,7 @@ candidates (`Pooled 20 of 60 (Rerank up to 20)`: Rerank up to caps the pool, so
 more candidates may change nothing), each store's candidates and how many were kept,
 its method (for `keyword_rag`, also the query tags it picked), the pipeline's notes
 and the evidence with each passage's file and part, store, rank and relevance.
+They come best match first; `n` is the number the answer cites, not the order.
 
 **The settings panel.** Under the latest message, *Settings for this chat*
 holds the chat's own *Evidence size*, *Rerank* and *Rewrite follow-ups*, and per
@@ -878,14 +883,17 @@ hand and give each a price (0 is allowed), then choose one for a job.
 A job that asks such a model something its cache does not hold stops with
 `stopped_replies`, and its prompts wait. Each AI step of a job asks all its prompts at
 once, so a stop holds a whole step: an eval's tags, then each method's answers; a
-load's vocabulary, then its tags and its abstracted examples. Inside the api
-container:
+load's vocabulary, then its tags and its abstracted examples. The commands run in the
+api container and write under `/home/app/.ragqa`, the one directory the service's user
+can write; `docker compose cp` moves the files in and out:
 
 ```sh
-python -m ragqa_core.replies export prompts.jsonl [--job JOB_ID]
+docker compose exec api python -m ragqa_core.replies export /home/app/.ragqa/prompts.jsonl [--job JOB_ID]
+docker compose cp api:/home/app/.ragqa/prompts.jsonl .
 # one {"key", "model", "purpose", "job_id", "max_tokens", "system", "prompt"} a line
-python -m ragqa_core.replies import replies.jsonl
-# one {"key", "reply"} a line, for any of the waiting prompts
+# write replies.jsonl: one {"key", "reply"} a line, for any of the waiting prompts
+docker compose cp replies.jsonl api:/home/app/.ragqa/replies.jsonl
+docker compose exec api python -m ragqa_core.replies import /home/app/.ragqa/replies.jsonl
 ```
 
 Then resume the run (or load again): the job finds the replies cached and stops again
@@ -904,9 +912,9 @@ Light and Dark, remembered in this browser.
 | Route | What it shows |
 |---|---|
 | `/` | **Start here** (four steps, hidden once a store, a chat and a run are done), then every store with its answer (does keyword retrieval help?), the run it came from, its state and, if its last load stopped, `Last load stopped: <error>`; **+ New store** → **Create** opens the new store (the form leads with Documents, offers each type's own recipes and says `Embedded with <model> (Settings → Search defaults)`); **Try a built-in benchmark** holds **Add <dataset>** for each built-in dataset (one whose store exists is opened instead) and **Set up the four benchmark stores** |
-| `/c/{name}` | One store: **Chat with this store** (disabled while it is empty), the answer with its gap bar, its runs and a form to start one (pick the eval set; **+ New run** stays disabled until the store has loaded, and `?eval_set=` opens the form once with that set picked), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), its **Embedding model** (what it was built with; rebuild with another, with progress, cancel and resume), for a Documents store its **Keyword tags** (`Not built` with an **Add keyword tags** button that shows the estimate first, `Adding keyword tags: <pct>`, a stopped build with Resume, or `Built: <n> terms`; a Documents store has no keyword lists section and its imports take `.md` and `.txt` only), its **Chat settings** (the method and candidates a chat uses for it, each with where the value comes from, and Reset to Settings for one saved on the store), delete |
+| `/c/{name}` | One store: **Chat with this store** (disabled while it is empty), the answer with its gap bar, its runs and a form to start one (pick the eval set; **+ New run** stays disabled until the store has loaded, and `?eval_set=` opens the form once with that set picked), its items and sources, imports, its default eval set (pick another of its type, or none) with how many of its questions leaked, the three keyword lists (edit, propose, save), its **Embedding model** (what it was built with; rebuild with another, with progress, cancel and resume), for a Documents store its **Keyword tags** (`Not built` with an **Add keyword tags** button (it waits for the store to hold passages) that shows the estimate first, `Adding keyword tags: <pct>`, a stopped build with Resume, or `Built: <n> terms`; a Documents store has no keyword lists section and its imports take `.md` and `.txt` only), its **Chat settings** (the method and candidates a chat uses for it, each with where the value comes from, and Reset to Settings for one saved on the store), delete |
 | `/c/{name}/runs/{id}` | One run, with the eval set and version it asked |
-| `/chat` | Chat. The left lists your saved chats (chats are saved on the server). A chat has a list of stores. Each reply has `[n]` links to its sources (id, file, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. On a phone the conversation comes first. A cached answer reads `Cost $0.00 · answer cached`, and the chat's own notes survive a reload in this browser. Add document adds `.txt` and `.md` files to a store for good (an add that would spend shows its estimate with Add and Cancel). Send works without an answer model: the reply is the passages, with a note linking to Settings. Under each answer a **Retrieval step** shows the search text, what it was reranked against, each store's candidates and the evidence, and under the latest message one **Settings for this chat** panel holds the chat's evidence size, rerank and rewrite, each store's method and candidates, Re-run and Set as default; **Use from your app** holds the curl lines to send the next message and to start a copy of the chat, see [Chat request bodies](#chat-request-bodies); see [Chat in detail](#chat-in-detail) |
+| `/chat` | Chat. The left lists your saved chats (chats are saved on the server). A chat has a list of stores. Each reply has `[n]` links to its sources (id, file, store, source, `part i of n` for a passage of a split file, the first 300 characters, expandable) and its cost. A reply shows a safe subset of Markdown: code blocks, `code`, bold, italic, `-` and `1.` lists, `#` headings as bold lines, and paragraphs; links, images, tables and HTML stay as typed text. Enter sends, Shift+Enter adds a newline. On a phone the conversation comes first. A cached answer reads `Cost $0.00 · answer cached`, and the chat's own notes survive a reload in this browser. Add file… adds `.txt` and `.md` files to the store named beside it (Documents stores are listed first), for good, not into the message (an add that would spend shows its estimate with Add and Cancel). Send works without an answer model: the reply is the passages, with a note linking to Settings. Under each answer a **Retrieval step** shows the search text, what it was reranked against, each store's candidates and the evidence, and under the latest message one **Settings for this chat** panel holds the chat's evidence size, rerank and rewrite, each store's method and candidates, Re-run and Set as default; **Use from your app** holds the curl lines to send the next message and to start a copy of the chat, see [Chat request bodies](#chat-request-bodies); see [Chat in detail](#chat-in-detail) |
 | `/eval-sets` | Every eval set; create one, with a store to label against |
 | `/e/{name}` | One eval set: edit questions in place, add, delete, Save, import, include leaked, versions (View, Restore this version, Show all versions), its linked store, and for a Documents set the labelling panel (Find passages) and a Run against its store link; delete the set |
 | `/lab` | One question, methods side by side |
@@ -959,7 +967,7 @@ with a field its endpoint doesn't know is refused with 422 (`PUT
 | `POST /eval-sets/{name}/imports` | `{upload_id, mapping, source_name}`: imports in the request, upserting by id; returns the counts (new, updated, unchanged), `skipped` and the new `version` |
 | `GET /chats`, `POST /chats` | Saved chats, newest first; create one with `{stores, title?}` or `{from, title?}`: `from` is the id of a chat to copy (its stores and saved settings, no messages; a store since deleted is left out). 404 for an unknown store, or an unknown `from` chat; 422 for no stores, `a chat needs stores, or from: a chat to copy` with neither, `send stores or from, not both` with both, and `a chat needs at least one store` when none of the copied chat's stores is left |
 | `GET /chats/{id}`, `PATCH /chats/{id}`, `DELETE /chats/{id}` | One chat with its messages, attempts and decisions, its own `settings`, and `in_force`, what the next search uses with the level each value comes from; change `{title, stores, evidence_size, rewrite, rerank}`; delete. A null `evidence_size`, `rewrite` or `rerank` inherits from Settings. 404 for an unknown chat, or a store being added that does not exist; 422 for a blank title, no stores, an evidence size outside 1 to 20, a null title or stores, or an unknown field |
-| `POST /chats/{id}/messages` | `{content, model?, answer?}`: search every store on the chat, pool and rerank their passages, and answer (or, with no answer model, return the passages alone). `answer` defaults to true; with `"answer": false` the attempt is searched, pooled and reranked as usual (a follow-up rewrite still runs when it is on) but no answer call is made and nothing is paid for one. With `?brief=true` it returns the short reply instead (`n`, `answer`, `citations`, `passages`, `passages_only`, `error`, `usd`; see [Chat request bodies](#chat-request-bodies)), whose `passages_only` is true when no answer model was available or `answer` was false. Without it, returns the message with its first attempt: `search_text`, `decisions` (per store: `method`, `candidates`, `search`, `tags`, `found`, `used`, `note`, `usd`, `error`), `evidence` (each passage with its `file`, `store`, `rank`, `score`, `relevance` and `channels`), `answer`, `citations`, `usd`, `error` and `pipeline` (where the search text came from, what it was reranked against and by which model, the pool, the notes, `passages_only`: no answer model was available when this attempt was made, `answer_cached`: the answer came from the AI cache, and `answer_skipped`: this attempt was made without an answer call. It is true for a message sent with `"answer": false` and for every re-run, and stays true after **Answer from this attempt** fills the answer). A failed answer is still 200 with `error` set, and the message is saved. 404 for an unknown chat; 422 for empty text, a field other than `content`, `model` and `answer` (so a misspelt `answer` is refused, not answered and paid for), or an answer model that is unknown or has no price, before anything is saved |
+| `POST /chats/{id}/messages` | `{content, model?, answer?}`: search every store on the chat, pool and rerank their passages, and answer (or, with no answer model, return the passages alone). `answer` defaults to true; with `"answer": false` the attempt is searched, pooled and reranked as usual (a follow-up rewrite still runs when it is on) but no answer call is made and nothing is paid for one. With `?brief=true` it returns the short reply instead (`n`, `answer`, `citations`, `passages`, `passages_only`, `error`, `usd`; see [Chat request bodies](#chat-request-bodies)), whose `passages_only` is true when no answer model was available (missing, disabled or keyless; a usable but unpriced one is refused with 422) or `answer` was false. Without it, returns the message with its first attempt: `search_text`, `decisions` (per store: `method`, `candidates`, `search`, `tags`, `found`, `used`, `note`, `usd`, `error`), `evidence` (each passage with its `file`, `store`, `rank`, `score`, `relevance` and `channels`), `answer`, `citations`, `usd`, `error` and `pipeline` (where the search text came from, what it was reranked against and by which model, the pool, the notes, `passages_only`: no answer model was available when this attempt was made, `answer_cached`: the answer came from the AI cache, and `answer_skipped`: this attempt was made without an answer call. It is true for a message sent with `"answer": false` and for every re-run, and stays true after **Answer from this attempt** fills the answer). A failed answer is still 200 with `error` set, and the message is saved. 404 for an unknown chat; 422 for empty text, a field other than `content`, `model` and `answer` (so a misspelt `answer` is refused, not answered and paid for), or a `model` that is unknown or has no price, or a usable answer model with no price, before anything is saved |
 | `POST /chats/{id}/messages/{n}/attempts` | `{settings: {evidence_size?, rerank?, rewrite?}, stores: {store: {method?, candidates?}}}`: save those values on the chat (`null` inherits, a field left out is kept) and re-run message `n`, adding an attempt without answering. The attempt reuses the latest attempt's search text unless the rewrite or follow-up turns now in force differ from how it was made; a message from before this pipeline always keeps its text, with no paid rewrite. 404 for an unknown chat, message or store not on the chat; 409 for a method the store cannot run, and 503 for one that needs AI when none is connected; 422 for a bad value, and then none is saved |
 | `POST /chats/{id}/messages/{n}/attempts/{attempt}/answer` | `{model?}`: answer from that attempt. 404 for an unknown attempt; 409 when it is already answered or another request is answering it (nothing is paid twice). An answer model that is unknown or has no price becomes the attempt's `error`, after any note the attempt already had (a failed rewrite) |
 | `POST /chats/{id}/stores/{store}/default` | Set as default: save the method and candidates the chat holds for the store as the store's own, then clear them from the chat so it inherits them. Returns `{chat_method, chat_k, in_force}`. 404 for an unknown chat, or a store not on it; 409 when the store cannot run the method the chat holds (nothing is saved, since every chat that inherits it would fail) |
@@ -975,7 +983,7 @@ with a field its endpoint doesn't know is refused with 422 (`PUT
 | `POST /jobs/{job_id}/resume` | Resume a stopped run, copy, `reembed` or `tag_build`. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; `calls` and `est_usd` (optional) are checked as for a load. A `reembed` is free: it queues at once, with no estimate and no `confirm`. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt. A `tag_build` runs again in place too and finishes only what is left (the vocabulary if none is in force, the passages without tags); without `confirm` it returns `{estimate: {est_usd, calls}}`, with it the job is queued again. A `tag_build` resume that nothing can price is 503 `connect a model for keywords first`. Only a store's newest `tag_build` resumes: an older one is 409 `a newer tag build of '<name>' exists; resume that one` |
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person |
 | `GET /budget` | This service's spend this month against its cap |
-| `GET /ai` | Connections (keys masked), models with prices, jobs (`default_from_env` when `RAGQA_MODEL` sets the default), `resolved` (per job, whether a usable model is set up for it), budget and presets |
+| `GET /ai` | Connections (keys masked), models with prices (each with `usable`: enabled, on a connection with a key or one that needs none; and `ready`: usable and priced), jobs (`default_from_env` when `RAGQA_MODEL` sets the default), `resolved` (per job, whether a model is ready for it: usable and priced), budget and presets |
 | `POST /ai/connections`, `PATCH /ai/connections/{id}`, `DELETE /ai/connections/{id}` | Add, edit, remove a connection; 409 when a job uses it, or the field or connection is set by the environment. A new `base_url` without a new `api_key` clears the stored key |
 | `POST /ai/connections/{id}/test`, `POST /ai/connections/{id}/models/fetch`, `POST /ai/connections/{id}/models` | Test a connection (an unreachable server is reported, not raised), fetch its model list, add a model by hand |
 | `PUT /ai/models/{connection}/{model}` | Price, label or enable a model |

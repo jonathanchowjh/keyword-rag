@@ -119,9 +119,14 @@ export function evidenceHtml(e, at, ui, chat) {
   return `<li id="${key}" data-store="${esc(e.store)}"><span class="what">[${Number(e.n)}] ${whereHtml(e)}${what ? ` · ${esc(what)}` : ""}</span>${passageHtml(e.text, { key, open: ui.expanded.has(key) })}</li>`;
 }
 
+// The passages as the server sends them, best match first; each keeps the n the answer cites.
 export function evidenceListHtml(a, at, ui, chat) {
-  const passages = [...a.evidence].sort((x, y) => x.n - y.n).map((e) => evidenceHtml(e, at, ui, chat)).join("");
-  return passages ? `<ol class="evidence">${passages}</ol>` : '<p class="muted">No passages.</p>';
+  const passages = a.evidence.map((e) => evidenceHtml(e, at, ui, chat)).join("");
+  if (!passages) return '<p class="muted">No passages.</p>';
+  const order = a.evidence.length >= 2
+    ? `<p class="muted evidence-order">${a.answer != null ? "Best match first. [n] is the number the answer cites." : "Best match first."}</p>`
+    : "";
+  return `${order}<ol class="evidence">${passages}</ol>`;
 }
 
 // With no answer model an unanswered attempt is its passages, listed open under the message.

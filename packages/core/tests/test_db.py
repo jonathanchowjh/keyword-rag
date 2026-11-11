@@ -32,6 +32,7 @@ from ragqa_core.db import (
     newest_jobs,
     request_cancel,
     requeue,
+    retag_partly_done,
     run_items,
     save_collection,
     save_keyword_lists,
@@ -531,6 +532,16 @@ def test_jobs_resumable_statuses():
         "stopped_replies",
         "failed",
     )
+
+
+def test_retag_partly_done_is_true_for_each_partly_done_status_at_half(conn):
+    for status in jobs.PARTLY_DONE:
+        job = create_job(conn, "retag", status, {"version": "v"})
+        update_job(conn, job, status=status, progress=0.5)
+        assert retag_partly_done(conn, status), status
+    done = create_job(conn, "retag", "fin", {"version": "v"})
+    update_job(conn, done, status="done", progress=0.5)
+    assert not retag_partly_done(conn, "fin")
 
 
 def test_delete_job_removes_its_run_items(conn):

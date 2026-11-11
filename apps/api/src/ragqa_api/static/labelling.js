@@ -29,6 +29,8 @@ export class Labelling {
     this.discarding = null; // what Label or Delete will do once its unsaved marks are discarded
     this.asking = 0; // the latest Get the AI's answer: a price drawn for an older one is dropped
     this.answering = 0; // the question the panel holds: a paid answer for an older one is not shown
+    this.searched = false; // Find passages or Search the store has answered for this question
+    this.saveEmpty = false; // Save anyway was pressed: this save goes ahead with no passage marked Right
     this.paying = false; // the confirmed AI's answer is out: Start can't buy it again
   }
 
@@ -152,7 +154,10 @@ export class Labelling {
 
   canSave() {
     const blank = !$("lab-text").value.trim();
-    for (const id of ["lab-find", "lab-save", "lab-next"]) $(id).disabled = blank || this.busy();
+    const unfound = !this.open && !this.searched && this.set?.store != null; // a new question is saved after Find
+    $("lab-find").disabled = blank || this.busy();
+    for (const id of ["lab-save", "lab-next"]) $(id).disabled = blank || unfound || this.busy();
+    $("lab-save-why").textContent = !blank && unfound ? "Find passages first, so you can mark the right ones." : "";
     for (const b of $("lab-questions").querySelectorAll("button[data-label], button[data-del]")) b.disabled = this.busy();
     for (const b of $("lab-panel").querySelectorAll("button[data-mark]")) b.disabled = this.restoring;
     const right = this.listedIds().some((id) => this.marks.get(id) === "y");
@@ -190,6 +195,8 @@ export class Labelling {
   // Opens a question in the panel (null: a new, empty one) and, for a question, finds its passages.
   openQuestion(q) {
     this.closeDiscard();
+    this.closeSaveAsk();
+    this.searched = false;
     this.forgetAnswer();
     this.answering++; // a paid answer still under way is for what was here before
     $("lab-ai-answer").innerHTML = "";
@@ -224,9 +231,14 @@ export class Labelling {
       this.shown = [...pool.passages, ...pool.labelled, ...pool.missing.map((id) => ({ id }))];
       this.found = [];
       this.notes = pool.notes;
+      this.searched = true;
       this.drawPanel();
     } catch (e) {
-      if (mine === this.finding) say($("lab-find-msg"), e.message, "err");
+      if (mine === this.finding) {
+        this.searched = true; // a failed Find must not lock Save
+        say($("lab-find-msg"), e.message, "err");
+        this.canSave();
+      }
     }
   }
 
@@ -252,9 +264,12 @@ export class Labelling {
       if (!result.error && this.found.length === before) {
         say($("lab-search-msg"), "Nothing new: every passage the search found is already listed.", "err");
       }
+      this.searched = true;
       this.drawPanel();
     } catch (e) {
+      this.searched = true;
       say($("lab-search-msg"), e.message, "err");
+      this.canSave();
     }
   }
 
@@ -263,6 +278,7 @@ export class Labelling {
     this.forgetAnswer();
     if (this.marks.get(id) === m) this.marks.delete(id); // clicked again: back to not judged
     else this.marks.set(id, m);
+    this.closeSaveAsk();
     this.markUnsaved();
     this.drawPanel();
   }
@@ -336,8 +352,33 @@ export class Labelling {
     box.innerHTML = "";
   }
 
+  closeSaveAsk() {
+    $("lab-save-ask").innerHTML = "";
+  }
+
+  // A question with no passage marked Right isn't scored: ask before saving one.
+  askSaveEmpty(next) {
+    $("lab-save-ask").innerHTML = `<p class="warn">${esc("No passage marked Right: this question won't be scored.")}</p>
+    <div class="actions"><button type="button" id="lab-save-anyway">Save anyway</button>
+      <button type="button" class="secondary" id="lab-save-cancel">Cancel</button></div>`;
+    $("lab-save-anyway").addEventListener("click", () => {
+      this.saveEmpty = true;
+      this.closeSaveAsk();
+      this.saveQuestion(next);
+    });
+    $("lab-save-cancel").addEventListener("click", () => this.closeSaveAsk());
+    $("lab-save-ask").scrollIntoView({ block: "nearest" });
+  }
+
   async saveQuestion(next) {
+    const anyway = this.saveEmpty; // Save anyway's flag is spent by this call, whatever it does
+    this.saveEmpty = false;
     if (this.busy()) return;
+    this.closeSaveAsk();
+    if (!anyway && !this.listedIds().some((id) => this.marks.get(id) === "y")) {
+      this.askSaveEmpty(next);
+      return;
+    }
     this.closeDiscard(); // what it would discard is being saved
     this.saving = true;
     this.canSave(); // set before the first await, so a second click finds the buttons disabled

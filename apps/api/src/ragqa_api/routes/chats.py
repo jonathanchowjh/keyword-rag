@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from aiconnect.ai import NoConnection
 from ragqa_api.guards import Guards, check_methods
@@ -72,15 +72,6 @@ class ChatPatch(BaseModel):
     evidence_size: int | None = Field(None, ge=1, le=MAX_EVIDENCE)
     rewrite: bool | None = None
     rerank: bool | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def no_nulls(cls, data: object) -> object:
-        if isinstance(data, dict):
-            nulls = [f for f, value in data.items() if value is None and f in ("title", "stores")]
-            if nulls:
-                raise ValueError(f"{', '.join(nulls)} cannot be null: leave a field out to keep it")
-        return data
 
 
 class NewMessage(BaseModel):
@@ -195,6 +186,13 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
 
     @app.patch("/chats/{chat_id}")
     def patch_chat(chat_id: str, body: ChatPatch) -> dict:
+        nulls = [
+            f
+            for f in ("title", "stores")
+            if f in body.model_fields_set and getattr(body, f) is None
+        ]
+        if nulls:
+            raise ValueError(f"{', '.join(nulls)} cannot be null: leave a field out to keep it")
         return state.chats.update(chat_id, body.model_dump(exclude_unset=True))
 
     @app.delete("/chats/{chat_id}", status_code=204)

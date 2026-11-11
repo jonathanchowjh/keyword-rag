@@ -2,17 +2,35 @@
 
 ## Unreleased
 
+### Added
+
+- GET /ai lists each model's `usable` and `ready`.
+
 ### Changed
 
+- Changed (breaking): PATCH /chats/{id} with a null title or stores answers 422 with a plain-text `detail`, as the other routes do, instead of a list.
+- Chat's Add document is now Add file…: it names the store the file is added to, lists Documents stores first, and says what it added beside the button.
 - Changed (breaking): a request whose job's model is set up and usable but unpriced is refused with 422 `<connection>/<model> has no price; enter one first` where it would spend (proposing keyword lists, saving a vocabulary and requests checked for a model first answered 503; a disabled or keyless unpriced model is 503 everywhere, adding keyword tags included); a load that would only propose keyword lists skips the proposal, and chat's attempt-answer route puts it in the attempt's `error`.
 - Changed (breaking): an unconfirmed load that would queue because it is free is refused with 409 when the `calls` or `est_usd` it sends are stale, as adding documents already was.
 - The Hub dataset card says keyword-rag; the link still points at the rag-qa repository.
+- A job stopped for replies names the export command with its path.
+- An empty Documents store says to add documents, and one with no labelled questions says to label some, instead of asking for a run that can't start; Add keyword tags waits for passages; Save question waits for Find passages and asks before saving a question with no right passage.
+- Chat lists a reply's evidence best match first; each passage keeps the [n] the answer cites.
+- Documents stores no longer offer benchmark-only options (controls, multiple-choice choices, keyword-list methods); a Documents run lists each question's right passages and puts unscored questions last.
+- Changed (breaking): a chat whose answer model is missing, deleted, disabled or on a connection with no key (an answer role pointing at a deleted model included) answers with passages only and no error; with such a rewrite or query model, follow-ups are joined, not rewritten, and AI methods say they need AI. A usable but unpriced model is still refused.
 
 ### Fixed
 
+- Settings' Test, Fetch models, Save key and Save prices stay disabled until their request answers, so a double click can't test (and pay) twice.
+- A refused request's reason shows on the page instead of "Unprocessable Entity".
+- A store, eval set, run or chat that doesn't exist shows "No store named x." and a way back, instead of an empty page with live buttons; an unknown page is an HTML page for a browser.
+- .env.example sets nothing, so copying it no longer pins the monthly cap on Settings; the commands for answering by hand write where the service can, and say how to copy the files in and out.
+- On a store made from gpqa, bright_aops or bright_theoremqa, Finish loading loads that dataset, not the first one of its type; a new store's load card lets you pick the dataset.
 - The run page's question picker now defaults to the first method that retrieves, not the no-retrieval baseline.
 - After a refusal because the price changed, the page takes away the old Start, so a fresh click prices it again instead of resending the old price.
 - GET /collections/{n} on a Documents store whose scored run's eval-set version is gone shows the next run's score, or none, instead of 404; the store page loads again.
+- The Worker page no longer says a vocabulary is partly re-tagged when its retag stopped before writing any tags.
+- A model on a connection with no key is no longer offered in the pickers, and Settings marks it `(no key)`.
 
 ## 0.2.0 — 2026-11-11
 

@@ -508,6 +508,14 @@ def test_chat_needs_the_user_to_speak_last(client):
     assert client.post("/chat", json={"collection": "c", "messages": []}).status_code == 422
 
 
+def test_patch_refuses_a_null_title_with_a_plain_message(client):
+    add_collection(client)
+    chat = new_chat(client)
+    r = client.patch(f"/chats/{chat['id']}", json={"title": None})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "title cannot be null: leave a field out to keep it"
+
+
 def test_chats_crud_and_errors(client):
     add_collection(client)
     assert client.get("/chats").json() == []
@@ -529,7 +537,7 @@ def test_chats_crud_and_errors(client):
     for field in ("title", "stores"):
         r = client.patch(f"/chats/{chat['id']}", json={field: None})
         assert r.status_code == 422, field
-        assert field in r.json()["detail"][0]["msg"]  # r.text echoes the input: no test
+        assert r.json()["detail"] == f"{field} cannot be null: leave a field out to keep it"
     assert client.post("/chats", json={"stores": []}).status_code == 422
     assert client.post("/chats", json={"stores": ["nope"]}).status_code == 404
     assert client.get("/chats/nope").status_code == 404
@@ -669,7 +677,7 @@ def test_chat_patch_takes_null_as_inherit_and_refuses_a_null_title(client):
     for field in ("title", "stores"):
         r = client.patch(url, json={field: None})
         assert r.status_code == 422, field
-        assert field in r.json()["detail"][0]["msg"]
+        assert r.json()["detail"] == f"{field} cannot be null: leave a field out to keep it"
     assert client.get(url).json()["title"] == "New chat"
 
 

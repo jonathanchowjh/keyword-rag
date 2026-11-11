@@ -16,9 +16,11 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import fastapi.exception_handlers
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aiconnect.ai import (
     AI,
@@ -163,6 +165,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"detail": no_ai(exc.role)}, 503)
 
     app.add_exception_handler(NoConnection, no_connection)
+
+    async def unknown_page(request: Request, exc: Exception):
+        # A browser that follows a bad link gets a page; a client, and a route's own 404, get JSON.
+        assert isinstance(exc, StarletteHTTPException)
+        if (
+            exc.status_code == 404
+            and exc.detail == "Not Found"  # Starlette's no-route detail
+            and request.method == "GET"
+            and "text/html" in request.headers.get("accept", "")
+        ):
+            return FileResponse(STATIC / "not_found.html", status_code=404, media_type="text/html")
+        return await fastapi.exception_handlers.http_exception_handler(request, exc)
+
+    app.add_exception_handler(StarletteHTTPException, unknown_page)
 
     # -- routes ----------------------------------------------------------------
 

@@ -150,6 +150,47 @@ def test_science_collection_offers_scibench_and_runs(page, seeded):
     expect(page.get_by_text("Example tests the same skill").first).to_be_visible()
 
 
+def test_finish_loading_uses_the_dataset_the_load_started_with(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "gq", "qa_type": "mcq"})
+    job = [
+        {
+            "id": "dead0001",
+            "kind": "load",
+            "collection": "gq",
+            "status": "cancelled",
+            "setup": {"dataset": "gpqa"},
+        }
+    ]
+    page.route("**/jobs?*kind=load*", lambda route: route.fulfill(json=job))
+    seen = route_load(page, "gq", lambda b: (202, {"job_id": "ff00ee"}))
+    page.goto(seeded.url + "/c/gq")
+    page.get_by_role("button", name="Finish loading gpqa").click()
+    expect(page.get_by_text("Queued (job ff00ee)")).to_be_visible()
+    assert seen[0]["dataset"] == "gpqa"
+    expect(page.locator("#ld-dataset")).to_be_disabled()  # an unfinished load keeps its dataset
+
+
+def test_a_new_store_picks_among_its_types_datasets(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "pick", "qa_type": "science"})
+    seen = route_load(page, "pick", lambda b: (202, {"job_id": "aa11bb"}))
+    page.goto(seeded.url + "/c/pick")
+    options = page.locator("#ld-dataset option")
+    expect(options).to_have_text(["scibench", "bright_aops", "bright_theoremqa"])
+    page.locator("#ld-dataset").select_option("bright_aops")
+    page.get_by_role("button", name="Load bright_aops").click()
+    expect(page.get_by_text("Queued (job aa11bb)")).to_be_visible()
+    assert seen[0]["dataset"] == "bright_aops"
+
+
+def test_a_store_named_after_a_dataset_offers_that_dataset(page, seeded):
+    httpx.post(f"{seeded.url}/collections", json={"name": "gpqa", "qa_type": "mcq"})
+    try:
+        page.goto(seeded.url + "/c/gpqa")
+        expect(page.get_by_role("button", name="Load gpqa")).to_be_visible()
+    finally:  # a dataset-named store would turn the Stores page's "Add gpqa" into "Open gpqa"
+        httpx.delete(f"{seeded.url}/collections/gpqa")
+
+
 def test_collection_offers_finish_loading_after_an_interrupted_load(page, seeded):
     seeded.build("fl")
     job = [{"id": "dead0000", "kind": "load", "collection": "fl", "status": "interrupted"}]
@@ -642,7 +683,7 @@ def test_own_science_collection_offers_import_and_benchmark(page, seeded, tmp_pa
     page.goto(seeded.url + "/c/own")
     expect(page.locator("#imp-items-file")).to_be_visible()
     expect(page.locator("#imp-questions-file")).to_have_count(0)
-    expect(page.get_by_text("Or load the built-in benchmark, scibench")).to_be_visible()
+    expect(page.get_by_text("Or load a built-in benchmark.")).to_be_visible()
     expect(page.get_by_role("button", name="Load scibench")).to_be_visible()
     notes = tmp_path / "own notes!.csv"
     notes.write_text("text\nfirst thing about reefs\nsecond thing about tides\n")
@@ -788,7 +829,7 @@ def test_documents_store_imports_md_without_a_mapping_table(page, seeded, tmp_pa
     page.reload()
     expect(page.get_by_text("2 passages.", exact=True)).to_be_visible()
     expect(page.locator("#head .pill")).to_have_text("Ready")
-    expect(page.get_by_text("Or load the built-in benchmark")).to_have_count(0)
+    expect(page.get_by_text("Or load a built-in benchmark.")).to_have_count(0)
     expect(page.get_by_text("How are items described?")).to_be_hidden()
     expect(page.locator("#kw-topic")).to_be_hidden()
     expect(page.get_by_role("button", name="Propose with AI")).to_be_hidden()
@@ -866,7 +907,7 @@ def test_keyword_tags_section_shows_progress_and_resume(page, seeded):
 
 
 def test_keyword_tags_message_goes_when_the_state_changes(page, seeded):
-    documents_store(seeded, "dmsg", passages=False)
+    documents_store(seeded, "dmsg")
     shown = {"tags": {"state": "none"}}
     route_keyword_tags(page, "dmsg", shown)
     refusal = {"detail": "connect a model for keywords first"}
@@ -1029,7 +1070,10 @@ def test_documents_store_shows_its_chat_search_score(page, seeded):
         "for Hybrid + reranker, the search your chats use"
     )
     page.goto(seeded.url + "/c/dd")
-    expect(page.locator("#answer")).to_contain_text("How well does chat find the right passages?")
+    expect(page.locator("#answer-title")).to_have_text(
+        "How well does chat find the right passages?"
+    )
+    expect(page.get_by_role("heading", name="What's the answer?")).to_have_count(0)
     expect(page.locator("#answer")).to_contain_text(
         "Chats can choose another method; this scores the store's setting."
     )
@@ -1274,3 +1318,22 @@ def test_run_form_drops_its_start_after_a_price_change(page, seeded):
     page.get_by_role("button", name="Estimate").click()
     expect(page.locator("#rf-confirm button")).to_be_visible()
     expect(page.locator("#rf-msg")).to_have_text("")
+
+
+def test_an_empty_documents_store_points_at_import_not_a_run(page, seeded):
+    documents_store(seeded, "emptyd", passages=False)
+    page.goto(seeded.url + "/c/emptyd")
+    expect(page.locator("#answer")).to_contain_text("No score yet: add your documents to start")
+    tags = page.get_by_role("button", name="Add keyword tags")
+    expect(tags).to_be_disabled()
+    expect(
+        page.get_by_text("Add passages first: an empty store has nothing to tag.")
+    ).to_be_visible()
+
+
+def test_a_documents_store_without_an_eval_set_points_at_labelling(page, seeded):
+    documents_store(seeded, "nolab")
+    page.goto(seeded.url + "/c/nolab")
+    expect(page.locator("#answer")).to_contain_text(
+        "No score yet: label a few questions to get one"
+    )

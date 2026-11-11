@@ -1,10 +1,14 @@
 """Answer by hand the prompts of a connection of kind `manual`. A job that asks such a
 model what its cache does not hold stops (`stopped_replies`) and its prompts wait. Write
 them out, reply to each, read the replies back, then resume the run or load again: the
-job finds them cached. Run it where the database is, inside the api container:
+job finds them cached. Run it where the database is, inside the api container, and write
+under /home/app/.ragqa, the one directory its user can write (`docker compose cp` moves
+the files in and out):
 
-    docker compose exec api python -m ragqa_core.replies export OUT.jsonl [--job ID]
-    docker compose exec api python -m ragqa_core.replies import REPLIES.jsonl
+    docker compose exec api python -m ragqa_core.replies \\
+        export /home/app/.ragqa/OUT.jsonl [--job ID]
+    docker compose exec api python -m ragqa_core.replies \\
+        import /home/app/.ragqa/REPLIES.jsonl
 
 OUT.jsonl has one prompt a line: {"key", "model", "purpose", "job_id", "max_tokens",
 "system", "prompt"}. REPLIES.jsonl has {"key", "reply"} a line, for any of them. A reply is

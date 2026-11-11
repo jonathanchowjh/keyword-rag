@@ -442,3 +442,39 @@ def test_copy_is_announced_when_the_clipboard_fails(page, seeded):
     expect(page.locator("#chat-head details .sr-only[role=status]")).to_have_text(
         "Press Ctrl+C to copy"
     )
+
+
+@pytest.mark.parametrize(
+    "path, text, link",
+    [
+        ("/c/nope", "No store named nope.", "Stores"),
+        ("/e/nope", "No eval set named nope.", "Eval sets"),
+        ("/c/c/runs/abc", "No run abc on store c.", "Back to c"),
+        ("/c/nope/runs/abc", "No store named nope.", "Stores"),
+    ],
+)
+def test_a_missing_page_says_so_and_offers_a_way_back(page, seeded, path, text, link):
+    page.expected = ["404"]
+    page.clock.install()
+    page.goto(seeded.url + path)
+    expect(page.locator("[data-not-found]")).to_have_text(text)
+    expect(page.get_by_role("link", name=link, exact=True).last).to_be_visible()
+    expect(page.locator("main button")).to_have_count(0)  # no Save, Delete or Propose left
+    page.clock.run_for(20_000)  # past the store page's slow poll: nothing redraws, nothing throws
+    expect(page.locator("[data-not-found]")).to_have_text(text)
+
+
+def test_a_missing_chat_says_so_at_the_top(page, seeded):
+    page.expected = ["404"]
+    page.goto(seeded.url + "/chat#doesnotexist")
+    expect(page.locator("#empty")).to_have_text(
+        "No chat doesnotexist: it may have been deleted. "
+        "Start a new chat, or open one from the list."
+    )
+
+
+def test_an_unknown_page_is_an_html_page(page, seeded):
+    page.expected = ["404"]
+    page.goto(seeded.url + "/nothing")
+    expect(page.locator("h1")).to_have_text("Page not found")
+    expect(page.get_by_role("link", name="Stores", exact=True).last).to_be_visible()

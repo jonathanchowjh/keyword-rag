@@ -3,10 +3,9 @@ import { $, api, catalog, costMark, esc, head, methodLabel, modelOptions, passag
 const PRESET = new Set(["hybrid", "kw_individual", "kw_rrf"]);
 
 shell("lab");
-$("head").innerHTML = head({
-  title: "Lab",
-  sub: "One question, several methods side by side. Highlighted chips are the keywords the question and the item share.",
-});
+const LAB_SUB = "One question, several methods side by side.";
+const drawHead = (sub) => { $("head").innerHTML = head({ title: "Lab", sub }); };
+drawHead(LAB_SUB);
 
 // A method's plain label with its code id beside it.
 const named = (id) => `${esc(methodLabel(id))}<code>${esc(id)}</code>`;
@@ -25,6 +24,10 @@ async function loadMethods() {
   const name = $("collection").value;
   const detail = await api(`/collections/${encodeURIComponent(name)}`);
   if (mine !== asking) return; // the choice moved on while this was loading
+  const documents = detail.qa_type === "documents";
+  drawHead(documents ? LAB_SUB : `${LAB_SUB} Highlighted chips are the keywords the question and the item share.`);
+  $("choices-row").hidden = documents;
+  if ($("choices-row").hidden) $("choices").value = "";
   $("methods").innerHTML = detail.methods_available
     .map(
       (m) => `<label><input type="checkbox" value="${esc(m)}" ${PRESET.has(m) ? "checked" : ""}> ${named(m)}${costMark(m, detail)}</label>`,

@@ -307,9 +307,9 @@ class Chats:
     def ask(
         self, chat_id: str, content: str, model: str | None = None, answer: bool = True
     ) -> dict:
-        """Saves the message and its first attempt, answered unless answer is False. An
-        answer model that does not resolve or has no price is refused first, so nothing is
-        saved."""
+        """Saves the message and its first attempt, answered unless answer is False. A
+        `model` that does not resolve, or a usable answer model with no price, is refused
+        first, so nothing is saved."""
         chat = self._chat(chat_id)
         if not content.strip():
             raise ValueError("a message needs some text")
@@ -792,14 +792,14 @@ class Chats:
     # -- checks and reads --------------------------------------------------------
 
     def _check_model(self, model: str | None) -> None:
-        """Refuses, as POST /chat does, an answer model that does not resolve (UnknownModel)
-        or has no price (UnknownPrice). With no answer model at all, the attempt is
-        passages only."""
-        try:
-            ref = model or self.ai.model_for("answer")
-        except NoConnection:
+        """Refuses, as POST /chat does, an explicit answer model that does not resolve
+        (UnknownModel) or has no price (UnknownPrice). With no `model`, the answer role is
+        checked as `need_price` does: only a usable but unpriced model is refused; a missing,
+        disabled, keyless or deleted one leaves the attempt passages only."""
+        if model is None:
+            self.ai.need_price("answer")
             return
-        self.ai.need_rates(*self.ai.resolve(ref))
+        self.ai.need_rates(*self.ai.resolve(model))
 
     def _changed(self, chat: dict, settings: dict, stores: dict[str, dict]) -> dict:
         """The chat's settings with `settings` and `stores` saved over them, every value
@@ -837,11 +837,12 @@ class Chats:
         return why
 
     def _resolves(self, role: str) -> bool:
+        """The role resolves to a usable model (enabled, keyed or keyless by kind). An
+        unpriced one counts: it is refused with "has no price", not passed over."""
         try:
-            self.ai.model_for(role)
-        except NoConnection:
+            return self.ai.usable(*self.ai.resolve(self.ai.model_for(role)))
+        except (NoConnection, UnknownModel):
             return False
-        return True
 
     def _in_force(self, chat: dict) -> dict[str, Any]:
         """What the chat's next search uses, each chat field with the level it comes from."""

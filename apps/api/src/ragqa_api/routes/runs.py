@@ -15,6 +15,7 @@ from ragqa_api.guards import (
     estimate_reply,
 )
 from ragqa_core import db, jobs, search_defaults
+from ragqa_core.connection import Connection
 from ragqa_core.loader import QUESTION_IMPORT_GONE, roles_needed
 from ragqa_core.recipes import resolve_search
 from ragqa_core.retriever import DEFAULT_K, DEFAULT_RRF_K, POOL
@@ -264,7 +265,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             problems.append(f"Worker error: {worker.error}")
         if line := stalled(running, batches, datetime.now(UTC)):
             problems.append(line)
-        problems += job_problems(db.newest_jobs(state.conn))
+        problems += job_problems(state.conn, db.newest_jobs(state.conn))
         return {
             "worker": {"alive": alive, "running": running, "error": worker.error},
             "queue": db.list_jobs(state.conn, status="queued", limit=db.ALL)[::-1],
@@ -305,7 +306,7 @@ def run_summary(job: dict, summary: dict) -> dict:
     }
 
 
-def job_problems(newest: list[dict]) -> list[str]:
+def job_problems(conn: Connection, newest: list[dict]) -> list[str]:
     """One line per collection and kind whose newest job went wrong."""
     lines = []
     for job in newest:
@@ -314,7 +315,11 @@ def job_problems(newest: list[dict]) -> list[str]:
         if job["kind"] == "rekey" and job["status"] in jobs.PARTLY_DONE and job["progress"] > 0:
             name = job["collection"]
             lines.append(f"Keyword lists on {name} are partly re-keyed; save them again")
-        elif job["kind"] == "retag" and job["status"] in jobs.PARTLY_DONE and job["progress"] > 0:
+        elif (
+            job["kind"] == "retag"
+            and job["status"] in jobs.PARTLY_DONE
+            and db.retag_partly_done(conn, job["collection"])
+        ):
             name = job["collection"]
             lines.append(f"The vocabulary on {name} is partly re-tagged; save it again")
         elif job["kind"] == "copy" and job["status"] in jobs.RESUMABLE:

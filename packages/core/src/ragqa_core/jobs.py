@@ -58,6 +58,7 @@ def no_ai(role: str) -> str:
 
 def awaiting(e: AwaitingReplies) -> str:
     return (
-        f"{e}: export them with `python -m ragqa_core.replies export`, import the replies,"
-        " then resume the run or start the job again; replies already imported stay cached"
+        f"{e}: export them with `docker compose exec api python -m ragqa_core.replies"
+        " export /home/app/.ragqa/prompts.jsonl`, import the replies, then resume the run"
+        " or start the job again; replies already imported stay cached"
     )

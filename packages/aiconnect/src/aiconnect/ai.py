@@ -128,6 +128,11 @@ def usd_for(rates: tuple[float, float], tokens_in: int, tokens_out: int, batch: 
     return usd / 2 if batch else usd
 
 
+def callable_connection(connection: dict | sqlite3.Row) -> bool:
+    """A connection can be called: it has a key, or its kind needs none."""
+    return bool(connection["api_key"]) or connection["kind"] in ("openai", "manual")
+
+
 @contextmanager
 def provider_errors(connection: dict) -> Iterator[None]:
     """A provider failure becomes a ProviderError naming the connection, minus its key."""
@@ -376,18 +381,28 @@ class AI:
         return {"ok": True, "model": model_id, "usd": done.usd, "error": None}
 
     def models(self) -> list[dict]:
-        return [
-            {
-                "ref": f"{r['connection_id']}/{r['model_id']}",
-                "connection_id": r["connection_id"],
-                "model_id": r["model_id"],
-                "label": r["label"],
-                "price_in": r["price_in"],
-                "price_out": r["price_out"],
-                "enabled": bool(r["enabled"]),
-            }
-            for r in self.sql("select * from ai_models order by rowid")
-        ]
+        """Every model, with `usable` (enabled, on a callable connection) and `ready` (usable
+        and priced)."""
+        callable_by_id = {
+            r["id"]: callable_connection(r) for r in self.sql("select * from ai_connections")
+        }
+        out = []
+        for r in self.sql("select * from ai_models order by rowid"):
+            usable = bool(r["enabled"]) and callable_by_id.get(r["connection_id"], False)
+            out.append(
+                {
+                    "ref": f"{r['connection_id']}/{r['model_id']}",
+                    "connection_id": r["connection_id"],
+                    "model_id": r["model_id"],
+                    "label": r["label"],
+                    "price_in": r["price_in"],
+                    "price_out": r["price_out"],
+                    "enabled": bool(r["enabled"]),
+                    "usable": usable,
+                    "ready": usable and r["price_in"] is not None and r["price_out"] is not None,
+                }
+            )
+        return out
 
     def resolve(self, model: str) -> tuple[str, str]:
         """(connection id, model id) for a ref, or for a bare id that one enabled model has."""
@@ -556,9 +571,7 @@ class AI:
             (connection_id, model_id),
         )
         connection = self.need_connection(connection_id)
-        return bool(rows and rows[0]["enabled"]) and (
-            bool(connection["api_key"]) or connection["kind"] in ("openai", "manual")
-        )
+        return bool(rows and rows[0]["enabled"]) and callable_connection(connection)
 
     def rates(self, connection_id: str, model_id: str) -> tuple[float, float] | None:
         row = self.sql(

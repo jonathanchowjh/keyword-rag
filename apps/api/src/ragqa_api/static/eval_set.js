@@ -1,4 +1,4 @@
-import { $, NONE, api, askDelete, catalog, clock, count, esc, head, importBox, plural, say, shell, short } from "/static/ui.js";
+import { $, NONE, api, askDelete, catalog, clock, count, esc, head, importBox, notFound, plural, say, shell, short } from "/static/ui.js";
 import { Labelling } from "/static/labelling.js";
 
 const PAGE_SIZE = 50;
@@ -391,6 +391,11 @@ async function start() {
       done: () => (dirty ? null : load()), // edits made while it ran are kept; Save then says it moved on
     });
   } catch (e) {
+    if (e.status === 404) {
+      notFound({ title: name, crumb: [{ label: "Eval sets", href: "/eval-sets" }], text: `No eval set named ${name}.`,
+        links: [{ label: "Eval sets", href: "/eval-sets" }] });
+      return;
+    }
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Eval sets", href: "/eval-sets" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }

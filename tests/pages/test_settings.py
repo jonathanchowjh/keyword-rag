@@ -359,6 +359,21 @@ def test_a_job_on_a_model_it_can_no_longer_use_shows_it_and_can_be_cleared(page,
         ai.set_role("summary", None)
 
 
+def test_a_job_on_a_model_whose_connection_has_no_key_says_no_key(page, seeded):
+    ai = seeded.app.state.ai
+    ai.add_connection("nokey", "anthropic", "No key")
+    ai.add_model("nokey", "m", label="Keyless", price_in=1, price_out=1)
+    ai.set_role("answer", "nokey/m")
+    try:
+        page.goto(seeded.url + "/settings")
+        answer = page.locator('#roles select[data-role="answer"]')
+        expect(answer.locator("option:checked")).to_have_text("Keyless (no key)")
+        expect(answer.locator("option", has_text="Keyless")).to_have_count(1)
+    finally:  # seeded is session-scoped: leave it as found
+        ai.set_role("answer", None)
+        ai.remove_connection("nokey")
+
+
 def test_default_job_set_by_the_environment_is_read_only(page, seeded):
     def env_default(route):
         response = route.fetch()
@@ -445,3 +460,31 @@ def test_settings_draws_connections_when_catalog_fails(page, seeded):
     page.goto(seeded.url + "/settings")
     expect(page.locator('#connections [data-connection="kept"]')).to_be_visible()
     expect(page.locator("#msg")).to_have_text("catalog down")
+
+
+def test_a_double_click_on_test_sends_one_request(page, seeded):
+    held = []
+    page.route("**/ai/connections/*/test", lambda route: held.append(route))
+    page.goto(seeded.url + "/settings")
+    row = page.locator('#connections [data-connection="anthropic"]')
+    test = row.get_by_role("button", name="Test")
+    test.click()
+    expect(test).to_be_disabled()  # the mechanism: the second click lands on a disabled button
+    test.click(force=True)
+    held[0].fulfill(json={"ok": True, "model": "m", "usd": 0})
+    expect(row.locator(".result")).to_contain_text("Worked with m")
+    assert len(held) == 1
+
+
+def test_a_double_click_on_save_prices_sends_one_request(page, seeded):
+    held = []
+    page.route("**/ai/models/**", lambda route: held.append(route))
+    page.goto(seeded.url + "/settings")
+    model = page.locator('#models [data-connection="anthropic"] .model').first
+    save = model.get_by_role("button", name="Save prices")
+    save.click()
+    expect(save).to_be_disabled()  # the mechanism: the second click lands on a disabled button
+    save.click(force=True)
+    held[0].continue_()  # the row saves as it is, so the shared app is unchanged
+    expect(save).to_be_enabled()
+    assert len(held) == 1

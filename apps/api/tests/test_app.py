@@ -510,3 +510,11 @@ def test_the_service_warms_the_settings_reranker_at_start(tmp_path):
     with client:
         pass
     assert called == [TURBO]
+
+
+def test_unknown_path_is_json_for_a_client_and_html_for_a_browser(client):
+    assert client.get("/nothing").json() == {"detail": "Not Found"}
+    r = client.get("/nothing", headers={"accept": "text/html"})
+    assert r.status_code == 404 and "Page not found" in r.text
+    # a route's own 404 stays JSON even for a browser
+    assert client.get("/collections/nope", headers={"accept": "text/html"}).json()["detail"]

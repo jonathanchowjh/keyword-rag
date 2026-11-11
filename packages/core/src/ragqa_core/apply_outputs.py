@@ -1,9 +1,11 @@
 """Put authored build outputs (a vocabulary, and each item's tags and abstracted form) into
 a collection with no AI call. The owner runs it inside the api container, where the
-database and Qdrant are:
+database and Qdrant are. Copy both files in, to the one directory its user can write:
 
+    docker compose cp VOCABULARY.json api:/home/app/.ragqa/
+    docker compose cp OUTPUTS.jsonl api:/home/app/.ragqa/
     docker compose exec api python -m ragqa_core.apply_outputs \\
-        COLLECTION VOCABULARY.json OUTPUTS.jsonl
+        COLLECTION /home/app/.ragqa/VOCABULARY.json /home/app/.ragqa/OUTPUTS.jsonl
 
 VOCABULARY.json is {"terms": [{"term": ..., "definition": ...}, ...]}. OUTPUTS.jsonl has one
 row per stored item: {"id", "tags", "principle", "method", "answer"}. The service never

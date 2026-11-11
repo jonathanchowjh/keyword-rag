@@ -1086,13 +1086,14 @@ def retag_partly_done(conn: Connection, collection: str) -> bool:
     """A retag since the last finished one stopped after it began writing tags. Choosing
     them is the first half of its progress, and the worker records progress after its cancel
     check, so a stop just after the first batch is written still reads exactly 0.5."""
+    statuses = ", ".join(f"?{i}" for i in range(2, 2 + len(jobs.PARTLY_DONE)))
     row = first(
         conn.execute(
             "select 1 from jobs where kind = 'retag' and collection = ?1"
-            " and status in ('failed', 'cancelled', 'interrupted') and progress >= 0.5"
+            f" and status in ({statuses}) and progress >= 0.5"
             " and rowid > coalesce((select max(rowid) from jobs where kind = 'retag'"
             " and collection = ?1 and status = 'done'), 0) limit 1",
-            (collection,),
+            (collection, *jobs.PARTLY_DONE),
         )
     )
     return row is not None

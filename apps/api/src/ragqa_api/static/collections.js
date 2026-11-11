@@ -30,13 +30,12 @@ function rowHtml(c) {
   const a = c.answer;
   const pair = cat.answer_pair.map((m) => methodLabel(m, cat)).join(" and ");
   const docs = c.qa_type === "documents";
-  const mine = c.chat_search?.run_method;
   const said = () => (docs ? esc(scoreLine(a, cat)) : `Do keywords help? ${verdictHtml(a, c.qa_type, cat)}`);
   const answer = a
     ? `<div title="${esc(LEGEND)}">${said()}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
         clock(a.at))}${a.answered ? "" : " · retrieval only"}</div>`
     : docs
-    ? `<span class="muted">${esc(noScoreLine(mine, c.methods_unavailable?.[mine], cat))}</span>`
+    ? `<span class="muted">${esc(noScoreLine(c, cat))}</span>`
     : `<span class="muted">No answer yet</span><div class="small">${esc(
         c.runs ? `${plural(c.runs, "run")}, none finished with ${pair}` : `no runs yet: run ${pair} to get one`)}</div>`;
   const progress = c.state !== "ready" && c.progress != null ? ` ${pct(c.progress)}` : "";
@@ -80,12 +79,7 @@ const attempt = async (path, usable) => {
 };
 
 function aiUsable(ai) {
-  const kinds = new Map(ai.connections.map((c) => [c.id, c]));
-  return ai.models.some((m) => {
-    if (!m.enabled || m.price_in == null || m.price_out == null) return false;
-    const c = kinds.get(m.connection_id);
-    return c != null && (Boolean(c.key) || c.kind === "openai" || c.kind === "manual");
-  });
+  return ai.models.some((m) => m.ready);
 }
 
 async function startSteps(full) {

@@ -15,6 +15,8 @@ from page_helpers import (
 )
 from playwright.sync_api import expect
 
+from ragqa_core.fakes import until
+
 pytestmark = pytest.mark.pages
 
 POOL_LOADING = "The ranking model is still loading, so passages are in search order, not best first"
@@ -76,6 +78,7 @@ def test_labelling_save_question_twice_saves_one_question(page, seeded):
     said = msg.inner_text()
     mark(passages.first, "wrong")
     panel.get_by_role("button", name="Save question").click()
+    page.get_by_role("button", name="Save anyway").click()
     expect(msg).not_to_have_text(said)
     expect(msg).to_contain_text("Saved as version")
     got = httpx.get(f"{seeded.url}/eval-sets/lab2q").json()["questions"]
@@ -872,3 +875,55 @@ def test_labelling_error_shows_in_its_message(page, seeded):
     fail_unstyled("lab-search-msg", "the search broke")
     expect(page.locator("#lab-search-msg")).to_have_text("the search broke")
     expect(page.locator("#lab-search-msg")).to_have_class("err")
+
+
+def labelled_count(seeded, name):
+    return len(question_map(seeded, name))
+
+
+def test_save_waits_for_find_and_asks_when_nothing_is_right(page, seeded):
+    labelling_set(seeded, "savewait")
+    page.goto(seeded.url + "/e/savewaitq")
+    page.locator("#lab-text").fill("Where is the office?")
+    expect(page.locator("#lab-save")).to_be_disabled()
+    expect(page.locator("#lab-save-why")).to_have_text(
+        "Find passages first, so you can mark the right ones."
+    )
+    page.get_by_role("button", name="Find passages").click()
+    expect(page.locator("#lab-save")).to_be_enabled()
+    page.locator("#lab-save").click()
+    expect(
+        page.get_by_text("No passage marked Right: this question won't be scored.")
+    ).to_be_visible()
+    page.get_by_role("button", name="Cancel").click()
+    assert labelled_count(seeded, "savewaitq") == 0  # nothing was saved
+    page.locator("#lab-save").click()
+    page.get_by_role("button", name="Save anyway").click()
+    until(lambda: labelled_count(seeded, "savewaitq") == 1, 5, 0.05, "the question saved")
+    page.locator("#lab-save").click()  # the same question again: the ask comes back
+    expect(
+        page.get_by_text("No passage marked Right: this question won't be scored.")
+    ).to_be_visible()
+
+
+def test_save_turns_on_when_find_returns_nothing(page, seeded):
+    labelling_set(seeded, "findnone")
+    page.route(
+        "**/eval-sets/findnoneq/pool",
+        lambda route: route.fulfill(
+            json={"passages": [], "labelled": [], "missing": [], "notes": []}
+        ),
+    )
+    page.goto(seeded.url + "/e/findnoneq")
+    page.locator("#lab-text").fill("Anything at all?")
+    page.get_by_role("button", name="Find passages").click()
+    expect(page.locator("#lab-save")).to_be_enabled()
+
+
+def test_a_question_opened_with_label_saves_at_once(page, seeded):
+    # A guard: this passes before the change too; it keeps the U4 rule off opened questions.
+    labelling_set(seeded, "reopen")
+    labelled_questions(seeded, "reopen", ["What is an enzyme?"])
+    page.goto(seeded.url + "/e/reopenq")
+    page.get_by_role("button", name="Label").first.click()
+    expect(page.locator("#lab-save")).to_be_enabled()

@@ -236,3 +236,18 @@ def test_batch_with_null_connection_blocks_by_model(tmp_path):
     ai.set_role("default", None)
     with pytest.raises(Conflict, match="batch"):
         ai.remove_connection("anthropic")
+
+
+def test_models_say_usable_and_ready(tmp_path):
+    ai = fake_ai(tmp_path / "ai.db", lambda p: "ok", api_key=None)  # anthropic, keyless
+    ai.add_connection("gw", "openai", "Gateway", base_url="https://gw.example/v1")
+    ai.add_model("gw", "free", price_in=0, price_out=0)
+    ai.add_connection("keyed", "anthropic", "Keyed", api_key="k")
+    ai.add_model("keyed", "cheap", price_in=1, price_out=2)
+    ai.add_model("keyed", "unpriced", price_in=None, price_out=None)
+    rows = {m["ref"]: m for m in ai.models()}
+    keyless = next(m for m in ai.models() if m["connection_id"] == "anthropic" and m["price_in"])
+    assert keyless["usable"] is False and keyless["ready"] is False
+    assert rows["gw/free"]["usable"] is True and rows["gw/free"]["ready"] is True
+    assert rows["keyed/cheap"]["usable"] is True and rows["keyed/cheap"]["ready"] is True
+    assert rows["keyed/unpriced"]["usable"] is True and rows["keyed/unpriced"]["ready"] is False

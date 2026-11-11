@@ -104,7 +104,8 @@ edited file again, and only the passages that changed are embedded again.
 
 Then the store reads Ready, and **Chat with this store** is enabled. Its search
 is vector, word match and hybrid, all free. **Add keyword tags** adds one more
-method, `keyword_rag`: the one paid search method on a Documents store, priced first.
+method, `keyword_rag`: building its tags costs once, priced first, and searching with
+it is free (its query tags are picked by similarity).
 Other file types, the import API and passage ids are in
 [Importing](REFERENCE.md#importing).
 
@@ -291,7 +292,7 @@ are optional.
 | `HF_TOKEN` | Hugging Face token: read, to load GPQA (gated); write, only for the owner's build publishing |
 | `RAGQA_BUILD_HUB` | The Hub repo of [published builds](REFERENCE.md#published-builds) a load applies. Default `jonathanmiro97/keyword-rag-builds`; empty turns it off |
 | `RAGQA_HOME` | State directory. `/home/app/.ragqa` in the image |
-| `PORT` | Listen port. `8080` |
+| `PORT` | Listen port inside the container. `8080`. With compose, change the `ports:` line in compose.yaml instead |
 
 ## Benchmarks and the paper
 

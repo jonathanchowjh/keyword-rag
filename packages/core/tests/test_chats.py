@@ -501,6 +501,43 @@ def test_no_answer_model_saves_a_passages_only_attempt_without_an_error(tmp_path
     assert chats.rerun(chat["id"], 1)["pipeline"]["passages_only"] is False  # one resolves
 
 
+def test_an_answer_model_without_a_key_saves_a_passages_only_attempt_without_an_error(tmp_path):
+    chats, prompts = build(tmp_path)
+    chats.ai.update_connection("anthropic", api_key=None)  # priced, enabled, but keyless
+    chat = chats.create(["a"])
+    one = attempt(chats.ask(chat["id"], ENZYME))
+    assert one["pipeline"]["passages_only"] is True and one["error"] is None
+    assert one["answer"] is None and prompts == []
+    assert chats.in_force(chat["id"])["answer_available"] is False
+
+
+def test_a_keyless_and_unpriced_answer_model_is_passages_only_without_an_error(tmp_path):
+    chats, prompts = build(tmp_path)
+    ref = unpriced(chats)
+    chats.ai.set_role("default", ref)
+    chats.ai.update_connection("anthropic", api_key=None)
+    one = attempt(chats.ask(chats.create(["a"])["id"], ENZYME))
+    assert one["pipeline"]["passages_only"] is True and one["error"] is None
+    assert one["answer"] is None and prompts == []
+
+
+def test_an_answer_role_on_a_deleted_model_is_passages_only_without_an_error(tmp_path):
+    chats, prompts = build(tmp_path)
+    ref = unpriced(chats)
+    chats.ai.set_role("default", ref)
+    chats.ai.sql("delete from ai_models where model_id = 'unpriced-model'")
+    one = attempt(chats.ask(chats.create(["a"])["id"], ENZYME))
+    assert one["pipeline"]["passages_only"] is True and one["error"] is None
+    assert one["answer"] is None and prompts == []
+
+
+def test_an_unpriced_answer_model_is_still_refused_with_no_price(tmp_path):
+    chats, _ = build(tmp_path)
+    chats.ai.set_role("default", unpriced(chats))  # keyed and enabled: usable, not ready
+    with pytest.raises(UnknownPrice, match="has no price"):
+        chats.ask(chats.create(["a"])["id"], ENZYME)  # refused, not silently passages only
+
+
 def test_rerun_recomputes_the_search_text_only_when_rewrite_or_follow_up_changed(tmp_path):
     chats, _ = build(tmp_path)
     asked: list[str] = []  # every rewrite asked for, cached or not

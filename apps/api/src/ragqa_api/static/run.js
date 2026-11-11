@@ -1,5 +1,5 @@
 import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, catalog, clock,
-  confirmSpend, count, dropStaleStart, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, num, paint, pct,
+  confirmSpend, count, dropStaleStart, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, notFound, num, paint, pct,
   pill, plural, poll, pts, refreshSpend, say, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
@@ -365,14 +365,16 @@ function setupHtml() {
 // One method's hits and parsed answer, one column of an opened question. A hit outside
 // `judged`, the question's judged passages, was never judged; null marks none.
 function methodHtml(m, row, judged) {
+  // Documents hits carry no keyword list, so only a benchmark names what matched.
+  const matched = (words) => (qaType === "documents" ? ""
+    : `, matched keywords: <span data-matched>${esc(words)}</span>`);
   const seen = judged == null ? null : new Set(judged);
   const hits = (row?.hit_ids ?? [])
     .map((h, i) => {
       const skill = row.hit_skills?.[i];
       const words = show(row.hit_matched?.[i]); // rows from before hit_matched lack it
       const never = seen && !seen.has(h) ? ' <span class="muted" data-unjudged>(never judged)</span>' : "";
-      return `<li>${esc(skill ? `${h} (${skill})` : h)}${never}, matched keywords:
-        <span data-matched>${esc(words)}</span></li>`;
+      return `<li>${esc(skill ? `${h} (${skill})` : h)}${never}${matched(words)}</li>`;
     })
     .join("");
   const raw = row?.judge === "unreadable" && typeof row.judge_raw === "string" && row.judge_raw
@@ -390,6 +392,11 @@ function methodHtml(m, row, judged) {
 // left it out, so it is unmeasured there, not missed. Rows from before gold_held lack it.
 function goldHtml(q) {
   if (q.gold_answers?.length || !q.gold_ids?.length) return esc(show(q.gold_answers?.length ? q.gold_answers : q.gold_ids));
+  return goldIdsHtml(q);
+}
+
+// The right passages' ids, each muted when the store does not hold it.
+function goldIdsHtml(q) {
   const held = new Set(q.gold_held ?? q.gold_ids);
   return q.gold_ids
     .map((g) => (held.has(g) ? esc(g) : `<span class="muted" data-unheld>${esc(g)} (not in this store)</span>`))
@@ -403,14 +410,23 @@ function badgeHtml(outcome) {
   return `<span class="badge">${esc(outcome)}</span>`;
 }
 
+// A Documents question names its right passages and, when it has one, the reference answer.
+function goldLinesHtml(q) {
+  if (qaType !== "documents") return `<p>Gold: ${goldHtml(q)}</p>`;
+  const right = q.gold_ids?.length ? goldIdsHtml(q) : "none marked, so this question is not scored";
+  const reference = q.gold_answers?.length ? `<p>Reference answer: ${esc(show(q.gold_answers[0]))}</p>` : "";
+  return `<p>Right passages: ${right}</p>${reference}`;
+}
+
 function questionHtml(q, picked) {
   const outcome = q.methods[picked]?.outcome;
-  const mark = outcome ? `${badgeHtml(outcome)} ` : "";
+  const unscored = qaType === "documents" && !q.gold_ids?.length;
+  const mark = unscored ? '<span class="badge">Not scored</span> ' : outcome ? `${badgeHtml(outcome)} ` : "";
   const choices = (q.choices ?? []).map((c, i) => `${String.fromCharCode(65 + i)}. ${c}`);
   const columns = run.setup.methods.filter((m) => q.methods[m]).map((m) => methodHtml(m, q.methods[m], q.judged_ids));
   return `<details><summary>${mark}${esc(q.question ?? q.question_id)}</summary>
     ${choices.length ? `<p>${choices.map(esc).join("<br>")}</p>` : ""}
-    <p>Gold: ${goldHtml(q)}</p>
+    ${goldLinesHtml(q)}
     <div class="sides">${columns.join("")}</div></details>`;
 }
 
@@ -426,7 +442,10 @@ function showQuestions() {
   const m = $("q-method").value;
   const rows = showing;
   if (!m || !rows) return;
-  const shown = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
+  const picked = $("q-wrong").checked ? rows.filter((q) => q.methods[m]?.outcome === "wrong") : rows;
+  // Unscored Documents questions (no right passage marked) go last, keeping their order.
+  const unscored = (q) => qaType === "documents" && !q.gold_ids?.length;
+  const shown = [...picked.filter((q) => !unscored(q)), ...picked.filter(unscored)];
   $("questions").innerHTML = shown.length ? shown.map((q) => questionHtml(q, m)).join("") : '<p class="muted">None.</p>';
 }
 
@@ -549,7 +568,21 @@ function bindActions() {
 
 let polling = null; // stop() for the poll that runs while the run is busy
 let shownOnce = false; // the first refresh has painted (or failed): the toggle may load from now on
+// The run, or its store, is gone: say which.
+async function runNotFound() {
+  const storeGone = await api(`/collections/${enc}`).then(() => false, (e) => e.status === 404);
+  const crumb = [{ label: "Stores", href: "/" }];
+  if (storeGone) {
+    notFound({ title: name, crumb, text: `No store named ${name}.`, links: crumb });
+  } else {
+    notFound({ title: name, crumb, text: `No run ${id} on store ${name}.`,
+      links: [{ label: `Back to ${name}`, href: `/c/${enc}` }] });
+  }
+}
+
+let missing = false; // the run or its store is gone: the page is its not-found note for good
 async function refresh() {
+  if (missing) return;
   try {
     cat = await catalog();
     const was = run?.status;
@@ -583,8 +616,14 @@ async function refresh() {
     // Questions opened before the first refresh painted could not load then, so they load now.
     if (!shownOnce && $("questions-box").open) loadQuestions();
   } catch (e) {
-    $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Stores", href: "/" }] }) +
-      `<p class="err">${esc(e.message)}</p>`;
+    if (e.status === 404) {
+      missing = true;
+      run = null; // nothing left to poll for
+      await runNotFound();
+    } else {
+      $("head").innerHTML = head({ title: "Run", crumb: [{ label: "Stores", href: "/" }] }) +
+        `<p class="err">${esc(e.message)}</p>`;
+    }
   } finally {
     if (run) shownOnce = true;
   }

@@ -121,6 +121,23 @@ def test_env_example_lists_every_setting():
     }
 
 
+def test_env_example_sets_nothing():
+    """`cp .env.example .env` must change no default: every live line is a bare `NAME=`."""
+    live = [
+        line
+        for line in (ROOT / ".env.example").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert all(re.fullmatch(r"[A-Z_]+=", line) for line in live), live
+
+
+def test_env_example_commented_settings_uncomment_cleanly():
+    """A `# NAME=value` line must work once its `# ` is removed, so it holds no inline note."""
+    text = (ROOT / ".env.example").read_text()
+    lines = re.findall(r"^#\s*[A-Z_]+=.*$", text, re.M)
+    assert lines and all(re.fullmatch(r"#\s*[A-Z_]+=\S*", line) for line in lines), lines
+
+
 def test_docker_context_excludes_private_files():
     ignored = (ROOT / ".dockerignore").read_text().split()
     assert {"docs", ".env", ".superpowers", ".remember"} <= set(ignored)

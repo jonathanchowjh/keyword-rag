@@ -3,6 +3,7 @@
 import httpx
 import pytest
 from page_helpers import (
+    documents_store,
     route_load,
 )
 from playwright.sync_api import expect
@@ -61,7 +62,15 @@ def start_state(page):
     }
 
 
-GOOD_MODEL = {"connection_id": "k", "enabled": True, "price_in": 1.0, "price_out": 2.0}
+GOOD_MODEL = {
+    "connection_id": "k",
+    "enabled": True,
+    "price_in": 1.0,
+    "price_out": 2.0,
+    "usable": True,
+    "ready": True,
+}
+NO_MODEL = {**GOOD_MODEL, "usable": False, "ready": False}
 
 
 def test_start_here_shows_each_step_and_its_state(page, seeded):
@@ -109,8 +118,8 @@ def test_start_here_counts_only_a_usable_model(page, seeded):
     keyed = [{"id": "k", "kind": "anthropic", "key": "sk-...abcd"}]
     unkeyed = [{"id": "k", "kind": "anthropic", "key": None}]
     for models, connections, done in [
-        ([{**GOOD_MODEL, "enabled": False}], keyed, "false"),
-        ([GOOD_MODEL], unkeyed, "false"),
+        ([{**NO_MODEL, "enabled": False}], keyed, "false"),
+        ([NO_MODEL], unkeyed, "false"),
         ([GOOD_MODEL], keyed, "true"),
     ]:
         page.unroute_all()
@@ -145,7 +154,7 @@ def test_one_path_end_to_end(page, seeded):
     page.get_by_label("Name").fill("e2e")
     page.get_by_role("button", name="Create").click()
     expect(page).to_have_url(seeded.url + "/c/e2e")
-    expect(page.get_by_text("No score yet: run Hybrid + reranker to get one").first).to_be_visible()
+    expect(page.get_by_text("No score yet: add your documents to start").first).to_be_visible()
     page.goto(seeded.url + "/worker")
     expect(page.locator("#main")).to_be_visible()
 
@@ -440,3 +449,15 @@ def test_create_works_again_after_back(page, seeded):
             page.wait_for_timeout(20)
         held.pop().fulfill(status=409, json={"detail": "held"})  # settled before the next page
         expect(page.locator("#f-msg")).to_have_text("held")
+
+
+def test_a_documents_store_row_says_the_next_step(page, seeded):
+    documents_store(seeded, "rowempty", passages=False)
+    documents_store(seeded, "rownolab")
+    page.goto(seeded.url + "/")
+    expect(page.locator('a.row-link[href="/c/rowempty"]')).to_contain_text(
+        "No score yet: add your documents to start"
+    )
+    expect(page.locator('a.row-link[href="/c/rownolab"]')).to_contain_text(
+        "No score yet: label a few questions to get one"
+    )

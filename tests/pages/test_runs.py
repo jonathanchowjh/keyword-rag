@@ -528,6 +528,31 @@ def test_a_queued_run_waits_for_its_answer_and_offers_only_stop_run(page, seeded
         expect(page.get_by_role("button", name="Re-run")).to_have_count(0)
 
 
+def test_a_busy_run_deleted_meanwhile_is_not_found_once_and_stops_polling(page, seeded):
+    gone = []
+
+    def after_first(route):
+        if not gone and not hits:
+            hits.append(1)
+            return route.continue_()
+        gone.append(1)
+        route.fulfill(status=404, json={"detail": "no such run"})
+
+    hits = []
+    page.expected = ["404"]
+    with worker_stopped(seeded, "qd") as run_id:
+        page.clock.install()
+        page.route(f"**/eval/{run_id}", after_first)
+        page.goto(f"{seeded.url}/c/qd/runs/{run_id}")
+        expect(page.get_by_role("button", name="Stop run")).to_be_visible()
+        page.clock.run_for(4_000)  # one poll: the run is gone
+        expect(page.locator("[data-not-found]")).to_have_text(f"No run {run_id} on store qd.")
+        for _ in range(5):  # more polls, each given real time to reach the server
+            page.clock.run_for(4_000)
+            page.wait_for_timeout(100)
+        assert len(gone) == 1
+
+
 def test_a_finished_run_names_only_the_method_it_lacks(page, seeded):
     seeded.build("half")
     run_id = seeded.run("half", ["hybrid"])
@@ -1156,8 +1181,8 @@ def test_documents_run_form_ticks_chat_method_not_controls(page, seeded):
     box = lambda m: page.locator(f"input[name=method][value={m}]")  # noqa: E731
     expect(box("hybrid_rerank")).to_be_checked()
     expect(box("hybrid")).to_be_checked()
-    expect(box("random_example")).not_to_be_checked()
-    expect(box("fixed_example")).not_to_be_checked()
+    expect(box("random_example")).to_have_count(0)
+    expect(box("fixed_example")).to_have_count(0)
     with page.expect_request(lambda r: r.url.endswith("/eval") and r.method == "POST") as sent:
         page.get_by_role("button", name="Estimate").click()
     posted = json.loads(sent.value.post_data)
@@ -1688,3 +1713,59 @@ def test_rerun_drops_its_start_after_a_price_change(page, seeded):
     page.get_by_role("button", name="Re-run").click()
     expect(page.locator("#act-confirm button")).to_be_visible()
     expect(page.locator("#act-msg")).to_have_text("")
+
+
+def test_documents_run_form_has_no_controls_but_a_benchmark_keeps_them(page, seeded):
+    documents_store(seeded, "rfd")
+    page.goto(seeded.url + "/c/rfd")
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("input[name=method][value=hybrid]")).to_be_visible()
+    expect(page.locator("input[name=method][value=random_example]")).to_have_count(0)
+    expect(page.locator("input[name=method][value=fixed_example]")).to_have_count(0)
+    expect(page.locator("#run-form legend", has_text="Controls")).to_have_count(0)
+    page.goto(seeded.url + "/c/c")
+    page.get_by_role("button", name="New run").click()
+    expect(page.locator("input[name=method][value=random_example]")).to_have_count(1)
+    expect(page.locator("input[name=method][value=fixed_example]")).to_have_count(1)
+    expect(page.locator("#run-form legend", has_text="Controls")).to_have_count(1)
+
+
+def test_documents_run_lists_right_passages_and_puts_unscored_questions_last(page, seeded):
+    run_id, ids = documents_run(seeded, "rq1", ["hybrid", "vector"], references=1)
+    url = f"{seeded.url}/eval/{run_id}/questions?disagree=false"
+    rows = httpx.get(url).json()
+    first = rows[0]
+    unscored = {
+        **first,
+        "question_id": "0-unscored",  # sorts before the rest by id
+        "question": "nothing marked here?",
+        "gold_ids": [],
+        "gold_answers": [],
+    }
+    page.route("**/questions?disagree=false", lambda route: route.fulfill(json=[unscored, *rows]))
+    page.goto(f"{seeded.url}/c/rq1/runs/{run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    items = page.locator("#questions details")
+    expect(items).to_have_count(3)
+    last = items.nth(2)
+    expect(last.locator("summary")).to_contain_text("nothing marked here?")
+    expect(last.locator("summary .badge", has_text="Not scored")).to_have_count(1)
+    expect(items.locator("summary .badge", has_text="Not scored")).to_have_count(1)
+    last.locator("summary").click()
+    expect(last).to_contain_text("Right passages: none marked, so this question is not scored")
+    first_item = items.filter(has_text="how long does alpha last?")
+    first_item.locator("summary").click()
+    expect(first_item).to_contain_text(f"Right passages: {ids[0]}")
+    expect(first_item).to_contain_text("Reference answer: Ten days")
+    expect(first_item).not_to_contain_text("matched keywords:")
+    expect(first_item).not_to_contain_text("Gold:")
+
+
+def test_a_benchmark_run_still_shows_gold_and_matched_keywords(page, seeded):
+    page.goto(f"{seeded.url}/c/c/runs/{seeded.run_id}")
+    page.get_by_text("Questions", exact=True).click()
+    page.locator("#questions details > summary").first.click()
+    opened = page.locator("#questions details[open]").first
+    expect(opened).to_contain_text("Gold:")
+    expect(opened).to_contain_text("matched keywords:")
+    expect(opened).not_to_contain_text("Right passages")

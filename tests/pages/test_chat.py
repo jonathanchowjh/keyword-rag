@@ -13,6 +13,7 @@ from page_helpers import (
     chat_ask,
     chat_message,
     chat_route,
+    documents_store,
     make_chat,
     open_chat,
     sources,
@@ -393,7 +394,7 @@ def test_a_deleted_store_shows_as_deleted(page, seeded):
     expect(chips).to_have_count(2)
     expect(chips.nth(1)).to_have_text(re.compile("^doomed · deleted"))
     expect(chips.first).not_to_contain_text("deleted")
-    expect(page.locator("#doc-store option")).to_have_text(["c"])
+    expect(page.locator("#doc-store option")).to_have_text(["c · Exam multiple choice"])
     expect(page.locator("#log .user")).to_have_text("before it goes")  # the old chat reads whole
     expect(page.locator("#log .reply")).to_have_count(1)
     step = retrieval_step(page)
@@ -680,7 +681,9 @@ def test_add_document_asks_which_store(page, seeded, tmp_path):
     free_store(seeded, "pick-a")
     free_store(seeded, "pick-b")
     open_chat(page, seeded, ("pick-a", "pick-b"))
-    expect(page.locator("#doc-store option")).to_have_text(["pick-a", "pick-b"])
+    expect(page.locator("#doc-store option")).to_have_text(
+        ["pick-a · Science problems", "pick-b · Science problems"]
+    )
     page.locator("#doc-store").select_option("pick-b")
     path = tmp_path / "tides.txt"
     path.write_text("tides follow the moon")
@@ -689,6 +692,19 @@ def test_add_document_asks_which_store(page, seeded, tmp_path):
     assert "upload:tides" in [s["source"] for s in sources(seeded, "pick-b")]
     assert "upload:tides" not in [s["source"] for s in sources(seeded, "pick-a")]
     expect(page.locator("#doc-store")).to_have_value("pick-b")  # kept for the next file
+
+
+def test_add_file_names_its_store_and_says_what_it_added(page, seeded, tmp_path):
+    documents_store(seeded, "dz")
+    open_chat(page, seeded, ("c", "dz"))
+    expect(page.get_by_label("Add a file to store")).to_be_visible()
+    expect(page.locator("#doc-store")).to_have_value("dz")
+    expect(page.locator("#doc-store option").first).to_have_text("dz · Documents")
+    expect(page.get_by_role("button", name="Add file…")).to_be_visible()
+    path = tmp_path / "note.md"
+    path.write_text("# Note\n\nthe moon pulls the tides")
+    page.locator("#doc-file").set_input_files(str(path))
+    expect(page.locator("#add-doc-msg")).to_contain_text("Added")
 
 
 def test_chat_upload_adds_a_document_and_the_next_answer_can_cite_it(page, seeded, tmp_path):
@@ -1396,6 +1412,28 @@ def test_rerun_refused_shows_the_reason_and_keeps_the_edit(page, seeded):
     expect(turn.get_by_role("tab")).to_have_count(0)  # no attempt was added
 
 
+def test_rerun_422_list_detail_shows_its_reason(page, seeded):
+    page.expected = ["422"]
+    open_chat(page, seeded, ("c", "vo"))
+    chat_ask(page, "enzyme kinetics rate experiment")
+    panel = settings_panel(page)
+    detail = [
+        {
+            "loc": ["body", "evidence_size"],
+            "msg": "Input should be less than or equal to 20",
+            "type": "less_than_equal",
+        }
+    ]
+    page.route(
+        "**/messages/1/attempts", lambda route: route.fulfill(status=422, json={"detail": detail})
+    )
+    panel.get_by_label("Evidence size").fill("3")
+    rerun_button(panel).click()
+    expect(panel.locator(".panel-note")).to_have_text(
+        "evidence_size: Input should be less than or equal to 20"
+    )
+
+
 DECISION = {
     "store": "c",
     "method": "hybrid",
@@ -1810,3 +1848,40 @@ def test_evidence_shows_file_and_part(page, seeded):
     expect(items.first.locator(".what")).to_contain_text("[1] x.md · part 2 of 3")
     expect(items.first.locator(".what span[title]")).to_have_attribute("title", "x.md#2")
     expect(items.nth(1).locator(".what")).to_contain_text("[2] lone")
+
+
+def test_evidence_is_listed_best_first_with_its_citation_numbers(page, seeded):
+    base = CHAT_ATTEMPT["evidence"]
+    evidence = [  # the server's order is rank; n is the prompt's order
+        {**base[0], "id": "best", "n": 1, "relevance": 0.99},
+        {**base[1], "id": "second", "n": 3, "relevance": 0.90},
+        {**base[0], "id": "third", "n": 2, "relevance": 0.40},
+    ]
+    chat_route(page, lambda route: route.fulfill(json=chat_message(route, evidence=evidence)))
+    open_chat(page, seeded)
+    chat_ask(page, "where?")
+    page.locator("#msg-1 details.retrieval > summary").first.click()
+    whats = page.locator("#msg-1 ol.evidence > li .what")
+    expect(whats.nth(0)).to_contain_text("[1]")
+    expect(whats.nth(1)).to_contain_text("[3]")
+    expect(whats.nth(2)).to_contain_text("[2]")
+    expect(page.locator("#msg-1 .evidence-order").first).to_have_text(
+        "Best match first. [n] is the number the answer cites."
+    )
+
+
+def test_chat_method_select_over_documents_store_has_no_keyword_list_methods(page, seeded):
+    documents_store(seeded, "chatdoc")
+    cat = httpx.get(f"{seeded.url}/catalog").json()
+    keywords = [m for m, v in cat["methods"].items() if v["group"] == "keywords"]
+    assert keywords
+    values = {}
+    for store in ("chatdoc", "c"):
+        open_chat(page, seeded, (store,))
+        chat_ask(page, "enzyme kinetics rate experiment")
+        expect(page.locator("#msg-1 .reply")).to_have_count(1)
+        method = edit_box(settings_panel(page), store).get_by_label("Method")
+        values[store] = method.locator("option").evaluate_all("os => os.map(o => o.value)")
+    assert not set(values["chatdoc"]) & set(keywords)
+    assert "hybrid" in values["chatdoc"]
+    assert set(values["c"]) & set(keywords)

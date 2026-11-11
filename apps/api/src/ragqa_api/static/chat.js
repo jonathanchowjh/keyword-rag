@@ -1,8 +1,6 @@
 import { $, UNPRICED, api, catalog, esc, followJob, head, manyBody, methodLabel, modelOptions, plural, refreshSpend, say, shell, upload, usd } from "/static/ui.js";
 import { PASSAGES_ONLY, attemptHtml, passagesOnly, retrievalHtml } from "/static/reply.js";
 
-const MAX_EVIDENCE = 20; // the most passages a chat may answer from, the route's rule
-const MAX_CANDIDATES = 60; // the most candidates a store may add to the pool, the route's rule
 const REWRITE_AGAIN = "Re-run rewrites this follow-up with AI: one AI call.";
 const SOURCES = { settings: "Settings", store: "store", recommended: "recommended" }; // where a value is from
 
@@ -26,7 +24,7 @@ let adding = false; // files are being added
 const details = {}; // store -> its GET /collections/{name}: its chip, its methods, its own settings
 const pending = {}; // chat id -> the message still on its way there
 const arrived = {}; // chat id -> the replies (a message, a re-run, an answer) that came while its chat was loading, merged once it has
-const local = {}; // chat id -> lines the server never kept: refusals and Add document's notes; read and pushed through notesOf
+const local = {}; // chat id -> lines the server never kept: refusals and Add file's notes; read and pushed through notesOf
 const turns = {}; // "chat id:message n" (and "chat id:panel") -> what the reader has open or edited there, kept across redraws
 
 // The chat's stores that still exist.
@@ -160,12 +158,17 @@ function readPanel(el) {
   return out;
 }
 
+// The max attribute of a number field, or nothing while the server's limit is not known.
+const maxAttr = (max) => (max == null ? "" : `max="${max}"`);
+
 // A number field as the route takes it: blank is null (inherit). Throws, with what to fix, on
-// a value the route would refuse.
+// a value the route would refuse. max is the server's limit, null until the defaults load.
 function whole(value, max, name) {
   if (value.trim() === "") return null;
   const x = Number(value);
-  if (!(Number.isInteger(x) && x >= 1 && x <= max)) throw new Error(`${name} is a whole number from 1 to ${max}.`);
+  if (!(Number.isInteger(x) && x >= 1 && (max == null || x <= max))) {
+    throw new Error(max == null ? `${name} is a whole number from 1.` : `${name} is a whole number from 1 to ${max}.`);
+  }
   return x;
 }
 
@@ -176,14 +179,14 @@ function changesOf(ui) {
   const shown = shownFields(ui);
   const settings = {};
   const changed = {};
-  if (shown.evidence_size !== saved.evidence_size) settings.evidence_size = whole(shown.evidence_size, MAX_EVIDENCE, "Evidence size");
+  if (shown.evidence_size !== saved.evidence_size) settings.evidence_size = whole(shown.evidence_size, defaults?.limits?.evidence_size?.[1] ?? null, "Evidence size");
   for (const f of ["rerank", "rewrite"]) if (shown[f] !== saved[f]) settings[f] = shown[f] === "" ? null : shown[f] === "on";
   for (const store of live()) {
     const now = shown.stores[store];
     const was = saved.stores[store];
     const out = {};
     if (now.method !== was.method) out.method = now.method || null;
-    if (now.candidates !== was.candidates) out.candidates = whole(now.candidates, MAX_CANDIDATES, "Candidates");
+    if (now.candidates !== was.candidates) out.candidates = whole(now.candidates, defaults?.limits?.candidates?.[1] ?? null, "Candidates");
     if (Object.keys(out).length) changed[store] = out;
   }
   return { settings, stores: changed };
@@ -245,7 +248,8 @@ function methodOptions(store, value) {
   const inherited = inheritText(storeInherit(store, "method"), (m) => methodLabel(m, cat), "store");
   const why = details[store]?.methods_unavailable ?? {};
   const methods = [...new Set([...(cat?.chat_methods ?? defaults?.methods ?? []), ...(value ? [value] : [])])];
-  const listed = methods.map((m) => {
+  const documents = details[store]?.qa_type === "documents";
+  const listed = methods.filter((m) => !(documents && cat?.methods?.[m]?.group === "keywords" && m !== value)).map((m) => {
     const paid = cat?.methods?.[m]?.paid;
     const label = methodLabel(m, cat) + (paid && paid !== "never" ? " (may cost AI)" : "") + (why[m] ? ` (${why[m]})` : "");
     return option(m, value, label, Boolean(why[m]));
@@ -265,7 +269,7 @@ function storeFieldsHtml(store, shown, ui) {
       : "";
   return `<fieldset data-edit="${esc(store)}"><legend>${esc(store)}</legend><div class="row">
       <label>Method <select name="method" aria-label="Method">${methodOptions(store, f.method)}</select></label>
-      <label>Candidates <input name="candidates" aria-label="Candidates" type="number" min="1" max="${MAX_CANDIDATES}" step="1" value="${esc(f.candidates)}" placeholder="${esc(candidates)}"></label>
+      <label>Candidates <input name="candidates" aria-label="Candidates" type="number" min="1" ${maxAttr(defaults?.limits?.candidates?.[1])} step="1" value="${esc(f.candidates)}" placeholder="${esc(candidates)}"></label>
       <button type="button" class="secondary" data-default${off}>Set as default</button>
       <span class="edit-note${note?.bad ? " err" : " muted"}" role="status">${esc(note?.text ?? "")}</span>
     </div>${confirm}</fieldset>`;
@@ -279,7 +283,7 @@ function panelHtml(n) {
   const off = ui.busy || pending[chat.id] != null ? " disabled" : "";
   const size = inheritText(chatInherit("evidence_size"), String, "Settings");
   const fields = `<div class="row">
-      <label>Evidence size <input name="evidence_size" aria-label="Evidence size" type="number" min="1" max="${MAX_EVIDENCE}" step="1" value="${esc(shown.evidence_size)}" placeholder="${esc(size)}"></label>
+      <label>Evidence size <input name="evidence_size" aria-label="Evidence size" type="number" min="1" ${maxAttr(defaults?.limits?.evidence_size?.[1])} step="1" value="${esc(shown.evidence_size)}" placeholder="${esc(size)}"></label>
       ${switchHtml("rerank", "Rerank", shown.rerank, false)}
       ${switchHtml("rewrite", "Rewrite follow-ups", shown.rewrite, !chat.in_force?.rewrite_available)}
     </div>`;
@@ -402,8 +406,13 @@ function drawHead() {
     .join("");
   $("add-store").disabled = !others.length;
   const keep = $("doc-store").value;
-  $("doc-store").innerHTML = live()
-    .map((s) => `<option value="${esc(s)}"${s === keep ? " selected" : ""}>${esc(s)}</option>`)
+  const typeOf = (name) => stores.find((s) => s.name === name)?.qa_type;
+  const label = (name) => cat?.qa_types?.[typeOf(name)]?.label ?? typeOf(name) ?? "";
+  const targets = live()
+    .map((name, i) => ({ name, i, docs: typeOf(name) === "documents" }))
+    .sort((a, b) => b.docs - a.docs || a.i - b.i); // Documents stores first, each part in the chat's order
+  $("doc-store").innerHTML = targets
+    .map(({ name }) => `<option value="${esc(name)}"${name === keep ? " selected" : ""}>${esc(name)}${label(name) ? ` · ${esc(label(name))}` : ""}</option>`)
     .join("");
 }
 
@@ -479,11 +488,15 @@ async function loadSettings(id) {
   drawTurns();
 }
 
+const EMPTY = "Start a new chat, or open one from the list.";
+
 async function openChat(id) {
   const mine = ++opening;
   openId = id;
   chat = null;
+  $("empty").textContent = EMPTY; // a note about the last chat does not outlive it
   $("spoken").textContent = ""; // another chat: nothing of the last one is read out
+  $("add-doc-msg").textContent = ""; // the last chat's Add file result is not this chat's
   drawList();
   drawHead();
   drawLog();
@@ -497,7 +510,15 @@ async function openChat(id) {
     delete arrived[id];
     chat = late.reduce((c, merge) => merge(c), got);
   } catch (e) {
-    if (mine === opening) $("status").textContent = e.message;
+    if (mine !== opening) return;
+    if (e.status === 404) {
+      $("empty").textContent = `No chat ${id}: it may have been deleted. ${EMPTY}`;
+      $("empty").hidden = false;
+      openId = ""; // the hash is cleared: the sidebar must not treat the missing chat as open
+      history.replaceState(null, "", location.pathname);
+    } else {
+      $("status").textContent = e.message;
+    }
     return;
   }
   drawHead();
@@ -824,6 +845,11 @@ async function addFiles(files) {
     addNotes(id, { after: chat?.id === id ? lastN(chat) : start, role, content });
     if (chat?.id === id) drawLog();
   };
+  const msg = (text, cls) => {
+    $("add-doc-msg").textContent = text;
+    $("add-doc-msg").className = cls;
+  };
+  msg("", "muted");
   adding = true;
   setBusy();
   let added = false;
@@ -831,10 +857,14 @@ async function addFiles(files) {
     try {
       if (!/\.(txt|md)$/i.test(file.name)) throw new Error("only .txt and .md files can be added here");
       const said = await addFile(store, file);
-      if (said) addLine("note", said);
+      if (said) {
+        addLine("note", said);
+        msg(said, "muted");
+      }
       added ||= Boolean(said);
     } catch (e) {
       addLine("error", `${file.name}: ${e.message}`);
+      msg(`${file.name}: ${e.message}`, "err");
     }
     refreshSpend();
   }

@@ -1,11 +1,10 @@
 import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, catalog, clock, confirmSpend, count, costMark, dropStaleStart, embedderLabel, esc, gapBar, gapSpan,
   head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, UNPRICED, usd, verdictHtml,
-  importBox, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
+  importBox, notFound, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
 const FAST_MS = 3000;
 const BUSY_STATES = new Set(["loading", "rekeying", "retagging", "tagging", "copying", "evaluating", "queued", "importing", "labelling", "rebuilding"]); // the collection's own
-const DATASETS = { science: "scibench", mcq: "scienceqa", multihop: "musique", table: "tatqa" };
 const GROUPS = [
   ["baseline", "Baseline"],
   ["control", "Controls"],
@@ -69,17 +68,15 @@ function headHtml() {
 // A Documents store: the score of the search its chats use, no gap bar.
 function scoreAnswerHtml() {
   const a = col.answer;
-  const lead = "<strong>How well does chat find the right passages?</strong>";
   const foot = '<p class="muted">Chats can choose another method; this scores the store\'s setting.</p>';
   if (!a) {
-    const m = col.chat_search?.run_method;
-    return `<p class="verdict">${lead}</p><p class="muted">${esc(noScoreLine(m, col.methods_unavailable?.[m], cat))}</p>${foot}`;
+    return `<p class="muted">${esc(noScoreLine(col, cat))}</p>${foot}`;
   }
   const s = a.switch;
   const switchLine = s && !a.unreliable
     ? `<p>${esc(`${methodLabel(s.method, cat)} did better: ${pts(s.diff, s.lo, s.hi)}. Picked after the fact, so the gap is likely overstated. To use it, change the store's search method.`)}</p>`
     : "";
-  return `<p class="verdict">${lead}</p><p>${esc(scoreLine(a, cat))}</p>${switchLine}
+  return `<p>${esc(scoreLine(a, cat))}</p>${switchLine}
     <p class="muted">From <a href="/c/${enc}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
       short(a.run_id))}</a> at ${esc(clock(a.at))} · run ${esc(a.runs)} on this store</p>${foot}`;
 }
@@ -164,9 +161,9 @@ function setOptions(sets) {
 // A Documents store runs no keyword-list methods. Its answers are off until ticked, and
 // Judge answers needs them.
 function runFormHtml(ai, sets) {
-  // A Documents run ticks the chat's search and the three free ones, and no controls.
+  // A Documents run ticks the chat's search and the three free ones, and offers no controls.
   const ticks = [...new Set([col.chat_search?.run_method, "hybrid", "vector", "keyword"])];
-  const groups = GROUPS.filter(([id]) => !(documents() && id === "keywords")).map(([id, title]) => {
+  const groups = GROUPS.filter(([id]) => !(documents() && (id === "keywords" || id === "control"))).map(([id, title]) => {
     const boxes = Object.entries(cat.methods)
       .filter(([, m]) => m.group === id)
       .map(([mid, m]) => {
@@ -330,26 +327,44 @@ function itemsHtml() {
   return `<p>${esc(plural(col.count, type?.item_noun ?? "item"))}.</p>`;
 }
 
+// The dataset this store loads: the one its load started with, else the store's own name when
+// that is a dataset of its type, else the type's first. null for a Documents store.
+const typeDatasets = () => Object.keys(cat.datasets).filter((d) => cat.datasets[d] === col.qa_type);
+
+function loadDataset() {
+  const started = loadJob?.setup?.dataset;
+  if (started) return started;
+  return cat.datasets[name] === col.qa_type ? name : (typeDatasets()[0] ?? null);
+}
+
+const loadLabel = (unfinished, dataset) => `${unfinished ? "Finish loading" : "Load"} ${dataset}`;
+
 function benchmarkHtml() {
-  const dataset = DATASETS[col.qa_type];
+  const dataset = loadDataset();
   if (!dataset || !needsLoad()) return ""; // a Documents store has no built-in benchmark
   const unfinished = col.count > 0 || loadJob != null;
-  const label = unfinished ? "Finish loading" : `Load ${dataset}`;
+  const ids = typeDatasets();
+  if (!ids.includes(dataset)) ids.push(dataset); // a load started with a dataset since renamed or retyped
+  const options = ids.map((d) => `<option${d === dataset ? " selected" : ""}>${esc(d)}</option>`).join("");
   return `<div class="card form">
-    <div>Or load the built-in benchmark, ${esc(dataset)}.</div>
-    <div class="row"><label>Limit (blank for all)<input id="ld-limit" type="number" min="1"></label>
-      <button type="button" id="ld-go">${esc(label)}</button>
+    <div>Or load a built-in benchmark.</div>
+    <div class="row"><label>Dataset <select id="ld-dataset"${unfinished ? " disabled" : ""}>${options}</select></label>
+      <label>Limit (blank for all)<input id="ld-limit" type="number" min="1"></label>
+      <button type="button" id="ld-go">${esc(loadLabel(unfinished, dataset))}</button>
       <span id="ld-confirm"></span><span id="ld-msg" class="err" role="status"></span></div></div>`;
 }
 
 function bindLoad() {
   const go = $("ld-go");
   if (!go) return;
-  const dataset = DATASETS[col.qa_type];
+  const select = $("ld-dataset");
+  select.addEventListener("change", () => {
+    go.textContent = loadLabel(false, select.value);
+  });
   go.addEventListener("click", async () => {
     $("ld-msg").textContent = "";
     const limit = parseInt($("ld-limit").value, 10);
-    const base = { dataset, ...(limit > 0 ? { limit } : {}) };
+    const base = { dataset: select.value, ...(limit > 0 ? { limit } : {}) };
     try {
       const first = await api("/collections/" + enc + "/load", { method: "POST", body: { ...base, confirm: false } });
       if (!first.estimate) {
@@ -610,7 +625,8 @@ function tagsHtml() {
   } else if (t.state === "built") body = `<p>${esc(`Built: ${count(t.terms)} terms.`)}</p>`;
   else {
     body = `<p>${esc(notBuilt())}</p>
-      <div class="actions"><button type="button" id="tags-add">Add keyword tags</button></div>`;
+      <div class="actions"><button type="button" id="tags-add"${col.count === 0 ? " disabled" : ""}>Add keyword tags</button>${
+      col.count === 0 ? '<span class="muted">Add passages first: an empty store has nothing to tag.</span>' : ""}</div>`;
   }
   return `<h2>Keyword tags</h2>${body}`;
 }
@@ -768,10 +784,13 @@ function buildDelete() {
 
 // -- refresh ----------------------------------------------------------------------------
 
+let missing = false; // the store does not exist: the page is its not-found note for good
 async function refresh() {
+  if (missing) return;
   try {
     cat = await catalog();
     let loads, everySet;
+    // A 404 from any of these reads as a missing store: only the spec can answer one.
     [col, runs, loads, versions, everySet, defaults] = await Promise.all([
       api("/collections/" + enc),
       api("/eval?collection=" + enc),
@@ -788,6 +807,7 @@ async function refresh() {
     $("chat-store").disabled = empty || chatting;
     $("chat-store").title = why;
     $("chat-store-why").textContent = why;
+    $("answer-title").textContent = documents() ? "How well does chat find the right passages?" : "What's the answer?";
     paint("answer", answerHtml());
     paint("runs", runsHtml());
     paint("asked", askedHtml());
@@ -832,6 +852,12 @@ async function refresh() {
     $("new-run").title = noSet ? "Create an eval set first" : "";
     $("new-run-why").innerHTML = noSet ? `<a href="/eval-sets?store=${enc}">Create an eval set first</a>` : "";
   } catch (e) {
+    if (e.status === 404) {
+      missing = true;
+      notFound({ title: name, crumb: [{ label: "Stores", href: "/" }], text: `No store named ${name}.`,
+        links: [{ label: "Stores", href: "/" }] });
+      return;
+    }
     $("head").innerHTML = head({ title: name, crumb: [{ label: "Stores", href: "/" }] }) +
       `<p class="err">${esc(e.message)}</p>`;
   }

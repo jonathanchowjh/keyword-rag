@@ -174,6 +174,17 @@ def test_retag_state_and_problem_wording(client):
     assert client.get("/collections/w").json()["state"] == "retagging"
     db.update_job(conn, retag, status="failed", error="boom", progress=0.4)
     problems = client.get("/status").json()["problems"]
+    # still choosing tags at 0.4: nothing was written, so nothing is partly re-tagged
+    assert not any("partly re-tagged" in p for p in problems)
+
+
+def test_a_retag_stopped_while_writing_is_partly_re_tagged(client):
+    client.post("/collections", json=WORKED)
+    conn = client.app.state.conn
+    client.app.state.worker.stop()
+    retag = db.create_job(conn, "retag", "w", {"version": "v"})
+    db.update_job(conn, retag, status="cancelled", progress=0.5)
+    problems = client.get("/status").json()["problems"]
     assert "The vocabulary on w is partly re-tagged; save it again" in problems
 
 

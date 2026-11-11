@@ -4,6 +4,7 @@ import httpx
 import pytest
 from page_helpers import (
     REBUILD_MODEL,
+    documents_store,
     interrupt,
     worker_stopped,
 )
@@ -301,3 +302,26 @@ def test_lab_names_stores_not_collections(page, seeded):
     page.route("**/collections", lambda route: route.fulfill(json=[]))
     page.goto(seeded.url + "/lab")
     expect(page.locator("#status")).to_have_text("No stores yet. Create one from the Stores page.")
+
+
+def test_lab_hides_multiple_choice_parts_for_a_documents_store(page, seeded):
+    documents_store(seeded, "labdocs")
+    page.goto(seeded.url + "/lab")
+    choices = page.get_by_text("Choices, one per line", exact=False)
+    page.locator("#collection").select_option("labdocs")
+    expect(page.locator("#methods input[value=hybrid]")).to_be_visible()
+    expect(choices).to_be_hidden()
+    expect(page.locator("#head .sub")).not_to_contain_text("Highlighted chips")
+    expect(page.locator("#head .sub")).to_contain_text(
+        "One question, several methods side by side."
+    )
+    r = httpx.post(f"{seeded.url}/collections", json={"name": "labsci", "qa_type": "science"})
+    assert r.status_code == 201, r.text
+    page.goto(seeded.url + "/lab")
+    page.locator("#collection").select_option("labsci")
+    expect(page.locator("#methods")).not_to_be_empty()
+    expect(choices).to_be_visible()
+    page.locator("#collection").select_option("c")
+    expect(page.locator("#methods input[value=kw_individual]")).to_be_visible()
+    expect(choices).to_be_visible()
+    expect(page.locator("#head .sub")).to_contain_text("Highlighted chips")

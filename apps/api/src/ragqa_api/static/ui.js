@@ -65,12 +65,24 @@ export function paint(id, html) {
 
 // -- data ---------------------------------------------------------------------
 
+// A refusal's reason: a plain detail as it is, a validation list as "field: why" items.
+function reasonOf(detail) {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return "";
+  return detail
+    .map((d) => {
+      const loc = (d.loc ?? []).filter((part, i) => !(i === 0 && part === "body")).join(".");
+      return loc ? `${loc}: ${d.msg}` : d.msg;
+    })
+    .join("; ");
+}
+
 async function send(path, init) {
   const response = await fetch(path, init);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail;
-    const error = new Error(typeof detail === "string" ? detail : response.statusText || "request failed");
+    const error = new Error(reasonOf(detail) || response.statusText || "request failed");
     error.status = response.status;
     throw error;
   }
@@ -231,10 +243,10 @@ export function methodLabel(id, cat = known) {
   return cat?.methods?.[id]?.label ?? id;
 }
 
-// <option>s for the models a job may use: enabled and priced, by label, sending the ref.
+// <option>s for the models a job may use: ready (usable and priced), by label, sending the ref.
 export function modelOptions(models, chosen) {
   return models
-    .filter((m) => m.enabled && m.price_in != null && m.price_out != null)
+    .filter((m) => m.ready)
     .map((m) => `<option value="${esc(m.ref)}"${m.ref === chosen ? " selected" : ""}>${esc(m.label)}</option>`)
     .join("");
 }
@@ -337,8 +349,13 @@ export function scoreLine(answer, labels = known) {
   return [line, ...notes].join(" · ");
 }
 
-// A Documents store with no score for its chats' search: run it, or why it can't run here.
-export function noScoreLine(method, why, labels = known) {
+// A Documents store with no score for its chats' search: the next step its state calls for. `store`
+// is a GET /collections/{n} reply.
+export function noScoreLine(store, labels = known) {
+  if (!store.count) return "No score yet: add your documents to start";
+  if (!store.eval_set || !store.questions) return "No score yet: label a few questions to get one";
+  const method = store.chat_search?.run_method;
+  const why = store.methods_unavailable?.[method];
   const label = methodLabel(method, labels);
   return why ? `No score yet: ${label} can't run on this store (${why})` : `No score yet: run ${label} to get one`;
 }
@@ -416,6 +433,13 @@ export function head({ title, crumb = [], sub = "", aside = "" }) {
     <h1>${esc(title)}</h1>
     ${sub ? `<p class="sub">${esc(sub)}</p>` : ""}
   </div>${aside ? `<div class="aside">${aside}</div>` : ""}</div>`;
+}
+
+// A page whose subject does not exist: the whole main area says so, with a way back, and
+// nothing in it can be pressed.
+export function notFound({ title, crumb = [], text, links = [] }) {
+  const way = links.map((l) => `<a href="${esc(l.href)}">${esc(l.label)}</a>`).join(" · ");
+  $("main").innerHTML = head({ title, crumb }) + `<p class="err" data-not-found>${esc(text)}</p><p>${way}</p>`;
 }
 
 // The server's refusal of a Start whose shown price has changed (ragqa_api.guards.PRICE_CHANGED).

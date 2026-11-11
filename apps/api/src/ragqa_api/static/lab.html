@@ -20,7 +20,7 @@
       <label title="When methods merge their rankings, a higher value lets lower-ranked items count for more; 60 is the usual">Merge constant (rrf_k) <input id="rrfk" class="w80" type="number" value="60" min="0"></label>
     </div>
     <label>Question <textarea id="question" required></textarea></label>
-    <label>Choices, one per line (multiple choice only) <textarea id="choices" class="short"></textarea></label>
+    <label id="choices-row">Choices, one per line (multiple choice only) <textarea id="choices" class="short"></textarea></label>
     <fieldset><legend>Methods</legend><div class="methods" id="methods"></div></fieldset>
     <div class="row">
       <label class="ask-ai"><input id="answer" type="checkbox"> Have the AI answer the question <span class="cost muted">costs money</span></label>

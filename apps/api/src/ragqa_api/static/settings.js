@@ -15,15 +15,21 @@ const notes = {}; // connection id -> what its last button said, kept across red
 const modelPath = (m) => `/ai/models/${encodeURIComponent(m.connection_id)}/${m.model_id.split("/").map(encodeURIComponent).join("/")}`;
 const connPath = (id) => `/ai/connections/${encodeURIComponent(id)}`;
 
-// Runs one change, then redraws from the server; a refusal shows its reason.
-async function act(change) {
+// Runs one change, then redraws from the server; a refusal shows its reason. The clicked button
+// stays off until the redraw, so a second click can't send (and pay for) the request twice.
+async function act(change, button = null) {
   say($("msg"), "");
+  if (button) button.disabled = true;
   try {
-    await change();
-  } catch (e) {
-    say($("msg"), e.message);
+    try {
+      await change();
+    } catch (e) {
+      say($("msg"), e.message);
+    }
+    await load();
+  } finally {
+    if (button) button.disabled = false;
   }
-  await load();
 }
 
 // -- connections ------------------------------------------------------------------
@@ -38,7 +44,7 @@ function connectionHtml(c) {
         ${locked ? `disabled placeholder="${ENV}"` : ""}></label>
         <button type="button" class="secondary" data-act="key" disabled>Save key</button></div>`;
   const status = manual
-    ? '<span class="muted">prompts wait for replies: <code>python -m ragqa_core.replies</code></span>'
+    ? '<span class="muted">prompts wait for replies: <code>python -m ragqa_core.replies</code> (see Answered by hand in REFERENCE.md)</span>'
     : `<span class="muted">key ${esc(key)}</span>`;
   return `<div class="card conn" data-connection="${esc(c.id)}">
     <div class="top"><strong>${esc(c.label)}</strong><code>${esc(c.kind)}</code>${where}
@@ -95,7 +101,7 @@ $("connections").addEventListener("click", (event) => {
     });
     return;
   }
-  act(() => ACTIONS[button.dataset.act](box.dataset.connection, box));
+  act(() => ACTIONS[button.dataset.act](box.dataset.connection, box), button);
 });
 
 // Save key stays off until something is typed, so an empty box can never clear a key.
@@ -209,6 +215,8 @@ async function saveRow(row) {
     say($("msg"), "Give both prices, or choose one from the list.");
     return;
   }
+  const button = row.querySelector("[data-save]");
+  button.disabled = true; // until the PUT answers, so a second click saves nothing twice
   try {
     await api(modelPath({ connection_id: row.dataset.connection, model_id: row.dataset.id }), { method: "PUT", body });
     ai = await api("/ai");
@@ -216,6 +224,7 @@ async function saveRow(row) {
     drawRoles();
   } catch (e) {
     say($("msg"), e.message);
+    button.disabled = false;
   }
 }
 
@@ -232,7 +241,7 @@ $("models").addEventListener("click", (event) => {
   const card = event.target.closest("[data-connection]");
   const id = card.querySelector("[name=new-id]").value.trim();
   if (!id) return;
-  act(() => api(connPath(card.dataset.connection) + "/models", { method: "POST", body: { model_id: id } }));
+  act(() => api(connPath(card.dataset.connection) + "/models", { method: "POST", body: { model_id: id } }), event.target.closest("button"));
 });
 
 // -- jobs -------------------------------------------------------------------------
@@ -251,7 +260,15 @@ const JOB_NOTE = {
 function unusableOption(ref) {
   if (!ref) return "";
   const m = ai.models.find((x) => x.ref === ref);
-  const why = !m ? "not set up" : !m.enabled ? "disabled" : m.price_in == null || m.price_out == null ? "needs a price" : "";
+  const why = !m
+    ? "not set up"
+    : !m.enabled
+      ? "disabled"
+      : !m.usable
+        ? "no key"
+        : m.price_in == null || m.price_out == null
+          ? "needs a price"
+          : "";
   return why ? `<option value="${esc(ref)}" selected>${esc(m?.label ?? ref)} (${why})</option>` : "";
 }
 

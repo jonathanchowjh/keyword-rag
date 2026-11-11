@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>keyword-rag · Page not found</title>
+<link rel="icon" href="data:,">
+<script src="/static/theme.js"></script>
+<link rel="stylesheet" href="/static/ui.css">
+</head>
+<body>
+<aside id="side"></aside>
+<main id="main">
+  <h1>Page not found</h1>
+  <p>Nothing lives at <code id="where"></code>.</p>
+  <p><a href="/">Stores</a></p>
+</main>
+<script type="module">
+import { shell } from "/static/ui.js";
+shell("");
+document.getElementById("where").textContent = location.pathname;
+</script>
+</body>
+</html>
