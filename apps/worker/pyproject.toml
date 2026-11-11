@@ -1,6 +1,6 @@
 [project]
 name = "ragqa-worker"
-version = "0.2.0"
+version = "0.3.0"
 description = "The keyword-rag job-queue worker."
 requires-python = ">=3.12,<3.13"
 dependencies = [

@@ -233,11 +233,11 @@ def test_lists_history_loads_an_old_version_and_keeps_it(page, seeded):
 
 def test_runs_table_says_what_each_run_said(page, seeded):
     page.goto(seeded.url + "/c/c")
-    said = page.locator("[data-said]").first
-    expect(said).to_have_text(re.compile(r"^(Yes|No|Can't tell) [+−]\d+ pts?"))
+    said = page.locator("[data-result]").first
+    expect(said).to_have_text(re.compile(r"^(Yes|No|Can't tell yet) [+−]\d+ pts?"))
     expect(said.locator("strong.word")).to_have_count(1)
     page.goto(seeded.url + "/c/vo")
-    expect(page.locator("[data-said]").first).to_have_text("–")
+    expect(page.locator("[data-result]").first).to_have_text("–")
 
 
 def test_import_items_from_a_file_then_switch_the_source_off(page, seeded, tmp_path):
@@ -666,6 +666,32 @@ def test_import_several_files_one_unpriced(page, seeded, tmp_path):
     expect(preview).to_contain_text("Can't price b.md: set up a model in Settings")
     expect(page.locator("#imp-items-import")).to_be_disabled()
     assert queued == []
+
+
+def test_several_files_without_ai_disable_import(page, seeded, tmp_path):
+    documents_store(seeded, "manynoai", passages=False)
+    a, b = two_files(tmp_path)
+    pdf = tmp_path / "c.pdf"
+    pdf.write_bytes(b"%PDF-1.4 not text")
+
+    def missing(route):
+        response = route.fetch()
+        body = response.json()
+        if response.ok:
+            body["estimate"] = {**body["estimate"], "missing": ["summary"]}
+        route.fulfill(response=response, json=body)
+
+    page.route("**/collections/manynoai/uploads?*", missing)
+    page.goto(seeded.url + "/c/manynoai")
+    page.expected = ["422"]  # the .pdf is refused
+    page.locator("#imp-items-file").set_input_files([str(a), str(b), str(pdf)])
+    page.locator("#imp-items-go").click()
+    preview = page.locator("#imp-items-preview")
+    expect(preview.get_by_role("link", name="Connect AI first")).to_have_attribute(
+        "href", "/settings"
+    )
+    expect(page.locator("#imp-items-import")).to_be_disabled()
+    expect(preview.locator("li")).to_have_count(3)
 
 
 def test_mcq_import_takes_one_file(page, seeded):
@@ -1126,11 +1152,12 @@ def test_documents_score_copy_shows_headline_range_and_n(page, seeded):
     fields["retrieval"] = {**row["retrieval"], "ndcg@10": 0.5}
     db.upsert_run_item(conn, run_id, "hybrid_rerank", row["question_id"], fields, True)
     line = (
-        "Right passages ranked first: 75% (50–100) for Hybrid + reranker, "
+        "Ranking quality nDCG@10: 75% (50–100) for Hybrid + reranker, "
         "the search your chats use, on 2 questions"
     )
     page.goto(seeded.url + "/c/dd9")
     expect(page.locator("#answer")).to_contain_text(line)
+    expect(page.locator("#answer code.muted")).to_have_text("nDCG@10")
     page.goto(f"{seeded.url}/c/dd9/runs/{run_id}")
     expect(page.locator("#answer")).to_contain_text(line)
 

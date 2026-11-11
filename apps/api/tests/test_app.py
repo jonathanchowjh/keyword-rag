@@ -129,7 +129,7 @@ def doc_curl_commands() -> list[str]:
 def test_doc_curl_commands_fit_the_routes_and_request_models(tmp_path):
     app = create_app(settings(tmp_path))
     commands = doc_curl_commands()
-    assert len(commands) == 18
+    assert len(commands) == 19
     checked = 0
     for command in commands:
         method = re.search(r"-X (\w+)", command)
@@ -149,7 +149,7 @@ def test_doc_curl_commands_fit_the_routes_and_request_models(tmp_path):
         sent = json.loads(re.sub(r"<[^>]*>", "x1", body.group(1)))
         TypeAdapter(route.body_field.field_info.annotation).validate_python(sent)
         checked += 1
-    assert checked == 16
+    assert checked == 17
 
 
 def route_key(method: str, path: str) -> tuple[str, str]:
@@ -360,8 +360,12 @@ const ans = (verdict, diff, lo, hi, metric = 'accuracy', qaType = 'mcq') => u.ve
 out.j = ans('yes', 6.2, 1.8, 10.4);
 out.k = ans('no', -7, -12, -2);
 out.l = ans('cant_tell', 1, -2, 4);
-out.t = ans('yes', 6, 2, 10, 'em', 'table');
-out.u = ans('yes', 6, 2, 10, 'em', 'mcq');
+out.t = ans('yes', 6, null, null);
+out.u = [
+  u.metricHtml('ndcg@10', 'documents',
+               {metrics: {'ndcg@10': {label: 'Ranking quality', code: 'nDCG@10'}}}),
+  u.metricHtml('em', 'mcq', labels),
+];
 out.v = ['rekeying', 'retagging', 'copying', 'stopped_budget', 'stopped_no_key', 'cancelled']
   .map(u.pill);
 out.w = [u.count(11656), u.count(0)];
@@ -374,6 +378,11 @@ out.z = [{est_usd: null, calls: 3}, {est_usd: 0.4141, calls: 1}].map((estimate) 
 });
 const sim = {metric: 'solution_sim@1', proxy_trusted: true};
 out.y = [{unit: 'raw'}, {unit: 'match'}].map((scale) => u.verdictNotes({...sim, scale}));
+out.pa = u.passageHtml('# Title\\nline one\\nline two');
+out.pb = u.passageHtml('<script>x</script> [1]');
+out.pc = u.passageHtml('a'.repeat(300));
+out.pd = u.passageHtml('a'.repeat(301));
+out.em = ['a*b*c', 'x**2 + y**2', 'say **this** now', 'an *em* word'].map((t) => u.textHtml(t));
 console.log(JSON.stringify(out));
 """
 
@@ -390,17 +399,25 @@ def test_ui_formatting(tmp_path):
     assert got["c"] == "+1 pt (−2 to 4)"
     assert got["d"] == "+0 pts (−3 to 3)"
     assert got["e"] == "78%"
+    em = got["em"]
+    assert "<em>" not in em[0]
+    assert "<strong>" not in em[1] and "<em>" not in em[1]
+    assert "<strong>this</strong>" in em[2]
+    assert "<em>em</em>" in em[3]
     assert got["f"] == "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
     assert got["g"] == "14:02" and got["h"] == "21 Oct 14:02"
     assert got["n"] == ["–", "–", "–", "–", "0%"]
     assert got["o"] == ["–", "–", "–", "−3 pts (−4 to −1)"]
     assert got["p"] == ["–", "–", "–"]
     assert got["q"] == ["+3 pts (2–4)", "+5 pts"]
-    assert got["j"] == "Keywords per list +6 pts (2–10) answered correctly vs Hybrid"
-    assert got["k"].startswith("Keywords per list −7 pts")
-    assert got["l"].startswith("Keywords per list +1 pt")
-    assert got["t"] == "Keywords per list +6 pts (2–10) exact answer vs Hybrid"
-    assert got["u"].endswith("exact match vs Hybrid")  # no label for this type: the plain one
+    assert got["j"] == "Keywords per list vs Hybrid, +6 pts (range 2 to 10)"
+    assert got["k"] == "Keywords per list vs Hybrid, −7 pts (range −12 to −2)"
+    assert got["l"] == "Keywords per list vs Hybrid, +1 pt (range −2 to 4)"
+    assert got["t"] == "Keywords per list vs Hybrid, +6 pts"
+    assert got["u"] == [
+        'Ranking quality <code class="muted">nDCG@10</code>',
+        "Exact match",  # no code: the escaped label alone
+    ]
     assert [re.sub("<[^>]*>", "", v) for v in got["v"]] == [
         "Re-keying",
         "Re-tagging",
@@ -411,6 +428,12 @@ def test_ui_formatting(tmp_path):
     ]
     assert "pill run" in got["v"][2]
     assert got["w"] == ["11,656", "0"]
+    assert "<strong>Title</strong>" in got["pa"] and "line one<br>line two" in got["pa"]
+    assert "&lt;script&gt;" in got["pb"] and "<a" not in got["pb"]
+    assert "<details" not in got["pc"]
+    long = got["pd"]
+    assert 'class="preview"' in long and 'class="less"' in long and '<div class="full">' in long
+    assert long.split('<div class="full">')[1].count("a" * 301) == 1
     assert got["x"] == ["< $0.01", "$0.00", "$0.41", "$12.00"]
     unpriced, priced = got["z"]  # no model to price with: unknown, not $0.00
     assert "cost unknown" in unpriced and "$0.00" not in unpriced and "≈ $0.41" in priced

@@ -408,7 +408,7 @@ def job_problems(conn: Connection, newest: list[dict]) -> list[dict]:
             lines.append({"text": text, "href": job_href(job)})
         elif job["kind"] == "copy" and job["status"] in jobs.RESUMABLE:
             why = jobs.PROBLEM.get(job["status"], "was cancelled")
-            text = f"The copy into {name} {why}; delete {name} and copy it again"
+            text = f"The copy into {name} {why}; resume it, or delete {name} and copy it again"
             lines.append({"text": text, "href": job_href(job)})
         elif job["status"] in jobs.PROBLEM:
             lines.append(problem(job, jobs.PROBLEM[job["status"]]))

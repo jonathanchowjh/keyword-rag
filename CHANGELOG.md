@@ -1,15 +1,22 @@
 # Changelog
 
-## Unreleased
+Newest first. "(breaking)" marks a change a client of the API may need to act on; each release's "Upgrading from" section lists what to change.
+
+## 0.3.0 — 2026-11-12
 
 ### Added
 
+- REFERENCE.md says how to back up, reset and upgrade, naming the two volumes; SECURITY.md says what leaves the machine and that API keys are stored in plaintext.
+- REFERENCE.md has Statuses and errors (every status the API answers, with an example) and Job statuses (which can resume), a Documents import by curl that works, and the request fields' real names.
 - GET /ai lists each model's `usable` and `ready`.
 - GET /jobs, /jobs/{id} and /status rows carry label, resumable and href.
 - GET /collections/{name} returns busy: true while a job is queued or running on the store, or its rebuild's switch has stopped part-way.
 
 ### Changed
 
+- The eval-set page strikes a removed question through with Undo, counts the questions Save would keep, and asks before you leave with unsaved changes. Run against its store waits for a first question.
+- Every page fits a 400 px screen: long selects and the New store name box shrink, wide tables scroll, and the narrow nav leaves out the child links.
+- Passages keep their line breaks and show headings in bold, and an opened passage shows its text once.
 - Changed (breaking): an AI connection or model that doesn't exist answers 404 on the routes that name it in the path (it answered 422); POST /eval with an eval_set that doesn't exist answers 404.
 - Changed (breaking): POST /ai/connections/{id}/models answers 201.
 - Changed (breaking): adding documents is refused with 409 while a rebuild's switch has stopped part-way, as REFERENCE.md said.
@@ -34,9 +41,13 @@
 - Documents stores no longer offer benchmark-only options (controls, multiple-choice choices, keyword-list methods); a Documents run lists each question's right passages and puts unscored questions last.
 - Changed (breaking): a chat whose answer model is missing, deleted, disabled or on a connection with no key (an answer role pointing at a deleted model included) answers with passages only and no error; with such a rewrite or query model, follow-ups are joined, not rewritten, and AI methods say they need AI. A usable but unpriced model is still refused.
 - Start reads Connect AI first, linking to Settings, when what it would run needs a model that isn't usable; prices read the same everywhere (chat no longer shows "≈ < $0.01"); a refused Start or Resume shows why beside it, and only a changed price takes it away.
+- Changed (breaking): importing into a store whose rebuild's switch stopped part-way is refused with 409 "the switch to <model> stopped part-way; resume it first", as adding documents is.
+- A stopped copy's problem line says it can be resumed.
+- The pages name the retrieval metrics plainly, with the code beside them: Ranking quality (nDCG@10), Found in top 10 (Recall@10), First right passage (MRR@10). A verdict reads "Can't tell yet: Keywords per list vs Hybrid, +0 pts (range −3 to 3)", and the store page's runs column is Result.
 
 ### Fixed
 
+- The eval-set page's versions read "1 question · View".
 - The store page no longer polls every 3 seconds while a rebuild's switch is stopped.
 - Settings' Test, Fetch models, Save key and Save prices stay disabled until their request answers, so a double click can't test (and pay) twice.
 - A refused request's reason shows on the page instead of "Unprocessable Entity".
@@ -48,6 +59,22 @@
 - GET /collections/{n} on a Documents store whose scored run's eval-set version is gone shows the next run's score, or none, instead of 404; the store page loads again.
 - The Worker page no longer says a vocabulary is partly re-tagged when its retag stopped before writing any tags.
 - A model on a connection with no key is no longer offered in the pickers, and Settings marks it `(no key)`.
+- Importing several files when no summary model is usable disables Import and says Connect AI first, as one file does.
+
+### Upgrading from 0.2.0
+
+- Expect 404, not 422, for an AI connection or model that doesn't exist on the routes that name it in the path, and for `POST /eval` with an unknown `eval_set`.
+- Expect 201 from `POST /ai/connections/{id}/models`.
+- Expect 409 when adding documents or importing into a store whose rebuild's switch stopped part-way; resume the switch first.
+- If you match job-in-the-way messages by text, match "a <kind> job is queued or running on '<name>'; wait" and "an eval is running on '<name>'; wait".
+- Read `GET /status` problems as `problems[].text` (with `href`), not as strings, and expect the job named as the Worker page names it.
+- If you match the resume refusal, expect "this <job> cannot be resumed; start it again" for loads, imports, re-keys, re-tags and labelling.
+- Read `detail` as plain text on `PATCH /chats/{id}` 422 (null title or stores), not as a list.
+- Expect 422 `<connection>/<model> has no price; enter one first` for a usable but unpriced model where a request would spend (it was 503 for proposing keyword lists, saving a vocabulary and checks for a model); a disabled or keyless unpriced model is still 503, and chat's attempt-answer route puts the refusal in the attempt's `error`.
+- Expect 200 with an estimate from an unconfirmed spending request when no model is usable (it was 503); read `roles` and `missing` on the estimate, and expect 503 only on a confirm.
+- Send current `calls` and `est_usd` with an unconfirmed load that would queue because it is free; stale ones are refused with 409.
+- Send `rerank_pool` on a Documents run if you need 50: without it the run reranks up to Settings' Rerank up to (at most 50); the run form no longer sends `k`, `rrf_k` or `rerank_pool`.
+- Expect a chat with a missing, deleted, disabled or keyless answer model to answer with passages only and no error; with such a rewrite or query model, follow-ups are joined, not rewritten, and AI methods say they need AI.
 
 ## 0.2.0 — 2026-11-11
 

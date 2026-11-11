@@ -248,5 +248,6 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
             "propose": guards.proposes(spec),
         }
         with guards.not_adding(name):
+            guards.refuse_stopped_switch(name)
             guards.refuse_tag_build(name)
             return {"job_id": db.create_job(state.conn, "import", name, setup)}

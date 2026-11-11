@@ -69,7 +69,16 @@ def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
     row.locator("[data-field=text]").fill("enzyme question zero, reworded")
     row.get_by_role("button", name="Done").click()
     q1 = rows.filter(has=page.locator("td", has_text="q1")).first
-    q1.get_by_role("button", name="Delete", exact=True).click()
+    expect(page.locator("#head")).to_contain_text("40 questions")
+    q1.get_by_role("button", name="Remove", exact=True).click()
+    expect(q1).to_have_class("removed")
+    expect(q1.get_by_role("button")).to_have_count(1)
+    expect(page.locator("#head")).to_contain_text("39 questions")
+    q2 = rows.filter(has=page.locator("td", has_text="q2")).first
+    q2.get_by_role("button", name="Remove", exact=True).click()
+    expect(page.locator("#head")).to_contain_text("38 questions")
+    q2.get_by_role("button", name="Undo").click()
+    expect(page.locator("#head")).to_contain_text("39 questions")
     page.get_by_role("button", name="Add question").click()
     fresh = rows.last
     fresh.locator("[data-field=text]").fill("a brand new question")
@@ -83,6 +92,7 @@ def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
     by_id = {q["id"]: q for q in got["questions"]}
     assert len(got["questions"]) == 40
     assert "q1" not in by_id
+    assert "q2" in by_id
     assert by_id["q0"]["text"] == "enzyme question zero, reworded"
     assert by_id["q0"]["meta"] == next(q for q in before["questions"] if q["id"] == "q0")["meta"]
     added = [q for q in got["questions"] if q["text"] == "a brand new question"]
@@ -90,6 +100,40 @@ def test_eval_set_page_edits_and_saves_a_version_keeping_meta(page, seeded):
     assert [q["meta"] for q in added] == [{"source": "hand"}]  # checked for leaks
     assert len(got["versions"]) == len(before["versions"]) + 1
     expect(page.locator("#versions li").first).to_contain_text(got["version"][:8])
+    page.reload()
+    expect(rows.filter(has=page.get_by_role("cell", name="q1", exact=True))).to_have_count(0)
+    expect(rows.filter(has=page.get_by_role("cell", name="q2", exact=True))).to_have_count(1)
+
+
+def test_leaving_with_unsaved_changes_asks_first(page, seeded):
+    seeded.build("leave")
+    page.goto(seeded.url + "/e/leave")
+    row = page.locator("#questions tbody tr").first
+    row.get_by_role("button", name="Edit").click()
+    row.locator("[data-field=text]").fill("typed, not saved")
+    seen = []
+    page.once("dialog", lambda d: (seen.append(d.type), d.dismiss()))
+    page.get_by_role("link", name="Eval sets").first.click()
+    page.wait_for_timeout(300)
+    assert seen == ["beforeunload"]
+    expect(page).to_have_url(seeded.url + "/e/leave")
+
+
+def test_versions_read_question_then_view(page, seeded):
+    seeded.build("vers")
+    qs = httpx.get(f"{seeded.url}/eval-sets/vers").json()["questions"][:1]
+    put_questions(seeded, "vers", qs)
+    page.goto(seeded.url + "/e/vers")
+    old = page.locator("#versions li", has=page.get_by_role("button", name="View")).first
+    expect(old).to_contain_text("40 questions · View")
+    expect(page.locator("#versions li").first).to_contain_text("1 question · current")
+
+
+def test_run_needs_a_question(page, seeded):
+    labelling_set(seeded, "norun")
+    page.goto(seeded.url + "/e/norunq")
+    expect(page.locator("#run-store")).to_have_text("Run against its store: add a question first")
+    expect(page.locator("#run-store a")).to_have_count(0)
 
 
 def test_eval_set_page_keeps_edits_on_a_stale_save(page, seeded):
@@ -476,3 +520,18 @@ def test_create_eval_set_prefills_store_name(page, seeded):
     documents_store(seeded, "prefillme", passages=False)
     page.goto(seeded.url + "/eval-sets?store=prefillme")
     expect(page.locator("#f-name")).to_have_value("prefillme")
+
+
+def test_deleting_a_set_with_unsaved_edits_does_not_ask_to_stay(page, seeded):
+    seeded.build("gonedirty")
+    page.goto(seeded.url + "/e/gonedirty")
+    row = page.locator("#questions tbody tr").first
+    row.get_by_role("button", name="Edit").click()
+    row.locator("[data-field=text]").fill("typed, not saved")
+    seen = []
+    page.on("dialog", lambda d: (seen.append(d.type), d.dismiss()))
+    page.get_by_role("button", name="Delete eval set…").click()
+    page.get_by_role("button", name="Yes, delete gonedirty").click()
+    expect(page).to_have_url(seeded.url + "/eval-sets")
+    assert seen == []
+    assert httpx.get(f"{seeded.url}/eval-sets/gonedirty").status_code == 404

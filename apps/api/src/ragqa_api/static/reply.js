@@ -3,7 +3,7 @@
 // they read of the open chat comes in as one context object, built per attempt:
 // ctx = { at, ui, n, chat, hasModel, cat }. `at` is "<message n>-<attempt>", `ui` the attempt's
 // view state, `n` the message number.
-import { NONE, esc, methodLabel, passageHtml, plural, sourceLabel, usd, whereHtml } from "/static/ui.js";
+import { NONE, esc, methodLabel, passageHtml, plural, sourceLabel, textHtml, usd, whereHtml } from "/static/ui.js";
 
 export const PASSAGES_ONLY = "Passages only: no answer model";
 
@@ -22,76 +22,6 @@ function citeHtml(escaped, cited, at) {
   return escaped.replace(CITATION, (mark, inner) =>
     /^\d+$/.test(inner) ? link(inner, mark) : `[${inner.replace(/\d+/g, (n) => link(n, n))}]`,
   );
-}
-
-// One escaped line: `code` spans kept as typed, bold and italic, then citation links.
-// An underscore inside a word (snake_case_name) is no emphasis.
-function inlineHtml(line, cited, at) {
-  return line
-    .split(/(`[^`]+`)/)
-    .map((s, i) => {
-      if (i % 2) return `<code>${s.slice(1, -1)}</code>`;
-      const marked = s
-        .replace(/\*\*(\S(?:.*?\S)?)\*\*/g, "<strong>$1</strong>")
-        .replace(/(^|\W)__(\S(?:.*?\S)?)__(?!\w)/g, "$1<strong>$2</strong>")
-        .replace(/\*(\S(?:[^*]*?\S)?)\*/g, "<em>$1</em>")
-        .replace(/(^|\W)_(\S(?:[^_]*?\S)?)_(?!\w)/g, "$1<em>$2</em>");
-      return citeHtml(marked, cited, at);
-    })
-    .join("");
-}
-
-// The reply as a safe subset of markdown. The text is escaped first, so no tag or attribute
-// ever comes from the model: fenced code, `code`, bold, italic, - and 1. lists, # headings
-// as bold lines, blank lines as paragraphs. Links, images, tables and HTML stay as text.
-function textHtml(text, cited, at) {
-  const lines = esc(text).replace(/\r\n?/g, "\n").split("\n");
-  const out = [];
-  let para = [];
-  const flush = () => {
-    if (para.length) out.push(`<p>${para.map((l) => inlineHtml(l, cited, at)).join("<br>")}</p>`);
-    para = [];
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*```/.test(line)) {
-      flush();
-      const code = [];
-      while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i]);
-      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
-      continue;
-    }
-    const heading = line.match(/^#{1,3} +(.*)$/);
-    if (heading) {
-      flush();
-      out.push(`<p><strong>${inlineHtml(heading[1], cited, at)}</strong></p>`);
-      continue;
-    }
-    const kind = /^\s*[-*] +\S/.test(line) ? "ul" : /^\s*\d+\. +\S/.test(line) ? "ol" : null;
-    if (kind) {
-      flush();
-      // Items run on across a single blank line, and an indented line continues its item.
-      const mark = kind === "ul" ? /^\s*[-*] +(.*)$/ : /^\s*(\d+)\. +(.*)$/;
-      const items = [];
-      const first = line.match(mark);
-      const start = kind === "ol" && Number(first[1]) !== 1 ? ` start="${Number(first[1])}"` : "";
-      for (; i < lines.length; i++) {
-        const item = lines[i].match(mark);
-        if (item) items.push([item[kind === "ul" ? 1 : 2]]);
-        else if (/^\s+\S/.test(lines[i])) items[items.length - 1].push(lines[i].trim());
-        else if (!lines[i].trim() && mark.test(lines[i + 1] ?? "")) continue;
-        else break;
-      }
-      i--;
-      const lis = items.map((parts) => `<li>${parts.map((s) => inlineHtml(s, cited, at)).join("<br>")}</li>`);
-      out.push(`<${kind}${start}>${lis.join("")}</${kind}>`);
-      continue;
-    }
-    if (line.trim()) para.push(line);
-    else flush();
-  }
-  flush();
-  return out.join("");
 }
 
 // The store's name, marked when it has since been deleted.
@@ -162,7 +92,7 @@ export function attemptHtml(a, ctx) {
   const none = a.evidence.length ? "" : '<div class="meta warn no-passages">The stores found no passages, so this answer used none.</div>';
   const note = a.error ? `<div class="meta warn">${esc(a.error)}</div>` : ""; // e.g. a failed rewrite
   const cached = a.pipeline?.answer_cached ? " · answer cached" : ""; // the answer only: a paid rewrite is not
-  return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, cited, at)}</div>${sources}
+  return `<div class="msg reply"><div class="md" data-text="${esc(a.answer)}">${textHtml(a.answer, (s) => citeHtml(s, cited, at))}</div>${sources}
     ${none}${note}<div class="meta muted">Cost ${usd(a.usd)}${cached}</div></div>`;
 }
 

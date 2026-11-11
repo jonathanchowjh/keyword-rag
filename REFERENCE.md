@@ -5,8 +5,9 @@ run and a chat. This file is what the path leaves out: every option, page and
 endpoint. The paper, the datasets and the experiments are in
 [RESEARCH.md](RESEARCH.md).
 
-The API paths and JSON fields say `collections` for stores; the pages and this
-text say store. Every endpoint is also listed, with its schema, at
+The API paths say `collections` for stores (`POST /collections`). A request field
+names a store `collection` in `/query`, `/eval` and `/chat`, `stores` in `/chats`,
+and `store` in `/eval-sets`. The pages and this text say store. Every endpoint is also listed, with its schema, at
 http://127.0.0.1:8080/docs.
 
 ## Contents
@@ -26,8 +27,11 @@ http://127.0.0.1:8080/docs.
 - [AI connections in detail](#ai-connections-in-detail)
 - [Pages](#pages)
 - [Endpoints](#endpoints)
+- [Statuses and errors](#statuses-and-errors)
+- [Job statuses](#job-statuses)
 - [The POST /eval body](#the-post-eval-body)
 - [Reading a run](#reading-a-run)
+- [Back up, reset, upgrade](#back-up-reset-upgrade)
 
 ## Stores and eval sets
 
@@ -273,17 +277,30 @@ import (`kind=questions` is 422).
   estimate returns `evidence_named` and `evidence_held`, and the Run page says so
   when a store holds none.
 
-Over the API, an items import is an upload, then an import of that upload:
+Over the API, an items import is an upload, then an import of that upload, sent
+twice: the first answers with the estimate and queues nothing, the second confirms
+it with the `calls` and `est_usd` the first showed.
 
 ```sh
-curl -X POST "http://127.0.0.1:8080/collections/notes/uploads?filename=notes.jsonl&kind=items" \
-  --data-binary @notes.jsonl
-# {"upload_id": "...", "preview": {...}, "estimate": {...}}
-curl -X POST http://127.0.0.1:8080/collections/notes/imports \
+curl -X POST "http://127.0.0.1:8080/collections/docs/uploads?filename=notes.md&kind=items" \
+  --data-binary @notes.md
+# → {"upload_id": "…", "preview": {…}, "estimate": {…}}
+curl -X POST http://127.0.0.1:8080/collections/docs/imports \
   -H 'content-type: application/json' \
-  -d '{"upload_id": "...", "kind": "items", "mapping": {"text": "body"}, "source_name": "notes", "confirm": true}'
+  -d '{"upload_id": "<upload_id>", "source_name": "notes"}'
+# → 200 {"estimate": {"calls": …, "est_usd": …}, "preview": {…}}: nothing is queued yet
+curl -X POST http://127.0.0.1:8080/collections/docs/imports \
+  -H 'content-type: application/json' \
+  -d '{"upload_id": "<upload_id>", "source_name": "notes", "confirm": true, "calls": 3, "est_usd": 0.01}'
+# → 202 {"job_id": "…"}: send the calls and est_usd the second reply showed
+```
 
-# questions go to an eval set
+A benchmark-type store takes `.jsonl`, `.csv` or `.json`, and the import then needs
+a `mapping` such as `{"text": "body"}`.
+
+Questions go to an eval set:
+
+```sh
 curl -X POST http://127.0.0.1:8080/eval-sets -H 'content-type: application/json' \
   -d '{"name": "notes", "qa_type": "science"}'
 curl -X POST "http://127.0.0.1:8080/eval-sets/notes/uploads?filename=qs.jsonl" \
@@ -396,7 +413,7 @@ when a run asks (see [The POST /eval body](#the-post-eval-body)).
 
 Then start a run from a store's page, choosing the eval set, or with `POST /eval`
 (`eval_set` defaults to the store's default; 422 `has no eval set; choose one` when
-there is none, 404 for a set that doesn't exist, 409 when its QA type is not the store's). A run that would measure
+there is none, 409 when its QA type is not the store's, and an unknown eval set answers 404). A run that would measure
 nothing, for example retrieval only on questions that name no evidence the store
 holds, is refused.
 
@@ -817,12 +834,12 @@ is needed in `.env`.
 
   | Job | Used for |
   |---|---|
-  | `default` | anything not assigned below |
-  | `answer` | answers in the Lab and in evals (a run can pick its own model) |
-  | `summary` | per-item summaries for the keyword methods |
-  | `keywords` | AI keyword-list proposals |
-  | `query` | paid query-time steps: query summaries, keywords and hops |
-  | `rewrite` | the chat's optional follow-up rewrite: one AI call turns a follow-up into a standalone question |
+  | `default` | Used by any job without its own choice |
+  | `answer` | Writes chat answers, answers in runs and the Lab, judges a Documents run's answers, and the eval-set page's Get the AI's answer |
+  | `summary` | Summarises items, and questions for keyword methods, in stores built with summaries |
+  | `keywords` | Proposes keyword lists and vocabularies, and tags items when a store is built |
+  | `query` | Picks a question's keywords when a store searches with model tags, and the iterative method's hops |
+  | `rewrite` | Rewrites a chat follow-up as one standalone question |
 
 - **Budget.** The monthly cap is set here too. This month's spend counts every
   connection together.
@@ -861,8 +878,8 @@ is accepted when exactly one enabled model has it.
   check it again`) when the step now makes other calls or costs more.
 - **Start on the pages.** Start reads "Connect AI first", a link to Settings, when
   the estimate's `missing` is not empty. A refused Start or Resume shows its reason
-  beside it, and only a changed price takes Start away. Prices read "≈ $x",
-  "< $0.01", or the unpriced text.
+  beside it, and only a changed price takes Start away. Prices read "$x",
+  "< $0.01" or the unpriced text, and an import of several files reads "at most $x".
 - **A monthly cap inside the service.** Each call is priced from the
   provider's reported token usage and written to a ledger. A call that would
   cross the cap is refused before it is sent, and an evaluation that hits the
@@ -989,9 +1006,9 @@ with a field its endpoint doesn't know is refused with 422 (`PUT
 | `GET /eval/{job_id}`, `GET /eval/{job_id}/items` | A run's answer, gaps and table, with its log and `since` (see [Reading a run](#reading-a-run)); one method's per-question rows. `GET /eval/{job_id}` of a Documents run also has `answers` (null unless it answered; see [Reading a run](#reading-a-run)) and `labels` (`tracked`, `unjudged` per method as `{shown, questions, flag}`, `unmeasured`, `no_right_passage`) |
 | `GET /eval/{job_id}/questions?disagree=` | Each question with every method's row and its `outcome`; `disagree=true` keeps the questions where the methods' outcomes differ, leaving out the controls and `question_only` |
 | `DELETE /eval/{job_id}` | Delete a finished run and its rows; 409 while it is queued or running |
-| `GET /jobs?collection=&kind=&status=`, `GET /jobs/{job_id}` | Jobs, newest first; one job's status, progress and log. Each row also carries `label` (what the pages call it: `Evaluating wl`, `Importing into docs`, `Re-tagging w`), `resumable` (true when its kind resumes and its status is a stopped one) and `href` (where its results live: an eval's run page, else the store's page). `/status` rows (`worker.running`, `queue`) carry the same |
+| `GET /jobs?collection=&kind=&status=&limit=`, `GET /jobs/{job_id}` | Jobs, newest first (`limit` defaults to 100); one job's status, progress and log. Each row also carries `label` (what the pages call it: `Evaluating wl`, `Importing into docs`, `Re-tagging w`), `resumable` (true when its kind resumes and its status is a stopped one) and `href` (where its results live: an eval's run page, else the store's page). `/status` rows (`worker.running`, `queue`) carry the same |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued job, or ask a running one to stop; 409 for any other status |
-| `POST /jobs/{job_id}/resume` | Resume a stopped run, copy, `reembed` or `tag_build`. Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; `calls` and `est_usd` (optional) are checked as for a load. Any other kind (load, import, re-key, re-tag, labelling) is 409 `this <job> cannot be resumed; start it again`. A `reembed` is free: it queues at once, with no estimate and no `confirm`. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt. A `tag_build` runs again in place too and finishes only what is left (the vocabulary if none is in force, the passages without tags); without `confirm` it returns `{estimate: {est_usd, calls, roles, missing}}`, with it the job is queued again. Without `confirm` every resume answers 200 with its estimate, whose `roles` and `missing` name the roles it would call and those with no usable model only a confirm is refused with 503. Resuming a run is the one case where a $0 resume with no model named is queued on confirm even when `missing` is non-empty; it stops `stopped_no_key` unless every answer is cached. A copy or tag build resume that makes calls is 503 on confirm when `missing` is non-empty. Only a store's newest `tag_build` resumes: an older one is 409 `a newer tag build of '<name>' exists; resume that one` |
+| `POST /jobs/{job_id}/resume` | Resume a stopped run, copy, `reembed` or `tag_build`; which statuses resume is in [Job statuses](#job-statuses). Without `confirm`: the estimate for what is left, or 409 with why it cannot resume. With it: queued again; `calls` and `est_usd` (optional) are checked as for a load. Any other kind (load, import, re-key, re-tag, labelling) is 409 `this <job> cannot be resumed; start it again`. A `reembed` is free: it queues at once, with no estimate and no `confirm`. A copy runs again in place: adding skips the items it added and the build finishes what it left unbuilt. A `tag_build` runs again in place too and finishes only what is left (the vocabulary if none is in force, the passages without tags); without `confirm` it returns `{estimate: {est_usd, calls, roles, missing}}`, with it the job is queued again. Without `confirm` every resume answers 200 with its estimate, whose `roles` and `missing` name the roles it would call and those with no usable model only a confirm is refused with 503. Resuming a run is the one case where a $0 resume with no model named is queued on confirm even when `missing` is non-empty; it stops `stopped_no_key` unless every answer is cached. A copy or tag build resume that makes calls is 503 on confirm when `missing` is non-empty. Only a store's newest `tag_build` resumes: an older one is 409 `a newer tag build of '<name>' exists; resume that one` |
 | `GET /status` | The worker, the queue, pending AI batches and the problems that need a person. `problems` is `[{text, href}]`: a job's line reads `<label> (<first 8 id characters>) <why>` (`Evaluating wl (ab12cd34) failed`) and links to the job's page (the partly re-keyed, partly re-tagged and copy lines name the store and link to its page); the worker-thread and worker-error lines have a null `href` |
 | `GET /budget` | This service's spend this month against its cap |
 | `GET /ai` | Connections (keys masked), models with prices (each with `usable`: enabled, on a connection with a key or one that needs none; and `ready`: usable and priced), jobs (`default_from_env` when `RAGQA_MODEL` sets the default), `resolved` (per job, whether a model is ready for it: usable and priced), budget and presets |
@@ -1001,12 +1018,7 @@ with a field its endpoint doesn't know is refused with 422 (`PUT
 | `PUT /ai/roles/{job}`, `PUT /ai/budget` | Choose the model a job uses; set the monthly cap |
 | `GET /search-defaults`, `PUT /search-defaults` | The app-wide [Search defaults](#search-defaults): `{saved, recommended, in_force, limits, methods, rerankers, embedders, embed_machine, notes, rerank_status, rerank_error}`, where a null `saved` value follows the recommendation and `rerank_model` is shown as a name; `rerank_status` is the in-force reranker's load (`idle`, `loading`, `ready` or `failed`) and `rerank_error` why it failed. `PUT` takes any of `method`, `candidates`, `evidence_size`, `rerank`, `rewrite`, `follow_up_turns`, `rrf_k`, `rerank_model`, `rerank_pool`, `dense_model`, in part; `null` puts one back to recommended. A `PUT` with `rerank_model` starts loading it in the background, at once even if it failed minutes ago. 422 for an unknown field or a value out of range, a method that is not a chat method, a reranker or an embedding model fastembed does not list. `embedders` is `{name, dim, size_gb, note, seconds_per_1000}` for each offered model |
 
-Errors: a bad value is 422; a state conflict is 409; a provider's error is
-502, carrying its message with any key masked; no model for a job is 503 on confirm (a
-disabled or keyless model counts as none); without confirm a spending route
-answers 200 with its estimate, whose `missing` names the roles with no usable
-model (one exception: see the load row); a model that is set up and usable
-but has no price is 422 `<connection>/<model> has no price; enter one first`.
+Every status the API answers, and what it looks like, is in [Statuses and errors](#statuses-and-errors).
 
 Loads, re-keys and evaluations run one at a time, oldest first, on a worker
 thread inside the service. A resumed run keeps its original place in that
@@ -1015,6 +1027,44 @@ order. A job that was running when the service stopped comes back
 `/query`, for example a keyword method before lists exist or one whose provider
 fails, reports its own `error` (a provider's with any key masked) and what it
 spent, and the other methods still return.
+
+## Statuses and errors
+
+**Login.** HTTP Basic is on only when both `RAGQA_USERNAME` and `RAGQA_PASSWORD` are set; setting only one answers 503 (`set both RAGQA_USERNAME and RAGQA_PASSWORD, or neither`).
+
+**Errors.** Every error is `{"detail": "<message>"}`, apart from FastAPI's own 422 list.
+
+**Spending.** A route that spends answers 200 with its estimate until you send `confirm: true`; see [Estimates and batches](#estimates-and-batches). `/query`, `/chat` and `/chats/{id}/messages` are the exception: they spend at once and show the cost after.
+
+| Status | When | Example |
+|---|---|---|
+| 200 | A spending route without `confirm`: the estimate, and nothing is queued | `{"estimate": {"calls": 3, "est_usd": 0.01, "roles": ["answer"], "missing": []}}`; a non-empty `missing` means a confirm will answer 503 |
+| 201 | Created: `POST /collections`, `/ai/connections`, `/ai/connections/{id}/models`, `/chats`, `/eval-sets`, `/eval-sets/{name}/questions` | the new record |
+| 202 | A job was queued: documents over the sync limit, imports, load, copy, reembed and keyword-tags on `/collections/{name}`; `PUT` keyword-lists and vocabulary; `POST /eval`; `POST /jobs/{id}/resume` | `{"job_id": "…"}` |
+| 401 | The login is set and the request has no credentials or wrong ones (every route, `/health` too) | `{"detail": "authentication required"}` |
+| 402 | The monthly cap is reached before an uncached AI call. Inside a job the cap ends the job as `stopped_budget` instead | `{"detail": "monthly cap reached: …"}` |
+| 404 | An unknown store, eval set, chat, job, connection or model | `{"detail": "no connection x"}` |
+| 409 | A name is taken; a job is in the way; the price changed; a rebuild's switch stopped part-way (adds and imports are refused until you resume it); a stale `base` or `base_version`; a resume refused | `{"detail": "a load job is queued or running on 'docs'; wait"}`, `{"detail": "the price changed since you saw it: check it again"}`, `{"detail": "the switch to <model> stopped part-way; resume it first"}` |
+| 413 | An upload over 200 MB | `{"detail": "the file is over 209715200 bytes"}` |
+| 422 | A bad field or value, an unknown body field, or a model with no price | `{"detail": "<connection>/<model> has no price; enter one first"}` |
+| 502 | The AI provider failed; its message comes back with the key masked | `{"detail": "…"}` |
+| 503 | On confirm, no AI model is set up for a job the step would call; also before any call: `/chat` or a chat message with an explicit paid method (or `keyword_rag` with model tags) and no AI connected, and a load that would summarise or propose lists with no model for it | `{"detail": "no AI model is set up for the 'keywords' job; choose one on the Settings page"}` |
+
+## Job statuses
+
+| Status | Means | Resume |
+|---|---|---|
+| `queued` | waiting; one job runs at a time, oldest first | cancel it instead |
+| `running` | in progress; Cancel asks it to stop, and it ends `cancelled` | — |
+| `done` | finished | — |
+| `failed` | an error; `error` says which | yes, for a run, copy, rebuild or tag build |
+| `cancelled` | stopped by Cancel | yes, for the same four |
+| `interrupted` | the service stopped while it ran | yes, for the same four |
+| `stopped_budget` | hit the monthly cap; rows already paid for are kept | yes, after raising the cap |
+| `stopped_no_key` | no AI model is set up for the job | yes, after choosing one in Settings |
+| `stopped_replies` | prompts wait for replies by hand | yes, after importing the replies |
+
+Any other kind (load, import, re-key, re-tag, labelling) answers 409 `this <job> cannot be resumed; start it again`.
 
 ## The POST /eval body
 
@@ -1097,3 +1147,30 @@ service:
 - Every run records its full setup: models, keyword-list version, `k`,
   `rrf_k`, seed, dataset filter, sources and question ids. `log` holds the
   run's last 50 events.
+
+## Back up, reset, upgrade
+
+| Volume | Mounted at | Holds |
+|---|---|---|
+| `rag-qa_ragqa` (compose's `ragqa`) | `/home/app/.ragqa` | `ragqa.db` (stores' text, eval sets, chats, runs, AI connections), `uploads/`, downloaded datasets and models |
+| `rag-qa_qdrant` (compose's `qdrant`) | `/qdrant/storage` | the vectors |
+
+**Back up.** This copy is safe while the app runs:
+
+```sh
+docker compose exec api python -c "import sqlite3; sqlite3.connect('/home/app/.ragqa/ragqa.db').backup(sqlite3.connect('/home/app/.ragqa/backup.db'))"
+docker compose cp api:/home/app/.ragqa/backup.db ./ragqa-backup.db
+```
+
+For everything, stop the stack and copy both volumes with `docker run --rm -v rag-qa_qdrant:/v -v "$PWD":/b alpine tar czf /b/qdrant.tgz -C /v .`, and the same for `rag-qa_ragqa`.
+
+**Reset.** `docker compose down -v` deletes both volumes, and with them every store, chat and key.
+
+**Upgrade.**
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+Then read the CHANGELOG's "Upgrading from" section for the version you left.

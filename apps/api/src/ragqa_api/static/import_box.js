@@ -253,18 +253,23 @@ export class ImportBox {
     const added = ready.reduce((n, f) => n + adds(f), 0);
     const removed = ready.reduce((n, f) => n + Number(f.up.estimate.removed ?? 0), 0);
     const unpriced = ready.find((f) => f.up.estimate.est_usd === null && f.up.estimate.calls > 0);
+    const noAI = ready.find((f) => needsAI(f.up.estimate));
     const total = ready.reduce((n, f) => n + Number(f.up.estimate.est_usd ?? 0), 0);
     const price = unpriced ? UNPRICED : ready.length > 1 ? `at most ${usd(total)}` : usd(total);
     const gone = removed > 0 ? `, ${count(removed)} to remove` : "";
     const each = entries
       .map((f) => `<li>${esc(f.error ? `${f.name}: ${f.error}` : `${f.name}: ${plural(adds(f), this.noun)}`)}</li>`)
       .join("");
-    const why = unpriced ? `<span class="err">${esc(`Can't price ${unpriced.name}: set up a model in Settings`)}</span>` : "";
+    const why = unpriced
+      ? `<span class="err">${esc(`Can't price ${unpriced.name}: set up a model in Settings`)}</span>`
+      : noAI
+        ? ` ${CONNECT_AI}`
+        : "";
     const summary = ready.length
       ? `<p>${esc(`${plural(ready.length, "file")}: ${plural(added, this.noun)} to add${gone} · ${price}`)}</p>`
       : "";
     const foot = ready.length
-      ? `<div class="row"><button type="button" id="imp-${this.kind}-import" ${unpriced ? "disabled" : ""}>${esc(
+      ? `<div class="row"><button type="button" id="imp-${this.kind}-import" ${unpriced || noAI ? "disabled" : ""}>${esc(
           unpriced ? "Import" : `Import (${price})`)}</button>${why}</div>`
       : "";
     this.own("preview").innerHTML = `${before}${summary}<ul>${each}</ul>${foot}`;

@@ -66,21 +66,26 @@ def test_the_documents_type_in_plain_words():
         "retrieves": "passages that answer the question",
     }
     assert c["metrics"]["recall@10"] == {
-        "label": "Recall@10",
+        "label": "Found in top 10",
         "says": "Share of the right items in the top 10",
         "unit": "share",
         "kind": "retrieval",
+        "code": "Recall@10",
     }
     assert c["metrics"]["mrr@10"] == {
-        "label": "MRR@10",
+        "label": "First right item",
         "says": "1 over the rank of the first right item in the top 10",
         "unit": "score",
         "kind": "retrieval",
+        "code": "MRR@10",
     }
+    assert c["metrics"]["ndcg@10"]["label"] == "Ranking quality"
+    assert c["metrics"]["ndcg@10"]["code"] == "nDCG@10"
+    assert c["metrics"]["accuracy"]["code"] is None
     assert c["metric_labels_by_type"]["documents"] == {
-        "ndcg@10": "Right passages ranked first",
-        "recall@10": "Right passages found (top 10)",
-        "mrr@10": "How soon the first right passage comes",
+        "ndcg@10": "Ranking quality",
+        "recall@10": "Found in top 10",
+        "mrr@10": "First right passage",
         "accuracy": "Answers judged right",
     }
     assert c["metric_labels_by_type"]["documents"]["accuracy"] == "Answers judged right"

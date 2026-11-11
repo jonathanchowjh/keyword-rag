@@ -1,5 +1,5 @@
 import { $, LEGEND, api, capital, catalog, clock, confirmSpend, esc, head, methodLabel, nameField, paint, pct, pill, plural, shownPrice,
-  noScoreLine, poll, refreshSpend, say, scoreLine, shell, short, verdictHtml, watchName } from "/static/ui.js";
+  noScoreLine, poll, refreshSpend, say, scoreHtml, shell, short, verdictHtml, watchName } from "/static/ui.js";
 
 const REFRESH_MS = 15000;
 const BENCHMARKS = [
@@ -29,7 +29,7 @@ function rowHtml(c) {
   const a = c.answer;
   const pair = cat.answer_pair.map((m) => methodLabel(m, cat)).join(" and ");
   const docs = c.qa_type === "documents";
-  const said = () => (docs ? esc(scoreLine(a, cat)) : `Do keywords help? ${verdictHtml(a, c.qa_type, cat)}`);
+  const said = () => (docs ? scoreHtml(a, cat) : `Do keywords help? ${verdictHtml(a, c.qa_type, cat)}`);
   const answer = a
     ? `<div title="${esc(LEGEND)}">${said()}</div><div class="small">run ${esc(short(a.run_id))} · ${esc(
         clock(a.at))}${a.answered ? "" : " · retrieval only"}</div>`

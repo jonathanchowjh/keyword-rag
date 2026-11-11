@@ -369,6 +369,22 @@ def test_labelling_label_on_another_row_asks_before_dropping_unsaved_marks(page,
     expect(page.locator("#lab-count")).to_have_text("0 right, 0 wrong, 2 not judged")
 
 
+def test_leaving_with_unsaved_marks_asks_first(page, seeded):
+    labelling_set(seeded, "leavemarks")
+    labelled_questions(seeded, "leavemarks", ["alpha first?"])
+    page.goto(seeded.url + "/e/leavemarksq")
+    page.locator("#lab-questions tbody tr").get_by_role("button", name="Label").click()
+    passages = page.locator("#lab-panel li[data-passage]")
+    expect(passages).to_have_count(2)
+    mark(passages.first, "right")
+    seen = []
+    page.once("dialog", lambda d: (seen.append(d.type), d.dismiss()))
+    page.get_by_role("link", name="Eval sets").first.click()
+    page.wait_for_timeout(300)
+    assert seen == ["beforeunload"]
+    expect(page).to_have_url(seeded.url + "/e/leavemarksq")
+
+
 def test_labelling_delete_asks_before_dropping_unsaved_marks(page, seeded):
     labelling_set(seeded, "lab13")
     labelled_questions(seeded, "lab13", ["alpha first?", "brine second?"])

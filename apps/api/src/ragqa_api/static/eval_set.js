@@ -13,6 +13,7 @@ let set = null; // the latest GET /eval-sets/{name}
 let rows = []; // the working copy of its questions; nothing here is written until Save changes
 let page = 0;
 let dirty = false;
+let leaving = false; // the set is deleted: nothing left to save
 let added = 0;
 let allVersions = false; // Show all versions was clicked
 let viewing = null; // the old version shown read-only, { version, questions }; null for none
@@ -25,12 +26,15 @@ const commas = (text) => text.split(",").map((s) => s.trim()).filter(Boolean);
 
 // -- head and counts ----------------------------------------------------------------------------
 
+// The rows Save would keep.
+const kept = () => rows.filter((q) => !q._removed);
+
 function headHtml() {
   const type = cat.qa_types[set.qa_type];
   return head({
     title: name,
     crumb: [{ label: "Eval sets", href: "/eval-sets" }],
-    sub: `${type?.label ?? set.qa_type}: ${plural(set.questions.length, "question")}`,
+    sub: `${type?.label ?? set.qa_type}: ${plural(kept().length, "question")}`,
     aside: set.version ? `version ${esc(short(set.version))}` : "",
   });
 }
@@ -41,8 +45,9 @@ function ofTotal(n, total) {
 }
 
 function fieldsHtml() {
-  const total = rows.length;
-  const have = (test) => rows.filter(test).length;
+  const live = kept();
+  const total = live.length;
+  const have = (test) => live.filter(test).length;
   const evidence = have((q) => q.gold_ids.length);
   return `Worked solutions: ${ofTotal(have((q) => q.meta?.solution), total)} · Skills: ${ofTotal(
     have((q) => q.meta?.skill), total)} · Evidence ids: ${evidence > 0 ? ofTotal(evidence, total) : NONE}`;
@@ -50,12 +55,19 @@ function fieldsHtml() {
 
 // -- the questions table ---------------------------------------------------------------------------
 
+function removedRow(q, i) {
+  return `<tr data-row="${i}" class="removed"><td>${esc(q.id)}</td><td>${esc(q.text)}</td>
+    <td>${esc((q.choices ?? []).join(" | "))}</td><td>${esc(q.gold_answers.join(" | "))}</td>
+    <td>${esc(q.gold_ids.join(", "))}</td><td>${esc(q.meta?.source ?? "")}</td>
+    <td><button type="button" class="secondary" data-undo="${i}">Undo</button></td></tr>`;
+}
+
 function viewRow(q, i) {
   return `<tr data-row="${i}"><td>${esc(q.id)}</td><td>${esc(q.text)}</td>
     <td>${esc((q.choices ?? []).join(" | "))}</td><td>${esc(q.gold_answers.join(" | "))}</td>
     <td>${esc(q.gold_ids.join(", "))}</td><td>${esc(q.meta?.source ?? "")}</td>
     <td><button type="button" class="secondary" data-edit="${i}">Edit</button>
-      <button type="button" class="secondary" data-remove="${i}">Delete</button></td></tr>`;
+      <button type="button" class="secondary" data-remove="${i}">Remove</button></td></tr>`;
 }
 
 function editRow(q, i) {
@@ -69,7 +81,7 @@ function editRow(q, i) {
     <td><input data-field="gold_ids" aria-label="evidence ids, comma separated" value="${esc(q.gold_ids.join(", "))}"></td>
     <td>${esc(q.meta?.source ?? "")}</td>
     <td><button type="button" data-done="${i}">Done</button>
-      <button type="button" class="secondary" data-remove="${i}">Delete</button></td></tr>`;
+      <button type="button" class="secondary" data-remove="${i}">Remove</button></td></tr>`;
 }
 
 function questionsHtml() {
@@ -77,10 +89,10 @@ function questionsHtml() {
   const from = page * PAGE_SIZE;
   const body = rows
     .slice(from, from + PAGE_SIZE)
-    .map((q, k) => (q._open ? editRow(q, from + k) : viewRow(q, from + k)))
+    .map((q, k) => (q._removed ? removedRow(q, from + k) : q._open ? editRow(q, from + k) : viewRow(q, from + k)))
     .join("");
-  return `<table><thead><tr><th>Id</th><th>Question</th><th>Choices</th><th>Answer</th>
-    <th>Evidence ids</th><th>Source</th><th></th></tr></thead><tbody>${body}</tbody></table>`;
+  return `<div class="scroll"><table><thead><tr><th>Id</th><th>Question</th><th>Choices</th><th>Answer</th>
+    <th>Evidence ids</th><th>Source</th><th></th></tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function pagerHtml() {
@@ -93,10 +105,18 @@ function pagerHtml() {
 
 function draw() {
   page = Math.min(page, Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1));
+  $("head").innerHTML = headHtml();
+  $("run-store").innerHTML = runStoreHtml();
   $("questions").innerHTML = questionsHtml();
   $("pager").innerHTML = pagerHtml();
   $("fields").textContent = fieldsHtml();
   showDirty();
+}
+
+function runStoreHtml() {
+  if (!set.store) return "";
+  if (!kept().length) return '<span class="muted">Run against its store: add a question first</span>';
+  return `<a href="/c/${encodeURIComponent(set.store)}?eval_set=${enc}">Run against its store</a>`;
 }
 
 // An import reloads the set, so it waits until the edits are saved or discarded.
@@ -138,7 +158,11 @@ function bindTable() {
       dirty = true;
     }
     if (d.remove !== undefined) {
-      rows.splice(Number(d.remove), 1);
+      rows[Number(d.remove)]._removed = true; // Save leaves it out, a new row included
+      dirty = true;
+    }
+    if (d.undo !== undefined) {
+      delete rows[Number(d.undo)]._removed;
       dirty = true;
     }
     draw();
@@ -178,7 +202,7 @@ async function save() {
   commit();
   $("save-msg").className = "";
   $("save-msg").textContent = "";
-  const questions = rows.map(({ id, text, choices, gold_answers, gold_ids, meta, judged_ids }) => ({
+  const questions = kept().map(({ id, text, choices, gold_answers, gold_ids, meta, judged_ids }) => ({
     id, text, choices, gold_answers, gold_ids, meta, judged_ids, // meta and judged_ids go back as read
   }));
   try {
@@ -211,7 +235,7 @@ function versionsHtml() {
       const current = v.version === set.version;
       const tail = current
         ? ' · <span class="ok">current</span>'
-        : `<button type="button" class="secondary" data-view="${esc(v.version)}">View</button>`;
+        : ` · <button type="button" class="secondary" data-view="${esc(v.version)}">View</button>`;
       return `<li><code>${esc(short(v.version))}</code> ${esc(clock(v.created_at))} · ${esc(
         plural(v.questions, "question"))}${tail}</li>`;
     })
@@ -231,14 +255,14 @@ function versionTableHtml(questions) {
   if (set.qa_type === "documents") {
     const body = sorted.map((q) => `<tr><td>${esc(q.text)}</td><td>${count(q.gold_ids.length)}</td>
       <td>${q.judged_ids ? count(q.judged_ids.length) : NONE}</td></tr>`).join("");
-    return `<table><thead><tr><th>Question</th><th>Right passages</th><th>Judged</th></tr></thead>
-      <tbody>${body}</tbody></table>`;
+    return `<div class="scroll"><table><thead><tr><th>Question</th><th>Right passages</th><th>Judged</th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
   }
   const body = sorted.map((q) => `<tr><td>${esc(q.id)}</td><td>${esc(q.text)}</td>
     <td>${esc((q.choices ?? []).join(" | "))}</td><td>${esc(q.gold_answers.join(" | "))}</td>
     <td>${esc(q.gold_ids.join(", "))}</td><td>${esc(q.meta?.source ?? "")}</td></tr>`).join("");
-  return `<table><thead><tr><th>Id</th><th>Question</th><th>Choices</th><th>Answer</th>
-    <th>Evidence ids</th><th>Source</th></tr></thead><tbody>${body}</tbody></table>`;
+  return `<div class="scroll"><table><thead><tr><th>Id</th><th>Question</th><th>Choices</th><th>Answer</th>
+    <th>Evidence ids</th><th>Source</th></tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function drawView() {
@@ -336,6 +360,7 @@ function bindDelete() {
         yes: `Yes, delete ${name}`,
         path: `/eval-sets/${enc}?confirm=true`,
         gone: "/eval-sets",
+        deleted: () => (leaving = true),
       });
     } catch (e) {
       $("del-confirm").innerHTML = `<p class="err" role="status">${esc(e.message)}</p>`;
@@ -354,9 +379,7 @@ async function load() {
   rows = set.questions.map((q) => ({ ...q, gold_answers: q.gold_answers ?? [], gold_ids: q.gold_ids ?? [] })).sort(byId);
   dirty = false;
   $("head").innerHTML = headHtml();
-  $("run-store").innerHTML = set.store
-    ? `<a href="/c/${encodeURIComponent(set.store)}?eval_set=${enc}">Run against its store</a>`
-    : "";
+  $("run-store").innerHTML = runStoreHtml();
   drawVersions();
   // A Documents set is labelled, one question at a time; the leak check is off for it.
   const documents = set.qa_type === "documents";
@@ -394,6 +417,12 @@ async function start() {
       `<p class="err">${esc(e.message)}</p>`;
   }
 }
+
+window.addEventListener("beforeunload", (e) => {
+  if (leaving || !(dirty || labelling.unsaved)) return;
+  e.preventDefault();
+  e.returnValue = "";
+});
 
 bindTable();
 bindLeaked();

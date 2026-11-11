@@ -1,6 +1,6 @@
 import { ImportBox } from "/static/import_box.js";
 import { $, BUSY, NONE, api, askDelete, askResume, axisHtml, capital, catalog, clock, confirmSpend, count, costMark, embedderLabel, esc, gapBar, gapSpan,
-  head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreLine, scoreRange, shell, short, usd, verdictHtml,
+  head, legendHtml, methodLabel, metricLabel, modelOptions, noScoreLine, paint, pct, pill, plural, pts, refreshSpend, scoreHtml, scoreRange, shell, short, usd, verdictHtml,
   notFound, poll, sourceLabel, verdictNotes, wordHtml } from "/static/ui.js";
 
 const SLOW_MS = 15000;
@@ -76,7 +76,7 @@ function scoreAnswerHtml() {
   const switchLine = s && !a.unreliable
     ? `<p>${esc(`${methodLabel(s.method, cat)} did better: ${pts(s.diff, s.lo, s.hi)}. Picked after the fact, so the gap is likely overstated. To use it, change the store's search method.`)}</p>`
     : "";
-  return `<p>${esc(scoreLine(a, cat))}</p>${switchLine}
+  return `<p>${scoreHtml(a, cat)}</p>${switchLine}
     <p class="muted">From <a href="/c/${enc}/runs/${encodeURIComponent(a.run_id)}">run ${esc(
       short(a.run_id))}</a> at ${esc(clock(a.at))} · run ${esc(a.runs)} on this store</p>${foot}`;
 }
@@ -97,7 +97,7 @@ function answerHtml() {
 // -- runs --------------------------------------------------------------------------
 
 // What a finished run said about the declared pair: "Yes +6 pts (2–10)", or "–" without it.
-function saidHtml(r) {
+function resultHtml(r) {
   const a = r.answer_summary;
   if (!a || BUSY.has(r.status)) return NONE;
   if (a.kind === "score") return esc(scoreRange(a.mean, a.lo, a.hi));
@@ -113,13 +113,13 @@ function runsHtml() {
       const progress = r.status === "running" ? ` ${pct(r.progress)}` : "";
       return `<tr data-run="${esc(r.id)}"><td><a href="/c/${enc}/runs/${encodeURIComponent(r.id)}">${esc(
         clock(r.created_at))}</a></td><td>${esc(methods)}</td><td class="num">${esc(r.question_count)}</td>
-        <td>${r.answer ? "Answered" : "Retrieval only"}</td><td data-said>${saidHtml(r)}</td>
+        <td>${r.answer ? "Answered" : "Retrieval only"}</td><td data-result>${resultHtml(r)}</td>
         <td class="num">${esc(usd(r.usd_total))}</td>
         <td>${pill(r.status)}${esc(progress)}</td></tr>`;
     })
     .join("");
   return `<table><thead><tr><th>Time</th><th>Methods</th><th>Questions</th><th>Answers</th>
-    <th title="${esc(documents() ? "The score of the search your chats use" : `The verdict on ${cat.answer_pair.map((m) => methodLabel(m, cat)).join(" against ")}`)}">Said</th><th>Cost</th><th>Status</th></tr></thead>
+    <th title="${esc(documents() ? "The score of the search your chats use" : `The verdict on ${cat.answer_pair.map((m) => methodLabel(m, cat)).join(" against ")}`)}">Result</th><th>Cost</th><th>Status</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
@@ -729,8 +729,8 @@ function chatSettingsHtml() {
       <td class="muted" data-from>${esc(FROM[f.from] ?? f.from)}</td><td>${reset}</td></tr>`;
   };
   return `<p class="muted">What chat uses for this store, unless a chat says otherwise.</p>
-    <table><tbody>${row("method", "Search method", (m) => methodLabel(m, cat), "chat_method")}
-    ${row("candidates", "Candidates", String, "chat_k")}</tbody></table>
+    <div class="scroll"><table><tbody>${row("method", "Search method", (m) => methodLabel(m, cat), "chat_method")}
+    ${row("candidates", "Candidates", String, "chat_k")}</tbody></table></div>
     <p id="chat-settings-msg" class="err" role="status"></p>`;
 }
 

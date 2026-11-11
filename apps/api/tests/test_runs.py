@@ -1534,7 +1534,7 @@ def test_status_problems_are_text_and_href(client):
     assert by_text["Worker error: boom"] is None
     assert by_text[f"Importing into c ({imported[:8]}) was interrupted by a restart"] == "/c/c"
     assert by_text["Keyword lists on c are partly re-keyed; save them again"] == "/c/c"
-    assert by_text["The copy into d failed; delete d and copy it again"] == "/c/d"
+    assert by_text["The copy into d failed; resume it, or delete d and copy it again"] == "/c/d"
     assert by_text[f"Evaluating c ({stopped[:8]}) was interrupted by a restart"] == (
         f"/c/c/runs/{stopped}"
     )

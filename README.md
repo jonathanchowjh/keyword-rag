@@ -14,7 +14,7 @@ five QA types: Documents (your own files), science problems, exam multiple
 choice, multi-hop and tables. Search runs on your machine. An AI is optional, and
 every paid step except chat and the Lab shows its price before it spends.
 
-- **Status:** version 0.2.0, in active development. Runs locally in Docker; no
+- **Status:** version 0.3.0, in active development. Runs locally in Docker; no
   published image.
 - **License:** Apache-2.0.
 
@@ -79,8 +79,8 @@ nothing. Anything that would spend shows Connect AI first until you connect a mo
 - **Chat**: a saved conversation that searches every store it lists, reranks
   their passages together and answers from the best of them.
 
-The API paths and JSON fields say `collections` for stores (`POST /collections`,
-`GET /collections/{name}`). The pages and these docs say store.
+API paths say `collections` for stores; a request field says `collection`,
+`stores` (chats) or `store` (eval sets). The pages and these docs say store.
 
 ## Your first store
 
@@ -157,10 +157,10 @@ up to 20, follow-ups rewritten and RRF k 60. See
    page opens.
 
 **Read it.** The store page leads with "How well does chat find the right
-passages?": nDCG@10 for the search your chats use, with its 95% range and the
-number of questions measured (n). nDCG@10 is 1 when the right passages top the
-list, and 0 when none is in the top 10. The run page has each method's score,
-with Recall@10 and MRR@10.
+passages?": Ranking quality (nDCG@10) for the search your chats use, with its
+95% range and the number of questions measured (n). It is 100% when the right
+passages top the list, and 0% when none is in the top 10. The run page adds
+Found in top 10 (Recall@10) and First right passage (MRR@10) for each method.
 
 - **Another method did better:** the store page says so, with the gap. It was
   picked after the fact, so the gap is likely overstated. To switch, pick it for
@@ -291,7 +291,7 @@ are optional.
 | `RAGQA_QDRANT_URL` | Set by compose. Unset means embedded Qdrant in the API process, fine for a small store |
 | `HF_TOKEN` | Hugging Face token: read, to load GPQA (gated); write, only for the owner's build publishing |
 | `RAGQA_BUILD_HUB` | The Hub repo of [published builds](REFERENCE.md#published-builds) a load applies. Default `jonathanmiro97/keyword-rag-builds`; empty turns it off |
-| `RAGQA_HOME` | State directory. `/home/app/.ragqa` in the image |
+| `RAGQA_HOME` | State directory. Default `~/.ragqa`; `/home/app/.ragqa` in the image |
 | `PORT` | Listen port inside the container. `8080`. With compose, change the `ports:` line in compose.yaml instead |
 
 ## Benchmarks and the paper

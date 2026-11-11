@@ -66,7 +66,9 @@ button.secondary { background:transparent; color:var(--fg); }
 button:disabled { opacity:.5; cursor:default; }
 textarea, select, input { font:inherit; color:inherit; background:var(--card);
   border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
-label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
+label { display:grid; grid-template-columns:minmax(0, 1fr); gap:4px; font-size:12px; color:var(--muted); min-width:0; }
+select, input, textarea { max-width:100%; }
+.form > * { min-width:0; }
 .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
 .sides { display:flex; flex-wrap:wrap; gap:16px; }
 .sides > div { flex:1 1 14rem; min-width:0; }
@@ -77,7 +79,7 @@ label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
   #side { position:static; height:auto; flex-direction:row; flex-wrap:wrap; align-items:center;
     gap:4px 8px; border-right:0; border-bottom:1px solid var(--line); }
   #side .tag, #side .group { display:none; }
-  #side a.sub { padding-left:8px; }
+  #side a.sub { display:none; }
   #side .theme { margin-top:0; margin-left:auto; }
   #side .spend { padding:0; }
   #main { padding:16px; }
@@ -113,8 +115,9 @@ main > details { margin:10px 0; } main summary { cursor:pointer; padding:4px 0; 
 .axis { position:relative; display:flex; justify-content:space-between; width:220px; font-size:11px;
   font-weight:normal; color:var(--muted); }
 .axis .zero { position:absolute; left:50%; transform:translateX(-50%); }
+tr.removed td { text-decoration:line-through; opacity:.6; }
 tr.resume-row td { background:var(--card); }
-td.num, td[data-said] { white-space:nowrap; }
+td.num, td[data-result] { white-space:nowrap; }
 /* A chat reply's markdown: tokens only, so light and dark both follow. */
 .page-chat .md p, .page-chat .md ul, .page-chat .md ol, .page-chat .md pre { margin:0 0 8px; }
 .page-chat .md > :last-child { margin-bottom:0; }
@@ -150,7 +153,12 @@ td.num, td[data-said] { white-space:nowrap; }
 .evidence li { border-top:1px solid var(--line); padding:6px 0; overflow-wrap:anywhere; }
 .evidence li:target { background:var(--hl); }
 .evidence .what { color:var(--muted); font-size:12px; }
-.passage .full { margin-top:4px; white-space:pre-wrap; }
+.passage .full { margin-top:4px; }
+.passage-text p, .passage .full p { margin:0 0 6px; }
+.passage-text p:last-child, .passage .full p:last-child { margin-bottom:0; }
+.passage .preview { white-space:pre-wrap; }
+.passage .less, .passage[open] .preview { display:none; }
+.passage[open] .less { display:inline; }
 .page-chat .passages { border:1px dashed var(--line); }
 .page-chat .panel { border:1px solid var(--line); border-radius:8px; padding:6px 12px; font-size:13px; }
 .page-chat .panel > summary { color:var(--muted); }

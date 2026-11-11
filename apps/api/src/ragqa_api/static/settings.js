@@ -248,10 +248,10 @@ $("models").addEventListener("click", (event) => {
 
 const JOB_NOTE = {
   default: "Used by any job without its own choice",
-  answer: "Writes chat answers, and answers in runs and the Lab",
+  answer: "Writes chat answers, answers in runs and the Lab, judges a Documents run's answers, and the eval-set page's Get the AI's answer",
   summary: "Summarises items, and questions for keyword methods, in stores built with summaries",
   keywords: "Proposes keyword lists and vocabularies, and tags items when a store is built",
-  query: "Picks a question's keywords when a store searches with model tags",
+  query: "Picks a question's keywords when a store searches with model tags, and the iterative method's hops",
   rewrite: "Rewrites a chat follow-up as one standalone question",
 };
 

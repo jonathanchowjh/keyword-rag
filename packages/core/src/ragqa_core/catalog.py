@@ -84,8 +84,8 @@ METHODS: dict[str, dict] = {
 }
 
 
-def _metric(label: str, says: str, kind: str, unit: str = "share") -> dict:
-    return {"label": label, "says": says, "unit": unit, "kind": kind}
+def _metric(label: str, says: str, kind: str, unit: str = "share", code: str | None = None) -> dict:
+    return {"label": label, "says": says, "unit": unit, "kind": kind, "code": code}
 
 
 METRICS: dict[str, dict] = {
@@ -113,15 +113,25 @@ METRICS: dict[str, dict] = {
         "Share of questions where the example tested the same skill",
         "retrieval",
     ),
-    "recall@10": _metric("Recall@10", "Share of the right items in the top 10", "retrieval"),
+    "recall@10": _metric(
+        "Found in top 10",
+        "Share of the right items in the top 10",
+        "retrieval",
+        code="Recall@10",
+    ),
     "mrr@10": _metric(
-        "MRR@10", "1 over the rank of the first right item in the top 10", "retrieval", unit="score"
+        "First right item",
+        "1 over the rank of the first right item in the top 10",
+        "retrieval",
+        unit="score",
+        code="MRR@10",
     ),
     "ndcg@10": _metric(
-        "Relevant examples ranked first",
+        "Ranking quality",
         "0 is none in the top 10, 100 every relevant example ranked ahead of the rest",
         "retrieval",
         unit="score",
+        code="nDCG@10",
     ),
     "solution_sim@1": _metric(
         "Reasoning match",
@@ -141,9 +151,9 @@ WORKED_RECALL_SAYS = {
 }
 METRIC_LABELS_BY_TYPE: dict[QaType, dict[str, str]] = {
     "documents": {
-        "ndcg@10": "Right passages ranked first",
-        "recall@10": "Right passages found (top 10)",
-        "mrr@10": "How soon the first right passage comes",
+        "ndcg@10": "Ranking quality",
+        "recall@10": "Found in top 10",
+        "mrr@10": "First right passage",
         "accuracy": "Answers judged right",
     },
     "science": WORKED_RECALL_LABEL,

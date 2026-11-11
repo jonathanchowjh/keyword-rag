@@ -571,7 +571,7 @@ def test_verdicts_explain_the_range_and_their_words(page, seeded):
     expect(cell).to_have_count(1)
     expect(cell.locator("strong.word")).to_have_count(1)  # the verdict word has weight
     page.goto(seeded.url + "/c/c")
-    expect(page.locator("#answer .legend")).to_contain_text("Can't tell: it spans 0")
+    expect(page.locator("#answer .legend")).to_contain_text("Can't tell yet: it spans 0")
     expect(page.locator("#answer .verdict strong.word")).to_have_count(1)
     expect(page.locator("#answer .axis")).to_contain_text("pts")
     # the verdict says the names and numbers; nothing under the bar repeats them

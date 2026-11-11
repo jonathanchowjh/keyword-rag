@@ -810,7 +810,7 @@ def test_copy_state_and_problem_wording(client):
     assert client.get("/collections/w").json()["state"] == "copying"
     db.update_job(conn, copy, status="failed", error="boom", progress=0.4)
     problems = [p["text"] for p in client.get("/status").json()["problems"]]
-    assert "The copy into w failed; delete w and copy it again" in problems
+    assert "The copy into w failed; resume it, or delete w and copy it again" in problems
     # A collection being copied into takes no hand-added items or vocabulary meanwhile.
     db.update_job(conn, db.create_job(conn, "copy", "w", {"source": "p"}), status="queued")
     r = client.post("/collections/w/documents", json={"items": ITEMS})
@@ -1096,6 +1096,20 @@ def test_add_documents_is_refused_while_a_switch_is_stopped(tmp_path, monkeypatc
     db.update_job(conn, db.create_job(conn, "reembed", "c", setup), status="interrupted")
     r = client.post("/collections/c/documents", json={"items": ITEMS[:1], "confirm": True})
     assert r.status_code == 409 and "stopped part-way" in r.json()["detail"]
+
+
+def test_import_is_refused_while_a_switch_is_stopped(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: the stopped switch stays stopped
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
+    db.update_job(conn, db.create_job(conn, "reembed", "c", setup), status="interrupted")
+    up = upload(client)
+    assert up.status_code == 200, up.text
+    r = do_import(client, up.json(), confirm=True)
+    assert r.status_code == 409 and "stopped part-way" in r.json()["detail"]
+    assert do_import(client, up.json()).status_code == 200  # the estimate stays free
 
 
 def test_store_reads_busy(tmp_path, monkeypatch):

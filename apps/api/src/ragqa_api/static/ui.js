@@ -124,15 +124,86 @@ export function sourceLabel(source) {
   return source;
 }
 
-// A retrieved passage's text. Up to `limit` characters it is shown whole; longer, its first
-// `limit` characters sit in a summary and the rest opens from it. `meta` is HTML for a small
-// line above. `key` names the toggle (data-expand) so a page can keep it open across redraws,
-// and `open` says whether it is open now.
+// A retrieved passage's text, with its line breaks and # headings kept. Up to `limit` characters
+// it is shown whole; longer, its first `limit` characters preview in a summary and the whole
+// text opens beneath, the preview hidden then. `meta` is HTML for a small line above. `key`
+// names the toggle (data-expand) so a page can keep it open across redraws, and `open` says
+// whether it is open now.
 export function passageHtml(text, { limit = 300, meta = "", key = null, open = false } = {}) {
   const line = meta ? `<div class="small">${meta}</div>` : "";
-  if (text.length <= limit) return `${line}<div>${esc(text)}</div>`;
+  if (text.length <= limit) return `${line}<div class="passage-text">${textHtml(text)}</div>`;
   const toggle = key ? ` data-expand="${esc(key)}"` : "";
-  return `${line}<details class="passage"${toggle}${open ? " open" : ""}><summary>${esc(text.slice(0, limit))}…</summary><div class="full">${esc(text)}</div></details>`;
+  return `${line}<details class="passage"${toggle}${open ? " open" : ""}><summary><span class="preview">${esc(text.slice(0, limit))}…</span><span class="less">Show less</span></summary><div class="full">${textHtml(text)}</div></details>`;
+}
+
+// One escaped line: `code` spans kept as typed, bold and italic, then citation links.
+// An underscore or star inside a word (snake_case_name, a*b*c, x**2) is no emphasis.
+function inlineHtml(line, link) {
+  return line
+    .split(/(`[^`]+`)/)
+    .map((s, i) => {
+      if (i % 2) return `<code>${s.slice(1, -1)}</code>`;
+      const marked = s
+        .replace(/(^|\W)\*\*(\S(?:.*?\S)?)\*\*(?!\w)/g, "$1<strong>$2</strong>")
+        .replace(/(^|\W)__(\S(?:.*?\S)?)__(?!\w)/g, "$1<strong>$2</strong>")
+        .replace(/(^|[^\w*])\*(?!\*)(\S(?:[^*]*?\S)?)\*(?![\w*])/g, "$1<em>$2</em>")
+        .replace(/(^|\W)_(\S(?:[^_]*?\S)?)_(?!\w)/g, "$1<em>$2</em>");
+      return link(marked);
+    })
+    .join("");
+}
+
+// Text as a safe subset of markdown. The text is escaped first, so no tag or attribute
+// ever comes from the text: fenced code, `code`, bold, italic, - and 1. lists, # headings
+// as bold lines, blank lines as paragraphs. Links, images, tables and HTML stay as text.
+export function textHtml(text, link = (escaped) => escaped) {
+  const lines = esc(text).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let para = [];
+  const flush = () => {
+    if (para.length) out.push(`<p>${para.map((l) => inlineHtml(l, link)).join("<br>")}</p>`);
+    para = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flush();
+      const code = [];
+      while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i]);
+      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      continue;
+    }
+    const heading = line.match(/^#{1,3} +(.*)$/);
+    if (heading) {
+      flush();
+      out.push(`<p><strong>${inlineHtml(heading[1], link)}</strong></p>`);
+      continue;
+    }
+    const kind = /^\s*[-*] +\S/.test(line) ? "ul" : /^\s*\d+\. +\S/.test(line) ? "ol" : null;
+    if (kind) {
+      flush();
+      // Items run on across a single blank line, and an indented line continues its item.
+      const mark = kind === "ul" ? /^\s*[-*] +(.*)$/ : /^\s*(\d+)\. +(.*)$/;
+      const items = [];
+      const first = line.match(mark);
+      const start = kind === "ol" && Number(first[1]) !== 1 ? ` start="${Number(first[1])}"` : "";
+      for (; i < lines.length; i++) {
+        const item = lines[i].match(mark);
+        if (item) items.push([item[kind === "ul" ? 1 : 2]]);
+        else if (/^\s+\S/.test(lines[i])) items[items.length - 1].push(lines[i].trim());
+        else if (!lines[i].trim() && mark.test(lines[i + 1] ?? "")) continue;
+        else break;
+      }
+      i--;
+      const lis = items.map((parts) => `<li>${parts.map((s) => inlineHtml(s, link)).join("<br>")}</li>`);
+      out.push(`<${kind}${start}>${lis.join("")}</${kind}>`);
+      continue;
+    }
+    if (line.trim()) para.push(line);
+    else flush();
+  }
+  flush();
+  return out.join("");
 }
 
 // "file · part 2 of 3" for a passage's meta, falling back to its id, with the id as its title.
@@ -275,6 +346,12 @@ export function metricLabel(id, qaType, cat = known) {
   return cat?.metric_labels_by_type?.[qaType]?.[id] ?? cat?.metrics?.[id]?.label ?? id;
 }
 
+// The label, escaped, with the metric's code beside it when it has one: "Ranking quality nDCG@10".
+export function metricHtml(id, qaType, cat = known) {
+  const code = cat?.metrics?.[id]?.code;
+  return esc(metricLabel(id, qaType, cat)) + (code ? ` <code class="muted">${esc(code)}</code>` : "");
+}
+
 // What a metric measures, in a sentence; "" when the catalog has nothing.
 export function metricSays(id, qaType, cat = known) {
   return cat?.metric_says_by_type?.[qaType]?.[id] ?? cat?.metrics?.[id]?.says ?? "";
@@ -295,12 +372,12 @@ export function usd(x) {
 
 const FREE_SCORE_NOTE = "free score, not yet checked against answers";
 export const NO_CHANCE = "no chance level";
-const WORDS = { yes: "Yes", no: "No", cant_tell: "Can't tell" };
+const WORDS = { yes: "Yes", no: "No", cant_tell: "Can't tell yet" };
 
 // What the range in brackets and the verdict words mean, said once where verdicts appear.
 export const LEGEND =
   "In brackets: the range the gap likely lies in (95%, from resampling the same questions). " +
-  "Yes or No: the whole range is on one side of 0. Can't tell: it spans 0.";
+  "Yes or No: the whole range is on one side of 0. Can't tell yet: it spans 0.";
 
 export function legendHtml(extra = "") {
   return `<p class="muted legend">${esc(extra ? `${LEGEND} ${extra}` : LEGEND)}</p>`;
@@ -319,18 +396,22 @@ export function verdictNotes(answer, { raw = answer.scale?.unit === "raw" } = {}
   return notes;
 }
 
-// The verdict word, bold and coloured by its state: "Yes", "No" or "Can't tell".
+// The verdict word, bold and coloured by its state: "Yes", "No" or "Can't tell yet".
 export function wordHtml(answer) {
   const kind = answer.verdict in WORDS ? answer.verdict : "cant_tell";
   return `<strong class="word ${kind}">${WORDS[kind]}</strong>`;
 }
 
-// "Keywords per list +6 pts (2–10) answered correctly vs Hybrid": the verdict after its word.
+// "Keywords per list vs Hybrid, +6 pts (range 2 to 10)": the verdict after its word. The metric
+// is named by the title of the element that wraps it (see verdictHtml).
 export function verdictRest(answer, qaType, labels = known) {
   const cand = methodLabel(answer.candidate, labels);
   const ref = methodLabel(answer.reference, labels);
-  const metric = metricLabel(answer.metric, qaType, labels).toLowerCase();
-  return `${cand} ${pts(answer.diff, answer.lo, answer.hi)} ${metric} vs ${ref}`;
+  const range =
+    Number.isFinite(answer.lo) && Number.isFinite(answer.hi)
+      ? ` (range ${signed(whole(answer.lo))} to ${signed(whole(answer.hi))})`
+      : "";
+  return `${cand} vs ${ref}, ${pts(answer.diff)}${range}`;
 }
 
 // A score and its likely range: "72% (64–80)", whole and unsigned; "–" when missing.
@@ -340,21 +421,21 @@ export function scoreRange(mean, lo, hi) {
   return `${Math.round(mean)}%${range}`;
 }
 
-// A Documents store's answer: the score of the search its chats use, and what weakens it.
+// A Documents store's answer, as HTML: the score of the search its chats use, and what weakens it.
 // A score most of whose top 10 was never judged is withheld.
-export function scoreLine(answer, labels = known) {
+export function scoreHtml(answer, labels = known) {
   const label = methodLabel(answer.method, labels);
   if (answer.unreliable) {
-    return `No score yet: most of the top 10 from ${label} were never judged. Label more of its passages.`;
+    return esc(`No score yet: most of the top 10 from ${label} were never judged. Label more of its passages.`);
   }
   const notes = [];
   if (answer.before_rerank) notes.push("measured before reranking");
   if (answer.n < 10) notes.push(`only ${plural(answer.n, "question")}: label more for a firmer score`);
   if (answer.newer_without > 0) notes.push(`the newest run didn't include ${label}`);
   if (answer.unfinished_newer) notes.push(`the last run of ${label} didn't finish`);
-  const line = `${metricLabel("ndcg@10", "documents", labels)}: ${scoreRange(answer.mean, answer.lo, answer.hi)} for ${
-    label}, the search your chats use, on ${plural(answer.n, "question")}`;
-  return [line, ...notes].join(" · ");
+  const line = `${metricHtml("ndcg@10", "documents", labels)}: ${esc(scoreRange(answer.mean, answer.lo, answer.hi))} for ${
+    esc(label)}, the search your chats use, on ${esc(plural(answer.n, "question"))}`;
+  return [line, ...notes.map(esc)].join(" · ");
 }
 
 // A Documents store with no score for its chats' search: the next step its state calls for. `store`
@@ -368,12 +449,13 @@ export function noScoreLine(store, labels = known) {
   return why ? `No score yet: ${label} can't run on this store (${why})` : `No score yet: run ${label} to get one`;
 }
 
-// "<b>Yes</b>: Keywords per list +6 pts (2–10) answered correctly vs Hybrid · free score, …"
+// "<b>Yes</b>: Keywords per list vs Hybrid, +6 pts (range 2 to 10) · free score, …"; the metric is the title.
 export function verdictHtml(answer, qaType, labels = known) {
   if (!answer) return '<span class="muted">No answer yet</span>';
-  if (answer.kind === "score") return esc(scoreLine(answer, labels));
+  if (answer.kind === "score") return scoreHtml(answer, labels);
   const notes = verdictNotes(answer).map((n) => ` · ${n}`).join("");
-  return `${wordHtml(answer)}: ${esc(verdictRest(answer, qaType, labels))}${
+  const title = esc(metricLabel(answer.metric, qaType, labels));
+  return `<span title="${title}">${wordHtml(answer)}: ${esc(verdictRest(answer, qaType, labels))}</span>${
     notes ? `<span class="muted">${esc(notes)}</span>` : ""}`;
 }
 
@@ -524,7 +606,7 @@ export async function askResume(box, jobId, done, current = () => true) {
 }
 
 // Asks inline before deleting: the question, then "Yes, …" or "Cancel". Deleting goes to `gone`.
-export function askDelete(box, { question, yes, path, gone }) {
+export function askDelete(box, { question, yes, path, gone, deleted }) {
   box.innerHTML = `<p>${esc(question)}</p><div class="actions">
     <button type="button" class="danger" data-yes>${esc(yes)}</button>
     <button type="button" class="secondary" data-keep>Cancel</button></div>`;
@@ -532,6 +614,7 @@ export function askDelete(box, { question, yes, path, gone }) {
   box.querySelector("[data-yes]").addEventListener("click", async () => {
     try {
       await api(path, { method: "DELETE" });
+      if (deleted) deleted(); // a page's leave guard can stand down before the redirect
       location.href = gone;
     } catch (e) {
       box.innerHTML = `<p class="err" role="status">${esc(e.message)}</p>`;

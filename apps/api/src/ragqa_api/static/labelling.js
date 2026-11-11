@@ -112,8 +112,8 @@ export class Labelling {
 
   labelTableHtml() {
     if (!this.rows.length) return '<p class="muted">No questions yet.</p>';
-    return `<table><thead><tr><th>Question</th><th>Right passages</th><th>Judged</th><th></th></tr></thead>
-    <tbody>${this.rows.map((q) => this.labelRowHtml(q)).join("")}</tbody></table>`;
+    return `<div class="scroll"><table><thead><tr><th>Question</th><th>Right passages</th><th>Judged</th><th></th></tr></thead>
+    <tbody>${this.rows.map((q) => this.labelRowHtml(q)).join("")}</tbody></table></div>`;
   }
 
   async drawLabelling() {

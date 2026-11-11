@@ -132,9 +132,14 @@ class Guards:
         switch stopped part-way: the store is then emptied or partly refilled, and the
         resume refills it from the rebuilt copy. Only resuming that switch may pass it."""
         self._refuse(name, tuple(jobs.BUSY_STATE))
+        if not stopped_switch_ok:
+            self.refuse_stopped_switch(name)
+
+    def refuse_stopped_switch(self, name: str) -> None:
+        """409 while a rebuild's switch stopped part-way; only resuming it may pass."""
         # switching_model reads the newest rebuild: a new one would hide the stopped switch.
         switching = db.switching_model(self.state.conn, name)
-        if switching and not stopped_switch_ok:
+        if switching:
             raise HTTPException(409, f"the switch to {switching} stopped part-way; resume it first")
 
     def _refuse(self, name: str, kinds: tuple[str, ...]) -> None:

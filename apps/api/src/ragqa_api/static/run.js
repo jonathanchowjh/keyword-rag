@@ -1,6 +1,6 @@
 import { $, BUSY, NONE, NO_CHANCE, RESUMABLE, api, askDelete, askResume, axisHtml, between, capital, catalog, clock,
-  confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricLabel, metricSays, notFound, num, paint, pct,
-  pill, plural, poll, pts, refreshSpend, say, scoreLine, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
+  confirmSpend, count, esc, gapBar, gapSpan, head, legendHtml, methodLabel, metricHtml, metricLabel, metricSays, notFound, num, paint, pct,
+  pill, plural, poll, pts, refreshSpend, say, scoreHtml, shell, short, sourceLabel, usd, verdictNotes, verdictRest, wordHtml } from "/static/ui.js";
 
 const POLL_MS = 3000;
 const STATE_TEXT = { ahead: "ahead", cant_tell: "can't tell", behind: "behind" };
@@ -136,9 +136,9 @@ function documentsAnswerHtml() {
   const wait = busy() ? " The scores appear when the run finishes." : "";
   // The score of the search the run froze as the chats' own; none if the run left it out.
   const mine = run.setup.chat_search?.run_method ?? run.reference;
-  const score = busy() ? "" : `<p>${esc(run.answer?.kind === "score"
-    ? scoreLine(run.answer, cat)
-    : `This run doesn't include ${method(mine)}, the search your chats use.`)}</p>`;
+  const score = busy() ? "" : `<p>${run.answer?.kind === "score"
+    ? scoreHtml(run.answer, cat)
+    : esc(`This run doesn't include ${method(mine)}, the search your chats use.`)}</p>`;
   return `<p class="verdict">${lead}${wait}</p>${score}${lines.map((n) => `<p class="warn">${esc(n)}</p>`).join("")}${partialHtml()}${answersHtml()}`;
 }
 
@@ -157,7 +157,7 @@ function answerHtml() {
   const notes = verdictNotes({ ...a, proxy_trusted: run.proxy_trusted }, { raw: rawScale() })
     .map((n) => capital(n) + ".")
     .join(" ");
-  return `<p class="verdict">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
+  return `<p class="verdict" title="${esc(metric(a.metric))}">${lead} ${wordHtml(a)}: ${esc(verdictRest(a, qaType, cat))}, on the same ${esc(
     plural(run.question_count, "question"))}.</p>${partialHtml()}
     ${notes ? `<p class="muted">${esc(notes)}</p>` : ""}
     ${legendHtml("Ahead, behind and can't tell in the table below read the same way.")}`;
@@ -283,7 +283,7 @@ function scoresHtml() {
   const names = [...new Set(Object.values(run.methods).flatMap((m) => Object.keys(m)))].filter(
     (k) => k !== "usd" && k !== "n"
   );
-  const heads = names.map((m) => `<th title="${esc(meaning(m))}">${esc(metric(m))}</th>`).join("");
+  const heads = names.map((m) => `<th title="${esc(meaning(m))}">${metricHtml(m, qaType, cat)}</th>`).join("");
   const rows = Object.entries(run.methods)
     .map(([m, row]) => {
       const cells = names
@@ -294,7 +294,7 @@ function scoresHtml() {
     .join("");
   const meanings = names
     .filter((m) => meaning(m))
-    .map((m) => `<p class="muted legend">${esc(metric(m))}: ${esc(meaning(m))}.</p>`)
+    .map((m) => `<p class="muted legend">${metricHtml(m, qaType, cat)}: ${esc(meaning(m))}.</p>`)
     .join("");
   return `<table><thead><tr><th>Method</th>${heads}</tr></thead><tbody>${rows}</tbody></table>${meanings}`;
 }
@@ -353,7 +353,7 @@ function setupHtml() {
       return `<tr><td>${esc(cat.setup_labels[k] ?? k)}</td><td>${esc(text)}</td></tr>`;
     })
     .join("");
-  return `${leftOutHtml()}<table><tbody>${rows}</tbody></table>`;
+  return `${leftOutHtml()}<div class="scroll"><table><tbody>${rows}</tbody></table></div>`;
 }
 
 // -- questions --------------------------------------------------------------------------------

@@ -13,7 +13,7 @@ members = [
 
 [[package]]
 name = "aiconnect"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/aiconnect" }
 dependencies = [
     { name = "anthropic" },
@@ -832,7 +832,7 @@ wheels = [
 
 [[package]]
 name = "ragqa"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -867,7 +867,7 @@ dev = [
 
 [[package]]
 name = "ragqa-api"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "aiconnect" },
@@ -888,7 +888,7 @@ requires-dist = [
 
 [[package]]
 name = "ragqa-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "aiconnect" },
@@ -913,7 +913,7 @@ requires-dist = [
 
 [[package]]
 name = "ragqa-worker"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "aiconnect" },
