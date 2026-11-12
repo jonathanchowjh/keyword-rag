@@ -25,7 +25,7 @@ every paid step except chat and the Lab shows its price before it spends.
 [Run and read it](#run-and-read-it) · [Chat across stores](#chat-across-stores) ·
 [Chat from your own app](#chat-from-your-own-app) ·
 [AI connections and cost safety](#ai-connections-and-cost-safety) ·
-[Configuration](#configuration) · [Benchmarks and the paper](#benchmarks-and-the-paper) ·
+[Configuration](#configuration) · [The paper and resources](#the-paper-and-resources) ·
 [More](#more)
 
 ## Quick start
@@ -215,42 +215,23 @@ curl -s -u user:password 'http://127.0.0.1:8080/chats/<id>/messages?brief=true' 
 ```
 
 Use the new chat's `id` in the second call. The server keeps the history, so
-your app sends only the new message. Every API conversation is a saved chat:
-open it on the chat page to see why it answered.
-
-- **The reply** has `n`, `answer`, `citations`, `passages`, `passages_only`,
-  `error` and `usd`. Each passage has `n`, `store`, `id`, `text`, `file`,
-  `source`, `part`, `parts` and `relevance` (0 to 1, or null when merged by rank).
-- **Your own model:** send `"answer": false` to get the reranked passages with
-  no answer written and nothing paid for one.
-- **Check `error`:** a failed answer is still HTTP 200, and the message is saved.
-  Retrying would save it twice.
-- **The login:** `-u user:password` is the `RAGQA_USERNAME` and `RAGQA_PASSWORD`
-  in the server's `.env`; leave it out when none is set. Put HTTPS in front
-  before exposing it beyond localhost. There are no API keys, CORS or streaming
-  yet. Every body is in [Chat request bodies](REFERENCE.md#chat-request-bodies).
+your app sends only the new message, and every API conversation is a saved chat
+you can open on the chat page to see why it answered. A failed answer is still
+HTTP 200 with `error` set, so check it rather than retry. Send `"answer": false`
+to get the reranked passages with no answer paid for. `-u user:password` is the
+`RAGQA_USERNAME` and `RAGQA_PASSWORD` in `.env`; leave it out when none is set,
+and put HTTPS in front before exposing it beyond localhost. The reply's fields
+and every body are in [Chat request bodies](REFERENCE.md#chat-request-bodies).
 
 ## AI connections and cost safety
 
 Connect an AI on Settings; nothing is needed in `.env`. **Give the key its own
 spend limit at the provider:** the service sees only its own calls, so the
-provider's limit is the real ceiling, since other keys on the same account draw
-on the same budget. For Anthropic, Claude Max 5x, Max 20x and
-Team plans include monthly API credit ($100 a month on Max 5x):
-
-1. On claude.ai, open **Settings → Billing → API credits** and link a Console
-   organisation.
-2. In the Console, create a workspace for keyword-rag and give it its own spend
-   limit.
-3. Add no payment method and leave auto-reload off. When the credit runs out,
-   requests stop; nothing is charged to your plan.
-4. Create an API key in that workspace and paste it into `ANTHROPIC_API_KEY` in
-   `.env` (then restart), or add it on the Settings page.
-
-The claude.ai login itself must not be used: Anthropic's Consumer Terms allow
-scripted access only through an API key. OpenAI, Gemini, xAI and OpenRouter
-have presets; LM Studio, vLLM and other OpenAI-compatible servers use **Custom**
-with their base URL.
+provider's limit is the real ceiling. A Claude Max or Team plan's monthly API
+credit can pay for it; the steps are in
+[Anthropic credit from a Claude plan](REFERENCE.md#anthropic-credit-from-a-claude-plan).
+OpenAI, Gemini, xAI and OpenRouter have presets; LM Studio, vLLM and other
+OpenAI-compatible servers use **Custom** with their base URL.
 
 - **Prices.** A price is per million input and output tokens. A model you fetch
   or add starts at $0, and a $0 model's calls cost the budget nothing, so price
@@ -294,13 +275,30 @@ are optional.
 | `RAGQA_HOME` | State directory. Default `~/.ragqa`; `/home/app/.ragqa` in the image |
 | `PORT` | Listen port inside the container. `8080`. With compose, change the `ports:` line in compose.yaml instead |
 
-## Benchmarks and the paper
+## The paper and resources
 
-keyword-rag grew out of a 2024 paper on keyword vectorization for science QA. It
-loads seven built-in datasets to measure the paper's methods beside modern ones
-and two controls. The paper, the datasets and the experiments are in
-[RESEARCH.md](RESEARCH.md); loading one is in
-[Loading a built-in dataset](REFERENCE.md#loading-a-built-in-dataset).
+keyword-rag is built on Jonathan Chow (Hartono Tjakrawinata), *Keyword
+Vectorization for Retrieval Augmented Generation on Science Question
+Answering*, Singapore Management University, 2024:
+[read the paper (PDF)](paper/keyword-vectorization-rag-science-qa.pdf). It
+describes each solved science question by keywords from three hand-built lists
+plus a short AI summary, and shows the best match as a one-shot example. On 76
+ACT Science questions that scored 78.9%, against 69.7% with no example and
+63.1% with plain vector search: a direction, not a settled size, which this
+bench measures on larger sets with confidence intervals and two controls. The
+results and a BibTeX entry are in [RESEARCH.md](RESEARCH.md#the-paper).
+
+- **Built on:** retrieval-augmented generation ([Lewis et al., 2020](https://arxiv.org/abs/2005.11401)),
+  chain-of-thought prompting ([Wei et al., 2022](https://arxiv.org/abs/2201.11903)),
+  BM25 ([Robertson et al., 2004](https://citeseerx.ist.psu.edu/document?repid=rep1&type=pdf&doi=10b2752c9940e9c761a161a0fef7ae08cae66301))
+  and reciprocal rank fusion ([Cormack et al., 2009](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)).
+- **Benchmarks:** [ScienceQA](https://arxiv.org/abs/2209.09513) ·
+  [SciBench](https://arxiv.org/abs/2307.10635) · [GPQA](https://arxiv.org/abs/2311.12022) ·
+  [BRIGHT](https://arxiv.org/abs/2407.12883) · [MuSiQue](https://arxiv.org/abs/2108.00573) ·
+  [TAT-QA](https://arxiv.org/abs/2105.07624); see
+  [Loading a built-in dataset](REFERENCE.md#loading-a-built-in-dataset).
+- **More:** every reference, the later work it draws on, the datasets' licences
+  and the experiments are in [RESEARCH.md](RESEARCH.md#references-and-resources).
 
 ## More
 

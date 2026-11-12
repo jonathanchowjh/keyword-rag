@@ -7,6 +7,7 @@ Newest first. "(breaking)" marks a change a client of the API may need to act on
 ### Changed
 
 - Changed (breaking): a load into a store whose rebuild's switch stopped part-way is refused with 409 "the switch to <model> stopped part-way; resume it first", as adding documents and importing are.
+- README.md has a section on the paper it is built on and the resources behind it; the Claude plan credit walkthrough moved to REFERENCE.md.
 
 ### Fixed
 

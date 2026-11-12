@@ -859,6 +859,23 @@ is needed in `.env`.
 OpenRouter ids like `openrouter/meta-llama/llama-3.1-8b` work. A bare model id
 is accepted when exactly one enabled model has it.
 
+### Anthropic credit from a Claude plan
+
+Claude Max 5x, Max 20x and Team plans include monthly API credit ($100 a month on
+Max 5x). To spend it here, behind a limit of its own:
+
+1. On claude.ai, open **Settings → Billing → API credits** and link a Console
+   organisation.
+2. In the Console, create a workspace for keyword-rag and give it its own spend
+   limit.
+3. Add no payment method and leave auto-reload off. When the credit runs out,
+   requests stop; nothing is charged to your plan.
+4. Create an API key in that workspace and paste it into `ANTHROPIC_API_KEY` in
+   `.env` (then restart), or add it on the Settings page.
+
+The claude.ai login itself must not be used: Anthropic's Consumer Terms allow
+scripted access only through an API key.
+
 ### Estimates and batches
 
 - **Estimate before spend.** `/eval`, resumes, paid loads, paid `/documents`,
