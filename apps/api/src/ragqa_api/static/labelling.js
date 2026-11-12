@@ -497,6 +497,7 @@ export class Labelling {
           yes: "Yes, delete it",
           path: `/eval-sets/${this.enc}/questions/${encodeURIComponent(d.del)}`,
           gone: `/e/${this.enc}`,
+          deleted: () => (this.unsaved = false), // discarded marks don't stop the reload
         }));
       }
     });

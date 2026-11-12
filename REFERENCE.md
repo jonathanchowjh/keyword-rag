@@ -1044,11 +1044,11 @@ spent, and the other methods still return.
 | 401 | The login is set and the request has no credentials or wrong ones (every route, `/health` too) | `{"detail": "authentication required"}` |
 | 402 | The monthly cap is reached before an uncached AI call. Inside a job the cap ends the job as `stopped_budget` instead | `{"detail": "monthly cap reached: …"}` |
 | 404 | An unknown store, eval set, chat, job, connection or model | `{"detail": "no connection x"}` |
-| 409 | A name is taken; a job is in the way; the price changed; a rebuild's switch stopped part-way (adds and imports are refused until you resume it); a stale `base` or `base_version`; a resume refused | `{"detail": "a load job is queued or running on 'docs'; wait"}`, `{"detail": "the price changed since you saw it: check it again"}`, `{"detail": "the switch to <model> stopped part-way; resume it first"}` |
+| 409 | A name is taken; a job is in the way; the price changed; a rebuild's switch stopped part-way (adds, imports and loads are refused until you resume it); a stale `base` or `base_version`; a resume refused | `{"detail": "a load job is queued or running on 'docs'; wait"}`, `{"detail": "the price changed since you saw it: check it again"}`, `{"detail": "the switch to <model> stopped part-way; resume it first"}` |
 | 413 | An upload over 200 MB | `{"detail": "the file is over 209715200 bytes"}` |
 | 422 | A bad field or value, an unknown body field, or a model with no price | `{"detail": "<connection>/<model> has no price; enter one first"}` |
 | 502 | The AI provider failed; its message comes back with the key masked | `{"detail": "…"}` |
-| 503 | On confirm, no AI model is set up for a job the step would call; also before any call: `/chat` or a chat message with an explicit paid method (or `keyword_rag` with model tags) and no AI connected, and a load that would summarise or propose lists with no model for it | `{"detail": "no AI model is set up for the 'keywords' job; choose one on the Settings page"}` |
+| 503 | On confirm, no AI model is set up for a job the step would call; also before any call: `/chat`, or a new attempt (`POST /chats/{id}/messages/{n}/attempts`), with an explicit paid method (or `keyword_rag` with model tags) and no AI connected; and a load that would summarise, on a store that doesn't build, with no summary model | `{"detail": "no AI model is set up for the 'summary' job; choose one on the Settings page"}` |
 
 ## Job statuses
 

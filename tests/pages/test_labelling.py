@@ -409,8 +409,11 @@ def test_labelling_delete_asks_before_dropping_unsaved_marks(page, seeded):
     rows.filter(has_text="brine second?").get_by_role("button", name="Delete question…").click()
     panel.get_by_role("button", name="Discard them").click()
     expect(confirm).to_be_visible()
+    dialogs = []
+    page.on("dialog", lambda d: (dialogs.append(d.type), d.dismiss()))
     page.get_by_role("button", name="Yes, delete it").click()
     expect(rows).to_have_count(1)
+    assert dialogs == []  # the marks were discarded, so the reload doesn't ask
     got = httpx.get(f"{seeded.url}/eval-sets/lab13q").json()["questions"]
     assert [q["text"] for q in got] == ["alpha first?"]
 

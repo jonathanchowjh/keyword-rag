@@ -314,6 +314,7 @@ def add_routes(app: FastAPI, guards: Guards) -> None:
                 # Free only because of this entry: the run fails rather than spend unasked.
                 setup["hub_entry"] = estimate["hub"]["entry"]
         with guards.not_adding(name):
+            guards.refuse_stopped_switch(name)  # the loader's indexer would fail on the model
             job_id = db.create_job(state.conn, "load", name, setup)
         return {"job_id": job_id}
 

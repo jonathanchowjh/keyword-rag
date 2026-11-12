@@ -1112,6 +1112,17 @@ def test_import_is_refused_while_a_switch_is_stopped(tmp_path, monkeypatch):
     assert do_import(client, up.json()).status_code == 200  # the estimate stays free
 
 
+def test_load_is_refused_while_a_switch_is_stopped(tmp_path, monkeypatch):
+    client = make_client(tmp_path)  # not entered: the stopped switch stays stopped
+    small_model(client, monkeypatch)
+    add_collection(client, lists=False)
+    conn = client.app.state.conn
+    setup = {"model": "fake/small", "from": "fake/dense", "switching": True}
+    db.update_job(conn, db.create_job(conn, "reembed", "c", setup), status="interrupted")
+    r = client.post("/collections/c/load", json={"dataset": "gpqa", "confirm": True})
+    assert r.status_code == 409 and "stopped part-way" in r.json()["detail"]
+
+
 def test_store_reads_busy(tmp_path, monkeypatch):
     client = make_client(tmp_path)  # not entered: no worker claims the jobs
     small_model(client, monkeypatch)

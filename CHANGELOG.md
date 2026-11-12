@@ -2,6 +2,17 @@
 
 Newest first. "(breaking)" marks a change a client of the API may need to act on; each release's "Upgrading from" section lists what to change.
 
+## Unreleased
+
+### Changed
+
+- Changed (breaking): a load into a store whose rebuild's switch stopped part-way is refused with 409 "the switch to <model> stopped part-way; resume it first", as adding documents and importing are.
+
+### Fixed
+
+- Deleting a question after discarding its unsaved marks no longer asks before the page reloads.
+- REFERENCE.md's 503 row names the attempt route and the summarising load, and no longer says a proposal needs a model.
+
 ## 0.3.0 — 2026-11-12
 
 ### Added
